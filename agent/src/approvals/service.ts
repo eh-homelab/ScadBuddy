@@ -17,7 +17,7 @@ import { scrubForLog } from '../sessions/sdkEvents.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
-// Postgres (`ai_approvals`, db/migrations.ts entry 3), so any replica can
+// Postgres (`ai_approvals`, db/migrations/*_approvals.sql), so any replica can
 // decide one and a pending one survives a restart.
 //
 // HOW A CALL WAITS. The harness gives canUseTool a gate (`gate()` below). The
