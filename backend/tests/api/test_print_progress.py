@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import respx
 from fastapi.testclient import TestClient
@@ -174,4 +176,4 @@ def test_a_run_starts_the_print_watcher_and_stamps_when_it_printed(
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     assert output_id in state.print_watcher.watching
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["printed_at"] is not None
+    assert asyncio.run(state.print_watcher.prints.printed_at(output_id)) is not None

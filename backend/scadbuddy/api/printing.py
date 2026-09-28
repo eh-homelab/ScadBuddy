@@ -260,7 +260,7 @@ async def post_run(
     async with client_for(settings) as client:
         result = await run_for_output(client, outputs, meta, settings, body)
     observer.started(meta)
-    watcher.watch(meta.id)
+    await watcher.started(meta.id)
     return result
 
 

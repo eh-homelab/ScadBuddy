@@ -99,6 +99,15 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
     """,
+    # 3: when each output's last print was started (#268), so the print watcher finds
+    # the prints to follow again after a restart (`bambuddy/watcher.py` `PgPrintLog`).
+    """
+    CREATE TABLE print_watches (
+        output_id  text PRIMARY KEY,
+        printed_at timestamptz NOT NULL
+    );
+    CREATE INDEX print_watches_printed_at ON print_watches (printed_at);
+    """,
 )
 
 JOB_COLUMNS = (

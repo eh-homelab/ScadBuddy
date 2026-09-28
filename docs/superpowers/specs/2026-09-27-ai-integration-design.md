@@ -434,8 +434,10 @@ cannot leave a gap.
 Print progress comes from **one server-side watcher per active print** (#268,
 `backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
 back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
-socket can't replace the read (§3.1). It resumes recent prints after a restart. With
-Postgres, a session advisory lock per print means one replica follows each print. #270 moves #241's render workers from interval polling to the
+socket can't replace the read (§3.1). When each print started is kept in Postgres
+(`print_watches`, backend migration 3; nothing on disk), so the watcher resumes recent
+prints after a restart. A session advisory lock per print means one replica follows
+each print. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
 **The database is required** (decided while building #266; tracked in #401). The

@@ -26,13 +26,16 @@ print, whoever is looking.
 
 Lifecycle
 ---------
-- :meth:`PrintWatcher.watch` starts following an output; a send or run calls it.
+- :meth:`PrintWatcher.started` records when a send or run started a print, in the
+  :class:`PrintLog`, and follows it.
 - :meth:`PrintWatcher.start` resumes every output printed within ``MAX_AGE`` (from
-  ``OutputMeta.printed_at``), so a restart does not lose a print. It rescans every
+  the log), so a restart does not lose a print. It rescans every
   ``RESCAN_INTERVAL``, so a print another replica was watching when it died is
   picked up.
-- With several replicas, a :class:`WatchLock` makes sure one process follows each
-  print: a Postgres session advisory lock when ``SCADBUDDY_DATABASE_URL`` is set.
+- With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
+  (``render/pg_store.py`` migration 3) and a Postgres session advisory lock makes
+  sure one replica follows each print (:class:`WatchLock`). Without it, the log is
+  in memory: a restart forgets the prints in flight.
 - A failed read publishes ``print.progress`` once per distinct failure, so the UI
   re-reads the progress route and shows the scope-aware problem it answers
   (``bambuddy/errors.py``). Events carry ids, never content (``core/events.py``).
@@ -50,6 +53,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from psycopg import AsyncConnection
+from psycopg.rows import TupleRow
 
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
 from scadbuddy.core.events import EventBus, PrintEvent, emit
@@ -78,6 +82,103 @@ Reader = Callable[[OutputMeta], Awaitable[PrintProgress | None]]
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+class PrintLog(Protocol):
+    """When each output's last print was started."""
+
+    async def record(self, output_id: str, at: datetime) -> None: ...
+
+    async def printed_at(self, output_id: str) -> datetime | None: ...
+
+    async def since(self, cutoff: datetime) -> list[str]: ...
+
+    async def aclose(self) -> None: ...
+
+
+class MemoryPrintLog:
+    """No database: this process's own prints, gone at a restart."""
+
+    def __init__(self, at: dict[str, datetime] | None = None) -> None:
+        self._at: dict[str, datetime] = dict(at or {})
+
+    async def record(self, output_id: str, at: datetime) -> None:
+        self._at[output_id] = at
+
+    async def printed_at(self, output_id: str) -> datetime | None:
+        return self._at.get(output_id)
+
+    async def since(self, cutoff: datetime) -> list[str]:
+        return [output_id for output_id, at in self._at.items() if at >= cutoff]
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _PgSession:
+    """One autocommit connection, reopened when it drops, used one query at a time."""
+
+    def __init__(self, conninfo: str) -> None:
+        self.conninfo = conninfo
+        self._conn: AsyncConnection[TupleRow] | None = None
+        self.lock = asyncio.Lock()
+
+    async def connection(self) -> AsyncConnection[TupleRow]:
+        if self._conn is None or self._conn.closed:
+            self._conn = await AsyncConnection.connect(
+                self.conninfo,
+                autocommit=True,
+                application_name="scadbuddy-print-watcher",
+            )
+        return self._conn
+
+    @property
+    def open(self) -> bool:
+        return self._conn is not None and not self._conn.closed
+
+    async def aclose(self) -> None:
+        async with self.lock:
+            if self._conn is not None:
+                await self._conn.close()
+                self._conn = None
+
+
+class PgPrintLog:
+    """The ``print_watches`` table. The render store's ``open`` applies the migration
+    that creates it, before the watcher starts (``main.py`` lifespan)."""
+
+    def __init__(self, conninfo: str) -> None:
+        self._session = _PgSession(conninfo)
+
+    async def record(self, output_id: str, at: datetime) -> None:
+        async with self._session.lock:
+            conn = await self._session.connection()
+            await conn.execute(
+                "INSERT INTO print_watches (output_id, printed_at) VALUES (%s, %s)"
+                " ON CONFLICT (output_id) DO UPDATE SET printed_at = EXCLUDED.printed_at",
+                (output_id, at),
+            )
+
+    async def printed_at(self, output_id: str) -> datetime | None:
+        async with self._session.lock:
+            conn = await self._session.connection()
+            cursor = await conn.execute(
+                "SELECT printed_at FROM print_watches WHERE output_id = %s", (output_id,)
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def since(self, cutoff: datetime) -> list[str]:
+        async with self._session.lock:
+            conn = await self._session.connection()
+            cursor = await conn.execute(
+                "SELECT output_id FROM print_watches WHERE printed_at >= %s", (cutoff,)
+            )
+            rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
+    async def aclose(self) -> None:
+        await self._session.aclose()
 
 
 class WatchLock(Protocol):
@@ -115,22 +216,11 @@ class PgWatchLock:
     """
 
     def __init__(self, conninfo: str) -> None:
-        self.conninfo = conninfo
-        self._conn: AsyncConnection[tuple[object, ...]] | None = None
-        self._lock = asyncio.Lock()
-
-    async def _connection(self) -> AsyncConnection[tuple[object, ...]]:
-        if self._conn is None or self._conn.closed:
-            self._conn = await AsyncConnection.connect(
-                self.conninfo,
-                autocommit=True,
-                application_name="scadbuddy-print-watcher",
-            )
-        return self._conn
+        self._session = _PgSession(conninfo)
 
     async def acquire(self, output_id: str) -> bool:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._session.lock:
+            conn = await self._session.connection()
             cursor = await conn.execute(
                 "SELECT pg_try_advisory_lock(%s, hashtext(%s))", (WATCH_LOCK_CLASS, output_id)
             )
@@ -138,18 +228,17 @@ class PgWatchLock:
         return bool(row and row[0])
 
     async def release(self, output_id: str) -> None:
-        async with self._lock:
-            if self._conn is None or self._conn.closed:
+        async with self._session.lock:
+            # A dropped connection took its locks with it.
+            if not self._session.open:
                 return
-            await self._conn.execute(
+            conn = await self._session.connection()
+            await conn.execute(
                 "SELECT pg_advisory_unlock(%s, hashtext(%s))", (WATCH_LOCK_CLASS, output_id)
             )
 
     async def aclose(self) -> None:
-        async with self._lock:
-            if self._conn is not None:
-                await self._conn.close()
-                self._conn = None
+        await self._session.aclose()
 
 
 class PrintWatcher:
@@ -160,6 +249,7 @@ class PrintWatcher:
         observer: ProgressObserver,
         read: Reader,
         events: EventBus | None,
+        prints: PrintLog | None = None,
         lock: WatchLock | None = None,
         min_interval: float = MIN_INTERVAL,
         max_interval: float = MAX_INTERVAL,
@@ -172,6 +262,7 @@ class PrintWatcher:
         self.observer = observer
         self.read = read
         self.events = events
+        self.prints = prints or MemoryPrintLog()
         self.lock = lock or LocalWatchLock()
         self.min_interval = min_interval
         self.max_interval = max_interval
@@ -188,6 +279,15 @@ class PrintWatcher:
     @property
     def watching(self) -> frozenset[str]:
         return frozenset(self._tasks)
+
+    async def started(self, output_id: str) -> None:
+        """A send or run started a print of ``output_id``: record it, and follow it."""
+        try:
+            await self.prints.record(output_id, self.now())
+        except Exception:
+            # The print was sent; this process follows it, but a restart would not.
+            logger.exception("could not record a started print", extra={"output_id": output_id})
+        self.watch(output_id)
 
     def watch(self, output_id: str) -> None:
         """Follow ``output_id``'s print; if it is already followed, read it again now."""
@@ -218,13 +318,13 @@ class PrintWatcher:
     async def resume(self) -> None:
         """Follow every output printed within ``max_age`` that nobody follows."""
         try:
-            recent = await asyncio.to_thread(self.outputs.printed_since, self.now() - self.max_age)
-        except OSError:
+            recent = await self.prints.since(self.now() - self.max_age)
+        except Exception:
             logger.exception("could not list recent prints to resume watching")
             return
-        for meta in recent:
-            if meta.id not in self._tasks:
-                self.watch(meta.id)
+        for output_id in recent:
+            if output_id not in self._tasks:
+                self.watch(output_id)
 
     async def _rescan(self) -> None:
         while True:
@@ -238,6 +338,7 @@ class PrintWatcher:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.lock.aclose()
+        await self.prints.aclose()
 
     async def _wait(self, output_id: str, seconds: float) -> None:
         poke = self._pokes[output_id]
@@ -270,11 +371,12 @@ class PrintWatcher:
             # Waits first: the send or run that started the print answered with its
             # own state, and the UI reads once when it subscribes.
             await self._wait(output_id, interval)
+            printed_at = await self.prints.printed_at(output_id)
+            if printed_at is None or self.now() - printed_at > self.max_age:
+                return
             try:
                 meta = await asyncio.to_thread(self.outputs.get, output_id)
             except OutputNotFoundError:
-                return
-            if meta.printed_at is None or self.now() - meta.printed_at > self.max_age:
                 return
             try:
                 progress = await self.read(meta)

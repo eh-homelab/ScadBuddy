@@ -4,24 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
-from scadbuddy.bambuddy.watcher import LocalWatchLock, PgWatchLock, PrintWatcher
+from scadbuddy.bambuddy.watcher import (
+    LocalWatchLock,
+    MemoryPrintLog,
+    PgPrintLog,
+    PgWatchLock,
+    PrintWatcher,
+)
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.pg_store import migrate
 from tests.bambuddy.conftest import recording
 
 OUTPUT = "c" * 32
@@ -29,13 +36,7 @@ NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
 FAST = {"min_interval": 0.01, "max_interval": 0.08, "error_interval": 0.02, "rescan_interval": 0}
 
 
-def write_output(
-    paths: DataPaths,
-    output_id: str = OUTPUT,
-    *,
-    printed_at: datetime | None = NOW,
-    **extra: Any,
-) -> OutputMeta:
+def write_output(paths: DataPaths, output_id: str = OUTPUT, **extra: Any) -> OutputMeta:
     meta = OutputMeta(
         id=output_id,
         slug="demo",
@@ -44,7 +45,6 @@ def write_output(
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
         print_route="pipeline",
         pipeline_run_id=12,
-        printed_at=printed_at,
         **extra,
     )
     directory = paths.outputs / "demo" / output_id
@@ -87,8 +87,13 @@ def paths(tmp_path: Path) -> DataPaths:
 
 
 def watcher_for(
-    paths: DataPaths, read: Callable[[OutputMeta], Awaitable[PrintProgress | None]], **options: Any
+    paths: DataPaths,
+    read: Callable[[OutputMeta], Awaitable[PrintProgress | None]],
+    *,
+    prints: MemoryPrintLog | None = None,
+    **options: Any,
 ) -> tuple[PrintWatcher, list[Event]]:
+    """A watcher whose log says ``OUTPUT`` was printed just now, unless given one."""
     bus = InProcessEventBus()
     seen: list[Event] = []
     bus.add_listener(seen.append)
@@ -97,6 +102,7 @@ def watcher_for(
         observer=ProgressObserver(bus),
         read=read,
         events=bus,
+        prints=prints if prints is not None else MemoryPrintLog({OUTPUT: NOW}),
         now=lambda: NOW,
         **{**FAST, **options},
     )
@@ -211,9 +217,10 @@ def test_a_print_that_is_not_live_is_not_read(
     paths: DataPaths, printed_at: datetime | None
 ) -> None:
     async def scenario() -> Script:
-        write_output(paths, printed_at=printed_at)
+        write_output(paths)
         read = Script(progress("running"))
-        watcher, _ = watcher_for(paths, read)
+        log = MemoryPrintLog({OUTPUT: printed_at} if printed_at else {})
+        watcher, _ = watcher_for(paths, read, prints=log)
         watcher.watch(OUTPUT)
         await until_idle(watcher)
         return read
@@ -234,10 +241,8 @@ def test_a_deleted_output_ends_the_watch(paths: DataPaths) -> None:
 
 def test_start_resumes_recent_prints_after_a_restart(paths: DataPaths) -> None:
     async def scenario() -> set[str]:
-        write_output(paths, "1" * 32)
-        write_output(paths, "2" * 32, printed_at=NOW - timedelta(hours=30))
-        write_output(paths, "3" * 32, printed_at=None)
-        watcher, _ = watcher_for(paths, Script(progress("running")), min_interval=10)
+        log = MemoryPrintLog({"1" * 32: NOW, "2" * 32: NOW - timedelta(hours=30)})
+        watcher, _ = watcher_for(paths, Script(progress("running")), prints=log, min_interval=10)
         await watcher.start()
         watching = set(watcher.watching)
         await watcher.aclose()
@@ -248,12 +253,14 @@ def test_start_resumes_recent_prints_after_a_restart(paths: DataPaths) -> None:
 
 def test_the_rescan_picks_up_a_print_nobody_follows(paths: DataPaths) -> None:
     async def scenario() -> set[str]:
+        log = MemoryPrintLog()
         watcher, _ = watcher_for(
-            paths, Script(progress("running")), min_interval=10, rescan_interval=0.02
+            paths, Script(progress("running")), prints=log, min_interval=10, rescan_interval=0.02
         )
         await watcher.start()
         assert watcher.watching == set()
-        write_output(paths)
+        # Another replica started it, and died before its watcher read it.
+        await log.record(OUTPUT, NOW)
         await asyncio.sleep(0.1)
         watching = set(watcher.watching)
         await watcher.aclose()
@@ -299,14 +306,17 @@ def test_a_print_started_while_its_last_watch_ends_is_followed(paths: DataPaths)
     assert read.reads >= 2
 
 
-def test_printed_since_skips_records_not_written_since_the_cutoff(paths: DataPaths) -> None:
-    write_output(paths, "1" * 32)
-    write_output(paths, "2" * 32)
-    stale = paths.outputs / "demo" / ("2" * 32) / META_NAME
-    old = (NOW - timedelta(hours=30)).timestamp()
-    os.utime(stale, (old, old))
-    found = OutputStore(paths).printed_since(NOW - timedelta(hours=24))
-    assert [meta.id for meta in found] == ["1" * 32]
+def test_started_records_the_print_and_follows_it(paths: DataPaths) -> None:
+    async def scenario() -> tuple[datetime | None, frozenset[str]]:
+        write_output(paths)
+        log = MemoryPrintLog()
+        watcher, _ = watcher_for(paths, Script(progress("running")), prints=log, min_interval=10)
+        await watcher.started(OUTPUT)
+        watching = watcher.watching
+        await watcher.aclose()
+        return await log.printed_at(OUTPUT), watching
+
+    assert asyncio.run(scenario()) == (NOW, frozenset({OUTPUT}))
 
 
 class Refusing(LocalWatchLock):
@@ -381,3 +391,25 @@ def test_a_dead_process_releases_its_prints(pg_conninfo: str) -> None:
             await alive.aclose()
 
     assert asyncio.run(scenario()) is True
+
+
+@pytest.mark.requires_postgres
+def test_the_postgres_print_log_keeps_the_latest_start(pg_conninfo: str) -> None:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        migrate(conn)
+
+    async def scenario() -> tuple[datetime | None, datetime | None, list[str]]:
+        log = PgPrintLog(pg_conninfo)
+        try:
+            await log.record(OUTPUT, NOW - timedelta(hours=30))
+            await log.record(OUTPUT, NOW)
+            await log.record("e" * 32, NOW - timedelta(hours=30))
+            return (
+                await log.printed_at(OUTPUT),
+                await log.printed_at("f" * 32),
+                await log.since(NOW - timedelta(hours=24)),
+            )
+        finally:
+            await log.aclose()
+
+    assert asyncio.run(scenario()) == (NOW, None, [OUTPUT])

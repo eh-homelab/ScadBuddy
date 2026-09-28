@@ -2392,8 +2392,6 @@ export interface components {
             plates?: components["schemas"]["PlateSend"][];
             /** Print Route */
             print_route?: ("pipeline" | "slice_queue") | null;
-            /** Printed At */
-            printed_at?: string | null;
             /** Project Id */
             project_id?: number | null;
             /** Queue Item Id */

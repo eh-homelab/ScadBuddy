@@ -11,7 +11,7 @@ from fastapi import Depends, Path, Request
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
-from scadbuddy.bambuddy.watcher import PgWatchLock, PrintWatcher
+from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -182,6 +182,7 @@ def build_state(settings: Settings) -> AppState:
             observer=print_progress,
             read=read_progress,
             events=events,
+            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
         checkouts=checkouts,

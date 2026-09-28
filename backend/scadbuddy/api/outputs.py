@@ -361,5 +361,5 @@ async def send_output_to_bambuddy(
     # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
     if result.pipeline_run_id is not None or result.queue_item_id is not None:
         observer.started(meta)
-        watcher.watch(meta.id)
+        await watcher.started(meta.id)
     return result
