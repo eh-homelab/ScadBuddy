@@ -56,6 +56,7 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type LibraryCopy = Schemas['LibraryCopy']
 export type EditTarget = Schemas['EditTarget']
 
 /** Named parameter sets per template: shipped with it (`template`) or saved (`mine`). */
@@ -175,4 +176,12 @@ export interface Problem {
   bambuddy_status?: number
   bambuddy_body?: unknown
   [extension: string]: unknown
+}
+
+/**
+ * The agent service's headless-browser setting (#349,
+ * `GET/PUT /api/v1/ai/settings/headless-browser`). Off by default.
+ */
+export interface HeadlessBrowserSetting {
+  enabled: boolean
 }

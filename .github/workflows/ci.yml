@@ -47,6 +47,13 @@ name: CI
 # build-image.yml, so no job here needs a bigger or different runner.
 on:
   pull_request:
+  # The merge queue (#508): a queued PR is re-checked on the queue's own commit --
+  # main plus every PR ahead of it -- which is what catches two PRs that pass
+  # alone and break main together (#488 + #490). `CI Summary` has to report
+  # there or the queue never merges anything. `claude-review` is carried onto
+  # that commit by merge-queue-review.yml; `freshness` and `dispatch-review` stay
+  # PR-only.
+  merge_group:
   push:
     branches: [main]
   # Weekly, and on demand, so every template's verify.sh runs against the image
@@ -781,18 +788,25 @@ jobs:
         id: select
         env:
           EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           list="$RUNNER_TEMP/models.txt"
           # The `rev-parse HEAD^2` guard: without a merge commit there is no
           # base parent to diff against, and diffing HEAD^1 of a non-merge
           # would silently compare against the wrong commit. Fail open.
+          # A merge-queue commit is diffed against the main it was built on:
+          # every queued PR ahead of this one is in the diff, as it should be.
           if [ "$EVENT_NAME" = "pull_request" ] \
             && git rev-parse -q --verify 'HEAD^2' >/dev/null \
             && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
             .github/scripts/select-models.sh changed <"$RUNNER_TEMP/changed.txt" >"$list"
+          elif [ "$EVENT_NAME" = "merge_group" ] \
+            && git fetch -q --depth=1 origin "$QUEUE_BASE" \
+            && git diff --name-only "$QUEUE_BASE" HEAD >"$RUNNER_TEMP/changed.txt"; then
+            .github/scripts/select-models.sh changed <"$RUNNER_TEMP/changed.txt" >"$list"
           else
-            if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
               echo "::warning::Could not compute this PR's changed files; verifying every template."
             fi
             .github/scripts/select-models.sh all >"$list"
@@ -1016,9 +1030,11 @@ jobs:
         if: ${{ steps.detect.outputs.backend == 'true' }}
         run: |
           set -uo pipefail
+          # Actions runs `bash -e`, so capture diff's exit here: 1 means the API
+          # changed, which is the point of this step, not a failure.
+          status=0
           diff -u --label "main (${BASE_SHA:0:7})" --label "this PR" \
-            "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/api.diff"
-          status=$?
+            "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/api.diff" || status=$?
           if [ "$status" -gt 1 ]; then
             echo "::error::diff failed (exit $status)"
             exit 1

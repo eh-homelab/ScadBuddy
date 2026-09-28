@@ -212,8 +212,10 @@ Spec §8.6's row "Headless browser used to click past an approval, or to reach o
 origins or files", as built. Details and measurements are in
 [headless-browser.md](headless-browser.md).
 
-- **Off by default**: the `ai_settings` key `headless_browser_enabled` must be `true`
-  and the session manager must be given `headlessBrowser` (nothing in `main.ts` does).
+- **Off by default**: the `ai_settings` key `headless_browser_enabled` must be `true`.
+  It is set only through `PUT /api/v1/ai/settings/headless-browser`, behind
+  `uiRequestProblem` like the other AI settings writes, from a user-only switch in
+  Settings.
 - **Tools the model cannot see**: `browser_run_code_unsafe`, `browser_evaluate`,
   `browser_file_upload`, `browser_drop`, `browser_install` are in `disallowedTools`.
   Every other tool has an explicit tier; a new one is `outward`, so denied.
@@ -230,9 +232,20 @@ origins or files", as built. Details and measurements are in
   `AgentActorGate` in
   [`backend/scadbuddy/api/agent_actor.py`](../../backend/scadbuddy/api/agent_actor.py)
   answers `403` to every non-safe route that is not on its allowlist of read/write
-  routes. Default deny: a new route is refused until listed. Approvals do not exist yet,
-  so no marked outward request ever passes. The marker is not authentication; forging
-  it can only get a request refused.
+  routes. Default deny: a new route is refused until listed. The one exception is a
+  **grant**: the model asks for one exact method and path with
+  `mcp__scadbuddy_browser__authorize_request`, an outward tool that parks for a human
+  approval (#258); the approved call writes a one-shot row to `ai_headless_grants`,
+  and the backend's `GRANT_SQL` uses it once, only while the turn that made it is the
+  session's live turn and only if its approval is approved and consumed. Any database
+  problem refuses. The marker is not authentication; forging it can only get a request
+  refused (a request without it is as trusted as today), and a forged marker cannot use
+  a grant without knowing the session id, the grant's exact path, and landing inside its
+  turn and two-minute window, for a request a human already approved.
+- **No open redirects**: the server's allow-list does not cover redirects, so the
+  backend's origin must not redirect off itself. `backend/tests/api/test_no_open_redirect.py`
+  checks the backend; anything placed in front of `SCADBUDDY_BACKEND_URL` is a
+  deployment requirement ([headless-browser.md](headless-browser.md#deployment-requirement-no-open-redirects)).
 - **Isolation**: `--isolated`, no profile on disk, one server per query, so no state
   crosses sessions (or turns).
 - **Chromium runs without its sandbox** (`--no-sandbox`, Playwright's default for
@@ -290,9 +303,9 @@ From the merged code and PR bodies:
    `main.ts` today, and the headless browser is not wired in either.
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **The headless browser follows redirects off its origin** (see above), and the
-   agent-actor gate's "unless an approved action authorises it" half waits for
-   approvals (#258, open PR #471).
+9. **The headless browser follows redirects off its origin** (see above): the
+   backend is tested to serve none, and a proxy in front of `SCADBUDDY_BACKEND_URL`
+   must not add one.
 
 ## Spec §3.2 items still open
 
@@ -309,9 +322,8 @@ merged code.
 | Whether `/local-presets/` can create a derived process preset | #284 |
 | Whether a BambuStudio-claimed 3MF's `project_settings.config` overrides the pipeline preset | #284 |
 | Which process preset each level of detail maps to | #284 |
-| How the backend matches the agent-actor marker to an approved outward action | #349, #258 |
 
-#349 measured the other headless-browser rows and moved them to spec §3.1 (see
-[headless-browser.md](headless-browser.md), "Measured"). The approval lookup cannot be
-measured before approvals exist; until then the backend refuses every marked outward
-request, and the headless browser stays off (spec §8.2).
+#349 measured the headless-browser rows and moved them to spec §3.1 (see
+[headless-browser.md](headless-browser.md), "Measured"), including how the backend
+matches the agent-actor marker to an approved outward action (a one-shot grant in the
+shared database).

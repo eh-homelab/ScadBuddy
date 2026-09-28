@@ -10,11 +10,20 @@ import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
-import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
-import { browserTierOf, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import {
+  DEFAULT_MAX_BUDGET_USD,
+  DEFAULT_MAX_TURNS,
+  harnessTierOf,
+  type HarnessRun,
+  runHarness,
+} from '../harness/run.js'
+import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { headlessGrantServer } from '../harness/headlessGrants.js'
+import type { PluginsForRun } from '../plugins/forwarder.js'
 import { ensureSessionDir, isUuid, sessionBrowserDir, sessionWorkDir } from '../harness/stateDirs.js'
+import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
-import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
+import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 
@@ -37,7 +46,8 @@ import { PostgresSessionStore } from './store.js'
 //     sessions.interrupt → interrupt, sessions.handoff → handoff. Its
 //     `authenticate()` resolves the principal, mapped to an `Owner` here
 //     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
-//     sessions.approve/deny belong to #258 with `waiting_approval`.
+//     sessions.approve/deny → approvals.decide (#258, src/approvals/service.ts),
+//     with the token's approval grant as `approvalGrants`.
 //   - #251's registry also supplies `tierOf` and the in-process MCP servers
 //     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
 //     tools, settle how tool payloads are redacted: tool.call inputs and
@@ -60,6 +70,13 @@ import { PostgresSessionStore } from './store.js'
 // `interrupt_requested`, which is how an interrupt reaches a turn running on
 // another replica.
 //
+// Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
+// call parks the turn in `waiting_approval` until a human decides
+// (src/approvals/service.ts has the whole flow). interrupt and handoff cancel
+// a session's pending approvals, and so does claiming a new turn; a shutdown
+// leaves them pending, and the session `waiting_approval`, across the restart.
+// Approving such an orphan resumes the session through `resumeApproved`.
+//
 // Budget and turns. Each session gets `max_turns` and `budget_usd` from
 // ai_settings at start (keys below; defaults from harness/run.ts). max_turns
 // is the SDK's per-query `maxTurns`; the budget is for the whole session: a
@@ -70,6 +87,14 @@ import { PostgresSessionStore } from './store.js'
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+
+/** abortAll()'s abort reason: a shutdown, which leaves pending approvals pending. */
+export const SHUTTING_DOWN = 'shutting down'
+
+function abortMessage(signal: AbortSignal): string {
+  const reason: unknown = signal.reason
+  return reason instanceof Error ? reason.message : 'the turn was interrupted'
+}
 
 export const DEFAULT_LEASE_MS = 60_000
 export const DEFAULT_RENEW_MS = 1_000
@@ -154,13 +179,27 @@ export type SessionManagerDeps = {
   mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /**
+   * The registered, enabled remote MCP plugins for a turn (#297), registered
+   * with the loopback forwarder: in production
+   * `forwardForRun(await loadEnabledPlugins(store, kek), forwarder)`. Read once
+   * per turn, so enabling or changing a plugin applies from the next turn on;
+   * released when the turn ends.
+   */
+  remotePlugins?: () => Promise<PluginsForRun>
+  /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
    * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
    * is the one origin the browser may open.
    */
-  headlessBrowser?: { backendUrl: string }
+  headlessBrowser?: { backendUrl: string; /** Tests only: a Chromium other than the pinned one. */ executablePath?: string }
   run?: QueryRunner
+  /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
+  approvalGrants?: GrantCheck
+  /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
+  approvalHashKey?: Buffer
+  /** How often a parked turn polls its approval for a decision made on another replica. */
+  approvalPollMs?: number
   leaseMs?: number
   renewMs?: number
   /** How often followers on other replicas poll the event log (EventLog). */
@@ -215,13 +254,7 @@ function record(row: Row): SessionRecord {
   }
 }
 
-/**
- * Spec §6 visibility: the browser user sees every session (with a "controlled
- * by …" badge); any other principal sees the sessions it owns or started.
- */
-export function canSee(principal: Owner, session: Pick<SessionRecord, 'owner' | 'creator'>): boolean {
-  return principal.kind === 'browser' || sameOwner(principal, session.owner) || sameOwner(principal, session.creator)
-}
+export { canSee }
 
 function positive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
@@ -246,7 +279,7 @@ export function titleFrom(prompt: string): string {
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
  * creator filter is served by the ai_sessions_owner and ai_sessions_creator
- * indexes (db/migrations.ts entry 2).
+ * indexes (db/migrations/20260928T0107Z_sessions.sql).
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
   const where: string[] = []
@@ -283,6 +316,8 @@ type LocalTurn = {
 export class SessionManager {
   readonly store: PostgresSessionStore
   readonly events: EventLog
+  /** Approvals of outward calls (#258); `approvals.decide` is the decision API. */
+  readonly approvals: ApprovalService
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -294,6 +329,15 @@ export class SessionManager {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.events = new EventLog(deps.sql, deps.pollMs === undefined ? {} : { pollMs: deps.pollMs })
+    this.approvals = new ApprovalService({
+      sql: deps.sql,
+      events: this.events,
+      ...(deps.settings ? { settings: deps.settings } : {}),
+      ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
+      ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
+      resume: (approval, by) => this.resumeApproved(approval, by),
+    })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
@@ -422,10 +466,74 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    const session = record(claimed)
+    return this.startTurn(record(claimed), turnId, prompt, principal)
+  }
 
+  /**
+   * Runs the turn that re-makes an approved call after its turn was lost
+   * (#258: the approval was decided after a restart). Claims the session
+   * like send() does, but for the decider rather than the owner: approving is
+   * what authorises it (approvals/service.ts `decide`). The approval is bound
+   * to the new turn, which alone may use it. Not resumed when the session
+   * cannot start a turn now, or the approval can no longer be used; the
+   * service then voids it and says so. A claim taken and then not used is
+   * released at once.
+   */
+  async resumeApproved(approval: ApprovalRecord, by: Owner): Promise<ResumeResult> {
+    if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
+    const turnId = randomUUID()
+    const [claimed] = await this.deps.sql.unsafe<Row[]>(
+      `UPDATE ai_sessions
+       SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
+           interrupt_requested = false, updated_at = now()
+       WHERE id = $1 AND status <> 'done' AND cost_usd < budget_usd
+         AND (turn_id IS NULL OR lease_until <= now())
+       RETURNING ${COLUMNS}`,
+      [approval.sessionId, turnId, this.leaseMs],
+    )
+    if (!claimed) {
+      return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
+    }
+    try {
+      if (!(await this.approvals.bindResume(approval.id, turnId))) {
+        await this.releaseClaim(approval.sessionId, turnId)
+        return { resumed: false, reason: 'the approval was already withdrawn, used or out of time' }
+      }
+      const prompt =
+        `${by.label} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
+        'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
+        'and is used once. If you no longer need it, say so instead.'
+      await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId })
+      return { resumed: true }
+    } catch (err) {
+      await this.releaseClaim(approval.sessionId, turnId)
+      return { resumed: false, reason: describe(err) }
+    }
+  }
+
+  /** Gives back a claim no turn ran on (a resume that could not start). */
+  private async releaseClaim(id: string, turnId: string): Promise<void> {
+    const released = await this.deps.sql`
+      UPDATE ai_sessions SET status = 'idle', turn_id = NULL, lease_until = NULL, updated_at = now()
+      WHERE id = ${id} AND turn_id = ${turnId}`
+    if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
+  }
+
+  private async startTurn(
+    session: SessionRecord,
+    turnId: string,
+    prompt: string,
+    author: Owner,
+    options: { keepResumeTurn?: string } = {},
+  ): Promise<Turn> {
+    const id = session.id
+    // A new turn supersedes approvals left pending, or approved and unused,
+    // by one that is gone (claiming proved no turn is live): their calls can
+    // no longer run. A resumed turn keeps the approval bound to it; its
+    // sibling orphans are cancelled with the rest (approvals/service.ts).
+    await this.approvals.cancelPending(id, 'superseded by a new turn', options)
     await this.events.append(id, [
-      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author: principal }),
+      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
     const controller = new AbortController()
@@ -472,11 +580,12 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    const ownTiers = this.deps.tierOf ?? (() => undefined)
-    // The browser's tools are tiered here too, so the action feed shows them
-    // as read/write rather than outward (spec §5.3, "Tiers").
-    const tierOf: TierResolver = (name) => browserTierOf(name) ?? ownTiers(name)
-    const mapper = new SdkEventMapper(id, tierOf)
+    const tierOf = this.deps.tierOf ?? (() => undefined)
+    // Widened with the plugins' tiers once they are loaded below, so the
+    // panel shows a plugin tool at the tier the permission seam applies. The
+    // headless browser's tools are tiered too (spec §5.3, "Tiers").
+    let eventTierOf: TierResolver = (name) => browserTierOf(name) ?? tierOf(name)
+    const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
 
     // Lease renewal, and the interrupt flag from other replicas.
@@ -491,7 +600,7 @@ export class SessionManager {
             lost = true
             controller.abort(new Error('lost the turn claim'))
           } else if (rows[0]?.interrupt_requested) {
-            controller.abort(new Error('interrupted'))
+            controller.abort(new Error('the turn was interrupted'))
           }
         })
         .catch(() => {
@@ -503,11 +612,41 @@ export class SessionManager {
     let failure: string | undefined
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
+    let forwarded: PluginsForRun | undefined
+    let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
     try {
       // The credential first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log.
       const credential = await this.deps.credential()
       secrets = [credential.secret]
+      forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+      const remotePlugins = forwarded?.plugins ?? []
+      // Plugin header values (and their bare tokens) are redacted from the
+      // event log like the credential. Claude Code never holds them (the
+      // forwarder adds them), but a plugin could echo one in a tool result.
+      secrets.push(...(forwarded?.secrets ?? []))
+      const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
+      eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
+      // A plugin left out of this turn is said so in the session, not only in the log.
+      const unavailable = (message: string) =>
+        this.events.append(id, [
+          scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
+        ])
+      for (const problem of forwarded?.problems ?? []) {
+        this.deps.stderr?.(`${problem}\n`)
+        await unavailable(problem)
+      }
+      pluginCheck = async (message: SDKMessage) => {
+        if (message.type !== 'system' || message.subtype !== 'init') return
+        for (const plugin of remotePlugins) {
+          const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
+          if (status !== 'connected') {
+            await unavailable(
+              `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
+            )
+          }
+        }
+      }
       const [cwd, resume, model, browserSetting] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
@@ -520,6 +659,9 @@ export class SessionManager {
               sessionId: id,
               backendUrl: this.deps.headlessBrowser.backendUrl,
               dir: sessionBrowserDir(this.deps.paths, id),
+              ...(this.deps.headlessBrowser.executablePath
+                ? { executablePath: this.deps.headlessBrowser.executablePath }
+                : {}),
             }
           : undefined
       const run: HarnessRun = {
@@ -532,13 +674,39 @@ export class SessionManager {
         maxTurns: session.maxTurns,
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
         signal: controller.signal,
-        tierOf: ownTiers,
+        tierOf,
+        approvalGate: this.approvals.gate({
+          sessionId: id,
+          turnId,
+          requestedBy: session.owner,
+          secrets: () => secrets,
+          signal: controller.signal,
+        }),
         ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
+        ...(this.deps.mcpServers || browser
+          ? {
+              mcpServers: {
+                ...(this.deps.mcpServers ? this.deps.mcpServers(session) : {}),
+                // The one way past the backend's agent-actor gate: a human
+                // approves one exact outward request (harness/headlessGrants.ts).
+                ...(browser
+                  ? {
+                      [GRANT_SERVER]: headlessGrantServer({
+                        sql,
+                        sessionId: id,
+                        turnId,
+                        hash: (tool, input) => this.approvals.hash(tool, input),
+                      }),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
       for await (const message of this.run(run)) {
@@ -546,6 +714,7 @@ export class SessionManager {
           result = message
           local.settling = true
         }
+        await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
       }
@@ -555,6 +724,7 @@ export class SessionManager {
       // result is what counts then.
       if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
+      forwarded?.release()
       local.settling = true
       clearInterval(renew)
       await renewing
@@ -564,13 +734,18 @@ export class SessionManager {
     // message), so releasing the claim here means the next turn, on any
     // replica, resumes from a complete transcript.
     if (lost) return { kind: 'lost_claim' }
-    return this.finish(session, turnId, controller.signal.aborted && !result, result, failure, secrets)
+    const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
+    return this.finish(session, turnId, stopped, result, failure, secrets)
   }
 
+  /**
+   * `stopped` is why the turn was aborted (the abort reason: an interrupt, or
+   * SHUTTING_DOWN), when it was.
+   */
   private async finish(
     session: SessionRecord,
     turnId: string,
-    interrupted: boolean,
+    stopped: string | undefined,
     result: SDKResultMessage | undefined,
     failure: string | undefined,
     secrets: readonly string[],
@@ -581,6 +756,23 @@ export class SessionManager {
     const tail: ServerEvent[] = []
     let costUsd = session.costUsd
     let turns = session.turns
+    // An approval still pending here belongs to a call that was waiting when
+    // the turn was aborted: only an abort ends a wait (approvals/service.ts).
+    // A shutdown keeps it, and the session waiting on it, for after the
+    // restart; anything else (an interrupt) cancels it. Measured on SDK
+    // 0.3.283 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
+    // is pending fails that call ("Tool permission request failed: AbortError:
+    // Tool permission stream closed before response received"), and Claude
+    // Code may still reach the model and end with a `result` before it exits,
+    // so either outcome below can follow. The tool never runs.
+    // Approved-but-unused approvals end with the turn in every case,
+    // including the one a resumed turn was bound to and did not use.
+    const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
+    if (stopped !== SHUTTING_DOWN) {
+      await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
+    } else {
+      await this.approvals.revokeUnused(id, 'the turn ended')
+    }
     if (result) {
       // `total_cost_usd` of a RESUMED query already includes the earlier
       // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
@@ -598,7 +790,7 @@ export class SessionManager {
         tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
       }
       outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
-    } else if (interrupted) {
+    } else if (stopped !== undefined) {
       status = 'idle'
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
@@ -608,6 +800,7 @@ export class SessionManager {
       tail.push(event({ type: 'error', sessionId: id, code: 'turn_failed', message }))
       outcome = { kind: 'failed', message }
     }
+    if (keepWaiting) status = 'waiting_approval'
     tail.push(event({ type: 'session.status', sessionId: id, status }))
 
     const released = await this.deps.sql`
@@ -617,6 +810,16 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}`
     if (released.count === 0) return { kind: 'lost_claim' }
     await this.events.append(id, tail.map((e) => scrubForLog(e, secrets)))
+    // A decision that landed while this turn was finishing saw it still
+    // holding the session and took it for parked (approvals/service.ts
+    // decide), so nobody resumes for it: void an approval of this turn's
+    // that nothing used, and settle the status if nothing is pending now. A
+    // decision that lands after the release is an orphan's: decide() resumes
+    // for it, and a row already bound to that resumed turn is skipped here
+    // (revokeUnused `turnId`). Whichever of the two gets the row first wins;
+    // a void is announced, so an approval is never lost silently.
+    await this.approvals.revokeUnused(id, 'it was decided as its turn ended', { turnId })
+    await this.approvals.refreshStatus(id)
     return outcome
   }
 
@@ -632,10 +835,15 @@ export class SessionManager {
       // Accurate, not optimistic: a turn whose result is already in is
       // finishing by itself, so this interrupt stops nothing.
       if (local.settling) return false
-      local.controller.abort(new Error('interrupted'))
+      // Its pending approvals are cancelled as it finishes (finish()).
+      local.controller.abort(new Error(`interrupted by ${principal.label}`))
       return true
     }
-    if (!session.turnActive) return false
+    if (!session.turnActive) {
+      // No turn: all an interrupt can stop is an approval left pending by a
+      // turn that is gone (a restart), which would otherwise resume it.
+      return (await this.approvals.cancelPending(id, `interrupted by ${principal.label}`)) > 0
+    }
     // Running on another replica: its lease renewal sees the flag.
     const rows = await this.deps.sql`
       UPDATE ai_sessions SET interrupt_requested = true
@@ -665,6 +873,9 @@ export class SessionManager {
       WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id}`
     if (rows.count === 0) throw new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
+    // An approval asked for the previous owner's turn is not handed on
+    // (approvals/service.ts): the parked call is refused.
+    await this.approvals.cancelPending(id, `the session was handed off to ${to.label}`)
     return this.get(id, to)
   }
 
@@ -726,6 +937,6 @@ export class SessionManager {
 
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
   abortAll(): void {
-    for (const { controller } of this.active.values()) controller.abort(new Error('shutting down'))
+    for (const { controller } of this.active.values()) controller.abort(new Error(SHUTTING_DOWN))
   }
 }

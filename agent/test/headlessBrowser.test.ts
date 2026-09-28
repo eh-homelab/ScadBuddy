@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AGENT_ACTOR_HEADER,
   assertHeadlessPlugin,
+  AUTHORIZE_TOOL_NAME,
   BROWSER_TOOL_TIERS,
   browserInputProblem,
   browserTierOf,
@@ -78,6 +79,12 @@ describe('tiers (spec §5.3)', () => {
     expect(browserTierOf('mcp__playwright__browser_click')).toBeUndefined()
     // Unknown means outward (spec §8.1): needs approval, i.e. not run.
     expect(decide(t('browser_something_new'), browserTierOf).decision).toBe('needs_approval')
+  })
+
+  it('makes the authorize tool outward: it always parks for a human approval', () => {
+    expect(AUTHORIZE_TOOL_NAME).toBe('mcp__scadbuddy_browser__authorize_request')
+    expect(browserTierOf(AUTHORIZE_TOOL_NAME)).toBe('outward')
+    expect(decide(AUTHORIZE_TOOL_NAME, browserTierOf).decision).toBe('needs_approval')
   })
 
   it('has no tool both tiered and disallowed', () => {

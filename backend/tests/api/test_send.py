@@ -56,6 +56,12 @@ def configure(client: TestClient, **extra: Any) -> None:
 
 
 def upload_route(file_id: int = 41) -> respx.Route:
+    """The upload, and the read that finds the copy still there when it is reused (#316)."""
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": file_id, "filename": "demo-elan.3mf", "folder_id": 2}
+        )
+    )
     return respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(
             200,
@@ -120,6 +126,7 @@ def plate_routes(
 # --- #25 library mode ---------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     client: TestClient, model: str, paths: DataPaths
@@ -142,17 +149,39 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     assert request.headers["X-API-Key"] == "s3cret"
     assert b"demo-elan.3mf" in request.content
 
+    # Recorded in Postgres, not in meta.json (#455)...
     meta = json.loads(
         (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
     )
-    assert meta["library_file_id"] == 41
+    assert "library_files" not in meta
 
-    # And the detail route reports it, so the UI can deep-link without re-sending.
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+    # ...and the detail route reports it, so the UI can deep-link without re-sending.
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    assert [(row["id"], row["folder_id"]) for row in rows] == [(41, 2)]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
-def test_a_re_send_deletes_the_previous_file_rather_than_duplicating_it(
+def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
+    client: TestClient, model: str
+) -> None:
+    """Same folder, same printer: the copy already there is this exact 3MF (#316)."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    assert body["library_file_id"] == 41
+    assert upload.call_count == 1
+    assert not delete.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
     client: TestClient, model: str
 ) -> None:
     configure(client)
@@ -160,42 +189,16 @@ def test_a_re_send_deletes_the_previous_file_rather_than_duplicating_it(
     upload = upload_route()
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
-    delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
-    upload.mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "id": 42,
-                "filename": "demo-elan.3mf",
-                "file_type": "3mf",
-                "file_size": 9,
-                "thumbnail_path": None,
-            },
-        )
-    )
-
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
-
-    assert delete.called
-    assert body["library_file_id"] == 42
-
-
-@respx.mock
-def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
-    client: TestClient, model: str
-) -> None:
-    configure(client)
-    output_id = make_output(client, model)
-    upload_route()
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
-
-    respx.delete(f"{API}/library/files/41").mock(
+    respx.get(f"{API}/library/files/41").mock(
         return_value=httpx.Response(404, json={"detail": "Not found"})
     )
+    upload_route(42)
 
     response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
     assert response.status_code == 200
+    assert response.json()["library_file_id"] == 42
+    assert upload.call_count == 2
 
 
 def test_sending_without_a_url_configured_is_a_conflict(client: TestClient, model: str) -> None:
@@ -215,6 +218,7 @@ def test_sending_an_unknown_output_is_a_404(client: TestClient) -> None:
 # --- #26 queue mode -----------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_runs_the_configured_pipeline(
     client: TestClient, model: str, paths: DataPaths
@@ -258,6 +262,7 @@ def test_queue_mode_runs_the_configured_pipeline(
     assert meta["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
     client: TestClient, model: str
@@ -282,6 +287,7 @@ def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
     assert response.json()["bambuddy_body"] == report
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_without_a_pipeline_slices_then_enqueues(
     client: TestClient, model: str, paths: DataPaths
@@ -331,6 +337,7 @@ def test_queue_mode_without_a_pipeline_slices_then_enqueues(
     assert meta["queue_item_id"] == 9
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, **PRESETS)
@@ -354,6 +361,7 @@ def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model
     assert not queue.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
     client: TestClient, model: str
@@ -369,6 +377,7 @@ def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
     assert "presets" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_with_no_printer_and_no_pipeline_says_so(client: TestClient, model: str) -> None:
     configure(client, **PRESETS)
@@ -381,6 +390,7 @@ def test_queue_mode_with_no_printer_and_no_pipeline_says_so(client: TestClient, 
     assert "printer" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_more_colours_than_filament_slots_is_refused_before_slicing(
     client: TestClient, model: str
@@ -415,6 +425,7 @@ def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
 # --- #105 the plate follows the target printer --------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_upload_is_laid_out_for_the_target_printers_plate(
     client: TestClient, model: str
@@ -455,6 +466,7 @@ def test_the_upload_is_laid_out_for_the_target_printers_plate(
     assert transform[9:11] == [175.0, 160.0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     client: TestClient, model: str
@@ -473,6 +485,7 @@ def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     assert [float(v) for v in (item.get("transform") or "").split()][9:11] == [128.0, 128.0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     client: TestClient, model: str, paths: DataPaths
@@ -516,6 +529,7 @@ def _uploaded_nozzle(route: respx.Route) -> list[str]:
     return nozzle
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, model: str) -> None:
     """A 0.2-nozzle pipeline's file must not tell someone at the printer it is 0.4."""
@@ -530,6 +544,7 @@ def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, mod
     assert _uploaded_nozzle(upload) == ["0.2"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
     client: TestClient, model: str
@@ -548,6 +563,7 @@ def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
     assert not presets.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
     client: TestClient, model: str
@@ -563,6 +579,7 @@ def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
     assert _uploaded_nozzle(upload) == ["0.4"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
     client: TestClient, model: str
@@ -587,6 +604,7 @@ def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
     ],
     ids=["not-json", "wrong-shape"],
 )
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_malformed_preset_catalogue_does_not_fail_the_send(
     client: TestClient, model: str, response: httpx.Response
@@ -613,14 +631,16 @@ def _uploaded_3mf(route: respx.Route) -> bytes:
     raise AssertionError("the upload carried no file part")
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_refused_re_send_leaves_the_previous_file_in_place(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """The fit check runs before the delete, so a refusal costs nothing.
+    """The fit check runs before anything touches Bambuddy, so a refusal costs nothing.
 
-    Deleting first would strand ``library_file_id`` pointing at a file that is no
-    longer in Bambuddy: the button would report 409 and the deep link would 404.
+    Deleting first would leave the recorded copy pointing at a file that is no longer
+    in Bambuddy: the button would report 409 and the deep link would 404. (A delete
+    that fails *after* the new upload is covered in ``test_library_copies.py``.)
     """
     respx.get(f"{API}/slicer-pipelines/").mock(
         return_value=httpx.Response(200, json={"pipelines": []})
@@ -664,36 +684,8 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
 
     assert response.status_code == 409
     assert not delete.called, "the old file was removed before the refusal"
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
-
-
-@respx.mock
-def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, model: str) -> None:
-    """A delete that is not a 404 leaves the previous send intact and retryable.
-
-    Clearing the id first would strand the file in Bambuddy with nothing pointing
-    at it, and every retry would upload another copy — the duplication this delete
-    exists to prevent.
-    """
-    configure(client)
-    output_id = make_output(client, model)
-    upload = upload_route()
-    assert (
-        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
-            "library_file_id"
-        ]
-        == 41
-    )
-
-    respx.delete(f"{API}/library/files/41").mock(
-        return_value=httpx.Response(500, json={"detail": "boom"})
-    )
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
-
-    assert response.status_code >= 500
-    assert upload.call_count == 1, "a second copy was uploaded despite the failed delete"
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    assert [row["id"] for row in rows] == [41]
 
 
 # --- #80 the Edit in ScadBuddy back-link ---------------------------------------------
@@ -711,6 +703,7 @@ def annotate_route(file_id: int = 41, notes: str | None = None) -> respx.Route:
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_edit_link_is_attached_to_the_uploaded_file(
     client: TestClient, model: str, paths: DataPaths
@@ -730,6 +723,7 @@ def test_the_edit_link_is_attached_to_the_uploaded_file(
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_nothing_is_attached_when_no_public_url_is_configured(
     client: TestClient, model: str, paths: DataPaths
@@ -767,6 +761,7 @@ def pipeline_run_route(run_id: int = 12) -> respx.Route:
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_annotation_still_queues_the_print(
     client: TestClient, model: str, paths: DataPaths
@@ -798,6 +793,7 @@ def test_a_failed_annotation_still_queues_the_print(
     assert meta["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
     """A slow or broken annotate must not sit in front of the pipeline run."""
@@ -816,6 +812,7 @@ def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, mod
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, model: str) -> None:
     """Bambuddy's ``update_file`` guards every assignment with ``if data.X is not
@@ -832,6 +829,7 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_slice_and_queue_branch_annotates_both_files_last(
     client: TestClient, model: str
@@ -879,6 +877,7 @@ def test_the_slice_and_queue_branch_annotates_both_files_last(
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
@@ -909,6 +908,7 @@ def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, m
     assert response.json()["edit_url"] is None
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
     client: TestClient, model: str

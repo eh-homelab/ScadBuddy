@@ -1,5 +1,6 @@
 import type {
   Asset,
+  HeadlessBrowserSetting,
   AssetUsage,
   AttachResult,
   BambuddyTargets,
@@ -408,7 +409,11 @@ export const api = {
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
   getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
-  deleteOutput: (id: string) => request<void>(`/outputs/${seg(id)}`, { method: 'DELETE' }),
+  /** #316 — `deleteInboxCopies` also deletes the output's copies in Bambuddy's inbox folder. */
+  deleteOutput: (id: string, deleteInboxCopies = false) =>
+    request<void>(`/outputs/${seg(id)}${deleteInboxCopies ? '?delete_inbox_copies=true' : ''}`, {
+      method: 'DELETE',
+    }),
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
 
@@ -606,4 +611,17 @@ export const api = {
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+
+  /**
+   * The AI agent's headless browser (#349), served by the agent service under
+   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getHeadlessBrowserSetting: () =>
+    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
+
+  putHeadlessBrowserSetting: (enabled: boolean) =>
+    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
 }

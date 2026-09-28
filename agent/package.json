@@ -9,7 +9,7 @@
   },
   "scripts": {
     "prebuild": "pnpm gen:api",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/db/migrations', 'dist/db/migrations', { recursive: true })\"",
     "start": "node dist/main.js",
     "lint": "eslint .",
     "pretypecheck": "pnpm gen:api",

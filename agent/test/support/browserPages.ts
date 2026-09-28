@@ -17,13 +17,18 @@ export type Hit = { method: string; url: string; headers: IncomingHttpHeaders }
 
 export type PageServer = { origin: string; hits: Hit[]; close(): Promise<void> }
 
-async function serve(handler: (url: string, method: string, res: ServerResponse) => void): Promise<PageServer> {
+type Handler = (url: string, method: string, res: ServerResponse, headers: IncomingHttpHeaders) => void | Promise<void>
+
+async function serve(handler: Handler): Promise<PageServer> {
   const hits: Hit[] = []
   const server: Server = createServer((req, res) => {
     req.resume()
     req.on('end', () => {
       hits.push({ method: req.method ?? 'GET', url: req.url ?? '/', headers: req.headers })
-      handler(req.url ?? '/', req.method ?? 'GET', res)
+      void Promise.resolve(handler(req.url ?? '/', req.method ?? 'GET', res, req.headers)).catch(() => {
+        res.writeHead(500)
+        res.end()
+      })
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -46,8 +51,15 @@ export async function startOtherOrigin(): Promise<PageServer> {
   })
 }
 
+/**
+ * Answers the stand-in's outward route (`POST /api/v1/prints`) with a status.
+ * By default 403, what backend/scadbuddy/api/agent_actor.py answers a marked
+ * outward request with no grant.
+ */
+export type OutwardGate = (headers: IncomingHttpHeaders) => Promise<number>
+
 /** The stand-in UI; `otherOrigin` is what its probe and redirect point at. */
-export async function startUi(otherOrigin: string): Promise<PageServer> {
+export async function startUi(otherOrigin: string, gate: OutwardGate = () => Promise.resolve(403)): Promise<PageServer> {
   const page = `<!doctype html>
 <html><head><title>Customizer</title></head>
 <body>
@@ -61,16 +73,16 @@ export async function startUi(otherOrigin: string): Promise<PageServer> {
   <p id="probe-result">probe not run</p>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
-  return serve((url, method, res) => {
+  return serve(async (url, method, res, headers) => {
     if (url === '/redirect-away') {
       res.writeHead(302, { location: `${otherOrigin}/` })
       res.end()
       return
     }
     if (url === '/api/v1/prints' && method === 'POST') {
-      // What backend/scadbuddy/api/agent_actor.py answers a marked outward request.
-      res.writeHead(403, { 'content-type': 'application/json' })
-      res.end('{"detail":"refused"}')
+      const status = await gate(headers)
+      res.writeHead(status, { 'content-type': 'application/json' })
+      res.end(status === 200 ? '{"ok":true}' : '{"detail":"refused"}')
       return
     }
     res.writeHead(200, { 'content-type': 'text/html' })

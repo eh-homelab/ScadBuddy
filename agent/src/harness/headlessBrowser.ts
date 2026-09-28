@@ -128,8 +128,17 @@ export const BROWSER_TOOL_TIERS: Readonly<Record<string, RiskTier>> = {
   browser_tabs: 'write',
 }
 
+/**
+ * The in-process tool that asks a human to allow ONE outward request from the
+ * headless browser (headlessGrants.ts). Outward tier: it parks for approval.
+ */
+export const GRANT_SERVER = 'scadbuddy_browser'
+export const AUTHORIZE_TOOL = 'authorize_request'
+export const AUTHORIZE_TOOL_NAME = `mcp__${GRANT_SERVER}__${AUTHORIZE_TOOL}`
+
 /** The tier of a headless-browser tool as the SDK names it; undefined for any other tool. */
 export function browserTierOf(toolName: string): RiskTier | undefined {
+  if (toolName === AUTHORIZE_TOOL_NAME) return 'outward'
   if (!toolName.startsWith(TOOL_PREFIX)) return undefined
   const bare = toolName.slice(TOOL_PREFIX.length)
   return Object.hasOwn(BROWSER_TOOL_TIERS, bare) ? BROWSER_TOOL_TIERS[bare] : undefined

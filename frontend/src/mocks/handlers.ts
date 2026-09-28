@@ -42,7 +42,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { realtimeHandler } from './realtime'
+import { emitRealtime, realtimeHandler } from './realtime'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -56,10 +56,6 @@ import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
-
-interface MockJob extends Job {
-  polls: number
-}
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -94,8 +90,10 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
+  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
+  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
-  jobs: new Map<string, MockJob>(),
+  jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
@@ -127,6 +125,68 @@ const state = {
   pendingPreviews: new Set<string>(),
 }
 
+/** Milliseconds a mock render spends pending, then running. */
+export const MOCK_JOB_STEP_MS = 15
+
+/**
+ * #267 — a mock render moves on by itself, as a real one does, and announces each
+ * state over the mock socket (`emitRealtime`), as `render/jobs.py` publishes it.
+ * `GET /jobs/:id` only reports.
+ */
+function runJob(jobId: string): void {
+  const announce = (kind: string) => {
+    const job = state.jobs.get(jobId)
+    if (job) emitRealtime(kind, [`job:${jobId}`], { job_id: jobId, slug: job.slug })
+  }
+  // Ids restart at every resetMockState, so a timer left by an earlier test checks
+  // it is still acting on the job it was started for.
+  const started = state.jobs.get(jobId)
+  setTimeout(() => {
+    const job = state.jobs.get(jobId)
+    if (!job || job !== started || job.status !== 'pending') return
+    job.status = 'running'
+    job.log_tail = ['Compiling design (CSG Tree generation)...']
+    announce('job.running')
+    emitRealtime('job.progress', [`job:${jobId}`], { job_id: jobId, slug: job.slug, stage: 'render' })
+    setTimeout(() => {
+      if (state.jobs.get(jobId) !== job || job.status !== 'running') return
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = fixtures.OPENSCAD_LOG_TAIL
+        announce('job.failed')
+        return
+      }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = [
+          "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
+          'Current top level object is empty.',
+        ]
+        job.warnings = fixtures.FAILED_JOB_WARNINGS
+        announce('job.failed')
+        return
+      }
+      job.status = 'done'
+      job.bbox_mm = bboxOf(job.params ?? {})
+      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.plates = state.plates[job.slug] ?? []
+      job.preview_url = `${base}/jobs/${job.id}/preview.glb`
+      job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+      job.notes =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
+          ? fixtures.TEMPLATE_NOTES
+          : []
+      job.warnings =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
+          ? fixtures.JOB_WARNINGS
+          : []
+      announce('job.done')
+    }, MOCK_JOB_STEP_MS)
+  }, MOCK_JOB_STEP_MS)
+}
+
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
   state.models = fixtures.models.map((m) => ({ ...m }))
@@ -139,6 +199,7 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
+  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
@@ -393,6 +454,29 @@ function nextNumber(): number {
   return 8800 + state.seq
 }
 
+/**
+ * #316 — the output's library copy in `folderId` (the inbox when null), recording a new
+ * one when there is none. The mock has one target, so the folder alone is the key.
+ */
+function copyIn(output: Output, folderId: number | null): number {
+  const folder = folderId ?? state.settings.library_folder_id ?? null
+  const existing = (output.library_files ?? []).find((copy) => copy.folder_id === folder)
+  if (existing) return existing.id
+  const id = nextNumber()
+  state.outputs = state.outputs.map((o) =>
+    o.id === output.id
+      ? {
+          ...o,
+          library_files: [
+            ...(o.library_files ?? []),
+            { id, folder_id: folder, target_key: 'Bambu Lab H2C', sliced: [] },
+          ],
+        }
+      : o,
+  )
+  return id
+}
+
 function num(params: Record<string, ParamValue>, key: string, fallback: number): number {
   const value = params[key]
   return typeof value === 'number' ? value : fallback
@@ -442,11 +526,6 @@ function round(value: number): number {
   return Math.round(value * 10) / 10
 }
 
-function jobView(job: MockJob): Job {
-  const { polls: _polls, ...rest } = job
-  return rest
-}
-
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
 /** `library/assets.py`'s `sniff`: the kind comes from the bytes, never the name. */
@@ -490,6 +569,17 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+
+/**
+ * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
+ * in core/problems.py answers every one with the same detail and puts the reason in
+ * `errors`, so a caller reads the field's message there, never in `detail`.
+ */
+function shapeRefusal(msg: string) {
+  return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
+    errors: [{ loc: ['body', 'presets'], msg }],
+  })
+}
 
 /**
  * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
@@ -571,22 +661,37 @@ function refuseBuiltin(slug: string) {
 /** `library/presets.py`'s limits: the longest name, and the most presets a template keeps. */
 export const MAX_PRESET_NAME = 80
 export const MAX_PRESETS = 200
+/** `library/slugs.py`'s `SLUG_PATTERN` and `MAX_SLUG_LENGTH`: what a template preset's `id` may be. */
+export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+export const MAX_PRESET_ID = 100
+/** `library/presets.py`'s bounds on a preset's description and tags. */
+export const MAX_PRESET_DESCRIPTION = 2000
+export const MAX_PRESET_TAGS = 20
+export const MAX_PRESET_TAG = 40
 
-/** Why a preset save is refused, as the server words it, or undefined. */
-function presetRefusal(
-  slug: string,
-  name: string,
-  params: Record<string, ParamValue>,
-  own: string | null,
-) {
-  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
-  if (name.length > MAX_PRESET_NAME) {
-    return problem(
-      422,
-      'Unprocessable Content',
-      `a preset name is at most ${MAX_PRESET_NAME} characters`,
-    )
-  }
+/**
+ * `template_preset_keys` in `library/presets.py`: a preset's explicit id, else its name
+ * as a slug with `-2`, `-3` on a clash, else `preset-<n>` when the name has no slug
+ * characters. An explicit id is never reused by a derived key.
+ */
+function templatePresetKeys(presets: { id?: string | null; name: string }[]): string[] {
+  const taken = new Set(presets.flatMap((preset) => (preset.id ? [preset.id] : [])))
+  return presets.map((preset, index) => {
+    if (preset.id) return preset.id
+    const base = slugify(preset.name) || `preset-${index + 1}`
+    let key = base
+    for (let suffix = 2; taken.has(key); suffix++) key = `${base}-${suffix}`
+    taken.add(key)
+    return key
+  })
+}
+
+/**
+ * Why a preset's values are refused, as `require_valid_preset_params` words it, or
+ * undefined: an unknown parameter, then each value's type as `build_defines` checks
+ * it, then a dropdown value that is not one of its options.
+ */
+function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   const byName = new Map((state.schemas[slug]?.parameters ?? []).map((p) => [p.name, p]))
   const unknown = Object.keys(params).filter((key) => !byName.has(key))
   if (unknown.length > 0) {
@@ -622,6 +727,26 @@ function presetRefusal(
       )
     }
   }
+  return undefined
+}
+
+/** Why a preset save is refused, as the server words it, or undefined. */
+function presetRefusal(
+  slug: string,
+  name: string,
+  params: Record<string, ParamValue>,
+  own: string | null,
+) {
+  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  if (name.length > MAX_PRESET_NAME) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `a preset name is at most ${MAX_PRESET_NAME} characters`,
+    )
+  }
+  const refused = valueRefusal(slug, params)
+  if (refused) return refused
   // After the values, as the server checks them: they are validated in the route,
   // and only then does the store count the presets and compare the names.
   const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
@@ -1083,9 +1208,93 @@ export const handlers = [
 
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const { presets: defined, ...patch } = (await request.json()) as ModelPatch
+    // #326: the template's own presets, replaced whole, checked in the server's order.
+    // First the body's shape -- each preset's name and id, then the list's length and
+    // uniqueness -- which is FastAPI parsing it into `ModelPatch` before the route runs,
+    // so it is refused (422) even for a built-in or a model that is not there -- with
+    // the generic detail every `RequestValidationError` gets, the reason in `errors`.
+    const cleaned: NonNullable<typeof defined> = []
+    if (defined) {
+      for (const preset of defined) {
+        // The raw length first, as pydantic checks `max_length` before `_clean_name`
+        // collapses the whitespace.
+        if (preset.name.length > MAX_PRESET_NAME) {
+          return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
+        }
+        const name = preset.name.trim().replace(/\s+/g, ' ')
+        if (!name) return shapeRefusal('a preset needs a name')
+        if (
+          preset.id !== undefined &&
+          preset.id !== null &&
+          (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID)
+        ) {
+          return shapeRefusal(`'${preset.id}' is not a preset id`)
+        }
+        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
+          return shapeRefusal(
+            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
+          )
+        }
+        const tags = preset.tags ?? []
+        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
+          return shapeRefusal(
+            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+          )
+        }
+        cleaned.push({ ...preset, name })
+      }
+      if (cleaned.length > MAX_PRESETS) {
+        return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
+      }
+      const names = new Set<string>()
+      const ids = new Set<string>()
+      for (const preset of cleaned) {
+        const folded = preset.name.toLowerCase()
+        if (names.has(folded)) {
+          return shapeRefusal(`two presets are named '${preset.name}'`)
+        }
+        names.add(folded)
+        if (preset.id) {
+          if (ids.has(preset.id)) {
+            return shapeRefusal(`two presets have the id '${preset.id}'`)
+          }
+          ids.add(preset.id)
+        }
+      }
+    }
+    // Then the route: a built-in is read-only, and a missing model is a 404, before the
+    // values are checked against its schema by `require_valid_preset_params`.
     const refused = refuseBuiltin(slug)
     if (refused) return refused
-    const patch = (await request.json()) as ModelPatch
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (defined) {
+      for (const preset of cleaned) {
+        const refused = valueRefusal(slug, preset.params ?? {})
+        if (refused) return refused
+      }
+      // A name is one preset's in the picker: none of the template's is a saved one's.
+      const saved = (state.presets[slug] ?? []).filter((preset) => preset.origin === 'mine')
+      const clash = cleaned.find((preset) =>
+        saved.some((other) => other.name.toLowerCase() === preset.name.toLowerCase()),
+      )
+      if (clash) {
+        return problem(
+          409,
+          'Conflict',
+          `'${slug}' already has a saved preset named '${clash.name}'`,
+          { name: clash.name },
+        )
+      }
+      const keys = templatePresetKeys(cleaned)
+      const shipped: ParamPreset[] = cleaned.map((preset, index) => ({
+        id: `template-${keys[index]}`,
+        name: preset.name,
+        origin: 'template',
+        params: preset.params ?? {},
+      }))
+      state.presets[slug] = [...shipped, ...saved]
+    }
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
     ) as Partial<ModelSummary>
@@ -1402,8 +1611,8 @@ export const handlers = [
       created_at: new Date().toISOString(),
       params: body.params,
       log_tail: [],
-      polls: 0,
     })
+    runJob(jobId)
     return HttpResponse.json(
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
@@ -1464,43 +1673,7 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
-
-    job.polls += 1
-    if (job.polls === 1) {
-      job.status = 'running'
-      job.log_tail = ['Compiling design (CSG Tree generation)...']
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = fixtures.OPENSCAD_LOG_TAIL
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = [
-        "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
-        'Current top level object is empty.',
-      ]
-      job.warnings = fixtures.FAILED_JOB_WARNINGS
-      return HttpResponse.json(jobView(job))
-    }
-
-    job.status = 'done'
-    job.bbox_mm = bboxOf(job.params ?? {})
-    job.colors = colorsOf(job.slug, job.params ?? {})
-    job.plates = state.plates[job.slug] ?? []
-    job.preview_url = `${base}/jobs/${job.id}/preview.glb`
-    job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-    job.notes =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
-    job.warnings =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME ? fixtures.JOB_WARNINGS : []
-    return HttpResponse.json(jobView(job))
+    return HttpResponse.json(job)
   }),
 
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
@@ -1602,7 +1775,7 @@ export const handlers = [
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, null)
     const queued = body.mode === 'queue'
     const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
     const queueItemId = queued && !pipelineRunId ? nextNumber() : null
@@ -1610,7 +1783,6 @@ export const handlers = [
       o.id === id
         ? {
             ...o,
-            library_file_id: libraryFileId,
             pipeline_run_id: pipelineRunId,
             queue_item_id: queueItemId,
           }
@@ -1692,7 +1864,8 @@ export const handlers = [
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
-      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      library_file_id:
+        output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
   }),
@@ -1733,11 +1906,11 @@ export const handlers = [
       projectId === null
         ? null
         : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, folderId)
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -1949,6 +2122,20 @@ export const handlers = [
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
+
+  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/settings/headless-browser`, () =>
+    HttpResponse.json({ enabled: state.headlessBrowser }),
+  ),
+
+  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
+    const body = (await request.json()) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
+    }
+    state.headlessBrowser = body.enabled
+    return HttpResponse.json({ enabled: state.headlessBrowser })
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {

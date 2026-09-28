@@ -8,8 +8,10 @@ for sessions that have no user tab: sessions started over `/mcp` or by another a
 [browser bridge](browser-bridge.md) is still the only way to act in the user's own tab;
 the headless browser never sees that tab.
 
-It is **off by default**, and nothing in `main.ts` turns it on yet (the session manager
-is not wired into the service; see "Status" below).
+It is **off by default**. Settings has a switch for it ("AI headless browser"), which
+stores `headless_browser_enabled` through `PUT /api/v1/ai/settings/headless-browser`;
+from the next turn on, every session turn gets the browser (`main.ts` gives the
+`SessionManager` its `headlessBrowser` dependency).
 
 ## Pieces
 
@@ -22,7 +24,9 @@ is not wired into the service; see "Status" below).
 | Turning it on per turn | `runTurn()` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts): `deps.headlessBrowser` **and** the `ai_settings` key `headless_browser_enabled` = `true` |
 | Its directory | `sessionBrowserDir()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts): `<state dir>/browser/<session id>` |
 | Chromium | the Dockerfile's `agent` stage: `install-browser --with-deps --only-shell chromium`, `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers` |
+| The setting, and its switch in Settings | [`agent/src/routes/headlessBrowser.ts`](../../agent/src/routes/headlessBrowser.ts) (`GET`/`PUT /api/v1/ai/settings/headless-browser`, `uiReadProblem`/`uiRequestProblem` guards); [`frontend/src/components/HeadlessBrowserSetting.tsx`](../../frontend/src/components/HeadlessBrowserSetting.tsx) |
 | The backend's refusal of outward requests from it | [`backend/scadbuddy/api/agent_actor.py`](../../backend/scadbuddy/api/agent_actor.py) `AgentActorGate` |
+| The one way past that refusal: an approved, one-shot grant | [`agent/src/harness/headlessGrants.ts`](../../agent/src/harness/headlessGrants.ts) (`mcp__scadbuddy_browser__authorize_request`), table `ai_headless_grants` ([migration](../../agent/src/db/migrations/20260928T0812Z_headless_grants.sql)), `GRANT_SQL` in `agent_actor.py` |
 
 ## How a turn gets it
 
@@ -97,9 +101,42 @@ In order, from the model outwards:
    read/write tools' routes that no outward tool shares; `agent/test/agentActor.test.ts`
    derives the same list from the tool registry and fails on drift). Everything else,
    i.e. send, print, delete, settings writes, library pins from a URL, and any route
-   added later, gets `403 Needs approval`. Spec §5.3 lets an approved, unconsumed
-   outward action authorise one such request; approvals are #258 (open PR #471), so
-   today the refusal is unconditional.
+   added later, gets `403 Needs approval`, unless a grant authorises exactly that
+   request (next section).
+
+## Approving one outward request
+
+Spec §5.3: a marked outward request passes only when "an approved, unconsumed outward
+action for that session authorises that request; the backend consumes it once". As
+built:
+
+1. The model clicks *Print* in the headless UI; the page's `POST
+   /api/v1/print/outputs/<id>/run` gets `403`, whose detail names the next step.
+2. The model calls **`mcp__scadbuddy_browser__authorize_request`** with that request's
+   `method` and exact `path` (`browser_network_requests` shows them). The tool is
+   `outward` tier (`browserTierOf`), so it **parks for a human approval** in the
+   ScadBuddy UI like any outward call (#258, `approvals/service.ts`), bound to that
+   exact input by its HMAC.
+3. Once approved, the tool's handler (`recordGrant()`) finds the approval it ran under
+   (same session and turn, same tool, same input hash, approved and consumed) and
+   writes one row to `ai_headless_grants`: session, turn, approval, method, path, and
+   an expiry two minutes out (`GRANT_TTL_SECONDS`).
+4. The model clicks again. The backend's `GRANT_SQL` lets the request through only if a
+   grant matches the marker's session, the method and the exact path, is unused and
+   unexpired, its turn is still the session's live turn (`ai_sessions.turn_id`, lease
+   not expired), and its approval is approved and consumed; it marks the grant used in
+   the same statement. A third click is refused again.
+
+So an interrupt, a handoff, a new turn or the end of the turn voids an unused grant.
+Everything else fails closed: no database URL on the backend, the database down, or no
+`ai_*` tables all mean `403`. The backend reads the agent's tables through its own
+`SCADBUDDY_DATABASE_URL` (the shared #241 database; spec §3.2 named "a lookup in the
+shared database" as one option). `agent/test/headlessGrants.pg.test.ts` runs the
+backend's `GRANT_SQL` against the agent's real schema, and
+`agent/test/headlessBrowser.session.e2e.test.ts` runs the whole flow in a real session
+turn: real SDK and Claude Code, real Chromium, approvals in Postgres, and a stand-in UI
+whose outward route answers with `GRANT_SQL` (refused, parked, approved, exactly one
+request through, refused again).
 
 ## Measured (the tests, and the image)
 
@@ -126,7 +163,7 @@ headless shell before the tests.
   harness refuses it before that). **A redirect off the origin is followed**: the
   tool usually reports an interrupted navigation, but the other origin has already
   received the request, marker included. ScadBuddy's origin must therefore not serve
-  open redirects.
+  open redirects (see "Deployment requirement" below).
 - **Isolation**: two servers (two sessions) do not share `localStorage`. A server lives
   as long as its Claude Code process, which is **one query**, so a session's second turn
   starts with a fresh browser (and has to navigate again).
@@ -152,21 +189,29 @@ headless shell before the tests.
   libraries `--with-deps` installs; full Chromium would be 740 MB. `@playwright/mcp`
   and `playwright`/`playwright-core` add about 19 MB to `node_modules`.
 
+## Deployment requirement: no open redirects
+
+Because the server's allow-list does not apply to redirects, **nothing served at the
+backend's origin (`SCADBUDDY_BACKEND_URL`) may redirect to another origin**. For the
+backend itself this is tested: `backend/tests/api/test_no_open_redirect.py` sends paths
+shaped to provoke a redirect (`//evil.example/`, `/%2F%2Fevil.example/`, trailing
+slashes, the SPA's directories) to the app with a built SPA mounted and asserts every
+`Location` stays on the origin, and it fails when any backend module starts building a
+redirect by hand until that redirect is reviewed. What the test cannot see is anything
+in front of the backend on that origin. If `SCADBUDDY_BACKEND_URL` points at a proxy
+(an ingress, an auth proxy, a CDN), that proxy must not redirect off the origin either
+(for example to a login page on another host). In the pod layout of spec §4.1 it is
+`http://127.0.0.1:<backend port>`, the backend alone.
+
 ## Status and what is not done
 
-- **Not reachable in production yet.** `SessionManager` is not constructed in
-  `main.ts`, so nothing passes `deps.headlessBrowser`; and there is no route to set
-  `headless_browser_enabled` (changing it is a settings write, which needs an approval,
-  spec §5.3, §8.3).
-- **Approvals (#258, PR #471).** When they land, `AgentActorGate` must look up an
-  approved, unconsumed outward action for the marker's session and consume it once
-  (spec §5.3). Until then it refuses, which is the safe direction.
-- **Redirects** are not blocked by anything but the absence of open redirects on the
-  backend's origin.
-- **Not tested end to end against the real SPA and backend in one container run.** The
-  pieces are tested separately: the backend gate against the real app (pytest), the
-  marker on a page's own `fetch` (server test), and the harness driving a stand-in UI
-  (e2e test).
+- **Chromium runs without its sandbox** (above); enabling it is not measured.
+- **Not tested against the real SPA and backend in one container run.** The pieces
+  are tested: the gate and `GRANT_SQL` against Postgres (pytest and the agent's pg
+  test), the marker on a page's own `fetch` (server test), and a real session turn
+  driving a stand-in UI through the whole approve-and-click flow (session e2e test).
+- **The model has to find the request's path itself** (the `403` detail and
+  `browser_network_requests`); an approval card shows that method and path.
 
 ## Bumping `@playwright/mcp`
 

@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
     PrintProgressDep,
     SettingsStoreDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
@@ -117,6 +118,7 @@ async def post_run(
     output_id: OutputIdPath,
     body: PrintRunRequest,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
 ) -> PrintRunResult:
@@ -130,7 +132,7 @@ async def post_run(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await run_for_output(client, outputs, meta, settings, body)
+        result = await run_for_output(client, outputs, uploads, meta, settings, body)
     observer.started(meta)
     return result
 
@@ -143,6 +145,7 @@ async def post_run(
 async def get_filaments(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
@@ -169,6 +172,7 @@ async def get_filaments(
         return await filament_options_for_output(
             client,
             outputs,
+            uploads,
             meta,
             settings,
             printer_id=printer_id,
@@ -185,6 +189,7 @@ async def get_filaments(
 async def get_choices(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
@@ -193,7 +198,9 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await choices_for_output(client, outputs, meta, settings, printer_id=printer_id)
+        return await choices_for_output(
+            client, outputs, uploads, meta, settings, printer_id=printer_id
+        )
 
 
 @router.get(
@@ -204,6 +211,7 @@ async def get_choices(
 async def get_progress(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
 ) -> PrintProgress | None:
@@ -220,7 +228,7 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        progress = await progress_for(client, meta)
+        progress = await progress_for(client, meta, uploads=uploads)
     observer.observe(meta, progress)
     return progress
 

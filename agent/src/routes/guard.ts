@@ -1,5 +1,13 @@
 import type { Context } from 'hono'
-import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
+import {
+  checkOrigin,
+  effectiveRequest,
+  isLoopbackPeer,
+  isSecureTransport,
+  type OriginPolicy,
+  type RequestFacts,
+  requestOrigin,
+} from '../http/origins.js'
 
 // Interim gate for OUTWARD-tier writes from Settings (spec §8.1: "outward (send,
 // print, delete, settings or credential writes)"). Spec §8.2 wants every
@@ -25,6 +33,11 @@ import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } 
 // Browsers send `Origin` on every POST, PUT and DELETE (Fetch standard), so a
 // write without one did not come from a page.
 //
+// The approval decisions (routes/approvals.ts, #258) use the same check: a
+// request that passes it is treated as the browser user, the one principal
+// that approves outward actions in the UI (spec §8.1, §8.2). The limitation
+// below applies to them unchanged.
+//
 // LIMITATION, stated plainly: this is not an approval and not authentication.
 // Anything that can open a TCP connection to port 8081 can set Host and Origin
 // to the allowed values; what it cannot do from a non-trusted peer is claim
@@ -41,21 +54,26 @@ export function requestFacts(c: Context, remoteAddress: RemoteAddress): RequestF
 }
 
 /** Returns why the request is refused, or undefined when it may proceed. */
-export function uiRequestProblem(c: Context, policy: OriginPolicy, remoteAddress: RemoteAddress): string | undefined {
+export function uiRequestProblem(
+  c: Context,
+  policy: OriginPolicy,
+  remoteAddress: RemoteAddress,
+  what = 'credential changes',
+): string | undefined {
   const facts = requestFacts(c, remoteAddress)
   if (!isSecureTransport(facts, policy)) {
-    return 'credential changes must come through the HTTPS ingress'
+    return `${what} must come through the HTTPS ingress`
   }
   const verdict = checkOrigin(facts, policy)
   if (!verdict.ok) {
     switch (verdict.reason) {
       case 'no-origin':
-        return 'credential changes must come from the ScadBuddy UI (no Origin header)'
+        return `${what} must come from the ScadBuddy UI (no Origin header)`
       case 'malformed-origin':
-        return 'credential changes must come from the ScadBuddy UI (malformed Origin header)'
+        return `${what} must come from the ScadBuddy UI (malformed Origin header)`
       case 'not-allowed':
         return (
-          'credential changes must come from the ScadBuddy UI at its public URL ' +
+          `${what} must come from the ScadBuddy UI at its public URL ` +
           '(SCADBUDDY_PUBLIC_URL; Origin or Host is not on the allowlist)'
         )
     }
@@ -66,3 +84,39 @@ export function uiRequestProblem(c: Context, policy: OriginPolicy, remoteAddress
   }
   return undefined
 }
+
+/**
+ * The same check for a READ the UI makes (GET /api/v1/ai/approvals). A
+ * browser sends no `Origin` on a same-origin GET (Fetch standard), so here
+ * `Origin` is checked when present and otherwise the request's own origin
+ * (its Host, or a trusted proxy's `X-Forwarded-Host`) must be the UI's public
+ * origin, or loopback from a loopback peer; a `Sec-Fetch-Site` other than
+ * `same-origin` or `none` is refused. The transport rule is the same.
+ */
+export function uiReadProblem(
+  c: Context,
+  policy: OriginPolicy,
+  remoteAddress: RemoteAddress,
+  what: string,
+): string | undefined {
+  const facts = requestFacts(c, remoteAddress)
+  if (!isSecureTransport(facts, policy)) return `${what} must come through the HTTPS ingress`
+  if (facts.header('origin') !== undefined) {
+    return checkOrigin(facts, policy).ok ? undefined : `${what} must come from the ScadBuddy UI at its public URL`
+  }
+  const site = facts.header('sec-fetch-site')?.toLowerCase()
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
+    return `${what} must come from the ScadBuddy UI (Sec-Fetch-Site: ${site})`
+  }
+  const effective = effectiveRequest(facts, policy)
+  const target = effective.scheme ? requestOrigin(effective.scheme, effective.host) : undefined
+  const allowed =
+    target !== undefined &&
+    (policy.publicOrigins.has(target) ||
+      (!effective.viaTrustedProxy &&
+        isLoopbackPeer(facts.peer) &&
+        LOOPBACK_HOSTNAMES.has(new URL(target).hostname)))
+  return allowed ? undefined : `${what} must be addressed to the ScadBuddy UI at its public URL (SCADBUDDY_PUBLIC_URL)`
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
