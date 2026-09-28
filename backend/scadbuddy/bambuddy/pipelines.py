@@ -53,6 +53,7 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import (
+    copy_to_read,
     ensure_uploaded,
     request_scope,
     resolve_print_options,
@@ -158,15 +159,16 @@ async def filament_options_for_output(
     plate uses, in place of ``plate_id``'s own — which is what an all-plates print
     needs a spool for.
 
-    Uploads the 3MF if Bambuddy has not got it: the plate's slots are read out of a
-    *library file*, so there is no answer before one exists. An output is immutable,
-    so this uploads once per folder and target (#316).
+    Uploads the 3MF only if Bambuddy has no copy of it at all: the plate's slots are
+    read out of a *library file*, and any copy of this output has the same slots, so a
+    run's copy is reused (#457).
 
     With a printer it also carries that printer's mounted nozzles (#78). Without one
     there are no nozzles to read. An offline printer's status is unreadable the same way (spec §3):
     the step still opens, with no mounted nozzles to compare against.
     """
-    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
+    copy = await copy_to_read(client, store, uploads, meta, settings)
+    library_file_id = copy.id
     plate_ids = (
         [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)] or [1]
         if all_plates
@@ -179,6 +181,7 @@ async def filament_options_for_output(
             printer_id=printer_id,
             plate_id=plate,
             fallback_colours=list(meta.colors),
+            own_colours=list(meta.colors) if copy.recolored else None,
         )
         for plate in plate_ids
     ]
