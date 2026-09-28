@@ -823,13 +823,13 @@ source declares them -- is rendered in the background, and that render's
   not a job: never a `render_jobs` row or job file, never listed, never counted by
   admission (`SCADBUDDY_RENDER_QUEUE_MAX`) or the queue metrics, never a `job.*`
   event, and never makes a model's delete wait.
-- **Storage (#454).** With `SCADBUDDY_DATABASE_URL`, a `model_previews` row per
+- **Storage (#454).** In Postgres (`SCADBUDDY_DATABASE_URL`): a `model_previews` row per
   model id (`builtin:` ids included): the source key it was rendered from, whether
   it rendered, the error if not, and the PNG as `bytea`, on the render queue's
   pool and created by its migrations (3). A rendered row always has its image and
   a failed one never does (a CHECK constraint), so the record and the image cannot
-  disagree. Without a database the same record lives in the process's memory, and
-  a restart renders the previews again. Either way it is never in the model's
+  disagree. Without a database there are no previews at all; the database becomes
+  required with #401. A preview is never in the model's
   directory, so never committed, and never among the outputs, so never in a print
   flow. A delete, a reused slug's cleanup and the boot's orphan sweep drop it. The
   files #293 wrote under `cache/previews/` are ignored, not migrated: the previews
@@ -848,8 +848,8 @@ source declares them -- is rendered in the background, and that render's
   included. The next source edit tries again.
 - **Built-ins and existing models.** Built-ins get previews too; they are derived
   state, so a read-only template is untouched. At boot, every model is passed to
-  the scheduler once. A preview already current is left alone, so with a database
-  only the first boot after an upgrade renders anything (without one, every boot), and it renders one model at a time
+  the scheduler once. A preview already current is left alone, so only the first
+  boot after an upgrade renders anything, and it renders one model at a time
   behind requested renders, with a pause (1 s) after each.
 - **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay stored until their model goes; a delete, a reused slug and the orphan sweep still drop them.
 - **Frontend.** Only the new `preview` value (the Edit details dialog says a render

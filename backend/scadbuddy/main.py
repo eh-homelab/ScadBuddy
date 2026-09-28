@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except BaseException:
         await state.queue.close_store()
         raise
-    if state.settings.preview_renders:
+    if state.previews is not None:
         state.previews.start()
         # Every model without a thumbnail gets its default render, one at a time and
         # behind any render someone asks for; one already made from the current
@@ -226,7 +226,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await state.previews.aclose()
+        if state.previews is not None:
+            await state.previews.aclose()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):

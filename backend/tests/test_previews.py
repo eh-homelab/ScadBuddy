@@ -1,6 +1,5 @@
-"""The default-render preview stores (#179 follow-up, #454) and their place in the
-catalogue. Every store test runs against both stores: in memory, and in Postgres
-(`requires_postgres`)."""
+"""The default-render preview store (#179 follow-up; in Postgres since #454) and its
+place in the catalogue."""
 
 from __future__ import annotations
 
@@ -17,13 +16,7 @@ import trimesh
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.previews import (
-    PREVIEW_ID_LENGTH,
-    MemoryPreviewStore,
-    PostgresPreviewStore,
-    PreviewStore,
-    source_key,
-)
+from scadbuddy.library.previews import PREVIEW_ID_LENGTH, PreviewStore, source_key
 from scadbuddy.render import previews as previews_module
 from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import render_preview
@@ -60,19 +53,17 @@ def test_the_source_key_follows_the_source_and_its_libraries_only(paths: DataPat
     assert source_key(paths, "gone") is None
 
 
-@pytest.fixture(params=["memory", pytest.param("postgres", marks=pytest.mark.requires_postgres)])
-def store(request: pytest.FixtureRequest, paths: DataPaths) -> Iterator[PreviewStore]:
-    if request.param == "memory":
-        yield MemoryPreviewStore()
-        return
-    database = PostgresJobStore(request.getfixturevalue("pg_conninfo"), paths, pool_size=3)
+@pytest.fixture
+def store(pg_conninfo: str, paths: DataPaths) -> Iterator[PreviewStore]:
+    database = PostgresJobStore(pg_conninfo, paths, pool_size=3)
     database.open()
     try:
-        yield PostgresPreviewStore(database.connection)
+        yield PreviewStore(database.connection)
     finally:
         database.close()
 
 
+@pytest.mark.requires_postgres
 def test_a_preview_is_served_only_once_rendered_and_a_failure_serves_nothing(
     store: PreviewStore,
 ) -> None:
@@ -92,6 +83,7 @@ def test_a_preview_is_served_only_once_rendered_and_a_failure_serves_nothing(
     assert store.record(SLUG) is None
 
 
+@pytest.mark.requires_postgres
 def test_a_builtin_id_is_a_key_like_any_other(store: PreviewStore) -> None:
     store.write("builtin:widget", "a" * 64, b"builtin")
     store.write(SLUG, "b" * 64, b"mine")
@@ -100,6 +92,7 @@ def test_a_builtin_id_is_a_key_like_any_other(store: PreviewStore) -> None:
     assert store.slugs() == ["builtin:widget", SLUG]
 
 
+@pytest.mark.requires_postgres
 def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     store: PreviewStore, paths: DataPaths
 ) -> None:
@@ -115,6 +108,7 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     assert Catalogue(paths, previews=store).sweep_orphans() == []
 
 
+@pytest.mark.requires_postgres
 def test_the_catalogue_ranks_its_own_image_over_the_preview(
     store: PreviewStore, paths: DataPaths
 ) -> None:
@@ -131,6 +125,7 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(
     assert store.image(SLUG) is None
 
 
+@pytest.mark.requires_postgres
 def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths: DataPaths) -> None:
     store.write(SLUG, "a" * 64, b"preview")
     catalogue = Catalogue(paths, previews=store, serve_previews=False)
@@ -139,6 +134,7 @@ def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths:
     assert catalogue.thumbnail(SLUG) is None
 
 
+@pytest.mark.requires_postgres
 def test_a_write_no_longer_wanted_writes_nothing(store: PreviewStore) -> None:
     assert store.write(SLUG, "a" * 64, b"png", wanted=lambda: False) is False
     assert store.record_failure(SLUG, "a" * 64, "boom", wanted=lambda: False) is False
@@ -146,6 +142,7 @@ def test_a_write_no_longer_wanted_writes_nothing(store: PreviewStore) -> None:
     assert store.image(SLUG) is None
 
 
+@pytest.mark.requires_postgres
 def test_a_preview_or_a_failure_is_current_for_its_own_source_only(store: PreviewStore) -> None:
     store.write(SLUG, "a" * 64, b"png")
     assert store.current(SLUG, "a" * 64)
@@ -158,6 +155,7 @@ def test_a_preview_or_a_failure_is_current_for_its_own_source_only(store: Previe
     assert not store.current("gone", "a" * 64)
 
 
+@pytest.mark.requires_postgres
 def test_a_drop_cannot_land_between_the_check_and_the_write(store: PreviewStore) -> None:
     """The render's liveness check and its write are one step against a drop: a drop
     that arrives mid-write waits, then removes the preview."""
@@ -242,6 +240,7 @@ def _held_write(store: PreviewStore) -> tuple[threading.Thread, threading.Event,
     return writer, checking, release
 
 
+@pytest.mark.requires_postgres
 @pytest.mark.parametrize("serving", [True, False], ids=["serving", "previews off"])
 def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     store: PreviewStore, paths: DataPaths, serving: bool
@@ -264,6 +263,7 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     assert store.image(SLUG) is None
 
 
+@pytest.mark.requires_postgres
 def test_the_orphan_sweep_leaves_a_live_model_being_written(
     store: PreviewStore, paths: DataPaths
 ) -> None:
@@ -281,9 +281,6 @@ def test_the_orphan_sweep_leaves_a_live_model_being_written(
     assert store.image(SLUG) == b"png"
 
 
-# ── Postgres only ─────────────────────────────────────────────────────────────
-
-
 @pytest.mark.requires_postgres
 def test_previews_outlive_the_process_and_are_locked_across_processes(
     pg_conninfo: str, paths: DataPaths
@@ -296,8 +293,8 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
     second.open()
     try:
         mine, theirs = (
-            PostgresPreviewStore(first.connection),
-            PostgresPreviewStore(second.connection),
+            PreviewStore(first.connection),
+            PreviewStore(second.connection),
         )
         writer, _, release = _held_write(mine)
         dropper = threading.Thread(target=lambda: theirs.drop(SLUG))
@@ -313,7 +310,7 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
     finally:
         first.close()
     try:
-        assert PostgresPreviewStore(second.connection).image(SLUG) == b"png"
+        assert PreviewStore(second.connection).image(SLUG) == b"png"
     finally:
         second.close()
 

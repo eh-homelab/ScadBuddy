@@ -1171,7 +1171,7 @@ class Catalogue:
 
     def sweep_orphan_previews(self) -> list[str]:
         """Drop the default-render preview of every model that is gone; returns their
-        ids. Apart from `sweep_orphans`, which works by path: the previews may be
+        ids. Apart from `sweep_orphans`, which works by path: the previews are
         rows in the database.
 
         A model counts as live while its directory exists, as for `sweep_orphans`,

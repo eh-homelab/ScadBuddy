@@ -28,11 +28,7 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.library.previews import (
-    MemoryPreviewStore,
-    PostgresPreviewStore,
-    PreviewStore,
-)
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
@@ -67,7 +63,8 @@ class AppState:
     assets: AssetStore
     queue: RenderQueue
     #: Default-render previews: the thumbnail of a model with none and no output.
-    previews: PreviewScheduler
+    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
+    previews: PreviewScheduler | None
     #: Where every state change is published (spec §7). In-process today; the
     #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
     events: EventBus
@@ -133,17 +130,15 @@ def build_state(settings: Settings) -> AppState:
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     # Nothing connects here: the pool opens in `RenderQueue.open_store`, from the
     # lifespan.
-    # The previews share it; without a database they are kept in this process only,
-    # and a restart renders them again.
+    # The previews share it, and there are none without a database (#454, #401).
     store: JobBackend
-    preview_store: PreviewStore
+    preview_store: PreviewStore | None = None
     if settings.database_url:
         pg = PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
         store = pg
-        preview_store = PostgresPreviewStore(pg.connection)
+        preview_store = PreviewStore(pg.connection)
     else:
         store = JobStore(paths)
-        preview_store = MemoryPreviewStore()
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
     assets = AssetStore(
@@ -173,23 +168,26 @@ def build_state(settings: Settings) -> AppState:
         checkouts=checkouts,
         assets=assets,
     )
-    previews = PreviewScheduler(
-        catalogue,
-        preview_store,
-        queue,
-        lambda slug: render_preview(
-            slug,
-            config=config,
-            paths=paths,
-            history=history,
-            executor=queue.thumbnail_executor,
-        ),
-        timeout=config.render_timeout * TIMEOUT_FACTOR,
-    )
-    if settings.preview_renders:
+    previews: PreviewScheduler | None = None
+    if settings.preview_renders and preview_store is not None:
+        previews = PreviewScheduler(
+            catalogue,
+            preview_store,
+            queue,
+            lambda slug: render_preview(
+                slug,
+                config=config,
+                paths=paths,
+                history=history,
+                executor=queue.thumbnail_executor,
+            ),
+            timeout=config.render_timeout * TIMEOUT_FACTOR,
+        )
         # Everything that can change whether a model needs a preview, or which one.
         catalogue.on_change = previews.request
         outputs.on_change = previews.request
+    elif settings.preview_renders:
+        logger.warning("default-render previews need SCADBUDDY_DATABASE_URL; none are made")
     return AppState(
         settings=settings,
         config=config,

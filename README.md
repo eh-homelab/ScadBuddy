@@ -81,9 +81,9 @@ for the project picker).
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
   catalogue thumbnail; `false` renders nothing, and such a model shows no image
-  until one is set or generated. With `SCADBUDDY_DATABASE_URL` the previews are
-  kept in its `model_previews` table and survive a restart; without it they are
-  kept in memory and rendered again after each restart);
+  until one is set or generated. The previews are kept in the
+  `SCADBUDDY_DATABASE_URL` database's `model_previews` table, so without a
+  database there are none);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it

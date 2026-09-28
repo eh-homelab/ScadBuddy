@@ -102,7 +102,7 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
     """,
-    # 3: default-render previews (#454; `library.previews.PostgresPreviewStore`). One
+    # 3: default-render previews (#454; `library.previews.PreviewStore`). One
     # row per model id, the record and its image together: a rendered row always has
     # its PNG and a failed one never does, so the two cannot disagree.
     """
