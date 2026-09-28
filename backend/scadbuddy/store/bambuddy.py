@@ -22,8 +22,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
+from psycopg import Connection
+from psycopg.rows import DictRow
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.errors import not_configured
@@ -119,6 +122,9 @@ class BambuddyContentBackend:
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[int, str, str], int] = {}
+        #: One per folder being found or made, so this process's other callers for it
+        #: wait in the event loop rather than each holding a thread and a connection.
+        self._finding: dict[tuple[int, str, str], asyncio.Lock] = {}
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -214,13 +220,19 @@ class BambuddyContentBackend:
         found = self._folders.get(cache_key)
         if found is not None:
             return found
-        async with self._locked("store-folder", inbox, slug, role):
-            found = await asyncio.to_thread(self._recorded, inbox, slug, role)
-            if found is None:
-                found = await self._adopt_or_create(client, name, parent_id)
-                await asyncio.to_thread(self._record, inbox, slug, role, found)
-        self._folders[cache_key] = found
-        return found
+        async with self._finding.setdefault(cache_key, asyncio.Lock()):
+            found = self._folders.get(cache_key)
+            if found is not None:
+                return found
+            # Across processes: one connection, held for the lock and used for the
+            # lookup and the record, so a find never needs a second one from the pool.
+            async with self._locked("store-folder", inbox, slug, role) as conn:
+                found = await asyncio.to_thread(self._recorded, conn, inbox, slug, role)
+                if found is None:
+                    found = await self._adopt_or_create(client, name, parent_id)
+                    await asyncio.to_thread(self._record, conn, inbox, slug, role, found)
+            self._folders[cache_key] = found
+            return found
 
     async def _adopt_or_create(self, client: BambuddyClient, name: str, parent_id: int) -> int:
         for root in await client.folders():
@@ -230,36 +242,38 @@ class BambuddyContentBackend:
         return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
 
     @asynccontextmanager
-    async def _locked(self, *parts: object) -> AsyncIterator[None]:
-        """A Postgres advisory lock, so two workers never both create a folder."""
+    async def _locked(self, *parts: object) -> AsyncIterator[Connection[DictRow]]:
+        """A Postgres advisory lock, so two workers never both create a folder. Yields
+        the connection that holds it, for the work done under it."""
         key = int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
         conn = await asyncio.to_thread(self._pool.getconn)
         try:
             await asyncio.to_thread(conn.execute, "SELECT pg_advisory_lock(%s)", (key,))
             try:
-                yield
+                yield conn
             finally:
                 await asyncio.to_thread(conn.execute, "SELECT pg_advisory_unlock(%s)", (key,))
         finally:
             await asyncio.to_thread(self._pool.putconn, conn)
 
-    def _recorded(self, inbox: int, slug: str, role: str) -> int | None:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT folder_id FROM store_folders"
-                " WHERE inbox_id = %s AND slug = %s AND role = %s",
-                (inbox, slug, role),
-            ).fetchone()
+    @staticmethod
+    def _recorded(conn: Connection[DictRow], inbox: int, slug: str, role: str) -> int | None:
+        row: dict[str, Any] | None = conn.execute(
+            "SELECT folder_id FROM store_folders WHERE inbox_id = %s AND slug = %s AND role = %s",
+            (inbox, slug, role),
+        ).fetchone()
         return int(row["folder_id"]) if row is not None else None
 
-    def _record(self, inbox: int, slug: str, role: str, folder_id: int) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
-                " VALUES (%s, %s, %s, %s)"
-                " ON CONFLICT DO NOTHING",
-                (inbox, slug, role, folder_id),
-            )
+    @staticmethod
+    def _record(
+        conn: Connection[DictRow], inbox: int, slug: str, role: str, folder_id: int
+    ) -> None:
+        conn.execute(
+            "INSERT INTO store_folders (inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (inbox, slug, role, folder_id),
+        )
 
     def _forget(self, inbox: int, slug: str) -> None:
         with self._pool.connection() as conn:
