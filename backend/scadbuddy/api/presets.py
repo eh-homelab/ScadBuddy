@@ -28,13 +28,13 @@ from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
     MAX_PRESET_NAME,
     TEMPLATE_ID_PREFIX,
-    InvalidPresetsFileError,
     ParamPreset,
     ParamPresetCreate,
     ParamPresetDuplicate,
     ParamPresetUpdate,
     PresetExistsError,
     PresetNotFoundError,
+    PresetStore,
     TooManyPresetsError,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
@@ -71,8 +71,13 @@ async def _require_valid(
     )
 
 
-def _unreadable(error: InvalidPresetsFileError) -> ApiError:
-    return ApiError(status.HTTP_409_CONFLICT, str(error))
+def _require_saves(presets: PresetStore) -> None:
+    """503 on a server with no database: saved presets live in it (#332)."""
+    if not presets.saves:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "saved presets need a database: this server has no SCADBUDDY_DATABASE_URL",
+        )
 
 
 def _taken(slug: str, name: str) -> ApiError:
@@ -106,10 +111,7 @@ def _require_saved(slug: str, preset_id: str) -> None:
 )
 def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -> list[ParamPreset]:
     require_model_exists(catalogue, slug)
-    try:
-        return presets.presets(slug)
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
+    return presets.presets(slug)
 
 
 @router.post(
@@ -121,7 +123,8 @@ def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -
         "Saves a named set of parameter values on any template, built-in or mine. The "
         "values are checked as a render checks them (422 naming an unknown parameter "
         f"or a wrong type). Names are at most {MAX_PRESET_NAME} characters and unique "
-        "per template, ignoring case (409)."
+        "per template, ignoring case (409). Saved presets are kept in the database: "
+        "without one, saving, changing and deleting them is a 503."
     ),
 )
 async def create_preset(
@@ -136,6 +139,7 @@ async def create_preset(
     fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
+    _require_saves(presets)
     await _require_valid(
         slug,
         body.params,
@@ -151,8 +155,6 @@ async def create_preset(
         raise _taken(slug, body.name) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.post(
@@ -181,12 +183,11 @@ async def duplicate_preset(
     fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
+    _require_saves(presets)
     try:
         source = await asyncio.to_thread(presets.find, slug, preset_id)
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
     await _require_valid(
         slug,
         source.params,
@@ -203,8 +204,6 @@ async def duplicate_preset(
         raise _taken(slug, body.name) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.patch(
@@ -230,6 +229,7 @@ async def update_preset(
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
+    _require_saves(presets)
     if body.params is not None:
         await _require_valid(
             slug,
@@ -246,8 +246,6 @@ async def update_preset(
         raise _missing(slug, preset_id) from None
     except PresetExistsError:
         raise _taken(slug, body.name or "") from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.delete(
@@ -261,10 +259,9 @@ def delete_preset(
 ) -> Response:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
+    _require_saves(presets)
     try:
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
