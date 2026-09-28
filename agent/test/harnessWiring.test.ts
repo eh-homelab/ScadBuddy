@@ -2,6 +2,8 @@ import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage, SDKResultMessage, SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -16,13 +18,14 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import type { Owner } from '../src/sessions/protocol.js'
 import { browser } from './support/sessions.js'
 
 // The harness as main.ts wires it (#255): the registry's in-process server and
 // tiers (tools/harness.ts), run through the real SDK and its bundled Claude
-// Code against the fake Anthropic endpoint. The backend is msw. No plugin is
-// passed, as in main.ts: with `tools: []` there is no Skill or Agent tool, so a
-// plugin's skills and subagents would be listed but unusable.
+// Code against the fake Anthropic endpoint. The backend is msw. ScadBuddy's
+// own plugin is not passed, as in main.ts: with `tools: []` there is no Skill
+// or Agent tool, so its skills and subagents would be listed but unusable.
 
 const BACKEND = 'http://backend.test'
 const GATEWAY_TOKEN = 'gw-wiring-test-token-777788889999'
@@ -61,6 +64,29 @@ describe('harnessTools', () => {
   it("runs the browser user's session with every tier, and anyone else's with read only", () => {
     expect(harnessPrincipal(browser).tiers).toEqual(['read', 'write', 'outward'])
     expect(harnessPrincipal({ kind: 'bearer', id: 'token:a', label: 'A' }).tiers).toEqual(['read'])
+  })
+
+  async function offered(owner: Owner): Promise<string[]> {
+    const server = harnessTools(services()).mcpServers({ owner }).scadbuddy!
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await server.instance.connect(serverSide)
+    const client = new Client({ name: 'wiring-test', version: '0' })
+    await client.connect(clientSide)
+    const { tools } = await client.listTools()
+    await client.close()
+    return tools.map((t) => t.name).sort()
+  }
+
+  // Local review of #526, finding 3: a tool the principal cannot run is not
+  // offered, so its call is never parked for an approval that cannot help.
+  it("offers the browser user every tool, and anyone else's session only the read ones", async () => {
+    expect(await offered(browser)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
+    const reads = ALL_TOOLS.filter((t) => t.risk === 'read').map((t) => t.name).sort()
+    expect(reads.length).toBeGreaterThan(0)
+    expect(reads.length).toBeLessThan(ALL_TOOLS.length)
+    expect(await offered({ kind: 'bearer', id: 'token:a', label: 'A' })).toEqual(reads)
+    expect(await offered({ kind: 'flow', id: 'flow:x', label: 'X' })).toEqual(reads)
+    expect(await offered({ kind: 'bearer', id: 'token:a', label: 'A' })).not.toContain('delete_model')
   })
 })
 

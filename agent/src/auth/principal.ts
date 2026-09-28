@@ -13,16 +13,27 @@ import type { Owner } from '../sessions/protocol.js'
 export const TIERS = ['read', 'write', 'outward'] as const
 export type Tier = (typeof TIERS)[number]
 
-/** The kinds of spec §8.1's table; the same set as a session `Owner`'s (sessions/protocol.ts). */
+/**
+ * The kinds of spec §8.1's table; the same set as a session `Owner`'s
+ * (sessions/protocol.ts). `flow` is only ever a session's harness principal
+ * (`harnessPrincipal`), never an /mcp caller.
+ */
 export type PrincipalKind = Owner['kind']
 
 export type Principal = {
-  /** Stable per principal: `token:<id>`, `anonymous:<mcp session id>`, or the browser user. */
+  /**
+   * Stable per principal: `token:<id>`, `oidc:<issuer>#<sub>` (the IdP's subject, #262),
+   * `anonymous:<mcp session id>`, or the browser user.
+   */
   readonly id: string
   readonly kind: PrincipalKind
   readonly tiers: readonly Tier[]
   /** For the audit log (spec §8.3: `disabled` mode records the client IP). */
   readonly clientIp?: string | undefined
+  /** `oidc` principals: the token's `sub`, which the audit log records in place of a token name (#262). */
+  readonly subject?: string | undefined
+  /** `oidc` principals: the OAuth client the token was issued to (`azp` or `client_id`), when the token says. */
+  readonly clientId?: string | undefined
 }
 
 /** Every tier up to and including `max`: a `write` token may also read. */
