@@ -3,20 +3,26 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
-import { DEFAULT_STATE_DIR } from './harness/options.js'
-import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
+import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
+import { probeChromiumSandbox } from './harness/headlessSandbox.js'
+import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { GitFetcher } from './plugins/packages/git.js'
+import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
+import { PackageStore } from './plugins/packages/store.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
@@ -40,6 +46,10 @@ try {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
 }
+// No turn runs here yet: headless-browser folders left now are from a crash.
+await sweepBrowserDirs({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
+  console.error(`cannot remove leftover headless-browser folders: ${String(err)}`),
+)
 
 // Read once at start: rotating the key means restarting the pod (spec §9).
 // A missing or malformed file is not fatal; /healthz and Settings say why
@@ -89,6 +99,12 @@ const database = config.databaseUrl
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
+// OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
+// its metadata and JWKS caches for the process.
+const oidcRepo = settings
+  ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
+  : undefined
+const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
@@ -101,6 +117,13 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
+// files under <state dir>/plugins are a cache, rebuilt from the pin and
+// verified against its content hash before each load (plugins/packages/).
+// Each session turn loads the enabled ones (`packagePlugins` below).
+const pluginPackages = database ? new PackageStore(database.sql) : undefined
+const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+
 // One store for Settings (routes/mcpTokens.ts) and /mcp.
 const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
@@ -108,6 +131,22 @@ const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedT
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
 // expiry sweep are live so that approvals left pending by a restart can be
 // seen, decided or expired.
+// Whether the headless browser's Chromium can keep its sandbox in this pod
+// (harness/headlessSandbox.ts): probed once, on the first turn that uses the
+// browser, and said loudly either way.
+let sandboxProbe: Promise<boolean> | undefined
+const chromiumSandbox = (): Promise<boolean> =>
+  (sandboxProbe ??= probeChromiumSandbox().then((probe) => {
+    if (probe.available) console.log(`headless browser: Chromium runs with its sandbox (${probe.detail})`)
+    else {
+      console.warn(
+        `headless browser: Chromium's sandbox is unavailable here, so it runs with --no-sandbox (${probe.detail}); ` +
+          'allow user namespaces in the pod to enable it (docs/ai/headless-browser.md, "Sandbox")',
+      )
+    }
+    return probe.available
+  }))
+
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -124,6 +163,12 @@ const sessions =
                 forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
             }
           : {}),
+        // Enabled plugin packages (#297), materialised from their pins, per turn.
+        ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
+        // The headless browser (#349): on for a turn only when the
+        // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
+        // It may open only this origin, which serves the SPA.
+        headlessBrowser: { backendUrl: config.backendUrl, sandbox: chromiumSandbox },
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)
@@ -144,6 +189,9 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  pluginPackages,
+  packageInstaller,
+  settings,
   tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
@@ -163,7 +211,9 @@ const app = createApp({
     resources,
     services: {
       backend,
-      pending: new PendingActionStore(),
+      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
+      // database, an in-memory store whose actions are never confirmed.
+      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
@@ -171,10 +221,18 @@ const app = createApp({
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
-    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
     tokens,
-    authSettings: () => DEFAULT_MCP_AUTH,
+    // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
+    // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
+    // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
+    authSettings: async () => {
+      const oidc = await oidcRepo?.get()
+      return oidc?.enabled ? { ...DEFAULT_MCP_AUTH, mode: 'oidc', oidc } : DEFAULT_MCP_AUTH
+    },
+    oidc: oidcProvider,
+    publicUrl: config.publicUrl,
   },
+  mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {

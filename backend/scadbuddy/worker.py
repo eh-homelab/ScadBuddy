@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -93,14 +93,24 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
     """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the worker on the API's own stores and
     gates, so its renders lease the same checkouts the routes do. The thumbnail pool is
     its own; the lifespan shuts it down with the worker."""
-    assert state.projection is not None and state.blobs is not None and state.refs is not None
+    projection, blobs, refs = state.projection, state.blobs, state.refs
+    missing = [
+        name
+        for name, value in (("projection", projection), ("blobs", blobs), ("refs", refs))
+        if value is None
+    ]
+    if projection is None or blobs is None or refs is None:
+        raise RuntimeError(
+            f"the in-process render worker needs AppState.{', AppState.'.join(missing)},"
+            " which build_state sets together only with SCADBUDDY_TEMPORAL_ADDRESS"
+        )
     return WorkerDeps(
         config=state.config,
         paths=state.paths,
         assets=state.assets,
-        blobs=state.blobs,
-        refs=state.refs,
-        projection=state.projection,
+        blobs=blobs,
+        refs=refs,
+        projection=projection,
         history=state.history,
         checkouts=state.checkouts,
         fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
@@ -179,7 +189,7 @@ async def _poll(
 
 class _HealthServer(uvicorn.Server):
     @contextlib.contextmanager
-    def capture_signals(self) -> Iterator[None]:
+    def capture_signals(self) -> Generator[None, None, None]:
         # `main` owns SIGTERM/SIGINT: they set `stop`, which stops this server too.
         yield
 

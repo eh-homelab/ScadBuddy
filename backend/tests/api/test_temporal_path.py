@@ -131,3 +131,37 @@ def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconci
         assert again.status_code == 202, again.text
         assert client.get(f"/api/v1/jobs/{first}").json()["status"] == "cancelled"
         assert client.get(f"/api/v1/jobs/{again.json()['job_id']}").json()["status"] == "pending"
+
+
+def test_a_failing_start_on_temporal_still_closes_the_projection(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Temporal path's twin of the legacy queue's failing-backfill test: what
+    `_start_temporal` raises past opening the projection is cleaned up, not leaked."""
+    cfg = settings.model_copy(
+        update={
+            "temporal_address": "127.0.0.1:1",
+            "temporal_task_queue_render": f"t-{uuid.uuid4().hex[:8]}",
+        }
+    )
+    app = create_app(cfg)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    assert state.projection is not None
+    closed: list[str] = []
+    close = state.projection.close
+
+    def recording_close() -> None:
+        closed.append("projection")
+        close()
+
+    async def refused(*_: object, **__: object) -> Client:
+        raise RuntimeError("temporal refused the connection")
+
+    monkeypatch.setattr(state.projection, "close", recording_close)
+    monkeypatch.setattr("scadbuddy.main.connect", refused)
+
+    with pytest.raises(RuntimeError, match="temporal refused the connection"), TestClient(app):
+        pass
+
+    assert closed == ["projection"]
+    assert state.projection.pool.closed

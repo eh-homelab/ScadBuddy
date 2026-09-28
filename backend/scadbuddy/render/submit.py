@@ -234,9 +234,11 @@ class RenderService:
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
-        for the slug joins the first run. Past ``timeout`` the run is cancelled, so a
-        preview that timed out stops rendering; the activity's own bound, the margin
-        later, is the backstop should that cancel never arrive."""
+        for the slug joins the first run. Past ``timeout`` this caller stops waiting;
+        the run is shared, so it is not cancelled (another caller may still be waiting
+        on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
+        is ``timeout`` plus the margin. The timeout counts from the start, so it
+        includes any wait for a free worker."""
         assert self.client is not None
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
@@ -248,12 +250,7 @@ class RenderService:
             memo={**self._memo(), "preview_timeout": preview_timeout},
             rpc_timeout=RPC_TIMEOUT,
         )
-        try:
-            png: bytes = await asyncio.wait_for(handle.result(), timeout)
-        except TimeoutError:
-            with suppress(RPCError):
-                await handle.cancel()
-            raise
+        png: bytes = await asyncio.wait_for(handle.result(), timeout)
         return png
 
     def retry_after(self) -> int:
@@ -311,18 +308,28 @@ class RenderService:
             await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel(
                 rpc_timeout=RPC_TIMEOUT
             )
-        except RPCError:
-            # Never started (the reconciler had not got to it) or already closed.
-            logger.debug("no workflow to cancel", extra={"job_id": job.id})
-        except RuntimeError:
-            # The lazy client could not connect: Temporal is down. The row is already
-            # cancelled, and a workflow that starts later sees that at its first
-            # `project`, so the submit that superseded it still succeeds.
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                # Never started (the reconciler had not got to it). A closed one
+                # accepts the cancel without an error.
+                logger.debug("no workflow to cancel", extra={"job_id": job.id})
+                return
+            # The row is cancelled either way; the workflow may run on until its next
+            # `project` finds that. The submit that superseded it still succeeds.
             logger.warning(
-                "could not reach Temporal to cancel a superseded render's workflow",
-                exc_info=True,
-                extra={"job_id": job.id},
+                "could not cancel a render's workflow",
+                extra={"job_id": job.id, "status": error.status.name},
             )
+            self.metrics.store_errors.labels("cancel_workflow").inc()
+        except Exception as error:
+            # Not an RPC status (a client that cannot connect, say): the row is
+            # cancelled all the same, so this never fails the submit that superseded it.
+            logger.warning(
+                "could not cancel a render's workflow",
+                extra={"job_id": job.id, "error_type": type(error).__name__},
+                exc_info=True,
+            )
+            self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _reconcile_forever(self) -> None:
         loop = asyncio.get_running_loop()

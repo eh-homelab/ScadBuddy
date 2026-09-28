@@ -40,8 +40,12 @@ class PieceRequest(BaseModel):
     revision: str | None
     file: str = "model.scad"
     params: dict[str, ParamValue] = Field(default_factory=dict)
-    #: Stored, so the Temporal payload carries it; checked against the other four
-    #: fields, because it names the child workflow that dedups the piece.
+    #: For a piece with no revision, what stands in for one in its key: the job's own
+    #: (`job:<id>`). A live source can change between two jobs, so such a piece is
+    #: never shared, neither its blob directory nor its workflow (#642).
+    scope: str | None = None
+    #: Stored, so the Temporal payload carries it; checked against the other fields,
+    #: because it names the child workflow that dedups the piece.
     piece_key: str
 
     @model_validator(mode="after")
@@ -49,7 +53,10 @@ class PieceRequest(BaseModel):
         problem = input_problem(self.slug, self.revision)
         if problem is not None:
             raise ValueError(problem)
-        expected = piece_key(self.slug, self.revision, self.file, self.params)
+        if self.revision is not None and self.scope is not None:
+            raise ValueError("a piece at a revision is shared, so it takes no scope")
+        version = self.revision if self.revision is not None else self.scope
+        expected = piece_key(self.slug, version, self.file, self.params)
         if self.piece_key != expected:
             raise ValueError(f"piece_key {self.piece_key} does not match its request")
         return self
@@ -63,7 +70,7 @@ class PrepareResult(BaseModel):
 
 
 class RenderMainResult(BaseModel):
-    plates: int | None = 1
+    plates: int | None = None
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0

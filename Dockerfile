@@ -200,10 +200,11 @@ FROM node:24-bookworm-slim AS agent
 
 # tini for the same reason as the backend image: the Agent SDK spawns the
 # Claude Code binary as a child process per query, and node as PID 1 does not
-# reap orphans.
+# reap orphans. git (and ca-certificates for its https) fetches plugin
+# packages at their pinned commit (#297, agent/src/plugins/packages/git.ts).
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Numeric uid 10001, the same as the backend image, so one pod
@@ -218,8 +219,26 @@ RUN groupadd --gid 10001 scadbuddy \
 
 WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
+
+# The headless browser (#349, AI spec D11 and §5.3): the Chromium build the
+# pinned @playwright/mcp's own `playwright-core` expects, installed at build
+# time with its system libraries, so nothing is downloaded at runtime (the
+# upstream plugin's `npx @playwright/mcp@latest` is what spec D11 rejects).
+# `install-browser` is @playwright/mcp's cli.js passing through to
+# `playwright install`. `--only-shell` installs chromium-headless-shell alone,
+# which is what a headless launch without a `channel` uses
+# (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
+# 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
+# Bump with @playwright/mcp in agent/package.json.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
+# The vendored plugin manifest (agent/plugins/playwright/README.md); each
+# session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
+COPY --from=agent-build /src/agent/plugins ./plugins
 
 # The Claude Code binary the Agent SDK bundles is pinned the way
 # OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
@@ -509,7 +528,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
 # + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
 # terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
-# 660 s at the default.
+# plus a little slack for teardown (e.g. 30 s): 690 s at the default.
 CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short

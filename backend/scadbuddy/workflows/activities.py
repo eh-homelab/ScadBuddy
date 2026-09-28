@@ -33,7 +33,7 @@ from scadbuddy.render.jobs import (
     render_solids_stage,
     timed_stage,
 )
-from scadbuddy.render.previews import render_preview
+from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore
@@ -277,7 +277,12 @@ class RenderActivities:
         source = _prepared(prepared)
         work = d.blobs.dir_for(req.piece_key)
         try:
-            # The schema is derived here, from the checkouts: hold them.
+            # The schema is derived here, from the checkouts: hold them. The lease is per
+            # activity, as in `render_main` and `render_solids`, because each activity is
+            # its own unit of work, possibly on another worker, so no lease can span two.
+            # It is safe because every lease re-checks its checkouts (`require_checkouts`),
+            # so a removal between two activities fails the next one fast and, once the
+            # fetcher restores the pin, its retry renders.
             async with library_lease(d.checkouts, f"piece:{req.piece_key}", source.library_path):
                 result = await finish_piece_stage(
                     source,
@@ -311,7 +316,16 @@ class RenderActivities:
                 checkouts=d.checkouts,
             )
         )
-        return await _heartbeating(work)
+        try:
+            return await _heartbeating(work)
+        except OpenSCADError as error:
+            raise _failure(error) from None
+        except PreviewFailedError as error:
+            # Deterministic too (no plate image to keep): not retried, and typed so
+            # the scheduler records it against the source (`is_render_error`).
+            raise ApplicationError(
+                str(error), Failure(error=str(error)), type="PreviewFailedError", non_retryable=True
+            ) from None
 
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:

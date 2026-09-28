@@ -4,8 +4,11 @@ projection, with the openscad activities faked."""
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
 from typing import Any
@@ -310,30 +313,183 @@ async def test_a_preview_renders_on_the_worker_and_one_slug_runs_once(
     assert fake.calls == 1
 
 
-async def test_a_preview_past_its_timeout_is_cancelled_on_the_worker(
+async def test_a_preview_past_its_timeout_stops_waiting_and_leaves_the_shared_run(
     make_service: ServiceFactory,
 ) -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
         fake = FakePreview()
+        handle = client.get_workflow_handle(f"preview-{SLUG}")
         async with Worker(
             client,
             task_queue=queue,
             workflows=[RenderPreview],
             activities=[fake.render_preview_png],
         ):
-            with pytest.raises(TimeoutError):
-                await service.render_preview(SLUG, 0.5)
-            handle = client.get_workflow_handle(f"preview-{SLUG}")
-            async with asyncio.timeout(30):
-                while (await handle.describe()).status == WorkflowExecutionStatus.RUNNING:
-                    await asyncio.sleep(0.05)
-            fake.release.set()
-            described = await handle.describe()
+            try:
+                began = time.monotonic()
+                with pytest.raises(TimeoutError):
+                    await service.render_preview(SLUG, 0.5)
+                waited = time.monotonic() - began
+                # The caller gave up; the run it shared bounds itself (its memo'd
+                # `preview_timeout`) and is still rendering for anyone who joins it.
+                await asyncio.sleep(1.0)
+                still = (await handle.describe()).status
+                later = asyncio.create_task(service.render_preview(SLUG, 30.0))
+                await asyncio.sleep(0.2)
+                fake.release.set()
+                png = await later
+            finally:
+                fake.release.set()
+                with suppress(RPCError):
+                    await handle.cancel()
         await service.aclose()
 
-    assert described.status == WorkflowExecutionStatus.CANCELED
+    assert waited < 5.0
+    assert still == WorkflowExecutionStatus.RUNNING
+    assert png == PNG + SLUG.encode()
+    assert fake.calls == 1
+
+
+class _Handle:
+    """`get_workflow_handle`'s result, with `cancel` recorded or refused."""
+
+    def __init__(self, workflow_id: str, cancelled: list[str], error: Exception | None) -> None:
+        self.workflow_id, self.cancelled, self.error = workflow_id, cancelled, error
+
+    async def cancel(self, **_: object) -> None:
+        self.cancelled.append(self.workflow_id)
+        if self.error is not None:
+            raise self.error
+
+
+def _spy_cancel(
+    monkeypatch: pytest.MonkeyPatch, client: Client, error: Exception | None = None
+) -> list[str]:
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        client,
+        "get_workflow_handle",
+        lambda workflow_id, **_: _Handle(workflow_id, cancelled, error),
+    )
+    return cancelled
+
+
+async def test_a_cancel_that_fails_is_a_warning_and_the_supersede_still_succeeds(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        first = await service.submit(SLUG, {"width": 11})
+        cancelled = _spy_cancel(
+            monkeypatch, client, RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+        )
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.render.submit"):
+            second = await service.submit(SLUG, {"width": 12}, supersedes=first.id)
+        await service.aclose()
+
+    assert second.id != first.id and second.state == "pending"
+    assert cancelled == [workflow_id_for(first.id)]
+    assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned and getattr(warned[0], "job_id", None) == first.id
+    assert (
+        service.metrics.registry.get_sample_value(
+            "scadbuddy_render_store_errors_total", {"operation": "cancel_workflow"}
+        )
+        == 1
+    )
+
+
+async def test_a_cancel_that_fails_with_anything_else_never_fails_the_supersede(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        first = await service.submit(SLUG, {"width": 17})
+        _spy_cancel(monkeypatch, client, ValueError("not an RPC error"))
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.render.submit"):
+            second = await service.submit(SLUG, {"width": 18}, supersedes=first.id)
+        await service.aclose()
+
+    assert second.id != first.id and second.state == "pending"
+    assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned and getattr(warned[0], "job_id", None) == first.id
+    assert getattr(warned[0], "error_type", None) == "ValueError"
+    assert (
+        service.metrics.registry.get_sample_value(
+            "scadbuddy_render_store_errors_total", {"operation": "cancel_workflow"}
+        )
+        == 1
+    )
+
+
+async def test_a_cancel_of_a_workflow_that_never_started_is_not_an_error(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        first = await service.submit(SLUG, {"width": 13})
+        _spy_cancel(monkeypatch, client, RPCError("not found", RPCStatusCode.NOT_FOUND, b""))
+        await service.submit(SLUG, {"width": 14}, supersedes=first.id)
+        await service.aclose()
+
+    assert not service.metrics.registry.get_sample_value(
+        "scadbuddy_render_store_errors_total", {"operation": "cancel_workflow"}
+    )
+
+
+async def test_cancelling_the_last_claim_cancels_the_workflow(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        job = await service.submit(SLUG, {"width": 15})
+        cancelled = _spy_cancel(monkeypatch, client)
+        withdrawn = await service.cancel(job.id, slug=SLUG)
+        await service.aclose()
+
+    assert withdrawn is not None and withdrawn.id == job.id
+    assert withdrawn.state == "cancelled"
+    assert cancelled == [workflow_id_for(job.id)]
+
+
+async def test_cancelling_one_of_two_claims_leaves_the_workflow_running(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        job = await service.submit(SLUG, {"width": 16})
+        assert (await service.submit(SLUG, {"width": 16})).id == job.id
+        cancelled = _spy_cancel(monkeypatch, client)
+        withdrawn = await service.cancel(job.id, slug=SLUG)
+        await service.aclose()
+
+    assert withdrawn is None
+    assert cancelled == []
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert (stored.state, stored.claims) == ("pending", 1)
+
+
+async def test_cancelling_an_unknown_job_touches_nothing(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        cancelled = _spy_cancel(monkeypatch, client)
+        withdrawn = await service.cancel(uuid.uuid4().hex, slug=SLUG)
+        await service.aclose()
+
+    assert withdrawn is None
+    assert cancelled == []
 
 
 # ── inputs Temporal can never take (final review I2) ────────────────────────────

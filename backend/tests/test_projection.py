@@ -371,6 +371,52 @@ def test_a_legacy_submit_writes_inputs(
     assert projection.read(job.id).inputs == {"params": {"width": 26}}
 
 
+def test_stale_pending_never_returns_a_legacy_row(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    # During a rolling deploy the legacy queue owns its pending rows (no workflow_id);
+    # the reconciler must not start a workflow for one.
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        store.submit(_job(width=27), render_key("demo", {"width": 27}, None))
+    finally:
+        store.close()
+    owned = projection.submit(_job(width=28), render_key("demo", {"width": 28}, None)).job
+    assert [j.id for j in projection.stale_pending(older_than=0)] == [owned.id]
+
+
+def test_a_legacy_cache_hit_returns_the_inputs_it_wrote(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        hit = _job(width=29)
+        hit.state, hit.result = "done", _result()
+        hit.started_at = hit.finished_at = datetime.now(UTC)
+        submitted = store.submit(hit, render_key("demo", {"width": 29}, None))
+        assert submitted.cached
+        assert submitted.job.inputs == {"params": {"width": 29}}
+        assert store.read(hit.id).inputs == submitted.job.inputs
+    finally:
+        store.close()
+
+
+def test_a_legacy_read_reports_the_claim_count(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        key = render_key("demo", {"width": 30}, None)
+        first = store.submit(_job(width=30), key).job
+        assert store.submit(_job(width=30), key).job.id == first.id
+        assert store.read(first.id).claims == 2
+    finally:
+        store.close()
+
+
 # ── flipping SCADBUDDY_TEMPORAL_ADDRESS across a restart (final review I4) ──────
 
 

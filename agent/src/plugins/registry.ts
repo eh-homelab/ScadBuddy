@@ -27,9 +27,9 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 // forwarder hides colliding tools and refuses a call whose raw name differs
 // from the tiered one.
 // Plugin PACKAGES (skills, subagents, hooks from a git URL at a pinned commit,
-// issue #297 "Installing a plugin") are not in this entry: fetching them means
-// files on the data volume, which the rule for new state (Postgres only) does
-// not allow as specified. They are listed as follow-up in the PR.
+// issue #297 "Installing a plugin") are a separate table and module:
+// src/plugins/packages/ (`ai_plugin_packages`), where Postgres holds the pin
+// and the files on disk are only a verified cache.
 //
 // TRANSPORT. Spec D5: "MCP: Streamable HTTP only, over HTTPS". So `type: 'http'`
 // only (the SDK's `'sse'` is the legacy HTTP+SSE transport D5 rejects), and the
@@ -136,8 +136,8 @@ export const DEFAULT_AUTH_HEADER = 'Authorization'
 /** A request the registry refuses; `status` is the HTTP status the route answers with. */
 export class PluginError extends Error {
   override name = 'PluginError'
-  readonly status: 400 | 404 | 409 | 503
-  constructor(message: string, status: 400 | 404 | 409 | 503) {
+  readonly status: 400 | 404 | 409 | 422 | 502 | 503
+  constructor(message: string, status: 400 | 404 | 409 | 422 | 502 | 503) {
     super(message)
     this.status = status
   }

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
+import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -18,25 +22,39 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
+from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.workflows import activities
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
     RenderActivities,
     WorkerDeps,
     _heartbeating,
+    _main_result,
+    _process_output,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
-from scadbuddy.workflows.models import Failure, PieceRequest, PieceResult, Projection, piece_key
+from scadbuddy.workflows.models import (
+    Failure,
+    PieceRequest,
+    PieceResult,
+    PrepareResult,
+    Projection,
+    RenderMainResult,
+    piece_key,
+)
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad
+from tests.conftest import fake_3mf_openscad, write_openscad_3mf
 from tests.support.temporal import temporal_client
 
 REVISION = "c0ffee0"
@@ -91,7 +109,114 @@ def _request(revision: str | None = REVISION) -> PieceRequest:
     )
 
 
+# ── the library lease, per activity ────────────────────────────────────────────
+
+
+def _checkout(paths: DataPaths) -> Path:
+    """A pinned library's checkout as `require_checkouts` finds it:
+    ``libraries/<name>/<sha>/<name>/``."""
+    checkout = paths.libraries / "bosl" / ("ab12cd3" + "0" * 33)
+    (checkout / "bosl").mkdir(parents=True)
+    (checkout / "bosl" / "std.scad").write_text("module bosl() {}\n", encoding="utf-8")
+    return checkout
+
+
+async def _prepared_with_library(
+    acts: RenderActivities, env: ActivityEnvironment, req: PieceRequest, checkout: Path
+) -> PrepareResult:
+    prepared = await env.run(acts.prepare, req)
+    # The template pins the library: `prepare_source` resolved its checkout.
+    return prepared.model_copy(update={"library_path": [str(checkout)]})
+
+
+async def test_each_stage_activity_holds_the_library_lease_for_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Held while the activity reads the checkouts, released when it returns: a lease
+    cannot span activities, each one is its own unit of work."""
+    paths = _paths(tmp_path)
+    gate = CheckoutGate()
+    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = _request()
+    checkout = _checkout(paths)
+    holder = f"piece:{req.piece_key}"
+    seen: dict[str, list[str]] = {}
+
+    real_main = jobs._render_main
+
+    async def observed_main(*args: Any, **kwargs: Any) -> Any:
+        seen["render_main"] = gate.leased(checkout)
+        return await real_main(*args, **kwargs)
+
+    real_finish = jobs.finish_piece_stage  # what `activities` imported
+
+    async def observed_finish(*args: Any, **kwargs: Any) -> Any:
+        seen["finish_piece"] = gate.leased(checkout)
+        return await real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(jobs, "_render_main", observed_main)
+    monkeypatch.setattr(activities, "finish_piece_stage", observed_finish)
+
+    prepared = await _prepared_with_library(acts, env, req, checkout)
+    main = await env.run(acts.render_main, req, prepared)
+    assert seen["render_main"] == [holder]
+    assert gate.leased(checkout) == []
+    await env.run(acts.render_solids, req, prepared, main)
+    assert gate.leased(checkout) == []
+    await env.run(acts.finish_piece, req, prepared, main)
+    assert seen["finish_piece"] == [holder]
+    assert gate.leased(checkout) == []
+
+
+@pytest.mark.parametrize("stage", ["render_main", "render_solids", "finish_piece"])
+async def test_a_checkout_removed_between_activities_fails_the_next_one(
+    tmp_path: Path, stage: str
+) -> None:
+    """The gap between two activities is open to a removal. The next activity's lease
+    re-checks its checkouts, so it fails fast rather than reading what is gone; the
+    fetcher restores the pin and the retry renders."""
+    paths = _paths(tmp_path)
+    gate = CheckoutGate()
+    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = _request()
+    checkout = _checkout(paths)
+    prepared = await _prepared_with_library(acts, env, req, checkout)
+    main = RenderMainResult()
+    if stage != "render_main":
+        main = await env.run(acts.render_main, req, prepared)
+    if stage == "finish_piece":
+        await env.run(acts.render_solids, req, prepared, main)
+
+    async with gate.removing():
+        shutil.rmtree(checkout)
+
+    with pytest.raises(LibraryNotInstalledError, match="bosl"):
+        if stage == "render_main":
+            await env.run(acts.render_main, req, prepared)
+        elif stage == "render_solids":
+            await env.run(acts.render_solids, req, prepared, main)
+        else:
+            await env.run(acts.finish_piece, req, prepared, main)
+    assert gate.leased(checkout) == []
+    assert not (deps.blobs.dir_for(req.piece_key) / PIECE_NAME).exists()
+
+
 # ── the stage activities ───────────────────────────────────────────────────────
+
+
+def test_a_render_that_echoed_no_plates_carries_none_between_activities() -> None:
+    """`RenderMainResult` mirrors `ProcessOutput`: no `echo(plates = N)` is None in
+    both, never a count the template did not state."""
+    output = ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
+    assert output.plates is None
+    main = _main_result(output)
+    assert main.plates is None
+    assert _process_output(RenderMainResult.model_validate_json(main.model_dump_json())) == output
+    assert RenderMainResult().plates == output.plates
 
 
 async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> None:
@@ -153,6 +278,20 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     failure = raised.value.details[0]
     assert isinstance(failure, Failure)
     assert failure.error == raised.value.message
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:
+    paths = _paths(tmp_path, "%%FAIL%%\n")
+    acts = RenderActivities(_deps(tmp_path, paths))
+
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(acts.render_preview_png, _request().slug)
+
+    assert raised.value.type == "OpenSCADError"
+    assert raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
@@ -436,3 +575,53 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert raw.stat().st_mtime_ns == rendered
     refs.drop_holder("job", job.id)
     assert key in refs.referenced()  # the repeat's own ref
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_revision_less_job_never_renders_over_another_jobs_files(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """#642: without a revision the key named only the slug and params, so a second job
+    re-rendered a live source into the first job's blob directory, under its row."""
+    paths = _paths(tmp_path)
+    refs = BlobRefs(projection.pool)
+    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with render_worker(
+            client,
+            queue,
+            RenderActivities(deps),
+            build_id="test",
+            max_concurrent_activities=2,
+        ):
+            await make_current(client, namespace=client.namespace, build_id="test")
+
+            async def rendered(job: Job) -> Path:
+                projection.submit(job, render_key("demo", {"width": 1}, None))
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                    ),
+                    timeout=120,
+                )
+                done = projection.read(job.id)
+                assert done.state == "done", done.error
+                assert done.result is not None
+                return paths.root / done.result.model_3mf
+
+            first = await rendered(_job(width=1))
+            before = first.read_bytes()
+            # The author edits the template, which now draws a taller box.
+            paths.model_source("demo").write_text("cube(20);\n", encoding="utf-8")
+            write_openscad_3mf(
+                tmp_path / "bin" / "drawn.3mf",
+                [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 20)))],
+            )
+            second = await rendered(_job(width=1))
+
+    assert first.read_bytes() == before
+    assert second.parent != first.parent
+    assert second.read_bytes() != before
