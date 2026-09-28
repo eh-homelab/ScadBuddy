@@ -18,7 +18,7 @@ import {
   overhangDiagnostic,
   scopesFor,
 } from '../analyzers'
-import { mockOutput, problem, shapeRefusal } from '../handlers'
+import { mockOutput, nextHexId, problem, shapeRefusal } from '../handlers'
 import { emitRealtime } from '../realtime'
 
 /**
@@ -34,13 +34,11 @@ const state = {
   decisions: [] as AnalyzerDecision[],
   /** What the analyzers find on every output; a test can swap it. */
   diagnostics: [overhangDiagnostic, openEdgesDiagnostic] as AnalyzerDiagnostic[],
-  seq: 0,
 }
 
 export function reset(): void {
   state.decisions = []
   state.diagnostics = [overhangDiagnostic, openEdgesDiagnostic]
-  state.seq = 0
 }
 
 /** What every mock analyzer run finds, so run, preview and apply agree. */
@@ -191,9 +189,8 @@ export const handlers = [
         type: 'https://scadbuddy.dev/problems/confirmation-required',
       })
     }
-    state.seq += 1
     const decision: AnalyzerDecision = {
-      id: state.seq.toString(16).padStart(32, '0'),
+      id: nextHexId(),
       diagnostic_id: diagnostic.id,
       instance: diagnostic.key,
       kind: 'accept',
@@ -224,9 +221,8 @@ export const handlers = [
       ])
     }
     const instance = body.instance ?? null
-    state.seq += 1
     const decision: AnalyzerDecision = {
-      id: state.seq.toString(16).padStart(32, '0'),
+      id: nextHexId(),
       diagnostic_id: body.diagnostic_id,
       instance,
       kind: body.kind,
