@@ -1202,3 +1202,15 @@ export const prints: PrintDetail[] = [
     },
   }),
 ]
+
+/**
+ * What the backend's list filters read that a print does not carry (#609 review):
+ * Bambuddy's `print_name`, which `q` also matches, and when ScadBuddy first saw the
+ * link (`first_seen`), which dates a print with no start, such as a deleted archive.
+ */
+export const printArchives: Record<number, { print_name: string | null; first_seen: string }> = {
+  38: { print_name: null, first_seen: '2026-09-25T08:00:00Z' },
+  37: { print_name: 'name-keychain', first_seen: '2026-09-28T09:10:00Z' },
+  36: { print_name: 'gift tag', first_seen: '2026-09-26T19:59:00Z' },
+  35: { print_name: 'name-keychain', first_seen: '2026-09-27T03:45:40Z' },
+}
