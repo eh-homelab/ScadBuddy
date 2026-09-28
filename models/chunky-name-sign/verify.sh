@@ -36,7 +36,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
-FAMILIES="$(docker run --rm "$IMAGE" fc-list : family)"
+FAMILIES="$(docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$IMAGE" fc-list : family)"
 for family in "DejaVu Sans" "Lobster Two" "Noto Sans"; do
     if ! printf '%s\n' "$FAMILIES" | grep -F "$family" >/dev/null; then
         echo "FAIL: $IMAGE has no '$family'" >&2
@@ -123,7 +123,7 @@ def defines(ov):
 
 
 def docker(script):
-    r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w",
+    r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", os.getcwd() + ":/w", "-w", "/w",
                         IMAGE, "bash", "-ec", script], capture_output=True, text=True)
     if r.returncode or "WARNING" in r.stderr or "ERROR" in r.stderr:
         print(r.stderr)

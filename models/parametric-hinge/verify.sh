@@ -44,7 +44,7 @@ for c in "${CASES[@]}"; do
     echo
     echo "==> $name ${args[*]:-}"
     start=$(date +%s%N)
-    docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
+    docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" \
         openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad >/dev/null 2>&1
     echo "    rendered in $(( ($(date +%s%N) - start) / 1000000 )) ms"
     python3 - "$OUT/$name.3mf" "${expect_args[@]}" <<'PY' || status=1

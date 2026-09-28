@@ -3,19 +3,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path, Request
+from fastapi import Depends, Path
+from starlette.requests import HTTPConnection
 
+from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import (
+    EventBus,
+    InProcessEventBus,
+    UpstreamAvailable,
+    VersionCommitted,
+    emit,
+)
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import LibraryStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -47,7 +58,14 @@ class AppState:
     settings_store: SettingsStore
     fonts: FontService
     libraries: LibraryStore
+    #: Uploads for `// file` parameters, with their caps (#296).
+    assets: AssetStore
     queue: RenderQueue
+    #: Where every state change is published (spec §7). In-process today; the
+    #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
+    events: EventBus
+    #: Publishes ``print.*`` from the progress reads the backend makes.
+    print_progress: ProgressObserver
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -65,16 +83,46 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
+    #: Pins and renders share it; deleting a checkout takes it alone (#253). The
+    #: render queue holds the same one.
+    checkouts: CheckoutGate = field(default_factory=CheckoutGate)
     #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
     #: held for as long as the editor stays open rather than for one piece of work —
     #: the third term in the pod's worst case above.
     language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
+    realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
+
+
+def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
+    """The history's commit hook: ``version.committed`` for each template a commit
+    touched, and ``upstream.available`` for every duplicate of one that still exists.
+
+    Runs on the committing thread after the write lock is released, so reading the
+    duplicates' ``model.json`` here cannot deadlock against the commit.
+    """
+
+    def on_commit(commit: str, touched: list[str]) -> None:
+        for model_id in touched:
+            emit(events, VersionCommitted(slug=model_id, commit=commit))
+            try:
+                if not catalogue.exists(model_id):
+                    continue  # deleted: its duplicates' upstream is gone, not updated
+                duplicates = catalogue.duplicates_of(model_id)
+            except OSError:
+                logger.exception("could not list duplicates", extra={"slug": model_id})
+                continue
+            for duplicate in duplicates:
+                emit(events, UpstreamAvailable(slug=duplicate, upstream=model_id, commit=commit))
+
+    return on_commit
 
 
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
+    events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
@@ -85,26 +133,50 @@ def build_state(settings: Settings) -> AppState:
         else JobStore(paths)
     )
     outputs = OutputStore(paths)
+    checkouts = CheckoutGate()
+    assets = AssetStore(
+        paths.assets,
+        max_total_bytes=config.asset_max_total_bytes,
+        max_count=config.asset_max_count,
+    )
+    # The outputs feed the catalogue's fallback thumbnail (#179).
+    catalogue = Catalogue(
+        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+    )
+    history.on_commit = announce_commits(events, catalogue)
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
         history=history,
-        # The outputs feed the catalogue's fallback thumbnail (#179).
-        catalogue=Catalogue(paths, history, outputs),
+        catalogue=catalogue,
         outputs=outputs,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
+        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        queue=RenderQueue(config, paths, store=store, history=history, metrics=metrics),
+        assets=assets,
+        queue=RenderQueue(
+            config,
+            paths,
+            store=store,
+            history=history,
+            metrics=metrics,
+            events=events,
+            checkouts=checkouts,
+            assets=assets,
+        ),
         metrics=metrics,
+        events=events,
+        print_progress=ProgressObserver(events),
+        checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
+        realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
     )
 
 
@@ -129,8 +201,9 @@ async def probe_openscad_version(config: Config) -> str | None:
     return first[0].strip() if first else None
 
 
-def get_state(request: Request) -> AppState:
-    state: AppState = getattr(request.app.state, STATE_ATTR)
+def get_state(connection: HTTPConnection) -> AppState:
+    """For a request or a WebSocket alike: both are an ``HTTPConnection``."""
+    state: AppState = getattr(connection.app.state, STATE_ATTR)
     return state
 
 
@@ -173,8 +246,20 @@ def get_libraries(state: StateDep) -> LibraryStore:
     return state.libraries
 
 
+def get_assets(state: StateDep) -> AssetStore:
+    return state.assets
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
+
+
+def get_events(state: StateDep) -> EventBus:
+    return state.events
+
+
+def get_print_progress(state: StateDep) -> ProgressObserver:
+    return state.print_progress
 
 
 def get_checks(state: StateDep) -> asyncio.Semaphore:
@@ -183,6 +268,10 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
 
 def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
+
+
+def get_checkouts(state: StateDep) -> CheckoutGate:
+    return state.checkouts
 
 
 ConfigDep = Annotated[Config, Depends(get_config)]
@@ -194,9 +283,13 @@ PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
+AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
+EventsDep = Annotated[EventBus, Depends(get_events)]
+PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

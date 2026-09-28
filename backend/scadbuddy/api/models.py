@@ -25,16 +25,22 @@ from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
     CatalogueDep,
+    CheckoutsDep,
     ChecksDep,
     ConfigDep,
+    EventsDep,
     HistoryDep,
+    InstallsDep,
+    LibrariesDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
 )
+from scadbuddy.api.library_pins import pinned_at_create
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.assets import with_samples
@@ -56,6 +62,7 @@ from scadbuddy.library.history import (
     GitUnavailableError,
 )
 from scadbuddy.library.libraries import (
+    NAME_PATTERN,
     LibraryDeclarationError,
     ModelLibrary,
     model_search_path,
@@ -215,6 +222,11 @@ class PastedSource(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     force: bool = Field(default=False, description="Save even when the parse check fails")
+    libraries: list[Annotated[str, Field(pattern=NAME_PATTERN)]] = Field(
+        default_factory=list,
+        description="Curated libraries to pin at the catalogue's ref, in the model's first "
+        "revision and before the parse check",
+    )
 
 
 class SourceUpdate(BaseModel):
@@ -325,7 +337,10 @@ async def _guard_source(
         "bundled model's directory); `application/json` posts "
         "`{name, source}` pasted straight in; `text/plain` posts the bare source and "
         "takes its name from the `X-Model-Name` header. All three derive the slug, "
-        "parse-check the source and build the customizer schema identically."
+        "parse-check the source and build the customizer schema identically. The JSON "
+        "and multipart bodies may name curated `libraries`: each is pinned at the "
+        "catalogue's ref, as `PUT /models/{slug}/libraries/{name}` would, recorded in "
+        "the model's first revision and on the parse check's library path."
     ),
     openapi_extra={
         "requestBody": {
@@ -342,6 +357,10 @@ async def create_model(
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
+    events: EventsDep,
+    libraries: LibrariesDep,
+    installs: InstallsDep,
+    checkouts: CheckoutsDep,
     file: Annotated[
         UploadFile | None,
         File(description=f"The .scad source, at most {MAX_SOURCE_CHARS:,} characters"),
@@ -363,6 +382,14 @@ async def create_model(
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
+    library_names: Annotated[
+        list[str] | None,
+        Form(
+            alias="libraries",
+            description="Curated libraries to pin at the catalogue's ref, one per field; "
+            "a pin the model.json carries wins",
+        ),
+    ] = None,
     model_name: Annotated[
         str | None, Header(alias="X-Model-Name", description="Name for a text/plain paste")
     ] = None,
@@ -375,18 +402,24 @@ async def create_model(
             pasted = PastedSource.model_validate(await request.json())
         except (*_BAD_JSON, ValidationError) as error:
             raise _malformed_body(error) from None
-        return await _create(
-            catalogue,
-            config,
-            checks,
-            slug=_slug_from_name(pasted.name),
-            source=pasted.source,
-            meta=ModelMeta(
-                name=pasted.name, description=pasted.description, tags=list(pasted.tags)
-            ),
-            # Either spelling forces, as the design and the OpenAPI both promise.
-            force=force or pasted.force,
-        )
+        async with pinned_at_create(
+            pasted.libraries,
+            ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
+            libraries=libraries,
+            installs=installs,
+            checkouts=checkouts,
+        ) as pasted_meta:
+            return await _create(
+                catalogue,
+                config,
+                checks,
+                events,
+                slug=_slug_from_name(pasted.name),
+                source=pasted.source,
+                meta=pasted_meta,
+                # Either spelling forces, as the design and the OpenAPI both promise.
+                force=force or pasted.force,
+            )
 
     if content_type == "text/plain":
         if not model_name:
@@ -405,6 +438,7 @@ async def create_model(
             catalogue,
             config,
             checks,
+            events,
             slug=_slug_from_name(model_name),
             source=pasted_text,
             meta=ModelMeta(name=model_name),
@@ -450,34 +484,43 @@ async def create_model(
     base = await _read_meta_part(meta, slug) if meta is not None else ModelMeta(name=slug)
     parsed_tags = _parse_tags(tags)
 
-    return await _create(
-        catalogue,
-        config,
-        checks,
-        slug=slug,
-        source=source,
-        # The model.json's `source` attribution carries over. Its `origin_url` never
-        # does: that is set only by `POST /models/import`, which fetched the URL over
-        # https itself, and the catalogue renders it as a link -- taken from an
-        # uploaded file it would be a stored `javascript:` link waiting for a click.
-        meta=base.model_copy(
-            update={
-                "name": _first_name(name, base.name, slug),
-                # Blank is absent, as for the name; a non-blank one is kept as given.
-                "description": description
-                if description is not None and description.strip()
-                else base.description,
-                "tags": parsed_tags if parsed_tags is not None else base.tags,
-                "origin_url": None,
-                # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
-                # which template this one came from.
-                "upstream": None,
-            }
-        ),
-        force=force,
-        thumbnail=thumbnail_bytes,
-        readme=readme_text,
+    # The model.json's `source` attribution carries over. Its `origin_url` never
+    # does: that is set only by `POST /models/import`, which fetched the URL over
+    # https itself, and the catalogue renders it as a link -- taken from an
+    # uploaded file it would be a stored `javascript:` link waiting for a click.
+    uploaded = base.model_copy(
+        update={
+            "name": _first_name(name, base.name, slug),
+            # Blank is absent, as for the name; a non-blank one is kept as given.
+            "description": description
+            if description is not None and description.strip()
+            else base.description,
+            "tags": parsed_tags if parsed_tags is not None else base.tags,
+            "origin_url": None,
+            # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
+            # which template this one came from.
+            "upstream": None,
+        }
     )
+    async with pinned_at_create(
+        library_names or [],
+        uploaded,
+        libraries=libraries,
+        installs=installs,
+        checkouts=checkouts,
+    ) as uploaded_meta:
+        return await _create(
+            catalogue,
+            config,
+            checks,
+            events,
+            slug=slug,
+            source=source,
+            meta=uploaded_meta,
+            force=force,
+            thumbnail=thumbnail_bytes,
+            readme=readme_text,
+        )
 
 
 def _first_name(*candidates: str | None) -> str:
@@ -594,6 +637,7 @@ async def _create(
     catalogue: Catalogue,
     config: Config,
     limit: asyncio.Semaphore,
+    events: EventBus,
     *,
     slug: str,
     source: str,
@@ -637,6 +681,7 @@ async def _create(
         store_cached_schema(
             catalogue.paths.model_schema_cache(slug), checked.schema, library_path=library_path
         )
+    emit(events, ModelEvent(kind="model.created", slug=slug))
     return record
 
 
@@ -668,6 +713,7 @@ async def import_model(
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
+    events: EventsDep,
 ) -> ModelRecord:
     try:
         imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
@@ -679,6 +725,7 @@ async def import_model(
         catalogue,
         config,
         checks,
+        events,
         slug=_slug_from_name(name),
         source=imported.source,
         meta=ModelMeta(name=name, origin_url=imported.origin_url),
@@ -729,14 +776,18 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
+def patch_model(
+    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, events: EventsDep
+) -> ModelRecord:
     require_mine(slug)
     require_model(catalogue, slug)
     try:
-        return catalogue.update(slug, patch)
+        record = catalogue.update(slug, patch)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 class DuplicateRequest(BaseModel):
@@ -757,7 +808,11 @@ class DuplicateRequest(BaseModel):
     ),
 )
 def duplicate_model(
-    slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep, presets: PresetsDep
+    slug: SlugPath,
+    body: DuplicateRequest,
+    catalogue: CatalogueDep,
+    presets: PresetsDep,
+    events: EventsDep,
 ) -> ModelRecord:
     require_model_exists(catalogue, slug)
     new_slug = _slug_from_name(body.name)
@@ -767,13 +822,15 @@ def duplicate_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
         ) from None
-    except ModelNotFoundError:
-        # A concurrent delete of the upstream got there first.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except ModelNotFoundError as error:
+        # A concurrent delete got there first: of the upstream, or of the new copy
+        # between its commit and its record (#215). The error names which.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {error.slug!r}") from None
     except GitError as error:
         # Reading the upstream at `base` failed; as every other route that reads
         # the history maps it. Nothing of the duplicate is left behind.
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    emit(events, ModelEvent(kind="model.created", slug=new_slug))
     # The presets saved on the upstream come along. Best effort: the duplicate
     # exists by now, and failing it over its presets would report a copy that was
     # made as one that was not.
@@ -798,6 +855,7 @@ def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
     queue: QueueDep,
+    events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
@@ -825,6 +883,7 @@ def delete_model(
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    emit(events, ModelEvent(kind="model.deleted", slug=slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -861,6 +920,7 @@ async def put_source(
     paths: PathsDep,
     config: ConfigDep,
     checks: ChecksDep,
+    events: EventsDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -920,7 +980,13 @@ async def put_source(
         # A forced save, or no openscad at all: nothing was derived to store. GET
         # /schema is where the failure surfaces.
         logger.warning("stored source without a schema", extra={"slug": slug})
+    announce_source_change(events, slug)
     return record
+
+
+def announce_source_change(events: EventBus, slug: str) -> None:
+    emit(events, SourceChanged(slug=slug))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
 
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")
@@ -1024,6 +1090,7 @@ def get_thumbnail(
 async def put_thumbnail(
     slug: SlugPath,
     catalogue: CatalogueDep,
+    events: EventsDep,
     file: Annotated[
         UploadFile, File(description=f"The thumbnail, a PNG of at most {MAX_THUMBNAIL_SIZE}")
     ],
@@ -1033,10 +1100,12 @@ async def put_thumbnail(
     png = _require_png(await file.read())
     try:
         # `to_thread`: a git commit, from an `async def` handler. See `_create`.
-        return await asyncio.to_thread(catalogue.write_thumbnail, slug, png)
+        record = await asyncio.to_thread(catalogue.write_thumbnail, slug, png)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 @router.delete(
@@ -1049,17 +1118,19 @@ async def put_thumbnail(
         "its first output's plate image (`thumbnail_source` is then `output`)."
     ),
 )
-def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     try:
-        return catalogue.delete_thumbnail(slug)
+        record = catalogue.delete_thumbnail(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove"
         ) from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 @router.get(
@@ -1088,7 +1159,9 @@ def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     summary="Set a model's README",
     description="Sets or replaces the README, as one revision in the model's history.",
 )
-async def put_readme(slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep) -> ModelRecord:
+async def put_readme(
+    slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep, events: EventsDep
+) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if "\x00" in body.content:
@@ -1098,9 +1171,11 @@ async def put_readme(slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep
             "the README contains a NUL byte, so it is binary, not text",
         )
     try:
-        return await asyncio.to_thread(catalogue.write_readme, slug, body.content)
+        record = await asyncio.to_thread(catalogue.write_readme, slug, body.content)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 @router.delete(
@@ -1109,15 +1184,17 @@ async def put_readme(slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep
     summary="Remove a model's README",
     description="Removes the README, as one revision in the model's history.",
 )
-def delete_readme(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def delete_readme(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     try:
-        return catalogue.delete_readme(slug)
+        record = catalogue.delete_readme(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove") from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 def install_model_handlers(app: FastAPI) -> None:

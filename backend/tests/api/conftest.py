@@ -35,14 +35,17 @@ import pathlib
 import sys
 
 args = sys.argv[1:]
+# Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
+sidecar = pathlib.Path(sys.argv[0]).with_name("fake-env.json")
+settings = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
 
 # Lets a test count how many times openscad was actually run.
-log = os.environ.get("FAKE_OPENSCAD_LOG")
+log = settings.get("FAKE_OPENSCAD_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(" ".join(args) + "\\n")
 # And what OPENSCADPATH it was given (#93).
-path_log = os.environ.get("FAKE_OPENSCAD_PATH_LOG")
+path_log = settings.get("FAKE_OPENSCAD_PATH_LOG")
 if path_log:
     with open(path_log, "a", encoding="utf-8") as handle:
         handle.write(os.environ.get("OPENSCADPATH", "") + "\\n")
@@ -82,6 +85,17 @@ raise SystemExit(0)
 """
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake png body"
+
+
+def set_fake_env(directory: Path, name: str, value: str) -> None:
+    """Hand the fake binaries in ``directory`` a setting.
+
+    Not an environment variable: the backend gives openscad and openscad-lsp an
+    allowlisted environment (#281), so a ``monkeypatch.setenv`` never reaches them.
+    """
+    target = directory / "fake-env.json"
+    current = json.loads(target.read_text(encoding="utf-8")) if target.is_file() else {}
+    target.write_text(json.dumps({**current, name: value}), encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -163,6 +177,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],
         warnings=["a warning"],
+        notes=["a note"],
     )
 
 
@@ -184,10 +199,16 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
     async def queue_override() -> RenderQueue:
         # Built on first use so its workers live on the app's own event loop.
         if "queue" not in queues:
-            # On the app's own registry, as `build_state` wires it, so /metrics
-            # reports this queue's jobs.
-            metrics = getattr(application.state, STATE_ATTR).metrics
-            queue = RenderQueue(settings.to_config(), paths, render=fake_render, metrics=metrics)
+            # On the app's own registry and bus, as `build_state` wires them, so
+            # /metrics reports this queue's jobs and its states are published.
+            state = getattr(application.state, STATE_ATTR)
+            queue = RenderQueue(
+                settings.to_config(),
+                paths,
+                render=fake_render,
+                metrics=state.metrics,
+                events=state.events,
+            )
             await queue.start()
             queues["queue"] = queue
         return queues["queue"]

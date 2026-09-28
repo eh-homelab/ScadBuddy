@@ -6,16 +6,23 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
+    DEFAULT_ASSET_MAX_COUNT,
+    DEFAULT_ASSET_MAX_TOTAL_BYTES,
+    DEFAULT_ASSET_SWEEP_GRACE,
+    DEFAULT_ASSET_SWEEP_INTERVAL,
     DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
     DEFAULT_DATABASE_POOL_SIZE,
+    DEFAULT_DUPLICATE_STAGING_MAX_AGE,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
     DEFAULT_LIBRARY_MAX_BYTES,
     DEFAULT_LSP_SESSIONS,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
+    DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
+    DEFAULT_RENDER_FALLBACK_POLL_INTERVAL,
     DEFAULT_RENDER_LATENCY_SLO,
     DEFAULT_RENDER_LEASE_TIMEOUT,
     DEFAULT_RENDER_MAX_ATTEMPTS,
@@ -24,6 +31,7 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_MAX,
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
+    DEFAULT_SOLID_CONCURRENCY,
     Config,
 )
 
@@ -43,9 +51,11 @@ class Settings(BaseSettings):
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
+    render_fallback_poll_interval: float = DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
     render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
     render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
@@ -54,7 +64,13 @@ class Settings(BaseSettings):
     job_ttl: float = DEFAULT_JOB_TTL
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
+    realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
     library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
+    asset_max_total_bytes: int = DEFAULT_ASSET_MAX_TOTAL_BYTES
+    asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
+    asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
+    asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
+    duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -103,9 +119,11 @@ class Settings(BaseSettings):
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
+            solid_concurrency=self.solid_concurrency,
             render_queue_max=self.render_queue_max,
             render_queue_timeout=self.render_queue_timeout,
             render_poll_interval=self.render_poll_interval,
+            render_fallback_poll_interval=self.render_fallback_poll_interval,
             render_lease_timeout=self.render_lease_timeout,
             render_max_attempts=self.render_max_attempts,
             render_queue_depth_slo=self.render_queue_depth_slo,
@@ -116,7 +134,13 @@ class Settings(BaseSettings):
             fonts_catalogue_ttl=self.fonts_catalogue_ttl,
             openscad_lsp=self.openscad_lsp,
             lsp_sessions=self.lsp_sessions,
+            realtime_sockets=self.realtime_sockets,
             library_max_bytes=self.library_max_bytes,
+            asset_max_total_bytes=self.asset_max_total_bytes,
+            asset_max_count=self.asset_max_count,
+            asset_sweep_grace=self.asset_sweep_grace,
+            asset_sweep_interval=self.asset_sweep_interval,
+            duplicate_staging_max_age=self.duplicate_staging_max_age,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:

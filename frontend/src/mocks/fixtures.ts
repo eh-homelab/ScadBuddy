@@ -1,10 +1,6 @@
 import type {
   BambuddyTargets,
-  BedTypeChoice,
-  EligibilityReport,
   FilamentOptions,
-  PipelineView,
-  PresetChoice,
   PrintOptions,
   PrintOptionsState,
   ProjectView,
@@ -539,127 +535,6 @@ export const settings: Settings = {
 }
 
 /**
- * #83 — what the H2C's Bambu Studio profile takes: not the Cool Plate and not the Smooth
- * PEI / High Temp one, which is why the Draft pipeline's Cool Plate draws a warning.
- */
-export const h2cBedTypes: BedTypeChoice[] = [
-  { value: 'Engineering Plate', label: 'Engineering Plate' },
-  { value: 'Textured PEI Plate', label: 'Textured PEI Plate' },
-  { value: 'Supertack Plate', label: 'Bambu Cool Plate SuperTack' },
-]
-
-/**
- * #86 — the print picker's pipelines. `Textured PEI · 0.20 mm · AMS` targets the one H2C
- * directly; `Any H2C` targets the printer *class*, which is the case where the picker has
- * to ask which printer, and `Draft · 0.28 mm` is the one that is never eligible.
- */
-export const pipelineViews: PipelineView[] = [
-  {
-    id: 1,
-    name: 'Textured PEI · 0.20 mm · AMS',
-    description: null,
-    bed_type: 'Textured PEI Plate',
-    target_kind: 'specific_printer',
-    target_printer_id: 1,
-    target_printer_name: '3DP-31B-598',
-    target_model_class: null,
-    fanout_strategy: 'max_parallel',
-    printer_preset: { source: 'cloud', id: 'GM041' },
-    process_preset: { source: 'cloud', id: 'GP252' },
-    filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
-    printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
-    process_preset_name: '0.20mm Standard @BBL H2C',
-    filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
-    nozzle_diameter: '0.4',
-    printer_ids: [1],
-    bed_types: h2cBedTypes,
-  },
-  {
-    id: 2,
-    name: 'Draft · 0.28 mm',
-    description: null,
-    bed_type: 'Cool Plate',
-    target_kind: 'specific_printer',
-    target_printer_id: 1,
-    target_printer_name: '3DP-31B-598',
-    target_model_class: null,
-    fanout_strategy: 'max_parallel',
-    printer_preset: { source: 'cloud', id: 'GM041' },
-    process_preset: { source: 'cloud', id: 'GP260' },
-    filament_presets: [{ source: 'cloud', id: 'GFSB00_22' }],
-    printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
-    process_preset_name: '0.28mm Draft @BBL H2C',
-    filament_preset_names: ['Bambu ABS @BBL H2C'],
-    nozzle_diameter: '0.4',
-    printer_ids: [1],
-    bed_types: h2cBedTypes,
-  },
-  {
-    id: 3,
-    name: 'Any H2C',
-    description: null,
-    bed_type: 'Textured PEI Plate',
-    target_kind: 'printer_class',
-    target_printer_id: null,
-    target_printer_name: null,
-    target_model_class: 'H2C',
-    fanout_strategy: 'round_robin',
-    printer_preset: { source: 'cloud', id: 'GM041' },
-    process_preset: { source: 'cloud', id: 'GP252' },
-    filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
-    printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
-    process_preset_name: '0.20mm Standard @BBL H2C',
-    filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
-    nozzle_diameter: '0.4',
-    printer_ids: [1, 2],
-    bed_types: h2cBedTypes,
-  },
-]
-
-/** `check-eligibility` answers 200 with the report — only `run` turns it into a 409. */
-export const eligibilityReports: Record<number, EligibilityReport> = {
-  1: {
-    ok: true,
-    target_kind: 'specific_printer',
-    target_printer_id: 1,
-    target_printer_name: '3DP-31B-598',
-    target_model_class: null,
-    issues: [],
-    printer_reports: [],
-  },
-  2: {
-    ok: false,
-    target_kind: 'specific_printer',
-    target_printer_id: 1,
-    target_printer_name: '3DP-31B-598',
-    target_model_class: null,
-    issues: [
-      { kind: 'filament_type_mismatch', slot_index: 0, expected: 'ABS', actual: 'PLA' },
-      { kind: 'nozzle_diameter_mismatch', slot_index: null, expected: '0.4', actual: '0.2' },
-    ],
-    printer_reports: [],
-  },
-  // Under printer_class, `ok` means at least ONE printer passes; the reasons are per printer.
-  3: {
-    ok: true,
-    target_kind: 'printer_class',
-    target_printer_id: null,
-    target_printer_name: null,
-    target_model_class: 'H2C',
-    issues: [],
-    printer_reports: [
-      { printer_id: 1, printer_name: '3DP-31B-598', ok: true, issues: [] },
-      {
-        printer_id: 2,
-        printer_name: '3DP-77A-114',
-        ok: false,
-        issues: [{ kind: 'ams_slot_empty', slot_index: 1, expected: 'PLA', actual: 'empty' }],
-      },
-    ],
-  },
-}
-
-/**
  * #79 — projects, taken from the recorded Bambuddy (`backend/tests/bambuddy/recordings/`):
  * project 1 `Reagan Keychain` owns library folder 2 `Raegan` — Bambuddy's own spelling,
  * and the pairing that makes its project page list files.
@@ -693,75 +568,6 @@ export const projectViews: ProjectView[] = [
   },
 ]
 
-export const printerPresets: PresetChoice[] = [
-  {
-    ref: { source: 'cloud', id: 'GM041' },
-    name: 'Bambu Lab H2C 0.4 nozzle',
-    filament_type: null,
-    filament_colour: null,
-    compatible_printers: [],
-  },
-  {
-    ref: { source: 'cloud', id: 'GM042' },
-    name: 'Bambu Lab H2C 0.2 nozzle',
-    filament_type: null,
-    filament_colour: null,
-    compatible_printers: [],
-  },
-]
-
-/** Nozzle diameter lives in the process preset's NAME, not a field of its own. */
-export const processPresets: PresetChoice[] = [
-  {
-    ref: { source: 'cloud', id: 'GP243' },
-    name: '0.08mm High Quality @BBL H2C 0.2 nozzle',
-    filament_type: null,
-    filament_colour: null,
-    compatible_printers: ['Bambu Lab H2C 0.2 nozzle'],
-  },
-  {
-    ref: { source: 'cloud', id: 'GP252' },
-    name: '0.20mm Standard @BBL H2C',
-    filament_type: null,
-    filament_colour: null,
-    compatible_printers: ['Bambu Lab H2C 0.4 nozzle'],
-  },
-]
-
-export const filamentPresets: PresetChoice[] = [
-  {
-    ref: { source: 'cloud', id: 'GFSA05_22' },
-    name: 'Bambu PLA Basic @BBL H2C',
-    filament_type: 'PLA',
-    filament_colour: null,
-    compatible_printers: ['Bambu Lab H2C 0.4 nozzle'],
-  },
-  {
-    ref: { source: 'cloud', id: 'GFSB00_22' },
-    name: 'Bambu ABS @BBL H2C',
-    filament_type: 'ABS',
-    filament_colour: null,
-    compatible_printers: ['Bambu Lab H2C 0.4 nozzle'],
-  },
-  // An OrcaSlicer import: /local-presets/ is not the `local` tier of /slicer/presets.
-  {
-    ref: { source: 'local', id: '2' },
-    name: 'Cookiecad PETG Magic Dark Magic @H2C',
-    filament_type: 'PETG',
-    filament_colour: '#3400AD',
-    compatible_printers: ['Bambu Lab H2C 0.4 nozzle'],
-  },
-]
-
-export const BED_TYPES = [
-  'Cool Plate',
-  'Cool Plate (SuperTack)',
-  'Supertack Plate',
-  'Engineering Plate',
-  'High Temp Plate',
-  'Textured PEI Plate',
-  'Smooth PEI Plate',
-]
 /** Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults, as the backend serves them. */
 export const printOptionDefaults: PrintOptions = {
   bed_levelling: 'auto',
@@ -796,18 +602,33 @@ export const targets: BambuddyTargets = {
     { id: 2, name: 'ScadBuddy', is_external: false },
     { id: 3, name: 'Keychains', is_external: false },
   ],
-  pipelines: pipelineViews.slice(0, 2).map((pipeline) => ({
-    id: pipeline.id,
-    name: pipeline.name,
-    bed_type: pipeline.bed_type,
-    target_kind: pipeline.target_kind,
-    target_printer_id: pipeline.target_printer_id,
-    target_model_class: pipeline.target_model_class,
-    fanout_strategy: pipeline.fanout_strategy,
-    printer_preset: pipeline.printer_preset,
-    process_preset: pipeline.process_preset,
-    filament_presets: pipeline.filament_presets,
-  })),
+  // Settings' "Slicer pipeline" list (the send bar's pipeline route), not the print dialog.
+  pipelines: [
+    {
+      id: 1,
+      name: 'Textured PEI · 0.20 mm · AMS',
+      bed_type: 'Textured PEI Plate',
+      target_kind: 'specific_printer',
+      target_printer_id: 1,
+      target_model_class: null,
+      fanout_strategy: 'max_parallel',
+      printer_preset: { source: 'cloud', id: 'GM041' },
+      process_preset: { source: 'cloud', id: 'GP252' },
+      filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
+    },
+    {
+      id: 2,
+      name: 'Draft · 0.28 mm',
+      bed_type: 'Cool Plate',
+      target_kind: 'specific_printer',
+      target_printer_id: 1,
+      target_model_class: null,
+      fanout_strategy: 'max_parallel',
+      printer_preset: { source: 'cloud', id: 'GM041' },
+      process_preset: { source: 'cloud', id: 'GP260' },
+      filament_presets: [{ source: 'cloud', id: 'GFSB00_22' }],
+    },
+  ],
   printers: [
     { id: 1, name: '3DP-31B-598', model: 'H2C', is_active: true, nozzle_count: 2 },
     { id: 2, name: '3DP-77A-114', model: 'H2C', is_active: true, nozzle_count: 2 },
@@ -930,6 +751,19 @@ export const queuedSliceProgress: PrintProgress = {
 }
 
 export const FAILING_NAME = 'boom'
+
+/** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
+export const NOTED_NAME = 'alexandra'
+
+export const TEMPLATE_NOTES = [
+  'text_size reduced from 14 to 9.5 mm so the tag fits the 300 mm plate',
+  'modules are 0.59 mm; below about 0.8 mm a 0.4 mm nozzle cannot print them cleanly',
+]
+
+/** #383 — a name the mock renders fine but with one of ScadBuddy's own job warnings. */
+export const WARNED_NAME = 'nopic'
+
+export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
 
 export const OPENSCAD_LOG_TAIL = [
   'Compiling design (CSG Tree generation)...',
@@ -1144,11 +978,9 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
-  // #78 — the H2C's two extruders, as `printers/{id}/status` reports them. The 0.4 one is
-  // what pipeline 1's printer preset names, so nothing is mismatched here.
+  // #78 — the H2C's two extruders, as `printers/{id}/status` reports them.
   nozzles: [
     { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
     { nozzle_type: 'HS01', nozzle_diameter: '0.4' },
   ],
-  pipeline_nozzle_diameter: '0.4',
 }

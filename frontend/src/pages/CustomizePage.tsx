@@ -1,11 +1,15 @@
-import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
+import { committed, touchAfterRender, waitFor } from '../agent/highlight'
+import { AgentToolError } from '../agent/types'
+import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api } from '../api/client'
-import type { Output, ParamValue, Plate } from '../api/types'
+import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { PresetPicker } from '../components/PresetPicker'
@@ -17,15 +21,30 @@ import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
-import { defaultValues, type ParamValues } from '../lib/params'
-import { fitMessages } from '../lib/plate'
+import {
+  allParams,
+  checkParamValue,
+  defaultValues,
+  diffFromDefaults,
+  type ParamValues,
+} from '../lib/params'
+import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
+import { useFullscreen } from '../lib/useFullscreen'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
+
+const FLYOUT_ID = 'parameters-flyout'
+/**
+ * The flyout's width, which the readouts move clear of: set on the full-screen workspace
+ * per breakpoint (`--sb-flyout`), a sheet over the whole view below `md` and the docked
+ * column's widest, 360px, from there up.
+ */
+const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
@@ -119,20 +138,29 @@ export function CustomizePage() {
     rendering,
     error: renderError,
     busy: renderBusy,
+    settledFor,
   } = useRenderJob(slug, settled ? debounced : undefined, version)
+  // The job on screen is the render of the values on screen — not the previous one,
+  // which is all `settled && !rendering` can promise for a frame after a change.
+  const upToDate = settled && settledFor === debounced && !rendering
 
   // A parameter change invalidates the saved output — Generate has to run again.
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
-  const bbox = job?.status === 'done' ? job.bbox_mm : undefined
-  const colours = job?.colors?.length ?? 1
+  // #289 — a multi-plate render is checked plate by plate.
+  const targets = useMemo(() => fitTargets(job), [job])
   const fitState = useAsync(
-    async () => (bbox ? await api.getPlateFit(printerModel, bbox.size, colours) : null),
-    [printerModel, bbox?.size, colours],
+    async () =>
+      targets.length > 0
+        ? await Promise.all(targets.map((target) => api.getPlateFit(printerModel, target.size, target.colours)))
+        : null,
+    // useAsync keys by the deps' JSON, so a re-render with equal targets fetches nothing.
+    [printerModel, targets],
   )
-  const fit = fitState.data ?? undefined
+  const fits = fitState.data ?? []
+  const fit = worstFit(fits)
   const unit = useDisplayUnit()
-  const misfit = fit ? fitMessages(fit, unit) : []
+  const misfit = platesFitMessages(fits, targets, unit)
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
@@ -150,6 +178,193 @@ export function CustomizePage() {
   }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+
+  // #254 — the parameter the agent last touched: the panel shows its tab, and the row
+  // gets the highlight once it is on screen.
+  const [reveal, setReveal] = useState<{ name: string } | undefined>(undefined)
+  const showTouched = useCallback((name: string) => {
+    setReveal({ name })
+    touchAfterRender(() => document.querySelector(`[data-param="${name}"]`))
+  }, [])
+
+  const live = useLatest({
+    schema,
+    values,
+    upToDate,
+    job,
+    renderError,
+    printerModel,
+    plateState,
+    fit,
+    misfit,
+  })
+
+  function requireSchema() {
+    if (!schema) {
+      throw new AgentToolError('timeout', schemaState.error ? `The model did not load: ${schemaState.error.message}` : 'The model is still loading.')
+    }
+    return schema
+  }
+
+  function requireParam(name: string): Param {
+    const param = allParams(requireSchema()).find((entry) => entry.name === name)
+    if (!param) {
+      throw new AgentToolError('invalid_args', `"${slug}" has no parameter "${name}"; get_params lists them.`)
+    }
+    return param
+  }
+
+  function checked(name: string, value: ParamValue): ParamValue {
+    const outcome = checkParamValue(requireParam(name), value)
+    if (!outcome.ok) throw new AgentToolError('invalid_args', outcome.message)
+    return outcome.value
+  }
+
+  function renderReport() {
+    const { job: settledJob, renderError: failure, misfit: fitProblems, fit: plateFit } = live.current
+    return {
+      status: failure ? 'error' : settledJob?.status,
+      error: failure?.message ?? settledJob?.error ?? null,
+      bbox_mm: settledJob?.bbox_mm ?? null,
+      colors: settledJob?.colors ?? [],
+      warnings: settledJob?.warnings ?? [],
+      // What the template changed from the parameters it was given (#285).
+      notes: settledJob?.notes ?? [],
+      // The log only earns its tokens when something went wrong.
+      log_tail: settledJob?.status === 'failed' ? (settledJob.log_tail ?? []).slice(-20) : undefined,
+      plate: plateFit?.plate.name ?? null,
+      fits: fitProblems.length === 0,
+      fit_problems: fitProblems,
+    }
+  }
+
+  useAgentHandlers(
+    'customize',
+    {
+      get_params: () => {
+        const current = requireSchema()
+        return {
+          slug,
+          version: version ?? null,
+          params: allParams(current).map((param) => ({
+            name: param.name,
+            caption: param.caption ?? null,
+            type: param.type,
+            group: param.group || null,
+            value: values[param.name] ?? param.initial ?? null,
+            initial: param.initial ?? null,
+            min: param.min ?? undefined,
+            max: param.max ?? undefined,
+            step: param.step ?? undefined,
+            max_length: param.max_length ?? undefined,
+            options: param.options?.map((option) => ({ name: option.name, value: option.value })),
+            samples: param.samples?.length ? param.samples : undefined,
+          })),
+          changed: diffFromDefaults(current, values).map((diff) => diff.name),
+        }
+      },
+      set_param: async ({ name, value }) => {
+        const next = checked(name, value)
+        onChange(name, next)
+        showTouched(name)
+        await committed(() => live.current.values[name] === next)
+        return { name, value: next, rendering: 'after the usual debounce; render waits for it' }
+      },
+      set_params: async ({ values: wanted }) => {
+        const entries = Object.entries(wanted)
+        if (entries.length === 0) throw new AgentToolError('invalid_args', 'values is empty.')
+        const problems: string[] = []
+        const next: ParamValues = {}
+        for (const [name, value] of entries) {
+          try {
+            next[name] = checked(name, value)
+          } catch (cause) {
+            problems.push(cause instanceof Error ? cause.message : String(cause))
+          }
+        }
+        // All or nothing: one bad value leaves every field as it was.
+        if (problems.length > 0) throw new AgentToolError('invalid_args', problems.join(' '))
+        setEdits((current) => ({
+          of: current.of,
+          values: { ...(current.values ?? current.of ?? NOTHING), ...next },
+        }))
+        showTouched(Object.keys(next)[0] ?? '')
+        await committed(() => Object.entries(next).every(([name, value]) => live.current.values[name] === value))
+        return { values: next }
+      },
+      reset_param: async ({ name }) => {
+        if (name === undefined) {
+          const current = requireSchema()
+          onReset()
+          await committed(() => diffFromDefaults(current, live.current.values).length === 0)
+          return { reset: 'all' }
+        }
+        const param = requireParam(name)
+        if (param.initial === null || param.initial === undefined) {
+          throw new AgentToolError('invalid_args', `"${name}" has no default to go back to.`)
+        }
+        const initial = param.initial
+        onChange(name, initial)
+        showTouched(name)
+        await committed(() => live.current.values[name] === initial)
+        return { name, value: initial }
+      },
+      render: async ({ timeout_ms }) => {
+        requireSchema()
+        await waitFor(() => (live.current.upToDate ? true : undefined), {
+          timeout: timeout_ms,
+          what: 'the preview render of the current values',
+        })
+        return renderReport()
+      },
+      select_plate: async ({ printer_model }) => {
+        setPrinterModel(printer_model)
+        const plateNow = await waitFor(
+          () => {
+            const { printerModel: model, plateState: state } = live.current
+            return model === printer_model && !state.loading ? state : undefined
+          },
+          { timeout: 10_000, what: 'the plate to load' },
+        )
+        if (plateNow.error) throw new AgentToolError('failed', plateNow.error.message)
+        return { plate: plateNow.data ?? null }
+      },
+    },
+    () => ({
+      slug,
+      version: version ?? null,
+      loaded: Boolean(schema),
+      changed: schema ? diffFromDefaults(schema, values).map((diff) => ({ name: diff.name, value: diff.value })) : [],
+      render: upToDate ? (renderError ? 'error' : job?.status) : 'pending',
+      bbox_mm: job?.status === 'done' ? job.bbox_mm : null,
+      plate: plate?.name ?? null,
+      fit_problems: misfit,
+      saved_output: output ? { id: output.id, name: output.name ?? null } : null,
+    }),
+  )
+
+  // Full screen takes the whole workspace, not the viewer alone, so the parameters can
+  // come along as a flyout over the scene and a change is watched as it renders. It is
+  // the same element throughout, whichever way it fills the screen: moving the canvas
+  // would reload the model and lose the camera, and moving the panel would lose its tab.
+  const workspace = useRef<HTMLDivElement>(null)
+  const fullscreen = useFullscreen(workspace)
+  const full = fullscreen.mode !== null
+  const [flyout, setFlyout] = useState(false)
+  // Each full screen opens on the view alone.
+  if (!full && flyout) setFlyout(false)
+  const flyoutButton = useRef<HTMLButtonElement>(null)
+  const flyoutClose = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (flyout) flyoutClose.current?.focus()
+  }, [flyout])
+
+  const closeFlyout = useCallback(() => {
+    setFlyout(false)
+    // It was only covered, so it can take the focus straight back.
+    flyoutButton.current?.focus()
+  }, [])
 
   if (reopenId && reopenState.error) {
     // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
@@ -317,8 +532,26 @@ export function CustomizePage() {
         )}
       </div>
 
-      <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
-        <div className="min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line">
+      <div
+        ref={workspace}
+        data-testid="workspace"
+        className={`grid min-h-0 grid-cols-1 ${
+          full
+            ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
+                fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
+              }`
+            : 'lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]'
+        }`}
+      >
+        <div
+          id={FLYOUT_ID}
+          hidden={full && !flyout}
+          className={
+            full
+              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
+              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+          }
+        >
           <ParameterPanel
             schema={schema}
             slug={slug}
@@ -327,15 +560,19 @@ export function CustomizePage() {
             fonts={fontsState.data ?? []}
             onChange={onChange}
             onReset={onReset}
+            reveal={reveal}
             toolbar={
-              <PresetPicker
-                // A preset picked on one model means nothing on the next.
-                key={slug}
-                slug={slug}
-                schema={schema}
-                values={values}
-                onApply={onApplyPreset}
-              />
+              <>
+                {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
+                <PresetPicker
+                  // A preset picked on one model means nothing on the next.
+                  key={slug}
+                  slug={slug}
+                  schema={schema}
+                  values={values}
+                  onApply={onApplyPreset}
+                />
+              </>
             }
           />
         </div>
@@ -353,6 +590,19 @@ export function CustomizePage() {
               rendering={rendering || !settled}
               plate={plate}
               captureRef={captureRef}
+              leading={
+                full && (
+                  <ParametersButton
+                    ref={flyoutButton}
+                    open={flyout}
+                    flyout={FLYOUT_ID}
+                    onClick={() => setFlyout((open) => !open)}
+                  />
+                )
+              }
+              controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
+              // The flyout lies over the scene; the readouts move clear of it.
+              covered={full && flyout ? FLYOUT_WIDTH : undefined}
             />
           </Suspense>
           {misfit.length > 0 && (
@@ -378,21 +628,26 @@ export function CustomizePage() {
               {renderError.message}
             </p>
           )}
-          <ActionBar
-            slug={slug}
-            job={job}
-            rendering={rendering || !settled}
-            output={output}
-            capture={capture}
-            fit={fit}
-            onPrinterModel={setPrinterModel}
-            onGenerated={(created) => {
-              if (job) setSaved({ jobId: job.id, output: created })
-              outputsState.reload()
-            }}
-            onSent={() => outputsState.reload()}
-            onRan={() => outputsState.reload()}
-          />
+          {/* Full screen is the view and its parameters; the actions wait outside it. */}
+          <div hidden={full}>
+            <ActionBar
+              slug={slug}
+              job={job}
+              rendering={rendering || !settled}
+              upToDate={upToDate}
+              output={output}
+              capture={capture}
+              fit={fit}
+              fitProblems={misfit}
+              onPrinterModel={setPrinterModel}
+              onGenerated={(created) => {
+                if (job) setSaved({ jobId: job.id, output: created })
+                outputsState.reload()
+              }}
+              onSent={() => outputsState.reload()}
+              onRan={() => outputsState.reload()}
+            />
+          </div>
         </div>
       </div>
     </div>

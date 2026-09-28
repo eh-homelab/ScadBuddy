@@ -1,12 +1,13 @@
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
   BambuddyTargets,
+  ChoicesView,
   ConnectionTest,
   CustomizerSchema,
   DuplicateRequest,
   EditTarget,
-  EligibilityOverview,
   FilamentOptions,
   FontCatalogue,
   FontFamily,
@@ -26,15 +27,9 @@ import type {
   ParamPresetUpdate,
   PastedSource,
   ParamValue,
-  PipelineChoices,
-  PipelineCreate,
-  PipelineDefault,
-  PipelineView,
   Plate,
   PlateCatalogue,
   PlateFit,
-  PresetOptions,
-  PresetRef,
   PrinterBedType,
   PrintProgress,
   PrintRunRequest,
@@ -83,7 +78,12 @@ export class ApiError extends Error {
   readonly detail: string
   readonly problem: Problem
 
-  constructor(problem: Problem) {
+  /** A bare `(status, detail)` is the shorthand tests and callers use for a plain refusal. */
+  constructor(problemOrStatus: Problem | number, detail?: string) {
+    const problem: Problem =
+      typeof problemOrStatus === 'number'
+        ? { title: detail ?? String(problemOrStatus), status: problemOrStatus, detail }
+        : problemOrStatus
     // The detail is the sentence written for a person ("OpenSCAD could not build a
     // customizer schema from this model's source"); the title is the status name.
     super(problem.detail ?? problem.title)
@@ -325,6 +325,9 @@ export const api = {
   getAsset: (slug: string, id: string) =>
     request<Asset>(`/models/${seg(slug)}/assets/${seg(id)}`),
 
+  /** #296 — the upload store's size against its caps, for Settings. */
+  getAssetUsage: () => request<AssetUsage>('/assets/usage'),
+
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
@@ -420,31 +423,6 @@ export const api = {
     return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
-  /**
-   * #86 — the print picker. `printerPreset` is what narrows the process and filament
-   * tiers: unfiltered they are thousands of rows, so the server only sends them once a
-   * printer preset is named.
-   */
-  getPrintPresets: (printerPreset?: PresetRef) => {
-    const query = printerPreset
-      ? `?printer_preset_source=${seg(printerPreset.source)}&printer_preset_id=${seg(printerPreset.id)}`
-      : ''
-    return request<PresetOptions>(`/print/presets${query}`)
-  },
-
-  createPipeline: (body: PipelineCreate) =>
-    request<PipelineView>('/print/pipelines', { method: 'POST', body: JSON.stringify(body) }),
-
-  getModelPipelines: (slug: string) =>
-    request<PipelineChoices>(`/print/models/${seg(slug)}/pipelines`),
-
-  /** `null` clears this model's default, falling back to the global one. */
-  putModelPipeline: (slug: string, pipelineId: number | null) =>
-    request<PipelineDefault>(`/print/models/${seg(slug)}/pipeline`, {
-      method: 'PUT',
-      body: JSON.stringify({ pipeline_id: pipelineId }),
-    }),
-
   /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
   putModelChoices: (slug: string, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/models/${seg(slug)}/choices`, {
@@ -459,13 +437,6 @@ export const api = {
       body: JSON.stringify({ bed_type: bedType }),
     }),
 
-  /** Uploads the 3MF if Bambuddy has not got it yet, then asks each pipeline. */
-  checkEligibility: (outputId: string, pipelineIds?: number[]) =>
-    request<EligibilityOverview>(`/print/outputs/${seg(outputId)}/eligibility`, {
-      method: 'POST',
-      body: JSON.stringify({ pipeline_ids: pipelineIds ?? null }),
-    }),
-
   /**
    * #87 — one read per output, because the join is the server's job. The spool
    * inventory, where each spool is assigned, the printer's live AMS state and the
@@ -476,24 +447,42 @@ export const api = {
    * answerable at all — without one the server can say where a spool is but not whether
    * the chosen slot can reach it.
    *
-   * `nozzleDiameter` is the pipeline's, as `PipelineView.nozzle_diameter` reported it;
-   * the server compares it with the printer's mounted nozzles (#78).
+   * `plateId` is what the print dialog reads another plate of a multi-plate 3MF by;
+   * plate 1 already arrives inside `getChoices`. `allPlates` reads every plate at once —
+   * one row per slot any plate uses — for an all-plates print.
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; nozzleDiameter?: string | null; plateId?: number } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
       search.set('printer_id', String(query.printerId))
     }
-    if (query.nozzleDiameter) search.set('nozzle_diameter', query.nozzleDiameter)
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+    if (query.allPlates) search.set('all_plates', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
-  runPipeline: (outputId: string, body: PrintRunRequest) =>
+  /**
+   * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
+   * installed nozzles, quality tiers and processes per nozzle size, plates with the
+   * last one used, and the filament step. `printerId` narrows the per-printer bits
+   * (mounted nozzles, last plate) the same way `getFilaments`'s does.
+   */
+  getChoices: (outputId: string, printerId?: number | null) => {
+    const search = new URLSearchParams()
+    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
+  },
+
+  /**
+   * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
+   * is derived server-side from the dialog's spools, nozzles, quality and plate.
+   */
+  runPrint: (outputId: string, body: PrintRunRequest) =>
     request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -594,17 +583,7 @@ export const api = {
   putSettings: (body: SettingsUpdate) =>
     request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /**
-   * `slug` so the server resolves the printer *this model's* pipeline aims at (#86), and
-   * `pipelineId` when the picker has chosen a different one (#145).
-   */
-  getPrintOptions: (slug?: string, pipelineId?: number | null) => {
-    const query = new URLSearchParams()
-    if (slug) query.set('slug', slug)
-    if (pipelineId !== undefined && pipelineId !== null) query.set('pipeline_id', String(pipelineId))
-    const qs = query.toString()
-    return request<PrintOptionsState>(`/settings/print-options${qs ? `?${qs}` : ''}`)
-  },
+  getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 
   /** Replaces one scope wholesale; an all-unset `options` clears it. */
   putPrintOptions: (body: PrintOptionsUpdate) =>

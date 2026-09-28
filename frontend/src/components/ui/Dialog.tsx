@@ -15,7 +15,10 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      if (event.key !== 'Escape') return
+      // Taken: the full-screen view (useFullscreen) must not leave on the same key.
+      event.preventDefault()
+      onClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)

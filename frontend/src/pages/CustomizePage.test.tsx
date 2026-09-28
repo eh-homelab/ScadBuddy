@@ -1,17 +1,19 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
+import type { ReactNode } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Job, PipelineChoices, Plate } from '../api/types'
+import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
+import { choicesView } from '../mocks/choices'
 import {
   BUILTIN_SLUG,
-  pipelineViews,
   printOptions,
   settings as settingsFixture,
   targets,
   versionIds,
 } from '../mocks/fixtures'
+import { setMockPlates } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
@@ -19,10 +21,25 @@ import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
-// The viewer itself is covered by the Playwright smoke test.
+// The viewer itself is covered by the Playwright smoke test. The page's own buttons,
+// which the viewer lays over the scene, are rendered as they are.
 vi.mock('../components/Preview', () => ({
-  Preview: ({ job, rendering, plate }: { job?: Job; rendering: boolean; plate?: Plate }) => (
+  Preview: ({
+    job,
+    rendering,
+    plate,
+    leading,
+    controls,
+  }: {
+    job?: Job
+    rendering: boolean
+    plate?: Plate
+    leading?: ReactNode
+    controls?: ReactNode
+  }) => (
     <div data-testid="preview">
+      {leading}
+      {controls}
       {rendering && <span>rendering</span>}
       {plate && (
         <span data-testid="plate">
@@ -717,25 +734,19 @@ describe('CustomizePage', () => {
   })
 
   it('follows the printer chosen in the print picker, and warns when the model does not fit (#81)', async () => {
-    // The Draft pipeline aims at a second printer, an A1 mini, so switching pipelines
-    // switches printers — and plates.
+    // A second printer, an A1 mini: choosing it in the print dialog switches plates.
     server.use(
-      http.get('/api/v1/print/models/:slug/pipelines', () =>
-        HttpResponse.json({
-          pipelines: pipelineViews.map((pipeline) =>
-            pipeline.id === 2
-              ? { ...pipeline, target_printer_id: 2, target_printer_name: 'Mini', printer_ids: [2] }
-              : pipeline,
-          ),
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: asked === null ? 1 : Number(asked),
           printers: [
             targets.printers![0]!,
             { id: 2, name: 'Mini', model: 'A1M', is_active: true, nozzle_count: 1 },
           ],
-          model_pipeline_id: null,
-          global_pipeline_id: 1,
-          default_pipeline_id: 1,
-        } satisfies PipelineChoices),
-      ),
+        } satisfies ChoicesView)
+      }),
     )
     const { user } = render()
     await firstRender()
@@ -743,7 +754,7 @@ describe('CustomizePage', () => {
     await user.click(screen.getByTestId('generate'))
     await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
 
-    // The default pipeline targets the H2C.
+    // The dialog opens on the H2C.
     await user.click(screen.getByTestId('print'))
     const dialog = await screen.findByRole('dialog', { name: 'Print' })
     await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('H2C 330 × 320'))
@@ -768,7 +779,7 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const again = await screen.findByRole('dialog', { name: 'Print' })
-    await user.click(await within(again).findByRole('radio', { name: /Draft/ }))
+    await user.selectOptions(await within(again).findByLabelText('Printer'), '2')
 
     await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('A1 mini 180 × 180'))
     expect(screen.getByTestId('plate-fit')).toHaveTextContent(/X is 132\.1 mm over the A1 mini/)
@@ -806,6 +817,55 @@ describe('CustomizePage', () => {
     // Two colours, so the check is asked with the tower the send would add.
     expect(asked.at(-1)?.get('colours')).toBe('2')
     expect(asked.at(-1)?.get('x')).toBe('64.1')
+  })
+
+  it('checks a multi-plate render plate by plate, and names the plate that does not fit (#289)', async () => {
+    const box = (x: number, y: number, z: number): BoundingBox => ({
+      min: [0, 0, 0],
+      max: [x, y, z],
+      size: [x, y, z],
+    })
+    setMockPlates('name-keychain', [
+      { index: 1, bbox_mm: box(244, 244, 8.5), colors: ['#111111', '#222222'] },
+      { index: 2, bbox_mm: box(310, 248, 5.6), colors: ['#FFFFFF'] },
+    ])
+    const asked: URLSearchParams[] = []
+    server.use(
+      http.get('/api/v1/plate/fit', ({ request }) => {
+        const search = new URL(request.url).searchParams
+        asked.push(search)
+        const x = Number(search.get('x'))
+        return HttpResponse.json({
+          plate: {
+            model: null,
+            name: 'Default plate',
+            size: [256, 256],
+            height: 250,
+            usable: { min_x: 0, min_y: 0, max_x: 256, max_y: 256 },
+          },
+          overshoots: x > 256 ? [{ axis: 'X', size: x, limit: 256 }] : [],
+          problem: null,
+        })
+      }),
+    )
+    render()
+    await firstRender()
+    await waitFor(() =>
+      expect(screen.getByTestId('plate-fit')).toHaveTextContent(
+        'Does not fit: plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm).',
+      ),
+    )
+    // Each plate with its own box and colours; never the preview's box of both.
+    const checked = asked.map((search) => [search.get('x'), search.get('colours')])
+    expect(checked).toContainEqual(['244', '2'])
+    expect(checked).toContainEqual(['310', '1'])
+    expect(checked.map(([x]) => x)).not.toContain('64.1')
+    expect(screen.getByTestId('print')).toHaveTextContent('Too big on X')
+    // The Print button's tooltip names the plate too, not only the banner.
+    expect(screen.getByTestId('print')).toHaveAttribute(
+      'title',
+      'plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm)',
+    )
   })
 
   it('counts changes against the model defaults', async () => {
@@ -959,5 +1019,94 @@ describe('CustomizePage', () => {
     await screen.findByRole('button', { name: 'Duplicate' })
     expect(screen.queryByTestId('update-badge')).not.toBeInTheDocument()
     expect(screen.queryByTestId('upstream-gone')).not.toBeInTheDocument()
+  })
+})
+
+// jsdom has no Fullscreen API, so these run the fallback: the workspace covers the
+// window. The API itself is exercised by the Playwright run.
+describe('full screen', () => {
+  it('shows the view alone, with the parameters in a flyout', async () => {
+    const { user } = render()
+    await firstRender()
+    const generate = screen.getByTestId('generate')
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument()
+    // The parameters wait in the closed flyout, and the actions outside full screen.
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+    expect(generate).not.toBeVisible()
+
+    const parameters = screen.getByRole('button', { name: 'Parameters' })
+    expect(parameters).toHaveAttribute('aria-expanded', 'false')
+    await user.click(parameters)
+    expect(parameters).toHaveAttribute('aria-expanded', 'true')
+    const close = screen.getByRole('button', { name: 'Close parameters' })
+    expect(close).toHaveFocus()
+
+    // A change made in the flyout renders like any other.
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Nova')
+    await waitFor(() => expect(screen.getByTestId('bbox')).toHaveTextContent('46.7'), {
+      timeout: 4000,
+    })
+
+    await user.click(close)
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+    expect(parameters).toHaveFocus()
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }))
+    expect(screen.queryByRole('button', { name: 'Parameters' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Close parameters' })).not.toBeInTheDocument()
+    // Back in its column with the change, never remounted.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova')
+    expect(generate).toBeVisible()
+  })
+
+  it('takes the page around the view out of reach while full screen', async () => {
+    const { user } = render()
+    await firstRender()
+    const versions = screen.getByRole('link', { name: 'Versions' })
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    // Covered, so Tab must not reach it and navigate away unseen.
+    expect(versions.closest('[inert]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Exit full screen' }).closest('[inert]')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }))
+    expect(versions.closest('[inert]')).toBeNull()
+  })
+
+  it('opens each full screen on the view alone', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    await user.click(screen.getByRole('button', { name: 'Parameters' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    expect(screen.getByRole('button', { name: 'Parameters' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+  })
+
+  it('lets Escape close the font picker in the flyout without leaving the stand-in', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    await user.click(screen.getByRole('button', { name: 'Parameters' }))
+    await user.click(screen.getByRole('button', { name: 'Browse' }))
+    expect(screen.getByRole('dialog', { name: 'Choose a font' })).toBeInTheDocument()
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument()
+
+    // With nothing else to take it, the next one leaves full screen.
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
   })
 })

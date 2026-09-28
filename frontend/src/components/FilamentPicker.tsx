@@ -55,7 +55,14 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'low-filament': 'text-muted',
   'no-preset': 'text-muted',
   'no-fan-out': 'text-muted',
-  'nozzle-mismatch': 'text-warn',
+  // spec 2026-09-27 — the spool-first resolver's own kinds (task 5-7). None of these
+  // are ever produced by this picker's own `warningsFor`, but the type is shared with
+  // `PrintRunResult.warnings`, so the map still has to be exhaustive over it.
+  'mixed-sizes': 'text-warn',
+  'no-process': 'text-warn',
+  'not-installed': 'text-warn',
+  'plate-differs': 'text-muted',
+  'hf-unsupported': 'text-muted',
 }
 
 /** `0.2 mm (HS00) and 0.4 mm (HS01)` — one per extruder, as the printer reports them. */
@@ -90,7 +97,7 @@ function needLabel(slot: SlotNeed, copies: number): string {
   return `${grams(need)} for ${copies} ${copies === 1 ? 'copy' : 'copies'}`
 }
 
-function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
+export function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
   if (warnings.length === 0) return null
   return (
     <ul className="mt-1.5 space-y-0.5 text-[12px]" data-testid={testId}>
@@ -134,12 +141,8 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
   const warnings = checkPlan(options, plan, copies)
-  // #78 — the nozzle is the printer's and the pipeline's, not the plan's, so the server's
-  // own answer stays true however the slots are changed.
+  // #78 — the printer's mounted nozzles; the one to print with is the nozzle step's.
   const nozzles = (options.nozzles ?? []).filter((nozzle) => nozzle.nozzle_diameter)
-  const nozzleWarnings = (options.warnings ?? []).filter(
-    (warning) => warning.kind === 'nozzle-mismatch',
-  )
 
   return (
     <section className="mt-4">
@@ -157,13 +160,9 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
 
       {nozzles.length > 0 && (
         <p className="mt-1 text-[12px] text-muted" data-testid="nozzles">
-          {options.printer_name ?? 'The chosen printer'} has {nozzleList(nozzles)} mounted
-          {options.pipeline_nozzle_diameter
-            ? `; this pipeline slices for ${options.pipeline_nozzle_diameter} mm.`
-            : '.'}
+          {options.printer_name ?? 'The chosen printer'} has {nozzleList(nozzles)} mounted.
         </p>
       )}
-      <WarningList warnings={nozzleWarnings} testId="nozzle-warnings" />
 
       {/* One filter row for every slot: the inventory is the same list each time, and a
           per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}

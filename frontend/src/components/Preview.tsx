@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -50,23 +50,66 @@ interface Props {
   /** #81 — the chosen printer's plate, or the configured default. Undrawn until known. */
   plate?: Plate
   captureRef?: React.RefObject<PreviewCapture | null>
+  /** Laid over the scene's top left, before the plate: the page's own buttons. */
+  leading?: ReactNode
+  /** Laid over the scene's top right: the page's own buttons. */
+  controls?: ReactNode
+  /**
+   * How much of the scene's left edge the page covers, as a CSS length — the
+   * parameters flyout in full screen. The readouts keep clear of it; the scene does not
+   * move, so the camera's view stays as it was.
+   */
+  covered?: string
 }
 
-export function Preview({ job, rendering, plate, captureRef }: Props) {
+export function Preview({
+  job,
+  rendering,
+  plate,
+  captureRef,
+  leading,
+  controls,
+  covered,
+}: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
-  const [shown, setShown] = useState<{ url: string; bbox?: BoundingBox; colors: string[] } | undefined>()
+  // Its notes and warnings travel with it: they explain the model on screen, not the
+  // one rendering.
+  const [shown, setShown] = useState<
+    | {
+        url: string
+        bbox?: BoundingBox
+        colors: string[]
+        notes: string[]
+        warnings: string[]
+        plates: number
+      }
+    | undefined
+  >()
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url) {
-      setShown({ url: job.preview_url, bbox: job.bbox_mm ?? undefined, colors: job.colors ?? [] })
+      setShown({
+        url: job.preview_url,
+        bbox: job.bbox_mm ?? undefined,
+        colors: job.colors ?? [],
+        notes: job.notes ?? [],
+        warnings: job.warnings ?? [],
+        plates: Math.max(job.plates?.length ?? 0, 1),
+      })
     }
   }, [job])
 
   const theme = useViewerTheme()
   const failed = job?.status === 'failed'
+  const clear = covered ? { left: covered } : undefined
 
   return (
-    <div className="relative h-full min-h-0 w-full bg-bg">
+    <div
+      // min-w-0: the canvas is sized in pixels, and without it that width holds the
+      // column open, so the view never narrows again after full screen or a smaller
+      // window.
+      className="relative h-full min-h-0 w-full min-w-0 bg-bg"
+    >
       <Canvas
         key={theme.bg}
         data-testid="preview-canvas"
@@ -107,23 +150,49 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
         />
       </Canvas>
 
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
+      <div
+        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3"
+        style={clear}
+      >
         <div className="flex items-start justify-between gap-3">
-          {plate ? <PlateBadge plate={plate} /> : <span />}
-          {rendering && (
-            <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
-              <Spinner /> Rendering
-            </span>
-          )}
+          {/* Beside the flyout the room can run short: the left side wraps, so the
+              right side's controls stay on screen. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {leading}
+            {plate && <PlateBadge plate={plate} />}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {rendering && (
+              <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
+                <Spinner /> Rendering
+              </span>
+            )}
+            {controls}
+          </div>
         </div>
 
-        {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} />}
+        {!failed && (
+          <div className="flex flex-col items-start gap-2">
+            {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
+            {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
+            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
+          </div>
+        )}
       </div>
 
-      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
+      {failed && (
+        <RenderError
+          log={(job.log_tail ?? []).join('\n')}
+          warnings={job.warnings ?? []}
+          covered={covered}
+        />
+      )}
 
       {!shown && !failed && !rendering && (
-        <p className="absolute inset-0 flex items-center justify-center text-[13px] text-faint">
+        <p
+          className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
+          style={clear}
+        >
           Change a parameter to render.
         </p>
       )}
@@ -141,7 +210,7 @@ function PlateBadge({ plate }: { plate: Plate }) {
   )
 }
 
-function Dimensions({ bbox }: { bbox: BoundingBox }) {
+function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
   const unit = useDisplayUnit()
   return (
     <dl
@@ -150,16 +219,86 @@ function Dimensions({ bbox }: { bbox: BoundingBox }) {
     >
       <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
       <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox, unit)}</dd>
+      {/* #289 — the preview draws every plate at once; the 3MF splits them. */}
+      {plates > 1 && (
+        <>
+          <dt className="mt-1 text-[10px] tracking-wide text-faint">Plates</dt>
+          <dd data-testid="plate-count" className="sb-num mt-0.5 text-[13px] text-ink">
+            {plates}, shown together
+          </dd>
+        </>
+      )}
     </dl>
   )
 }
 
-function RenderError({ log }: { log?: string }) {
+/**
+ * #285 — what the template echoed as `NOTE:`/`WARNING:` on a successful render: a
+ * size it capped or text it shrank to fit the plate. Without it the result simply
+ * differs from the parameters, with nothing to say why.
+ */
+export function RenderNotes({ notes }: { notes: string[] }) {
   return (
-    <div className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm">
+    <section
+      data-testid="render-notes"
+      aria-label="Notes from the template"
+      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+    >
+      <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
+      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
+        {/* An index key: a display-only list, and its text need not be unique. */}
+        {notes.map((note, index) => (
+          <li key={index}>{note}</li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/**
+ * #383 — ScadBuddy's own warnings about a render, say a file parameter's asset
+ * OpenSCAD could not open. Warn-coloured and titled for ScadBuddy, so it reads as
+ * distinct from what the template itself said (`RenderNotes`).
+ */
+export function RenderWarnings({ warnings, inline = false }: { warnings: string[]; inline?: boolean }) {
+  return (
+    <section
+      data-testid="render-warnings"
+      aria-label="Render warnings"
+      className={
+        inline
+          ? 'max-h-28 overflow-auto border-b border-warn/25 px-3 py-2'
+          : 'pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm'
+      }
+    >
+      <h3 className="text-[10px] tracking-wide text-warn">From ScadBuddy</h3>
+      <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-[12px] leading-snug text-warn">
+        {warnings.map((warning, index) => (
+          <li key={index}>{warning}</li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function RenderError({
+  log,
+  warnings,
+  covered,
+}: {
+  log?: string
+  warnings: string[]
+  covered?: string
+}) {
+  return (
+    <div
+      className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
+      style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
+    >
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         OpenSCAD could not render these parameters.
       </p>
+      {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre
         data-testid="render-log"
         className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted"

@@ -61,6 +61,14 @@ Added for #88 on 2026-09-24 (a `GET`):
 |---|---|
 | `slicer-pipeline.json` | `GET /api/v1/slicer-pipelines/1` |
 
+Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit `serial_number` values, tray `tag_uid` (RFID identifier), and `tray_uuid` are redacted (see Step 1 command):
+
+| File | Source |
+|---|---|
+| `archives.json` | `GET /api/v1/archives/?printer_id=1&limit=5` |
+| `printer-status-rack.json` | `GET /api/v1/printers/1/status` |
+| `slicer-presets-h2c.json` | `GET /api/v1/slicer/presets` |
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the

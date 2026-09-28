@@ -1,4 +1,28 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Frame, type Page } from '@playwright/test'
+
+/**
+ * Where `count` presses of Tab land, as seen from `where` (the page, or the frame that
+ * holds the app): `view` inside the full-screen workspace, `page` for the document
+ * itself (past the last control, before the browser wraps round), or else the label of
+ * whatever outside the view took the focus.
+ */
+async function tabStops(page: Page, where: Page | Frame, count: number): Promise<string[]> {
+  const stops: string[] = []
+  for (let press = 0; press < count; press += 1) {
+    await page.keyboard.press('Tab')
+    stops.push(
+      String(
+        await where.evaluate(`(() => {
+          const focused = document.activeElement
+          if (!focused || focused === document.body) return 'page'
+          if (focused.closest('[data-testid="workspace"]')) return 'view'
+          return focused.getAttribute('aria-label') || focused.textContent.trim()
+        })()`),
+      ),
+    )
+  }
+  return stops
+}
 
 test.describe('customizer', () => {
   // These drive the msw worker. Against a real backend the numbers are the real
@@ -41,6 +65,106 @@ test.describe('customizer', () => {
     // The old dimensions stay on screen rather than blanking out.
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
     await expect(page.getByTestId('bbox-readout')).toContainText('81.4', { timeout: 10_000 })
+  })
+
+  test('shows the view full screen with the parameters in a flyout, and puts it back', async ({
+    page,
+  }) => {
+    await page.goto('/m/name-keychain')
+    const bbox = page.getByTestId('bbox-readout')
+    await expect(bbox).toContainText('64.1')
+    const canvas = page.getByTestId('preview-canvas')
+    const docked = await canvas.boundingBox()
+    const parameters = page.getByRole('region', { name: 'Parameters' })
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
+
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click()
+    const exit = page.getByRole('button', { name: 'Exit full screen' })
+    await expect(exit).toBeVisible()
+    // The browser's own full screen: the view alone, its readouts still over the scene.
+    expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
+    const viewport = page.viewportSize()
+    const whole = { x: 0, y: 0, width: viewport?.width, height: viewport?.height }
+    await expect.poll(() => canvas.boundingBox()).toEqual(whole)
+    await expect(bbox).toContainText('64.1')
+    await expect(parameters).toBeHidden()
+    await expect(page.getByTestId('generate')).toBeHidden()
+    // Tab stays in the view: nothing full screen hides takes the focus. The browser's own
+    // full screen sees to that; the stand-in's inert page is checked in the frame below.
+    const stops = await tabStops(page, page, 8)
+    expect(stops).toContain('view')
+    expect(stops.filter((stop) => stop !== 'view' && stop !== 'page')).toEqual([])
+
+    // The parameters fly out over the scene, and a change renders while in full screen.
+    await page.getByRole('button', { name: 'Parameters', exact: true }).click()
+    await expect
+      .poll(() => parameters.boundingBox())
+      .toEqual({ x: 0, y: 0, width: 360, height: viewport?.height })
+    await name.fill('Nova')
+    await expect(bbox).toContainText('46.7 × 37.2 × 6.8 mm')
+    // The readouts move clear of it; the scene stays where it was.
+    expect((await bbox.boundingBox())?.x).toBeGreaterThanOrEqual(360)
+    expect(await canvas.boundingBox()).toEqual(whole)
+
+    // A dialog from the flyout, in the browser's own full screen. The page's part of
+    // Escape: the dialog takes it, and nothing in the page leaves full screen for it.
+    // A real browser leaves anyway, on its own and past any page's reach (spec §5.3);
+    // automated Chromium never hands it the key, so that half is checked by hand.
+    await page.getByRole('button', { name: 'Browse' }).click()
+    const picker = page.getByRole('dialog', { name: 'Choose a font' })
+    await expect(picker).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(picker).toBeHidden()
+    expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
+    await page.getByRole('button', { name: 'Close parameters' }).click()
+    await expect(parameters).toBeHidden()
+
+    await exit.click()
+    await expect(page.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
+    expect(await page.evaluate('document.fullscreenElement')).toBeNull()
+    // Back in its place and no wider: the canvas is sized in pixels, and its full-screen
+    // width must not hold the column open.
+    await expect.poll(() => canvas.boundingBox()).toEqual(docked)
+    await expect(name).toHaveValue('Nova')
+  })
+
+  test('fills the frame where the page may not go full screen, as inside Bambuddy', async ({
+    page,
+    baseURL,
+  }) => {
+    // Bambuddy's External Link frame: another origin, its sandbox flags and no
+    // allow="fullscreen", so the Fullscreen API is refused inside it. The page around it
+    // only has to be on a second origin; a static file there will do.
+    const host = new URL('/mockServiceWorker.js', baseURL)
+    host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
+    await page.goto(host.href)
+    await page.setContent(
+      `<iframe src="${new URL('/m/name-keychain', baseURL).href}" title="ScadBuddy"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+        style="position: fixed; left: 180px; top: 56px; width: 1100px; height: 664px; border: 0"></iframe>`,
+    )
+    const frame = page.frameLocator('iframe')
+    await expect(frame.getByTestId('bbox-readout')).toContainText('64.1', { timeout: 15_000 })
+    const canvas = frame.getByTestId('preview-canvas')
+    const docked = await canvas.boundingBox()
+
+    await frame.getByRole('button', { name: 'Full screen', exact: true }).click()
+    await expect(frame.getByRole('button', { name: 'Exit full screen' })).toBeVisible()
+    await expect
+      .poll(() => canvas.boundingBox())
+      .toEqual({ x: 180, y: 56, width: 1100, height: 664 })
+    // Covered is not gone: Tab must still not reach the page under the stand-in.
+    const app = page.frames().find((candidate) => candidate.url().includes('/m/name-keychain'))
+    if (!app) throw new Error('the ScadBuddy frame is not loaded')
+    const stops = await tabStops(page, app, 8)
+    expect(stops).toContain('view')
+    expect(stops.filter((stop) => stop !== 'view' && stop !== 'page')).toEqual([])
+
+    // Tab may have carried the focus out to the page around the frame.
+    await frame.getByRole('button', { name: 'Exit full screen' }).focus()
+    await page.keyboard.press('Escape')
+    await expect(frame.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
+    await expect.poll(() => canvas.boundingBox()).toEqual(docked)
   })
 
   test('attaches an SVG to a file parameter and renders with it (#204)', async ({ page }) => {
@@ -104,6 +228,32 @@ test.describe('customizer', () => {
 
     await page.getByRole('textbox', { name: 'Name on the tag' }).fill('boom')
     await expect(page.getByTestId('render-log')).toContainText('Compilation failed')
+  })
+
+  test("shows the notes a successful render's template echoed (#285)", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-notes')).toHaveCount(0)
+
+    await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Alexandra')
+    const notes = page.getByRole('region', { name: 'Notes from the template' })
+    await expect(notes).toContainText('text_size reduced from 14 to 9.5 mm')
+    await expect(notes).toContainText('0.4 mm nozzle cannot print them cleanly')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-log')).toHaveCount(0)
+  })
+
+  test("shows ScadBuddy's own job warnings on a successful render (#383)", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-warnings')).toHaveCount(0)
+
+    await page.getByRole('textbox', { name: 'Name on the tag' }).fill('nopic')
+    const warnings = page.getByRole('region', { name: 'Render warnings' })
+    await expect(warnings).toContainText('OpenSCAD could not open pic.svg')
+    await expect(warnings).toContainText('From ScadBuddy')
+    await expect(page.getByTestId('render-notes')).toHaveCount(0)
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
   })
 })
 

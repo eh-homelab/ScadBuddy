@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/v1/assets/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How much the upload store holds
+         * @description The files stored for `// file` parameters: how many, their total bytes, and the caps an upload is refused past (0 is no limit). Files that no output, preset or render job references are removed by a sweep once nothing has uploaded or used them for SCADBUDDY_ASSET_SWEEP_GRACE.
+         */
+        get: operations["get_asset_usage_api_v1_assets_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/fonts": {
         parameters: {
             query?: never;
@@ -89,6 +109,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Render job preview from a named view
+         * @description The job's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer.
+         */
+        get: operations["get_job_view_api_v1_jobs__job_id__views__view__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/libraries": {
         parameters: {
             query?: never;
@@ -109,6 +149,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/libraries/installed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Library checkouts on the volume
+         * @description Every library checkout on the data volume, with the models whose live pins read it. One no model uses can be removed.
+         */
+        get: operations["list_installed_libraries_api_v1_libraries_installed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/libraries/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a library's checkouts from the volume
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         */
+        delete: operations["remove_library_api_v1_libraries__name__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -121,7 +201,7 @@ export interface paths {
         put?: never;
         /**
          * Add a model
-         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
+         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically. The JSON and multipart bodies may name curated `libraries`: each is pinned at the catalogue's ref, as `PUT /models/{slug}/libraries/{name}` would, recorded in the model's first revision and on the parse check's library path.
          */
         post: operations["create_model_api_v1_models_post"];
         delete?: never;
@@ -203,7 +283,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a file for a file parameter
-         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.
+         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422. A file not already stored that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries the store's `usage`; re-uploading stored content is never refused.
          */
         post: operations["upload_asset_api_v1_models__slug__assets_post"];
         delete?: never;
@@ -238,6 +318,26 @@ export interface paths {
         };
         /** An uploaded file's bytes */
         get: operations["get_asset_content_api_v1_models__slug__assets__asset_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Diagnostics of the latest render
+         * @description OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently settled render (done or failed). A 404 when no render of it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`.
+         */
+        get: operations["get_model_diagnostics_api_v1_models__slug__diagnostics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -287,7 +387,11 @@ export interface paths {
         delete: operations["unpin_library_api_v1_models__slug__libraries__name__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Re-pin a model's library from the upstream it already pins
+         * @description Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library, and a 409 when its entry is changed or removed by another request while the clone runs.
+         */
+        patch: operations["repin_library_api_v1_models__slug__libraries__name__patch"];
         trace?: never;
     };
     "/api/v1/models/{slug}/outputs": {
@@ -360,6 +464,26 @@ export interface paths {
         patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a preset
+         * @description Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).
+         */
+        post: operations["duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/readme": {
         parameters: {
             query?: never;
@@ -396,6 +520,26 @@ export interface paths {
         put?: never;
         /** Queue a render */
         post: operations["render_model_api_v1_models__slug__render_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/samples/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A sample file the template ships
+         * @description Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.
+         */
+        get: operations["get_sample_content_api_v1_models__slug__samples__name__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -477,7 +621,7 @@ export interface paths {
         };
         /**
          * A duplicate's upstream: state and merge preview
-         * @description `state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.
+         * @description `state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed; still mergeable) or `gone` (the upstream no longer exists). On `update` and `dismissed`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.
          */
         get: operations["get_upstream_api_v1_models__slug__upstream_get"];
         put?: never;
@@ -539,7 +683,7 @@ export interface paths {
         put?: never;
         /**
          * Merge the upstream's current revision
-         * @description Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.
+         * @description Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. A dismissed update merges the same way. 409 is one of three cases, told apart by the problem's fields: a conflict carries `merged` and `merge_base`; no update to merge carries `state` `current` or `gone`; and a template or upstream that kept changing across every attempt to write the merge carries `state` `update` or `dismissed` and is worth retrying.
          */
         post: operations["merge_upstream_api_v1_models__slug__upstream_merge_post"];
         delete?: never;
@@ -675,6 +819,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/geometry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mesh geometry analysis
+         * @description Printability measurements of the closed per-colour solids on one plate of the
+         *     output (#284): open and non-manifold edges with their locations, bounding box,
+         *     bed contact, height-to-base ratio, overhang area by angle, and estimates of the
+         *     thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
+         *     as in the preview. A 3MF with more than one plate (#289) is measured a plate at
+         *     a time; ``plates`` in the result says how many there are. Computed on first ask
+         *     and cached beside the output.
+         */
+        get: operations["get_output_geometry_api_v1_outputs__output_id__geometry_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs/{output_id}/model.3mf": {
         parameters: {
             query?: never;
@@ -702,7 +872,7 @@ export interface paths {
         /**
          * The 3MF's plates
          * @description What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
-         *     always one plate, which the picker does not ask about.
+         *     one plate unless the template asks for more (#289).
          */
         get: operations["get_output_plates_api_v1_outputs__output_id__plates_get"];
         put?: never;
@@ -776,6 +946,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Output preview from a named view
+         * @description The saved output's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG.
+         */
+        get: operations["get_output_view_api_v1_outputs__output_id__views__view__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/plate": {
         parameters: {
             query?: never;
@@ -841,10 +1031,11 @@ export interface paths {
         get?: never;
         /**
          * Remember this model's printer and spools
-         * @description The rest of what the picker chose, beside the model's pipeline (#78).
+         * @description The printer and spools the picker last chose for this model (#78).
          *
          *     Replaces this model's entry whole; an empty body forgets it, so the picker opens on
-         *     the auto-match again. Needs no Bambuddy, like the pipeline default.
+         *     the auto-match again. Needs no Bambuddy: this is ScadBuddy's own preference, stored
+         *     per slug.
          */
         put: operations["put_model_choices_api_v1_print_models__slug__choices_put"];
         post?: never;
@@ -854,65 +1045,21 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/print/models/{slug}/pipeline": {
+    "/api/v1/print/outputs/{output_id}/choices": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
         /**
-         * Remember this model's pipeline
-         * @description Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug.
+         * What the print dialog offers for this output
+         * @description Printers, installed nozzles, quality tiers and processes, plates with the last one
+         *     used, and the filament step — one read for the whole dialog (spec §3).
          */
-        put: operations["put_model_pipeline_api_v1_print_models__slug__pipeline_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/models/{slug}/pipelines": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Pipelines, with this model's default */
-        get: operations["get_model_pipelines_api_v1_print_models__slug__pipelines_get"];
+        get: operations["get_choices_api_v1_print_outputs__output_id__choices_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/outputs/{output_id}/eligibility": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Which pipelines would accept this output
-         * @description Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
-         *
-         *     Bambuddy judges a *library file*, so there is no eligibility answer before an
-         *     upload. The upload happens once per output: an output is immutable, so a recorded
-         *     ``library_file_id`` still describes this 3MF.
-         *
-         *     Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
-         *     ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
-         *     top-level ``ok`` means only that *some* printer passes.
-         */
-        post: operations["post_eligibility_api_v1_print_outputs__output_id__eligibility_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -938,9 +1085,10 @@ export interface paths {
          *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
          *     this printer": without one the spools are still listed, with their last known
          *     assignment, but the reconciled remaining weights are not. It is also what reads the
-         *     mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
-         *     nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
-         *     re-derived, because naming a preset means reading the whole catalogue again.
+         *     mounted nozzles (#78).
+         *
+         *     ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
+         *     place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -1015,71 +1163,15 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Run a pipeline for this output
-         * @description ``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
-         *     ``force``.
+         * Slice this output with the dialog's choices and queue it
+         * @description Derive every slicer preset from the chosen spools, nozzles, quality and plate
+         *     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
          *
-         *     Without ``pipeline_id`` the model's own default is used, then the global one. A
-         *     blocking eligibility issue is Bambuddy's 409, whose body this passes through as the
-         *     ``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records
-         *     ``eligibility_overridden``.
-         *
-         *     There is deliberately no printer here. ``PipelineRunRequest`` carries none, so a
-         *     class-targeted pipeline fans out by its own ``fanout_strategy`` and reports the
-         *     printer per copy in ``run.jobs[]``.
+         *     A choice the resolver cannot turn into presets — mixed nozzle sizes, or a slot with
+         *     no filament preset for the nozzle — is a 422 before anything is sliced. Which AMS
+         *     tray and extruder each spool feeds is still Bambuddy's decision at dispatch.
          */
         post: operations["post_run_api_v1_print_outputs__output_id__run_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/pipelines": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Create a pipeline from presets
-         * @description ``POST /api/v1/slicer-pipelines/`` verbatim.
-         *
-         *     ``SlicerPipelineCreate`` carries no target or fanout fields, so the new pipeline
-         *     cannot be created pre-aimed at a printer — Bambuddy targets it and the response
-         *     reports what it chose. Re-targeting is a ``PUT`` ScadBuddy does not make.
-         */
-        post: operations["post_pipeline_api_v1_print_pipelines_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/presets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Presets a new pipeline can be built from
-         * @description Printer presets and bed types, plus — once a printer preset is named — the
-         *     process and filament presets compatible with it.
-         *
-         *     The filter is server-side on purpose: the live instance holds ~4000 process and
-         *     filament presets across the cloud and standard tiers, which is not a payload to
-         *     hand a browser so it can filter them itself. Nozzle diameter is not a field
-         *     anywhere; it lives in the process preset's *name* ("… H2C 0.2 nozzle"), which is
-         *     why the form picks a process preset rather than a diameter.
-         */
-        get: operations["get_presets_api_v1_print_presets_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1287,6 +1379,20 @@ export interface components {
             width?: number | null;
         };
         /**
+         * AssetUsage
+         * @description How much the upload store holds, against its caps (#296).
+         */
+        AssetUsage: {
+            /** Bytes */
+            bytes: number;
+            /** Count */
+            count: number;
+            /** Max Count */
+            max_count: number;
+            /** Max Total Bytes */
+            max_total_bytes: number;
+        };
+        /**
          * AttachResult
          * @description What was attached, so the UI can say so rather than claiming more than happened.
          */
@@ -1310,17 +1416,6 @@ export interface components {
             /** Printers */
             printers?: components["schemas"]["Printer"][];
         };
-        /**
-         * BedTypeChoice
-         * @description One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``
-         *     carries, ``label`` what Bambu Studio's own bed picker calls it.
-         */
-        BedTypeChoice: {
-            /** Label */
-            label: string;
-            /** Value */
-            value: string;
-        };
         /** Body_create_model_api_v1_models_post */
         Body_create_model_api_v1_models_post: {
             /** Description */
@@ -1330,6 +1425,11 @@ export interface components {
              * @description The .scad source, at most 1,000,000 characters
              */
             file?: string | null;
+            /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, one per field; a pin the model.json carries wins
+             */
+            libraries?: string[] | null;
             /**
              * Meta
              * @description Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
@@ -1446,6 +1546,40 @@ export interface components {
              */
             source: string;
         };
+        /** ChoicesView */
+        ChoicesView: {
+            /**
+             * Bed Type
+             * @default Textured PEI Plate
+             */
+            bed_type: string;
+            /** Bed Types */
+            bed_types?: string[];
+            /** Filament Presets */
+            filament_presets?: {
+                [key: string]: components["schemas"]["FilamentPresetOption"][];
+            };
+            filaments: components["schemas"]["FilamentOptions"];
+            /** Installed */
+            installed?: components["schemas"]["InstalledNozzle"][];
+            /** Last Bed Type */
+            last_bed_type?: string | null;
+            model_choices?: components["schemas"]["ModelPrintChoices"];
+            /** Nozzle Sizes */
+            nozzle_sizes?: string[];
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printers */
+            printers?: components["schemas"]["Printer"][];
+            /** Processes */
+            processes?: {
+                [key: string]: string[];
+            };
+            /** Tiers */
+            tiers?: {
+                [key: string]: components["schemas"]["TierOption"][];
+            };
+        };
         /** ConnectionTest */
         ConnectionTest: {
             /** Detail */
@@ -1479,7 +1613,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
             /** Waiting Reason */
             waiting_reason?: string | null;
         };
@@ -1552,64 +1686,17 @@ export interface components {
              */
             source: "record" | "3mf";
         };
-        /**
-         * EligibilityCheck
-         * @description ``pipeline_ids`` omitted means every pipeline Bambuddy has.
-         */
-        EligibilityCheck: {
-            /** Pipeline Ids */
-            pipeline_ids?: number[] | null;
-        };
-        /**
-         * EligibilityIssue
-         * @description ``kind`` is an open enum here on purpose — Bambuddy adds kinds between
-         *     releases and an unknown one must still render, not 502 the whole report.
-         */
-        EligibilityIssue: {
-            /** Actual */
-            actual?: string | null;
-            /** Expected */
-            expected?: string | null;
-            /** Kind */
-            kind: string;
-            /** Slot Index */
-            slot_index?: number | null;
-        };
-        /** EligibilityOverview */
-        EligibilityOverview: {
-            /** Library File Id */
-            library_file_id: number;
-            /** Reports */
-            reports?: components["schemas"]["PipelineReport"][];
-        };
-        /**
-         * EligibilityReport
-         * @description Returned by ``check-eligibility`` and, on a 409, by ``run``.
-         *
-         *     Under ``target_kind="printer_class"`` ``ok`` is true when *at least one* matching
-         *     printer passes, and the per-printer detail moves to ``printer_reports`` — ``issues``
-         *     then carries only class-level problems. Reading ``ok`` as "every printer is ready"
-         *     is wrong for that target kind.
-         */
-        EligibilityReport: {
-            /** Issues */
-            issues?: components["schemas"]["EligibilityIssue"][];
-            /** Ok */
-            ok: boolean;
-            /** Printer Reports */
-            printer_reports?: components["schemas"]["PerPrinterReport"][];
-            /**
-             * Target Kind
-             * @default specific_printer
-             * @enum {string}
-             */
-            target_kind: "specific_printer" | "printer_class";
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-            /** Target Printer Name */
-            target_printer_name?: string | null;
+        /** FeatureEstimate */
+        FeatureEstimate: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Colour */
+            colour: string;
+            /** Islands */
+            islands: number;
+            /** Min Extent Mm */
+            min_extent_mm: number;
+            /** Part */
+            part: number;
         };
         /**
          * FilamentOptions
@@ -1624,8 +1711,6 @@ export interface components {
             library_file_id: number;
             /** Nozzles */
             nozzles?: components["schemas"]["NozzleInfo"][];
-            /** Pipeline Nozzle Diameter */
-            pipeline_nozzle_diameter?: string | null;
             /** Printer Id */
             printer_id?: number | null;
             /** Printer Name */
@@ -1658,6 +1743,15 @@ export interface components {
             slots?: components["schemas"]["SlotChoice"][];
         };
         /**
+         * FilamentPresetOption
+         * @description One row of Advanced mode's per-slot override: all the dialog reads of a preset.
+         */
+        FilamentPresetOption: {
+            /** Name */
+            name: string;
+            ref: components["schemas"]["PresetRef"];
+        };
+        /**
          * FilamentWarning
          * @description Advisory, never blocking. Bambuddy's own refusals are the eligibility report.
          */
@@ -1666,7 +1760,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out" | "nozzle-mismatch";
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out" | "mixed-sizes" | "no-process" | "not-installed" | "plate-differs" | "hf-unsupported";
             /** Message */
             message: string;
             /** Slot Id */
@@ -1745,6 +1839,50 @@ export interface components {
              */
             weight: number;
         };
+        /**
+         * GeometryAnalysis
+         * @description What :func:`analyze_geometry` measured. See the module docstring for methods.
+         */
+        GeometryAnalysis: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Bed Contact Area Mm2 */
+            bed_contact_area_mm2: number;
+            /** Bed Z */
+            bed_z: number;
+            /** Edges */
+            edges?: components["schemas"]["MeshEdge"][];
+            /**
+             * Edges Truncated
+             * @default false
+             */
+            edges_truncated: boolean;
+            footprint?: components["schemas"]["BoundingBox"] | null;
+            /** Height Mm */
+            height_mm: number;
+            /** Height To Base Ratio */
+            height_to_base_ratio?: number | null;
+            /** Overhangs */
+            overhangs: components["schemas"]["OverhangBucket"][];
+            /** Parts */
+            parts: components["schemas"]["PartGeometry"][];
+            /**
+             * Plate
+             * @default 1
+             */
+            plate: number;
+            /**
+             * Plates
+             * @default 1
+             */
+            plates: number;
+            smallest_feature?: components["schemas"]["FeatureEstimate"] | null;
+            thinnest_wall?: components["schemas"]["WallEstimate"] | null;
+            /**
+             * Version
+             * @default 2
+             */
+            version: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1790,6 +1928,30 @@ export interface components {
             /** Styles */
             styles?: string[];
         };
+        /**
+         * InstalledLibrary
+         * @description One checkout on the volume, and the models whose live pins read it.
+         */
+        InstalledLibrary: {
+            /** Commit */
+            commit: string;
+            /** Name */
+            name: string;
+            /** Used By */
+            used_by?: string[];
+        };
+        /** InstalledNozzle */
+        InstalledNozzle: {
+            /** Count */
+            count: number;
+            /**
+             * Flow
+             * @enum {string}
+             */
+            flow: "standard" | "high_flow";
+            /** Size */
+            size: string;
+        };
         /** JobStatus */
         JobStatus: {
             bbox_mm?: components["schemas"]["BoundingBox"] | null;
@@ -1800,6 +1962,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
             /** Error */
             error?: string | null;
             /** Finished At */
@@ -1810,12 +1976,16 @@ export interface components {
             log_tail?: string[];
             /** Model Version */
             model_version?: string | null;
+            /** Notes */
+            notes?: string[] | null;
             /** Params */
             params?: {
                 [key: string]: boolean | number | string;
             };
             /** Parts */
             parts?: components["schemas"]["PartInfo"][] | null;
+            /** Plates */
+            plates?: components["schemas"]["PlateInfo"][] | null;
             /** Preview Url */
             preview_url?: string | null;
             /** Slug */
@@ -1842,6 +2012,14 @@ export interface components {
              * @description An https git URL; the catalogue's when omitted
              */
             url?: string | null;
+        };
+        /** LibraryRepinRequest */
+        LibraryRepinRequest: {
+            /**
+             * Ref
+             * @description The tag or branch to pin; the ref already pinned when omitted, which moves a branch pin to where that branch is now
+             */
+            ref?: string | null;
         };
         /**
          * LoadedAt
@@ -1900,6 +2078,58 @@ export interface components {
             theirs: string;
         };
         /**
+         * MeshEdge
+         * @description One defective edge, located so the preview can draw it.
+         */
+        MeshEdge: {
+            /** Colour */
+            colour: string;
+            /** End */
+            end: [
+                number,
+                number,
+                number
+            ];
+            /** Faces */
+            faces: number;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "open" | "non_manifold";
+            /** Part */
+            part: number;
+            /** Start */
+            start: [
+                number,
+                number,
+                number
+            ];
+        };
+        /**
+         * ModelDiagnostics
+         * @description What the latest settled render of a model reported (#252).
+         */
+        ModelDiagnostics: {
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Job Id */
+            job_id: string;
+            /** Model Version */
+            model_version?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "done" | "failed";
+        };
+        /**
          * ModelLibrary
          * @description One entry of a model's ``libraries``: a library pinned for that model.
          */
@@ -1933,12 +2163,22 @@ export interface components {
          *     one case the picker asks. ``filament_plan`` is only a plan the user moved off the
          *     auto-match: a spool no longer in the inventory is dropped by the picker, which then
          *     falls back to the auto-match for that slot.
+         *
+         *     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
+         *     (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
+         *     written before them still loads; an empty ``nozzles`` means the dialog's default.
          */
         ModelPrintChoices: {
             /** Filament Plan */
             filament_plan?: components["schemas"]["SlotChoice"][];
+            /** Nozzles */
+            nozzles?: components["schemas"]["NozzleChoice"][];
             /** Printer Id */
             printer_id?: number | null;
+            /** Process Name */
+            process_name?: string | null;
+            /** Tier */
+            tier?: ("fine" | "standard" | "draft") | null;
         };
         /** ModelRecord */
         ModelRecord: {
@@ -2005,6 +2245,26 @@ export interface components {
             message: string;
             /** Short */
             short: string;
+        };
+        /**
+         * NozzleChoice
+         * @description One extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4).
+         *
+         *     Here rather than in ``resolver`` so the settings store can remember it per model
+         *     without importing the resolver (which reaches the client, which imports the store).
+         */
+        NozzleChoice: {
+            /**
+             * Flow
+             * @default standard
+             * @enum {string}
+             */
+            flow: "standard" | "high_flow";
+            /**
+             * Size
+             * @enum {string}
+             */
+            size: "0.2" | "0.4" | "0.6" | "0.8";
         };
         /**
          * NozzleInfo
@@ -2087,6 +2347,19 @@ export interface components {
             /** Index */
             index: number;
         };
+        /**
+         * OverhangBucket
+         * @description Faces tipped at least ``min_angle_deg`` below horizontal (cumulative).
+         */
+        OverhangBucket: {
+            /** Area Mm2 */
+            area_mm2: number;
+            bbox?: components["schemas"]["BoundingBox"] | null;
+            /** Faces */
+            faces: number;
+            /** Min Angle Deg */
+            min_angle_deg: number;
+        };
         /** Overshoot */
         Overshoot: {
             /**
@@ -2128,6 +2401,14 @@ export interface components {
             };
         };
         /**
+         * ParamPresetDuplicate
+         * @description The copy's name; its values are the original's.
+         */
+        ParamPresetDuplicate: {
+            /** Name */
+            name: string;
+        };
+        /**
          * ParamPresetUpdate
          * @description A rename, a new set of values, or both. ``params`` replaces the old ones whole.
          */
@@ -2162,6 +2443,8 @@ export interface components {
             name: string;
             /** Options */
             options?: components["schemas"]["Option"][];
+            /** Samples */
+            samples?: string[];
             /** Step */
             step?: number | null;
             /**
@@ -2169,6 +2452,31 @@ export interface components {
              * @enum {string}
              */
             type: "number" | "integer" | "string" | "boolean" | "select" | "color" | "font" | "slider" | "file";
+        };
+        /** PartGeometry */
+        PartGeometry: {
+            bbox: components["schemas"]["BoundingBox"] | null;
+            /** Colour */
+            colour: string;
+            /** Edges Checked */
+            edges_checked: boolean;
+            /** Name */
+            name: string;
+            /** Non Manifold Edges */
+            non_manifold_edges?: number | null;
+            /** Open Edges */
+            open_edges?: number | null;
+            /** Part */
+            part: number;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "solid" | "split";
+            /** Triangles */
+            triangles: number;
+            /** Volume Mm3 */
+            volume_mm3?: number | null;
         };
         /** PartInfo */
         PartInfo: {
@@ -2198,6 +2506,11 @@ export interface components {
              */
             force: boolean;
             /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, in the model's first revision and before the parse check
+             */
+            libraries?: string[];
+            /**
              * Name
              * @description Display name; its slug is derived from it
              */
@@ -2209,17 +2522,6 @@ export interface components {
             source: string;
             /** Tags */
             tags?: string[];
-        };
-        /** PerPrinterReport */
-        PerPrinterReport: {
-            /** Issues */
-            issues?: components["schemas"]["EligibilityIssue"][];
-            /** Ok */
-            ok: boolean;
-            /** Printer Id */
-            printer_id: number;
-            /** Printer Name */
-            printer_name: string;
         };
         /** Pipeline */
         Pipeline: {
@@ -2252,222 +2554,6 @@ export interface components {
             /** Target Printer Id */
             target_printer_id?: number | null;
         };
-        /** PipelineChoices */
-        PipelineChoices: {
-            /** Default Pipeline Id */
-            default_pipeline_id?: number | null;
-            /** Global Pipeline Id */
-            global_pipeline_id?: number | null;
-            model_choices?: components["schemas"]["ModelPrintChoices"];
-            /** Model Pipeline Id */
-            model_pipeline_id?: number | null;
-            /** Pipelines */
-            pipelines?: components["schemas"]["PipelineView"][];
-            /** Printer Bed Types */
-            printer_bed_types?: {
-                [key: string]: string;
-            };
-            /** Printers */
-            printers?: components["schemas"]["Printer"][];
-        };
-        /**
-         * PipelineCreate
-         * @description ``POST /api/v1/slicer-pipelines/``.
-         *
-         *     ``SlicerPipelineCreate`` carries **no** target or fanout fields even though
-         *     ``SlicerPipelineResponse`` returns them — a pipeline is created against the
-         *     defaults and re-targeted with ``PUT``, which ScadBuddy does not do.
-         */
-        PipelineCreate: {
-            /** Bed Type */
-            bed_type?: string | null;
-            /** Description */
-            description?: string | null;
-            /** Filament Presets */
-            filament_presets: components["schemas"]["PresetRef"][];
-            /** Name */
-            name: string;
-            printer_preset: components["schemas"]["PresetRef"];
-            process_preset: components["schemas"]["PresetRef"];
-        };
-        /** PipelineDefault */
-        PipelineDefault: {
-            /** Global Pipeline Id */
-            global_pipeline_id?: number | null;
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-            /** Slug */
-            slug: string;
-        };
-        /**
-         * PipelineDefaultPatch
-         * @description ``null`` clears this model's default, falling back to the global one.
-         */
-        PipelineDefaultPatch: {
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-        };
-        /**
-         * PipelineJob
-         * @description One copy of a run: the queue entry it became and the printer it landed on.
-         */
-        PipelineJob: {
-            /** Assigned Printer Id */
-            assigned_printer_id?: number | null;
-            /** Assigned Printer Name */
-            assigned_printer_name?: string | null;
-            /** Completed At */
-            completed_at?: string | null;
-            /** Copy Index */
-            copy_index: number;
-            /** Dispatched At */
-            dispatched_at?: string | null;
-            /** Error Message */
-            error_message?: string | null;
-            /** Id */
-            id: number;
-            /** Pipeline Run Id */
-            pipeline_run_id: number;
-            /** Queue Entry Id */
-            queue_entry_id?: number | null;
-            /** Status */
-            status: string;
-        };
-        /**
-         * PipelineReport
-         * @description Bambuddy's report for one pipeline, passed through as it came.
-         *
-         *     ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
-         *     judged, which is neither ready nor blocked, and the picker says so rather than
-         *     guessing either way. That either-or is enforced below rather than merely described,
-         *     because the browser branches on it: a row with neither would render as silently
-         *     absent, and one with both would claim two states at once.
-         */
-        PipelineReport: {
-            /** Error */
-            error?: string | null;
-            /** Pipeline Id */
-            pipeline_id: number;
-            report?: components["schemas"]["EligibilityReport"] | null;
-        };
-        /** PipelineRun */
-        PipelineRun: {
-            /** Completed At */
-            completed_at?: string | null;
-            /**
-             * Copies
-             * @default 1
-             */
-            copies: number;
-            /**
-             * Copies Cancelled
-             * @default 0
-             */
-            copies_cancelled: number;
-            /**
-             * Copies Completed
-             * @default 0
-             */
-            copies_completed: number;
-            /**
-             * Copies Failed
-             * @default 0
-             */
-            copies_failed: number;
-            /**
-             * Copies In Progress
-             * @default 0
-             */
-            copies_in_progress: number;
-            /** Created At */
-            created_at?: string | null;
-            /**
-             * Eligibility Overridden
-             * @default false
-             */
-            eligibility_overridden: boolean;
-            /** Error Message */
-            error_message?: string | null;
-            /** Fanout Strategy */
-            fanout_strategy?: ("max_parallel" | "fill_one_first" | "round_robin") | null;
-            /** Id */
-            id: number;
-            /** Jobs */
-            jobs?: components["schemas"]["PipelineJob"][];
-            /** Parent Run Id */
-            parent_run_id?: number | null;
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-            /** Pipeline Name */
-            pipeline_name?: string | null;
-            /** Slice Job Id */
-            slice_job_id?: number | null;
-            /** Sliced Library File Id */
-            sliced_library_file_id?: number | null;
-            /** Source Archive Id */
-            source_archive_id?: number | null;
-            /** Source Filename */
-            source_filename?: string | null;
-            /** Source Library File Id */
-            source_library_file_id?: number | null;
-            /** Started At */
-            started_at?: string | null;
-            /** Status */
-            status: string;
-            /** Target Kind */
-            target_kind?: ("specific_printer" | "printer_class") | null;
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-        };
-        /**
-         * PipelineView
-         * @description A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and
-         *     the printers its target comes out as.
-         */
-        PipelineView: {
-            /** Bed Type */
-            bed_type?: string | null;
-            /** Bed Types */
-            bed_types?: components["schemas"]["BedTypeChoice"][];
-            /** Description */
-            description?: string | null;
-            /**
-             * Fanout Strategy
-             * @enum {string}
-             */
-            fanout_strategy: "max_parallel" | "fill_one_first" | "round_robin";
-            /** Filament Preset Names */
-            filament_preset_names?: (string | null)[];
-            /** Filament Presets */
-            filament_presets?: components["schemas"]["PresetRef"][];
-            /** Id */
-            id: number;
-            /** Name */
-            name: string;
-            /** Nozzle Diameter */
-            nozzle_diameter?: string | null;
-            /** Printer Ids */
-            printer_ids?: number[];
-            printer_preset?: components["schemas"]["PresetRef"] | null;
-            /** Printer Preset Name */
-            printer_preset_name?: string | null;
-            process_preset?: components["schemas"]["PresetRef"] | null;
-            /** Process Preset Name */
-            process_preset_name?: string | null;
-            /**
-             * Target Kind
-             * @enum {string}
-             */
-            target_kind: "specific_printer" | "printer_class";
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-            /** Target Printer Name */
-            target_printer_name?: string | null;
-        };
         /** PlateArea */
         PlateArea: {
             /** Max X */
@@ -2496,6 +2582,18 @@ export interface components {
             plate: components["schemas"]["PlateView"];
             /** Problem */
             problem?: string | null;
+        };
+        /**
+         * PlateInfo
+         * @description One plate of a multi-plate render (spec §6.4): what the customizer checks
+         *     against the printer, plate by plate.
+         */
+        PlateInfo: {
+            bbox_mm: components["schemas"]["BoundingBox"];
+            /** Colors */
+            colors: string[];
+            /** Index */
+            index: number;
         };
         /**
          * PlateSend
@@ -2528,41 +2626,6 @@ export interface components {
             usable: components["schemas"]["PlateArea"];
         };
         /**
-         * PresetChoice
-         * @description One row of the "New pipeline" form's pickers.
-         *
-         *     ``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns
-         *     one, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.
-         *     An empty list means the preset declares no restriction, not that it fits nothing.
-         */
-        PresetChoice: {
-            /** Compatible Printers */
-            compatible_printers?: string[];
-            /** Filament Colour */
-            filament_colour?: string | null;
-            /** Filament Type */
-            filament_type?: string | null;
-            /** Name */
-            name: string;
-            ref: components["schemas"]["PresetRef"];
-        };
-        /**
-         * PresetOptions
-         * @description Printer presets and bed types always; process and filament only once a printer
-         *     preset is named, because unfiltered those two tiers are thousands of rows.
-         */
-        PresetOptions: {
-            /** Bed Types */
-            bed_types?: string[];
-            /** Filament */
-            filament?: components["schemas"]["PresetChoice"][];
-            /** Printer */
-            printer?: components["schemas"]["PresetChoice"][];
-            printer_preset?: components["schemas"]["PresetRef"] | null;
-            /** Process */
-            process?: components["schemas"]["PresetChoice"][];
-        };
-        /**
          * PresetRef
          * @description A slicer preset, identified by tier and id (``{"source":"cloud","id":"GM041"}``).
          */
@@ -2574,6 +2637,27 @@ export interface components {
              * @enum {string}
              */
             source: "orca_cloud" | "cloud" | "local" | "standard";
+        };
+        /** PrintChoices */
+        PrintChoices: {
+            /**
+             * Bed Type
+             * @default Textured PEI Plate
+             */
+            bed_type: string;
+            /** Filament Overrides */
+            filament_overrides?: {
+                [key: string]: components["schemas"]["PresetRef"];
+            };
+            /** Nozzles */
+            nozzles: components["schemas"]["NozzleChoice"][];
+            /** Process Name */
+            process_name?: string | null;
+            /**
+             * Tier
+             * @default standard
+             */
+            tier: ("fine" | "standard" | "draft") | null;
         };
         /**
          * PrintOptions
@@ -2731,28 +2815,13 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
-         * @description ``pipeline_id`` omitted means "whatever this model defaults to".
-         *
-         *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
-         *     only offers it once the issues have been shown.
-         *
-         *     The request does not choose its route; what it needs does. A pipeline run takes
-         *     only a source, ``copies`` and ``force``, so it is sliced and queued instead when
-         *     either:
-         *
-         *     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
-         *       queue-item fields exist on no other Bambuddy call (#87); or
-         *     - a remembered print option applies that a run cannot carry (#124). The options
-         *       resolve global → per-printer → per-model → this request's ``options`` and
-         *       ``copies``; or
-         *     - it names a plate type, or any plate but the first (#83). A run slices plate 1
-         *       with the pipeline's own bed type.
-         *
-         *     Otherwise it runs the pipeline exactly as before.
+         * @description The print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and
+         *     plate. Every slicer preset is derived from them by the resolver; there is no
+         *     pipeline to name, and the run always slices then queues.
          */
         PrintRunRequest: {
             /**
@@ -2760,19 +2829,11 @@ export interface components {
              * @default false
              */
             all_plates: boolean;
-            /** Bed Type */
-            bed_type?: string | null;
+            choices: components["schemas"]["PrintChoices"];
             /** Copies */
             copies?: number | null;
-            filament_plan?: components["schemas"]["FilamentPlan"] | null;
-            /**
-             * Force
-             * @default false
-             */
-            force: boolean;
+            filament_plan: components["schemas"]["FilamentPlan"];
             options?: components["schemas"]["PrintOptions"];
-            /** Pipeline Id */
-            pipeline_id?: number | null;
             /**
              * Plate Id
              * @default 1
@@ -2785,11 +2846,9 @@ export interface components {
         };
         /**
          * PrintRunResult
-         * @description One shape for both routes, so the caller need not know which one ran.
-         *
-         *     ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
-         *     populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
-         *     is a single row carrying ``quantity``. Following either to completion is #89.
+         * @description What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
+         *     reader of the result need not change until the dialog does (following it to
+         *     completion is #89).
          */
         PrintRunResult: {
             /** Bambuddy Url */
@@ -2800,8 +2859,6 @@ export interface components {
             folder_id?: number | null;
             /** Library File Id */
             library_file_id: number;
-            /** Pipeline Id */
-            pipeline_id: number;
             /** Printer Id */
             printer_id?: number | null;
             /** Project Id */
@@ -2810,11 +2867,10 @@ export interface components {
             queue_item_ids?: number[];
             /**
              * Route
-             * @default pipeline
-             * @enum {string}
+             * @default slice_queue
+             * @constant
              */
-            route: "pipeline" | "slice_queue";
-            run?: components["schemas"]["PipelineRun"] | null;
+            route: "slice_queue";
             /** Slice Job Id */
             slice_job_id?: number | null;
             /** Sliced Library File Id */
@@ -2965,6 +3021,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -3180,6 +3238,16 @@ export interface components {
             /** Subtype */
             subtype?: string | null;
         };
+        /** TierOption */
+        TierOption: {
+            /** Process Name */
+            process_name: string;
+            /**
+             * Tier
+             * @enum {string}
+             */
+            tier: "fine" | "standard" | "draft";
+        };
         /**
          * Upstream
          * @description The template a duplicate was copied from, and the revision of it it includes.
@@ -3223,7 +3291,7 @@ export interface components {
         };
         /** UpstreamStatus */
         UpstreamStatus: {
-            /** @description The merge a `POST …/upstream/merge` would make; on update only */
+            /** @description The merge a `POST …/upstream/merge` would make; on update or dismissed */
             preview?: components["schemas"]["MergePreview"] | null;
             /**
              * Revision
@@ -3292,6 +3360,23 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** WallEstimate */
+        WallEstimate: {
+            /** At */
+            at: [
+                number,
+                number,
+                number
+            ];
+            /** Colour */
+            colour: string;
+            /** Part */
+            part: number;
+            /** Samples */
+            samples: number;
+            /** Thickness Mm */
+            thickness_mm: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -3301,6 +3386,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_asset_usage_api_v1_assets_usage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetUsage"];
+                };
+            };
+        };
+    };
     get_fonts_api_v1_fonts_get: {
         parameters: {
             query?: never;
@@ -3449,6 +3554,41 @@ export interface operations {
             };
         };
     };
+    get_job_view_api_v1_jobs__job_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_libraries_api_v1_libraries_get: {
         parameters: {
             query?: never;
@@ -3465,6 +3605,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogueLibrary"][];
+                };
+            };
+        };
+    };
+    list_installed_libraries_api_v1_libraries_installed_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstalledLibrary"][];
+                };
+            };
+        };
+    };
+    remove_library_api_v1_libraries__name__delete: {
+        parameters: {
+            query?: {
+                /** @description Only this checkout; every one when omitted */
+                commit?: string | null;
+            };
+            header?: never;
+            path: {
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3794,6 +3987,37 @@ export interface operations {
             };
         };
     };
+    get_model_diagnostics_api_v1_models__slug__diagnostics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelDiagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     duplicate_model_api_v1_models__slug__duplicate_post: {
         parameters: {
             query?: never;
@@ -3878,6 +4102,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    repin_library_api_v1_models__slug__libraries__name__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryRepinRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -4097,6 +4358,42 @@ export interface operations {
             };
         };
     };
+    duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetDuplicate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_readme_api_v1_models__slug__readme_get: {
         parameters: {
             query?: never;
@@ -4216,6 +4513,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderAccepted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_sample_content_api_v1_models__slug__samples__name__get: {
+        parameters: {
+            query?: {
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                slug: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                    "image/svg+xml": unknown;
                 };
             };
             /** @description Validation Error */
@@ -4550,6 +4889,13 @@ export interface operations {
                     "application/json": components["schemas"]["UpstreamMerge"];
                 };
             };
+            /** @description The merge conflicts (`merged`, `merge_base`, `conflicts`: resolve it in the editor), there is no update to merge (`state` is `current` or `gone`), or the template or its upstream kept changing while the merge was worked out (`state` is `update` or `dismissed`: retry) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -4815,6 +5161,40 @@ export interface operations {
             };
         };
     };
+    get_output_geometry_api_v1_outputs__output_id__geometry_get: {
+        parameters: {
+            query?: {
+                /** @description The plate to measure (1-based) */
+                plate?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeometryAnalysis"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     download_output_api_v1_outputs__output_id__model_3mf_get: {
         parameters: {
             query?: never;
@@ -5008,6 +5388,41 @@ export interface operations {
             };
         };
     };
+    get_output_view_api_v1_outputs__output_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_plate_api_v1_plate_get: {
         parameters: {
             query?: {
@@ -5135,47 +5550,14 @@ export interface operations {
             };
         };
     };
-    put_model_pipeline_api_v1_print_models__slug__pipeline_put: {
+    get_choices_api_v1_print_outputs__output_id__choices_get: {
         parameters: {
-            query?: never;
+            query?: {
+                printer_id?: number | null;
+            };
             header?: never;
             path: {
-                slug: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PipelineDefaultPatch"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PipelineDefault"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_model_pipelines_api_v1_print_models__slug__pipelines_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                slug: string;
+                output_id: string;
             };
             cookie?: never;
         };
@@ -5187,42 +5569,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PipelineChoices"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    post_eligibility_api_v1_print_outputs__output_id__eligibility_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                output_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["EligibilityCheck"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EligibilityOverview"];
+                    "application/json": components["schemas"]["ChoicesView"];
                 };
             };
             /** @description Validation Error */
@@ -5240,8 +5587,8 @@ export interface operations {
         parameters: {
             query?: {
                 printer_id?: number | null;
-                nozzle_diameter?: string | null;
                 plate_id?: number;
+                all_plates?: boolean;
             };
             header?: never;
             path: {
@@ -5359,71 +5706,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PrintRunResult"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    post_pipeline_api_v1_print_pipelines_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PipelineCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PipelineView"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_presets_api_v1_print_presets_get: {
-        parameters: {
-            query?: {
-                printer_preset_source?: ("orca_cloud" | "cloud" | "local" | "standard") | null;
-                printer_preset_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PresetOptions"];
                 };
             };
             /** @description Validation Error */
@@ -5581,8 +5863,6 @@ export interface operations {
     get_print_options_api_v1_settings_print_options_get: {
         parameters: {
             query?: {
-                /** @description The model about to be printed, whose own pipeline may differ */
-                slug?: string | null;
                 /** @description The pipeline about to run, when the caller has already chosen one */
                 pipeline_id?: number | null;
             };

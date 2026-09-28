@@ -1,0 +1,28 @@
+{
+  "name": "scadbuddy",
+  "displayName": "ScadBuddy",
+  "version": "0.1.0",
+  "description": "Author OpenSCAD templates, drive the ScadBuddy customizer and send multi-colour prints to Bambuddy, through ScadBuddy's own MCP tools.",
+  "author": {
+    "name": "eh-homelab",
+    "url": "https://github.com/eh-homelab"
+  },
+  "homepage": "https://github.com/eh-homelab/ScadBuddy/tree/main/plugins/scadbuddy",
+  "repository": "https://github.com/eh-homelab/ScadBuddy",
+  "license": "MIT",
+  "keywords": ["openscad", "3d-printing", "bambuddy", "bambu-lab", "customizer", "mcp"],
+  "userConfig": {
+    "scadbuddy_url": {
+      "type": "string",
+      "title": "ScadBuddy URL",
+      "description": "The HTTPS base URL of your ScadBuddy, with no trailing slash, e.g. https://scadbuddy.example.org. The plugin connects to <url>/mcp.",
+      "required": true
+    },
+    "scadbuddy_token": {
+      "type": "string",
+      "title": "ScadBuddy MCP token",
+      "description": "A bearer token minted in ScadBuddy Settings. Leave it empty only when the operator has set the MCP auth mode to 'disabled'.",
+      "sensitive": true
+    }
+  }
+}

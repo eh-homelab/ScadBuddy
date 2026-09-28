@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
+import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import { trackingDuplicates } from '../lib/problems'
 import { Button } from './ui/Button'
@@ -60,7 +61,7 @@ export function DeleteModelButton({ slug, name }: Props) {
             <Button variant="ghost" onClick={close} disabled={deleting}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => void confirm()} disabled={deleting}>
+            <Button variant="danger" onClick={() => void confirm()} disabled={deleting} {...USER_ONLY}>
               {deleting ? <Spinner /> : duplicates ? 'Delete anyway' : 'Delete model'}
             </Button>
           </>

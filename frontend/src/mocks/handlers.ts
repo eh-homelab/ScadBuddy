@@ -1,11 +1,12 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
+  ChoicesView,
   BoundingBox,
   CatalogueFont,
   Diagnostic,
-  EligibilityOverview,
   FilamentOptions,
   FontFamily,
   Job,
@@ -22,14 +23,10 @@ import type {
   ParamPresetDuplicate,
   ParamPresetUpdate,
   ParamValue,
-  PipelineChoices,
-  PipelineCreate,
-  PipelineView,
   Plate,
   PlateFit,
-  PresetOptions,
-  PresetRef,
   PrintProgress,
+  PrintRunRequest,
   PrintRunResult,
   PrintOptions,
   PrintOptionsState,
@@ -45,6 +42,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { realtimeHandler } from './realtime'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -54,12 +52,33 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
 
 interface MockJob extends Job {
   polls: number
+}
+
+/** `ModelPrintChoices()` on the backend: every field at its default. */
+const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+  printer_id: null,
+  filament_plan: [],
+  nozzles: [],
+  tier: null,
+  process_name: null,
+}
+
+/** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
+function isNoModelChoices(choices: ModelPrintChoices): boolean {
+  return (
+    choices.printer_id == null &&
+    !choices.filament_plan?.length &&
+    !choices.nozzles?.length &&
+    choices.tier == null &&
+    choices.process_name == null
+  )
 }
 
 const state = {
@@ -77,9 +96,6 @@ const state = {
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
-  pipelines: [...fixtures.pipelineViews] as PipelineView[],
-  /** #86 — per-model default pipelines, the store's `model_pipelines`. */
-  modelPipelines: {} as Record<string, number>,
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
@@ -96,6 +112,10 @@ const state = {
   libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
   /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
   assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
+  /** #237 — other files a duplicate's merge takes or keeps; none unless a test sets them. */
+  mergeFiles: {} as Record<string, MergeFiles>,
+  /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
+  plates: {} as Record<string, NonNullable<Job['plates']>>,
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -115,8 +135,6 @@ export function resetMockState(): void {
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
-  state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
-  state.modelPipelines = {}
   state.modelChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
@@ -127,6 +145,8 @@ export function resetMockState(): void {
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
+  state.mergeFiles = {}
+  state.plates = {}
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -135,6 +155,25 @@ export function resetMockState(): void {
 /** Replaces a template's presets, so a test can start at a state that is slow to build. */
 export function setMockPresets(slug: string, presets: ParamPreset[]): void {
   state.presets[slug] = presets
+}
+
+type MergeFiles = Pick<MergePreview, 'taken' | 'kept'>
+
+/**
+ * #237 — the files besides `model.scad` that merging `slug`'s upstream takes (unchanged
+ * here since `base`) or keeps (changed on both sides). The mock tracks no other files,
+ * so without this both lists are empty.
+ */
+export function setMockMergeFiles(slug: string, files: MergeFiles): void {
+  state.mergeFiles[slug] = files
+}
+
+/**
+ * #289 — the plates every finished render of `slug` reports, as a template that asks for
+ * more than one plate would (spec §6.4). Unset, a render is one plate: `plates: []`.
+ */
+export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
+  state.plates[slug] = plates
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -240,7 +279,8 @@ function planMerge(slug: string, model: ModelSummary): MergePreview {
   const theirs = state.sources[upstream.id] ?? ''
   // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
   const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
-  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
+  const { taken = [], kept = [] } = state.mergeFiles[slug] ?? {}
+  const plan = { ours, base: baseSource, theirs, patch, taken, kept }
   if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
   if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
   const merged =
@@ -609,6 +649,8 @@ function refusal(check: SourceCheck) {
 }
 
 export const handlers = [
+  realtimeHandler,
+
   http.get(`${base}/models`, () => HttpResponse.json(state.models.map(view))),
 
   http.post(`${base}/models`, async ({ request }) => {
@@ -619,19 +661,38 @@ export const handlers = [
         description?: string
         tags?: string[]
         force?: boolean
+        libraries?: string[]
       }
       const pastedSlug = slugify(body.name)
       if (!pastedSlug) return problem(422, 'Unprocessable Content', 'that name yields no slug')
       if (state.models.some((m) => m.slug === pastedSlug)) {
         return problem(409, 'Conflict', `a model named '${pastedSlug}' already exists`)
       }
+      // #169 — curated names only, each pinned at the catalogue's ref.
+      const named = [...new Set(body.libraries ?? [])]
+      const unknown = named.filter((name) => !state.libraries.some((entry) => entry.name === name))
+      if (unknown.length > 0) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `not in the library catalogue: ${unknown.join(', ')}`,
+        )
+      }
       const check = checkOf(body.source)
       if (!check.ok && !body.force) return refusal(check)
+      const libraries = state.libraries
+        .filter((entry) => named.includes(entry.name))
+        .map((entry) => {
+          state.seq += 1
+          const commit = state.seq.toString(16).padStart(40, 'c')
+          return { name: entry.name, url: entry.url, ref: entry.ref, commit }
+        })
       const pasted: ModelSummary = {
         slug: pastedSlug,
         name: body.name,
         description: body.description ?? '',
         tags: body.tags ?? [],
+        libraries,
         updated_at: new Date().toISOString(),
         has_thumbnail: false,
         has_readme: false,
@@ -846,7 +907,8 @@ export const handlers = [
       upstream: model.upstream,
       revision:
         upstreamState === 'gone' ? null : (state.versions[model.upstream.id]?.[0]?.commit ?? null),
-      preview: upstreamState === 'update' ? planMerge(slug, model) : null,
+      preview:
+        upstreamState === 'update' || upstreamState === 'dismissed' ? planMerge(slug, model) : null,
     }
     return HttpResponse.json(status)
   }),
@@ -865,7 +927,7 @@ export const handlers = [
         'Conflict',
         `the merge into '${slug}' has 1 conflict(s); resolve them and save with ` +
           `PUT /models/${slug}/source?merge_base=${revision}`,
-        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: [], kept: [] },
+        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: plan.taken, kept: plan.kept },
       )
     }
     state.sources[slug] = plan.merged
@@ -1317,6 +1379,17 @@ export const handlers = [
       : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
   }),
 
+  // #296 — the server's defaults for the caps.
+  http.get(`${base}/assets/usage`, () => {
+    const metas = [...state.assets.values()].map((asset) => asset.meta)
+    return HttpResponse.json({
+      count: metas.length,
+      bytes: metas.reduce((total, meta) => total + meta.size, 0),
+      max_count: 10_000,
+      max_total_bytes: 1_000_000_000,
+    } satisfies AssetUsage)
+  }),
+
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
     return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
@@ -1361,8 +1434,13 @@ export const handlers = [
     job.status = 'done'
     job.bbox_mm = bboxOf(job.params ?? {})
     job.colors = colorsOf(job.slug, job.params ?? {})
+    job.plates = state.plates[job.slug] ?? []
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+    job.notes =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
+    job.warnings =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME ? fixtures.JOB_WARNINGS : []
     return HttpResponse.json(jobView(job))
   }),
 
@@ -1493,77 +1571,30 @@ export const handlers = [
     return HttpResponse.json(result)
   }),
 
-  // --- #86 print picker -------------------------------------------------------------
+  // --- spec 2026-09-27: the spool-first print dialog ------------------------------
 
-  http.get(`${base}/print/presets`, ({ request }) => {
-    const url = new URL(request.url)
-    const source = url.searchParams.get('printer_preset_source') as PresetRef['source'] | null
-    const id = url.searchParams.get('printer_preset_id')
-    const options: PresetOptions = {
-      printer: fixtures.printerPresets,
-      process: [],
-      filament: [],
-      bed_types: fixtures.BED_TYPES,
-      printer_preset: null,
-    }
-    if (!source || !id) return HttpResponse.json(options)
-    // Process and filament arrive only once a printer preset is named, filtered to the
-    // presets whose `compatible_printers` lists that preset's NAME.
-    const chosen = fixtures.printerPresets.find(
-      (choice) => choice.ref.source === source && choice.ref.id === id,
-    )
-    const fits = (compatible: string[] | undefined) =>
-      !compatible?.length || !chosen?.name || compatible.includes(chosen.name)
+  /**
+   * One read for the whole dialog. `printer_id` narrows it to that printer; without one
+   * the server opens on the model's remembered printer, as it does here.
+   */
+  http.get(`${base}/print/outputs/:id/choices`, ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const slug = output.slug
+    const remembered = state.modelChoices[slug] ?? NO_MODEL_CHOICES
+    const asked = new URL(request.url).searchParams.get('printer_id')
+    const printerId =
+      asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
+    const printerName =
+      (choicesView.printers ?? []).find((printer) => printer.id === printerId)?.name ?? null
+    const bed = state.printerBedTypes[String(printerId)]
     return HttpResponse.json({
-      ...options,
-      printer_preset: { source, id },
-      process: fixtures.processPresets.filter((c) => fits(c.compatible_printers ?? [])),
-      filament: fixtures.filamentPresets.filter((c) => fits(c.compatible_printers ?? [])),
-    } satisfies PresetOptions)
-  }),
-
-  http.post(`${base}/print/pipelines`, async ({ request }) => {
-    const body = (await request.json()) as PipelineCreate
-    const named = (ref: { source: string; id: string } | null | undefined) =>
-      [...fixtures.printerPresets, ...fixtures.processPresets, ...fixtures.filamentPresets].find(
-        (choice) => choice.ref.source === ref?.source && choice.ref.id === ref?.id,
-      )?.name ?? null
-    // SlicerPipelineCreate has no target fields: Bambuddy targets the new pipeline itself.
-    const created: PipelineView = {
-      id: nextNumber(),
-      name: body.name,
-      description: body.description ?? null,
-      bed_type: body.bed_type ?? null,
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_printer_name: '3DP-31B-598',
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: body.printer_preset,
-      process_preset: body.process_preset,
-      filament_presets: body.filament_presets,
-      printer_preset_name: named(body.printer_preset),
-      process_preset_name: named(body.process_preset),
-      filament_preset_names: body.filament_presets.map(named),
-      printer_ids: [1],
-    }
-    state.pipelines = [...state.pipelines, created]
-    await delay(150)
-    return HttpResponse.json(created)
-  }),
-
-  http.get(`${base}/print/models/:slug/pipelines`, ({ params }) => {
-    const slug = String(params['slug'])
-    const modelPipelineId = state.modelPipelines[slug] ?? null
-    return HttpResponse.json({
-      pipelines: state.pipelines,
-      printers: fixtures.targets.printers,
-      model_pipeline_id: modelPipelineId,
-      global_pipeline_id: state.settings.pipeline_id ?? null,
-      default_pipeline_id: modelPipelineId ?? state.settings.pipeline_id ?? null,
-      model_choices: state.modelChoices[slug] ?? { printer_id: null, filament_plan: [] },
-      printer_bed_types: state.printerBedTypes,
-    } satisfies PipelineChoices)
+      ...choicesView,
+      printer_id: printerId,
+      ...(bed ? { bed_type: bed } : {}),
+      filaments: { ...choicesView.filaments, printer_id: printerId, printer_name: printerName },
+      model_choices: remembered,
+    } satisfies ChoicesView)
   }),
 
   http.put(`${base}/print/printers/:id/bed-type`, async ({ params, request }) => {
@@ -1580,51 +1611,11 @@ export const handlers = [
   http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const body = (await request.json()) as ModelPrintChoices
-    const empty = { printer_id: null, filament_plan: [] }
-    if (body.printer_id == null && !body.filament_plan?.length) delete state.modelChoices[slug]
-    else state.modelChoices[slug] = { ...empty, ...body }
-    return HttpResponse.json(state.modelChoices[slug] ?? empty)
-  }),
-
-  http.put(`${base}/print/models/:slug/pipeline`, async ({ params, request }) => {
-    const slug = String(params['slug'])
-    const body = (await request.json()) as { pipeline_id: number | null }
-    if (body.pipeline_id === null) delete state.modelPipelines[slug]
-    else state.modelPipelines[slug] = body.pipeline_id
-    return HttpResponse.json({
-      slug,
-      pipeline_id: state.modelPipelines[slug] ?? null,
-      global_pipeline_id: state.settings.pipeline_id ?? null,
-    })
-  }),
-
-  http.post(`${base}/print/outputs/:id/eligibility`, async ({ params, request }) => {
-    const output = state.outputs.find((o) => o.id === params['id'])
-    if (!output) return problem(404, 'Output not found')
-    const body = (await request.json()) as { pipeline_ids: number[] | null }
-    const ids = body.pipeline_ids ?? state.pipelines.map((pipeline) => pipeline.id)
-    const libraryFileId = output.library_file_id ?? nextNumber()
-    state.outputs = state.outputs.map((o) =>
-      o.id === output.id ? { ...o, library_file_id: libraryFileId } : o,
-    )
-    await delay(150)
-    return HttpResponse.json({
-      library_file_id: libraryFileId,
-      reports: ids.map((pipelineId) => ({
-        pipeline_id: pipelineId,
-        // A pipeline created in this session has no recorded report; treat it as ready,
-        // which is what a fresh pipeline built for this plate would answer.
-        report: fixtures.eligibilityReports[pipelineId] ?? {
-          ok: true,
-          target_kind: 'specific_printer',
-          target_printer_id: 1,
-          target_printer_name: '3DP-31B-598',
-          target_model_class: null,
-          issues: [],
-          printer_reports: [],
-        },
-      })),
-    } satisfies EligibilityOverview)
+    // Forget only an all-default body, as the backend does: a remembered nozzle, tier or
+    // process with no printer and no plan is still kept.
+    if (isNoModelChoices(body)) delete state.modelChoices[slug]
+    else state.modelChoices[slug] = { ...NO_MODEL_CHOICES, ...body }
+    return HttpResponse.json(state.modelChoices[slug] ?? NO_MODEL_CHOICES)
   }),
 
   /**
@@ -1637,12 +1628,8 @@ export const handlers = [
     if (!output) return problem(404, 'Output not found')
     const search = new URL(request.url).searchParams
     const printerId = search.get('printer_id')
-    // #78 — no printer, no hardware to read: a class target nobody has narrowed yet. The
-    // pipeline's nozzle is echoed from the query, as the server does.
-    const hardware =
-      printerId === null
-        ? { nozzles: [], pipeline_nozzle_diameter: null }
-        : { pipeline_nozzle_diameter: search.get('nozzle_diameter') }
+    // #78 — no printer, no hardware to read.
+    const hardware = printerId === null ? { nozzles: [] } : {}
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
@@ -1651,42 +1638,27 @@ export const handlers = [
     } satisfies FilamentOptions)
   }),
 
+  /**
+   * spec 2026-09-27 §4 — the spool-first run. No pipeline: the server resolves every
+   * preset from `choices` and the spool plan, then slices and queues. A request without
+   * `choices` is the old pipeline shape, which the backend answers with a 422.
+   */
   http.post(`${base}/print/outputs/:id/run`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    const body = (await request.json()) as {
-      pipeline_id?: number | null
-      copies?: number
-      force?: boolean
-      printer_id?: number | null
-      plate_id?: number
-      all_plates?: boolean
-      bed_type?: string | null
-      filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
-      project_id?: number | null
-    }
-    const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
-    if (pipelineId === null) {
-      return problem(409, 'Conflict', 'no slicer pipeline is set for this model')
-    }
-    const report = fixtures.eligibilityReports[pipelineId]
-    if (report && !report.ok && !body.force) {
-      // Bambuddy turns the SAME report into a 409 here; the backend passes the body
-      // through as the `bambuddy_body` extension rather than paraphrasing it.
+    const body = (await request.json()) as Partial<PrintRunRequest>
+    if (!body.choices) return problem(422, 'Unprocessable Content', 'choices: Field required')
+    const sizes = new Set(body.choices.nozzles.map((nozzle) => nozzle.size))
+    if (sizes.size > 1) {
       return problem(
-        409,
-        'Conflict',
-        `Bambuddy reported a conflict when asked to run slicer pipeline ${pipelineId}`,
-        { type: 'https://scadbuddy.dev/problems/pipeline-ineligible', bambuddy_body: report },
+        422,
+        'Unprocessable Content',
+        "The two nozzles are different sizes. Bambuddy can't slice mixed nozzle sizes yet.",
       )
     }
     // Resolved as the server does (#124): an omitted `copies` is the remembered quantity,
-    // global → the printer the run keys on → this model, else 1.
-    const scopePrinter =
-      body.printer_id ??
-      state.settings.printer_id ??
-      state.pipelines.find((p) => p.id === pipelineId)?.target_printer_id ??
-      null
+    // global → the printer the run names → this model, else 1.
+    const scopePrinter = body.printer_id ?? state.printOptions.printer_id ?? null
     const copies =
       body.copies ??
       resolveOptions(
@@ -1702,88 +1674,36 @@ export const handlers = [
       projectId === null
         ? null
         : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
-    const runId = nextNumber()
     const libraryFileId = output.library_file_id ?? nextNumber()
+    const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: runId }
+        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
-
-    /**
-     * #87 — the escalation. A `PipelineRunCreateRequest` carries no printer and no
-     * filament mapping, so a request that names either cannot go down the pipeline
-     * route at all: the backend slices the library file with the pipeline's own presets
-     * and posts queue entries itself. `run` is null on that route — there is no
-     * pipeline run to report — which is why the success panel has to guard it.
-     */
-    // #83 — a plate type or any plate but the first cannot ride on a run either.
-    const plateChosen =
-      Boolean(body.bed_type) || Boolean(body.all_plates) || (body.plate_id ?? 1) !== 1
-    if (body.filament_plan || typeof body.printer_id === 'number' || plateChosen) {
-      const sliceJobId = nextNumber()
-      const queueItemIds = Array.from({ length: copies }, () => nextNumber())
-      const queued: PrintRunResult = {
-        route: 'slice_queue',
-        pipeline_id: pipelineId,
-        library_file_id: libraryFileId,
-        printer_id: body.printer_id ?? null,
-        run: null,
-        slice_job_id: sliceJobId,
-        sliced_library_file_id: nextNumber(),
-        queue_item_ids: queueItemIds,
-        copies,
-        warnings: fixtures.filamentOptions.warnings,
-        project_id: projectId,
-        folder_id: folderId,
-        bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-      }
-      return HttpResponse.json(queued)
-    }
-
-    const result: PrintRunResult = {
-      route: 'pipeline',
-      pipeline_id: pipelineId,
+    const warnings = body.choices.nozzles.some((nozzle) => nozzle.flow === 'high_flow')
+      ? [
+          {
+            kind: 'hf-unsupported' as const,
+            message:
+              "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
+          },
+        ]
+      : []
+    return HttpResponse.json({
+      route: 'slice_queue',
       library_file_id: libraryFileId,
+      printer_id: body.printer_id ?? null,
+      slice_job_id: nextNumber(),
+      sliced_library_file_id: nextNumber(),
+      queue_item_ids: queueItemIds,
       copies,
-      run: {
-        id: runId,
-        pipeline_id: pipelineId,
-        pipeline_name: state.pipelines.find((p) => p.id === pipelineId)?.name ?? null,
-        source_library_file_id: libraryFileId,
-        source_archive_id: null,
-        source_filename: null,
-        copies,
-        copies_completed: 0,
-        copies_failed: 0,
-        copies_cancelled: 0,
-        copies_in_progress: copies,
-        status: 'queued',
-        slice_job_id: nextNumber(),
-        sliced_library_file_id: nextNumber(),
-        eligibility_overridden: Boolean(body.force) && Boolean(report && !report.ok),
-        error_message: null,
-        jobs: Array.from({ length: copies }, (_unused, index) => ({
-          id: nextNumber(),
-          pipeline_run_id: runId,
-          copy_index: index,
-          assigned_printer_id: 1,
-          assigned_printer_name: '3DP-31B-598',
-          queue_entry_id: nextNumber(),
-          status: 'queued',
-          error_message: null,
-        })),
-        target_kind: 'specific_printer',
-        target_printer_id: 1,
-        target_model_class: null,
-        fanout_strategy: 'max_parallel',
-      },
+      warnings,
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-    }
-    return HttpResponse.json(result)
+    } satisfies PrintRunResult)
   }),
 
   // --- #79 projects -----------------------------------------------------------------
