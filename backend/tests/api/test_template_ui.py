@@ -122,12 +122,18 @@ def test_a_pinned_revision_serves_its_own_module_graph(
     _with_ui(paths, model, {"index.js": b"import './a.js'\n", "a.js": b"// one\n"})
     first = _commit(paths, "ui one")
     _with_ui(paths, model, {"a.js": b"// two\n"})
-    _commit(paths, "ui two")
+    head = _commit(paths, "ui two")
     pinned = client.get(f"/api/v1/models/{model}/versions/{first}/ui/a.js")
     assert pinned.status_code == 200
     assert pinned.text == "// one\n"
     assert pinned.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert client.get(f"/api/v1/models/{model}/ui/a.js").text == "// two\n"
+    # The current revision is answered from the live directory, which an uncommitted
+    # edit can change: never cached as immutable under the commit's URL.
+    current = client.get(f"/api/v1/models/{model}/versions/{head}/ui/a.js")
+    assert current.status_code == 200
+    assert current.text == "// two\n"
+    assert current.headers["cache-control"] == "no-cache"
 
 
 def test_the_page_carries_the_csp() -> None:
@@ -154,9 +160,15 @@ def test_the_spa_sends_the_csp_on_the_document_and_client_routes(tmp_path: objec
 
     bundle = Path(str(tmp_path))
     (bundle / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    (bundle / "assets").mkdir()
+    (bundle / "assets" / "x.js").write_text("export {}\n", encoding="utf-8")
     app = Starlette(routes=[Mount("/", SPAStaticFiles(bundle))])
     with TestClient(app) as spa:
-        for url in ("/", "/m/demo"):
+        for url in ("/", "/m/demo", "/assets/x.js"):
             response = spa.get(url)
             assert response.status_code == 200
             assert response.headers["content-security-policy"] == PAGE_CSP
+        etag = spa.get("/").headers["etag"]
+        unchanged = spa.get("/", headers={"If-None-Match": etag})
+        assert unchanged.status_code == 304
+        assert unchanged.headers["content-security-policy"] == PAGE_CSP
