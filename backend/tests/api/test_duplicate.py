@@ -408,7 +408,7 @@ def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
 def test_a_staging_the_sweep_cannot_read_does_not_keep_the_rest(
     paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    catalogue = Catalogue(paths)
+    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
     old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
     for name in ("a", "b"):
         staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
@@ -682,7 +682,9 @@ def test_the_claim_sweep_leaves_a_model_whose_source_is_only_missing_from_disk(
     """Tracked at HEAD, it is a model to restore, not a claim to sweep."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    catalogue = Catalogue(paths, history, duplicate_staging_max_age=0)
+    catalogue = Catalogue(
+        paths, history, duplicate_staging_max_age=0, wrapper_prefix=WRAPPER_PREFIX
+    )
     catalogue.create("kept", SOURCE, ModelMeta(name="Kept"))
     paths.model_source("kept").unlink()
 

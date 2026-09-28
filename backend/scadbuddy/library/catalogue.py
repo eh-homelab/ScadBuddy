@@ -273,7 +273,8 @@ class Catalogue:
         outputs: OutputStore | None = None,
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
-        wrapper_prefix: str = "",
+        *,
+        wrapper_prefix: str,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -1213,7 +1214,7 @@ class Catalogue:
                     continue
                 # Tracked at HEAD: a model whose source is missing from disk, not a
                 # claim -- restoring it is the history's job, not this sweep's.
-                if self.history is not None and self._has_history:
+                if self.history is not None and self.history.available:
                     head = self.history.head()
                     if head is not None and self.history.files_at(head, slug):
                         continue

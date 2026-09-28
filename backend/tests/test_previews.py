@@ -29,6 +29,7 @@ from scadbuddy.render.jobs import ModelSource
 from scadbuddy.render.previews import render_preview
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import write_openscad_3mf
 
 SLUG = "widget"
@@ -98,7 +99,7 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_but_not_a_write_in_flight(
     in_flight = paths.previews / ".gone-abc123.png"
     in_flight.write_bytes(b"half")
 
-    removed = Catalogue(paths).sweep_orphans()
+    removed = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans()
 
     assert sorted(removed) == ["cache/previews/gone.json", "cache/previews/gone.png"]
     assert store.image(SLUG) == b"png"
@@ -127,7 +128,7 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
 
 def test_the_catalogue_ranks_its_own_image_over_the_preview(paths: DataPaths) -> None:
     store = PreviewStore(paths)
-    catalogue = Catalogue(paths, previews=store)
+    catalogue = Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX)
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
@@ -270,7 +271,9 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     a render's write, with or without a store attached, so it removes both files or
     neither -- never the image alone."""
     store = PreviewStore(paths)
-    catalogue = Catalogue(paths, previews=store if attached else None)
+    catalogue = Catalogue(
+        paths, previews=store if attached else None, wrapper_prefix=WRAPPER_PREFIX
+    )
     writer, _, release = _held_write(store)
 
     clearing = threading.Thread(target=lambda: catalogue._clear_derived(SLUG))
@@ -290,7 +293,9 @@ def test_the_orphan_sweep_waits_behind_a_write_in_progress(paths: DataPaths) -> 
     store.write("gone", "a" * 64, b"png")
     writer, _, release = _held_write(store)
 
-    sweeping = threading.Thread(target=lambda: Catalogue(paths).sweep_orphans())
+    sweeping = threading.Thread(
+        target=lambda: Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans()
+    )
     sweeping.start()
     sweeping.join(0.1)
     assert sweeping.is_alive()

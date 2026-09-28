@@ -512,7 +512,7 @@ def catalogue(tmp_path: Path) -> Catalogue:
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    return Catalogue(paths, history)
+    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> None:
