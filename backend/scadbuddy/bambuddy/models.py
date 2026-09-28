@@ -107,6 +107,23 @@ class Printer(BambuddyModel):
     nozzle_count: int | None = None
 
 
+class Archive(BambuddyModel):
+    """A row of ``GET /api/v1/archives/`` — one past print (or upload).
+
+    ``bed_type`` is the plate the file was sliced for. An upload that never printed has
+    ``printer_id: null``; only rows with a printer are evidence of what was on its bed.
+    """
+
+    id: int
+    printer_id: int | None = None
+    status: str | None = None
+    bed_type: str | None = None
+    print_name: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime | None = None
+
+
 class NozzleInfo(BambuddyModel):
     """``nozzle_diameter`` is a **string** here ("0.4"), unlike the float the queue
     route reports back on a print."""
@@ -133,6 +150,22 @@ class SlotChoice(BaseModel):
 
     slot_id: int
     spool_id: int
+
+
+NozzleSize = Literal["0.2", "0.4", "0.6", "0.8"]
+FlowType = Literal["standard", "high_flow"]
+Tier = Literal["fine", "standard", "draft"]
+
+
+class NozzleChoice(BaseModel):
+    """One extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4).
+
+    Here rather than in ``resolver`` so the settings store can remember it per model
+    without importing the resolver (which reaches the client, which imports the store).
+    """
+
+    size: NozzleSize
+    flow: FlowType = "standard"
 
 
 class AmsTray(BambuddyModel):

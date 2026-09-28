@@ -59,6 +59,10 @@ DEFAULT_OPENSCAD_LSP = "openscad-lsp"
 # the cap is on sessions rather than on work: past it an editor simply goes without
 # completion and hover, which it already has to cope with when no server is installed.
 DEFAULT_LSP_SESSIONS = 4
+# Each realtime socket (`WS /api/v1/ws`, #266) is a standing bus subscription: a
+# queue of up to 256 events, walked on every publish. The cap bounds that cost; one
+# tab holds one socket, so it is far above any real deployment's tabs.
+DEFAULT_REALTIME_SOCKETS = 256
 DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
 DEFAULT_GIT_TIMEOUT = 30.0
 # A shallow clone is still unbounded in size, and every checkout shares the data
@@ -110,6 +114,7 @@ class Config:
     library_path: tuple[Path, ...] = ()
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
+    realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
     # The most one library's clone may take on the data volume (#213).
     library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
     asset_max_total_bytes: int = DEFAULT_ASSET_MAX_TOTAL_BYTES
@@ -151,6 +156,11 @@ class Config:
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
             raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
+        # Also a semaphore; zero refuses every socket, and the UI polls.
+        if self.realtime_sockets < 0:
+            raise ValueError(
+                f"SCADBUDDY_REALTIME_SOCKETS must be at least 0, not {self.realtime_sockets}"
+            )
         # Zero or less would refuse every library, however small.
         if self.library_max_bytes < 1:
             raise ValueError(
@@ -296,6 +306,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         git_timeout=float(source.get("SCADBUDDY_GIT_TIMEOUT") or DEFAULT_GIT_TIMEOUT),
         openscad_lsp=source.get("SCADBUDDY_OPENSCAD_LSP") or DEFAULT_OPENSCAD_LSP,
         lsp_sessions=int(source.get("SCADBUDDY_LSP_SESSIONS") or DEFAULT_LSP_SESSIONS),
+        realtime_sockets=int(source.get("SCADBUDDY_REALTIME_SOCKETS") or DEFAULT_REALTIME_SOCKETS),
         library_max_bytes=int(
             source.get("SCADBUDDY_LIBRARY_MAX_BYTES") or DEFAULT_LIBRARY_MAX_BYTES
         ),

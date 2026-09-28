@@ -181,8 +181,9 @@ stored on ScadBuddy's server and is never sent to the browser.
 
 2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
    **Test connection**.
-3. Under **Where files go**, choose the library folder, the fallback slicer pipeline
-   and the printer.
+3. Under **Where files go**, choose the library folder, the slicer pipeline the send
+   bar runs and the printer. That one pipeline is used for every model; a per-model
+   pipeline saved by an older ScadBuddy is no longer used.
 4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
    should link to; ScadBuddy can't work it out from behind a proxy). Then press
    **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
@@ -227,24 +228,73 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
   that opens these parameters again.
 - **Print** opens the print picker.
 
+The button at the top right of the preview shows it full screen, with the plate and
+bounding box still on it; **Esc** or the button again puts it back. In full screen,
+**Parameters** opens the parameters in a flyout over the view, so you can change them
+and watch the render; the buttons along the bottom wait until you leave full screen.
+Where the browser refuses full screen, as it does inside a frame that isn't allowed
+it, the view fills the frame instead.
+
 ### Print picker
 
 ![Print picker](images/print-picker.png)
 
-The print picker runs one of Bambuddy's slicer pipelines for the output:
+The print picker is spool-first: you choose the spools, the nozzle size, a quality
+tier and a plate, and ScadBuddy derives every Bambu printer, process and filament
+preset itself, then slices and queues through Bambuddy. There is no slicer pipeline to
+pick or maintain here — pipelines still exist in Bambuddy, and the one-click send bar
+and Settings' default pipeline still use one, until #312.
 
-- Opening the picker uploads the 3MF once. Bambuddy then checks the upload against
-  every pipeline. Pipelines that aren't ready show Bambuddy's own reasons, per slot,
-  and **Print anyway** overrides the check.
-- **New pipeline** creates one from printer, process and filament presets.
-- **Always use this pipeline for this model** remembers the choice for this model.
-  Otherwise the pipeline set in Settings is used.
-- Set the number of copies, a Bambuddy project, and the filament for each colour
-  from your spool inventory. Print options can be remembered for every print, for a
-  printer, or for this model.
-- If you pick filaments or queue-level options, Bambuddy slices with the pipeline's
-  presets and queues the result directly (the dialog tells you before you run).
-  Otherwise the pipeline runs as is. The panel then follows the run.
+Top to bottom, the dialog is:
+
+- **Advanced switch.** Off (Simple) by default. Advanced adds the full process list, a
+  High Flow choice per side, and a filament preset override per slot. Switching back to
+  Simple resets those to Standard flow, the tier's process and each spool's own preset,
+  so nothing chosen in Advanced is sent unseen.
+- **Printer** — shown only when more than one printer is active (today there is one).
+  Otherwise ScadBuddy has already picked one: this model's remembered printer, else the
+  printer set in Settings, else the first active printer — skipping a remembered or
+  Settings printer that is no longer active. Presets are only resolved for the H2C, so
+  printing on any other model is refused before anything is sliced.
+- **Filament** — the same spool-inventory picker the send bar uses. Loaded spools are
+  marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
+  with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
+  presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
+  the first option.
+- **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
+  there is no per-side size control. Sizes installed in the rack are marked
+  "(installed)"; picking one that isn't warns you to install it first. Advanced adds
+  Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
+  choice slices as Standard and the dialog says so: "Bambuddy slices this as Standard
+  flow; High Flow presets aren't supported by Bambuddy yet."
+- **Quality** — Fine / Standard / Draft in Simple mode. Advanced replaces that with the
+  full list of Bambu processes for the chosen nozzle size.
+- **Plate** — every plate type the H2C supports, preselected from the printer's last
+  print, else the plate last remembered for this printer, else Textured PEI Plate.
+  Choosing anything other than the last print's plate shows a reminder: "The
+  *printer*'s last print used *plate*. Swap to *plate* before this starts." For an
+  output with more than one plate, a separate choice of which plate (or all of them)
+  to print also appears here. Choosing all plates lists every plate's colors under
+  Filament, so a color only a later plate uses gets a spool too.
+- **Print options** — Bambuddy's own queue-item options (manual start, waiting for
+  filament, and the rest), remembered per print, per printer or per model as before.
+- **Project** — file the print under a Bambuddy project.
+- **Copies** — leave the field blank to use the remembered quantity, shown beside it.
+- **Print** — slices, then queues through Bambuddy; the panel then follows the run to
+  completion.
+
+**Errors that keep the dialog open.** A combination ScadBuddy cannot turn into presets —
+a filament slot with no resolvable preset, or mixed nozzle sizes — comes back as an
+error shown above Print and disables the button until something changes. Any other
+failure (Bambuddy unreachable, a timeout) shows the same way but leaves Print enabled to
+retry as it stands.
+
+**What's remembered.** The chosen printer, the spools (only the slots moved off the
+suggestion), the nozzle choice, the quality tier and process name are remembered per
+model, the same way print options and copies already are. The plate type is remembered
+per **printer**, not per model. Reopening the dialog restores all of it, and opens
+straight into Advanced mode if the remembered choice is a named process or a High Flow
+flow — either would otherwise apply unseen from Simple mode.
 
 ### History and versions
 
