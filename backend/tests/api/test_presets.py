@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -303,16 +301,18 @@ def test_the_orphan_sweep_forgets_a_gone_template_s_presets(
 
 
 def test_an_upload_a_saved_preset_names_is_kept_by_the_sweep(
-    client: TestClient, app: FastAPI, model: str
+    client: TestClient, app: FastAPI, model: str, pg_conninfo: str
 ) -> None:
     state = app.state.scadbuddy
     kept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "kept.svg")
     swept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg' width='2'/>", "gone.svg")
     _save(client, model, "Logo", {"label": kept.id})
-    then = time.time() - 10 * state.config.asset_sweep_grace
-    for meta in (kept, swept):
-        for path in (state.assets.blob_path(meta), state.assets.root / f"{meta.id}.json"):
-            os.utime(path, (then, then))
+    # Last used long ago: the upload store's rows (#591).
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = now() - make_interval(secs => %s)",
+            (10 * state.config.asset_sweep_grace,),
+        )
     assert sweep_assets(state) == [swept.id]
 
 

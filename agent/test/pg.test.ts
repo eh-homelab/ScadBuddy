@@ -239,7 +239,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
           expect(String(errors[0])).toMatch(/lock timeout/i)
           release()
           await held
-          expect(await waiting.ready()).toBe(true)
+          // Test files running in parallel migrate their own schemas under the
+          // same advisory lock and can hold it past this connection's 200 ms
+          // lock_timeout, so allow ready() a few retries.
+          let ready = false
+          for (let i = 0; i < 20 && !ready; i++) ready = await waiting.ready()
+          expect(ready).toBe(true)
         } finally {
           release()
           await held.catch(() => {})

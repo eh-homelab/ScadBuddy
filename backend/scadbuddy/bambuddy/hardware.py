@@ -2,7 +2,7 @@
 
 Pure helpers shared by the choices route and the run: the rack's nozzles, the plate the
 last print used, and the warnings that compare a choice against either. Kept apart from
-``choices.py`` because that module imports ``pipelines`` and the run in ``pipelines``
+``choices.py`` because that module imports ``print_run`` and the run in ``print_run``
 needs these, which would otherwise be an import cycle.
 """
 

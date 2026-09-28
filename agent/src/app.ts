@@ -18,6 +18,7 @@ import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
 import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
 import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
 import { registerPluginRoutes } from './routes/plugins.js'
+import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
 import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
@@ -26,9 +27,9 @@ import type { KekStatus } from './secrets.js'
 // direct streaming. /healthz, the Claude credential routes (#255,
 // routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
 // plugin registry routes (#297, routes/plugins.ts), the plugin package routes
-// (#297, routes/pluginPackages.ts), the MCP token routes (#251,
-// routes/mcpTokens.ts), the headless-browser setting (#349,
-// routes/headlessBrowser.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// (#297, routes/pluginPackages.ts), the MCP token and auth-mode routes (#251,
+// routes/mcpTokens.ts, routes/mcpAuthMode.ts), the headless-browser setting
+// (#349, routes/headlessBrowser.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -57,6 +58,13 @@ export type AppDeps = {
    * database: the routes then answer 503.
    */
   tokens?: TokenStore | undefined
+  /**
+   * Where Settings writes the /mcp auth mode and anonymous cap
+   * (routes/mcpAuthMode.ts; credentials.ts `SettingsStore`). The routes read
+   * them back through `mcp.authSettings`. Undefined (or left out) when there is
+   * no database: the routes then answer 503.
+   */
+  aiSettings?: SettingsWriter | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
@@ -233,6 +241,14 @@ export function createApp(deps: AppDeps): AgentApp {
     tokens: deps.database ? deps.tokens : undefined,
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerMcpAuthModeRoutes(app, {
+    settings: deps.database ? deps.aiSettings : undefined,
+    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
   })

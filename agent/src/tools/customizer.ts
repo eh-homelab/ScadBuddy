@@ -54,7 +54,8 @@ export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatu
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (job.status === 'done' || job.status === 'failed' || Date.now() >= deadline) return job
+    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled' || Date.now() >= deadline)
+      return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -132,7 +133,7 @@ export const customizerTools: Tool[] = [
       await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
       const job = await waitForJob(ctx, accepted.job_id)
       const summary = jobSummary(job)
-      if (job.status === 'failed') {
+      if (job.status === 'failed' || job.status === 'cancelled') {
         return { ...json(summary), isError: true }
       }
       if (job.status !== 'done') {

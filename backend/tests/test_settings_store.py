@@ -180,12 +180,12 @@ def test_a_key_removed_while_another_is_written_leaves_only_the_other(
 def test_a_connection_save_leaves_the_remembered_choices_alone(store: SettingsStore) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(1, "Cool Plate")
-    store.save(SettingsPatch(pipeline_id=4, public_url="https://scad.example"))
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
 
     loaded = store.load()
     assert loaded.model_print_choices["gear"].tier == "fine"
     assert loaded.printer_bed_types == {"1": "Cool Plate"}
-    assert loaded.pipeline_id == 4
+    assert loaded.printer_id == 4
 
 
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:

@@ -625,12 +625,7 @@ export const settings: Settings = {
   has_api_key: true,
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
-  pipeline_id: 1,
   printer_id: 1,
-  printer_preset: null,
-  process_preset: null,
-  filament_presets: [],
-  bed_type: null,
   default_plate: null,
   display_unit: 'mm',
   media_upload_max_bytes: 1024 * 1024 * 1024,
@@ -704,33 +699,6 @@ export const targets: BambuddyTargets = {
     { id: 2, name: 'ScadBuddy', is_external: false },
     { id: 3, name: 'Keychains', is_external: false },
   ],
-  // Settings' "Slicer pipeline" list (the send bar's pipeline route), not the print dialog.
-  pipelines: [
-    {
-      id: 1,
-      name: 'Textured PEI · 0.20 mm · AMS',
-      bed_type: 'Textured PEI Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP252' },
-      filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
-    },
-    {
-      id: 2,
-      name: 'Draft · 0.28 mm',
-      bed_type: 'Cool Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP260' },
-      filament_presets: [{ source: 'cloud', id: 'GFSB00_22' }],
-    },
-  ],
   printers: [
     { id: 1, name: '3DP-31B-598', model: 'H2C', is_active: true, nozzle_count: 2 },
     { id: 2, name: '3DP-77A-114', model: 'H2C', is_active: true, nozzle_count: 2 },
@@ -744,78 +712,27 @@ export const targets: BambuddyTargets = {
  */
 const QUEUE_URL = `${settings.bambuddy_url}/queue`
 
-/** A pipeline run mid-flight: both copies have reached the queue, neither has printed. */
-export const pipelineProgress: PrintProgress = {
-  route: 'pipeline',
-  stage: 'queued',
-  settled: false,
-  pipeline_run_id: 12,
-  slice_job_id: 21,
-  copies: 2,
-  copies_completed: 0,
-  copies_failed: 0,
-  copies_cancelled: 0,
-  copies_in_progress: 2,
-  error_message: null,
-  fix: null,
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: '3DP-31B-598',
-      queue_entry_id: 4472,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-    // A fan-out Bambuddy has not assigned yet: `assigned_printer_name` is null until it
-    // picks, which is a normal state and not a missing value to hide.
-    {
-      copy_index: 1,
-      printer_name: null,
-      queue_entry_id: 4473,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
-  bambuddy_url: QUEUE_URL,
-}
-
 /**
- * The real failed run, transcribed from `backend/tests/bambuddy/recordings/pipeline-run.json`
- * as `progress.from_run` normalises it. Its point is that Bambuddy's own fields all say
- * the run is fine — `status: "in_progress"`, `copies_in_progress: 1`, the one job still
- * `pending` — while `completed_at` and `error_message` say it is over. `settled` is the
- * backend's resolution of that contradiction, and the only reason the poll ever stops.
- * `fix` is chosen from `slice_job_id` set with `sliced_library_file_id` still null, not
- * from the wording of the message.
+ * A slice that failed, so no queue item was ever created. `fix` is chosen by the
+ * backend from *where* it failed (the slice), not from the wording of the message.
  */
-export const failedRunProgress: PrintProgress = {
-  route: 'pipeline',
+export const failedSliceProgress: PrintProgress = {
+  route: 'slice_queue',
   stage: 'failed',
   settled: true,
-  pipeline_run_id: 1,
   slice_job_id: 7,
+  queue_item_id: null,
   copies: 1,
   copies_completed: 0,
-  copies_failed: 0,
+  copies_failed: 1,
   copies_cancelled: 0,
-  copies_in_progress: 1,
+  copies_in_progress: 0,
   error_message:
     'Slice failed: The selected printer is not compatible with the process preset in the 3mf.',
   fix:
-    'Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix ' +
-    'the model, and print again.',
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: null,
-      queue_entry_id: null,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
+    'Bambuddy could not slice this plate. Change the plate or print settings, or fix the ' +
+    'model, and print again.',
+  copies_detail: [],
   bambuddy_url: QUEUE_URL,
 }
 
@@ -853,6 +770,14 @@ export const queuedSliceProgress: PrintProgress = {
 }
 
 export const FAILING_NAME = 'boom'
+
+/** A name the mock ends `cancelled` instead of `failed`, the way a job superseded by a newer request while running does. */
+export const CANCELLED_NAME = 'superseded'
+
+/** The backend's own wording (`render/projection.py` `CANCELLED_ERROR`), so the mock's `error`/`log_tail` match what a real cancelled job carries. */
+export const CANCELLED_ERROR = 'cancelled: every request for it was withdrawn'
+
+export const CANCELLED_LOG_TAIL = [CANCELLED_ERROR]
 
 /** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
 export const NOTED_NAME = 'alexandra'
