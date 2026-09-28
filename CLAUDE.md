@@ -116,17 +116,22 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
   parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
-  (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
+  (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
   a save never moves a template's revision; a template's own read-only ones in the `presets` list of its
-  `model.json`, with a legacy `presets.json` still read).
+  `model.json`, with a legacy `presets.json` still read), uploads for `// file`
+  parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
+  usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
-  the mocked e2e run.
+  the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
+  `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
+  up without editing `handlers.ts`, and must export `handlers` (and optionally
+  `reset`) (#508).
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
