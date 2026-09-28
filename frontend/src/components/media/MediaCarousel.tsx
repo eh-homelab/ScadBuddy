@@ -78,7 +78,11 @@ function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
   }, [near])
 
   useEffect(() => {
-    if (near && refocus.current) wrapper.current?.querySelector<HTMLElement>('button')?.focus()
+    if (!near || !refocus.current) return
+    // The first slide's own control, named rather than found by render order; a carousel
+    // whose slides open nothing is itself a tab stop.
+    const carousel = wrapper.current?.querySelector<HTMLElement>('[aria-roledescription="carousel"]')
+    ;(carousel?.querySelector<HTMLElement>('[data-slide-open="0"]') ?? carousel)?.focus()
   }, [near])
 
   return (
@@ -297,6 +301,7 @@ function SlideMedia({
     <button
       type="button"
       aria-label={`Open ${slide.alt}`}
+      data-slide-open={index}
       tabIndex={focusable ? 0 : -1}
       onClick={(event) => {
         contained(event)

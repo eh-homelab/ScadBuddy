@@ -226,4 +226,23 @@ describe('MediaCarousel, lazy (#558)', () => {
     expect(screen.getByRole('region', { name: 'Crème Coaster' })).toContainElement(first)
     expect(first).toHaveFocus()
   })
+
+  it.each([
+    ['opens its slides', vi.fn()],
+    ['opens nothing', undefined],
+  ])('leaves focus elsewhere alone when a carousel that %s mounts', (_, onOpen) => {
+    const { container } = render(
+      <>
+        <button type="button">Elsewhere</button>
+        <MediaCarousel slides={images} onOpen={onOpen} label="Crème Coaster" lazy />
+      </>,
+    )
+    const elsewhere = screen.getByRole('button', { name: 'Elsewhere' })
+    elsewhere.focus()
+
+    intersect(container)
+
+    expect(screen.getByRole('region', { name: 'Crème Coaster' })).toBeInTheDocument()
+    expect(elsewhere).toHaveFocus()
+  })
 })
