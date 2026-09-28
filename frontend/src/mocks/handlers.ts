@@ -99,6 +99,8 @@ const state = {
   assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
   /** #237 — other files a duplicate's merge takes or keeps; none unless a test sets them. */
   mergeFiles: {} as Record<string, MergeFiles>,
+  /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
+  plates: {} as Record<string, NonNullable<Job['plates']>>,
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -131,6 +133,7 @@ export function resetMockState(): void {
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
   state.mergeFiles = {}
+  state.plates = {}
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -150,6 +153,14 @@ type MergeFiles = Pick<MergePreview, 'taken' | 'kept'>
  */
 export function setMockMergeFiles(slug: string, files: MergeFiles): void {
   state.mergeFiles[slug] = files
+}
+
+/**
+ * #289 — the plates every finished render of `slug` reports, as a template that asks for
+ * more than one plate would (spec §6.4). Unset, a render is one plate: `plates: []`.
+ */
+export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
+  state.plates[slug] = plates
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -1408,6 +1419,7 @@ export const handlers = [
     job.status = 'done'
     job.bbox_mm = bboxOf(job.params ?? {})
     job.colors = colorsOf(job.slug, job.params ?? {})
+    job.plates = state.plates[job.slug] ?? []
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
     job.notes =

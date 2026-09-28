@@ -18,6 +18,7 @@ from scadbuddy.render.runner import (
     export_schema,
     format_scad_value,
     missing_file,
+    plate_count,
     quote_string,
     render_3mf,
     run_openscad,
@@ -451,3 +452,43 @@ async def test_a_real_render_reports_the_notes_it_echoed(tmp_path: Path) -> None
         ["-o", str(tmp_path / "out.stl"), scad.name], cwd=tmp_path, config=load_config()
     )
     assert output.notes == ('overlay_file "x.svg" ignored', "plaque too thin")
+
+
+# ── #289: a template states its plate count with `echo(plates = N)` ───────────
+
+
+def test_plate_count_reads_only_the_plates_echo() -> None:
+    assert plate_count("ECHO: plates = 2") == 2
+    assert plate_count("ECHO: plates = 1") == 1
+    assert plate_count('ECHO: "plates = 2"') is None
+    assert plate_count("ECHO: plates = 2, lid = true") is None
+    assert plate_count("ECHO: my_plates = 3") is None
+
+
+PLATES_OPENSCAD = """#!/bin/sh
+echo "ECHO: plates = 1"
+echo "ECHO: plates = 3"
+i=0
+while [ $i -lt 80 ]; do echo "filler $i"; i=$((i+1)); done
+"""
+
+
+async def test_a_run_reports_the_last_plate_count_even_out_of_the_tail(tmp_path: Path) -> None:
+    binary = tmp_path / "plates-openscad"
+    binary.write_text(PLATES_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert output.plates == 3
+    assert not any("plates" in line for line in output.log_tail)
+
+
+async def test_a_run_that_echoes_no_plate_count_reports_none(tmp_path: Path) -> None:
+    binary = tmp_path / "quiet-openscad"
+    binary.write_text("#!/bin/sh\necho 'ECHO: \"MAZE\", 4'\n", encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    assert (await run_openscad([], cwd=tmp_path, config=config)).plates is None

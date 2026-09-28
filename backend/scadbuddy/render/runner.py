@@ -40,6 +40,9 @@ _MISSING_FILE = re.compile(
     r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
 )
 
+#: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
+_PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+
 
 #: A message a template echoes for the person customizing it (#285): `NOTE:` by
 #: convention, `WARNING:` in the templates that predate it. A single string, so
@@ -91,6 +94,16 @@ class ProcessOutput:
     #: What the template echoed for the user (`template_note`), in first-seen order
     #: and once each. Read off the whole log for the same reason as `missing_files`.
     notes: tuple[str, ...] = ()
+    #: The last `echo(plates = N)` the run logged, or ``None`` when it logged none.
+    #: Also read off the whole log: an echo at the top of a long model is not in
+    #: the tail.
+    plates: int | None = None
+
+
+def plate_count(line: str) -> int | None:
+    """The plate count ``line`` states, if it is a template's `echo(plates = N)`."""
+    match = _PLATES.match(line)
+    return int(match["count"]) if match else None
 
 
 def template_note(line: str) -> str | None:
@@ -206,6 +219,7 @@ async def _drain(
     missing: list[str],
     notes: list[str],
     diagnostics: DiagnosticCollector,
+    plates: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -217,6 +231,9 @@ async def _drain(
         note = template_note(line)
         if note is not None and note not in notes and len(notes) < MAX_NOTES:
             notes.append(note)
+        count = plate_count(line)
+        if count is not None:
+            plates.append(count)
 
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
@@ -242,9 +259,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     missing: list[str] = []
     notes: list[str] = []
+    plates: list[int] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector, plates))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -282,6 +300,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         diagnostics=tuple(collector.diagnostics),
         diagnostics_dropped=collector.dropped,
         notes=tuple(notes),
+        plates=plates[-1] if plates else None,
     )
 
 

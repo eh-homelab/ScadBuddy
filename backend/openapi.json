@@ -1332,6 +1332,16 @@
             "title": "Parts",
             "type": "array"
           },
+          "plate": {
+            "default": 1,
+            "title": "Plate",
+            "type": "integer"
+          },
+          "plates": {
+            "default": 1,
+            "title": "Plates",
+            "type": "integer"
+          },
           "smallest_feature": {
             "anyOf": [
               {
@@ -1353,7 +1363,7 @@
             ]
           },
           "version": {
-            "default": 1,
+            "default": 2,
             "title": "Version",
             "type": "integer"
           }
@@ -1645,6 +1655,20 @@
               }
             ],
             "title": "Parts"
+          },
+          "plates": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PlateInfo"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plates"
           },
           "preview_url": {
             "anyOf": [
@@ -3995,6 +4019,32 @@
           "overshoots"
         ],
         "title": "PlateFit",
+        "type": "object"
+      },
+      "PlateInfo": {
+        "description": "One plate of a multi-plate render (spec \u00a76.4): what the customizer checks\nagainst the printer, plate by plate.",
+        "properties": {
+          "bbox_mm": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "colors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Colors",
+            "type": "array"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "bbox_mm",
+          "colors"
+        ],
+        "title": "PlateInfo",
         "type": "object"
       },
       "PlateSend": {
@@ -8958,7 +9008,7 @@
     },
     "/api/v1/outputs/{output_id}/geometry": {
       "get": {
-        "description": "Printability measurements of the output's closed per-colour solids (#284):\nopen and non-manifold edges with their locations, bounding box, bed contact,\nheight-to-base ratio, overhang area by angle, and estimates of the thinnest\nwall and smallest feature. Coordinates are the model's own (mm, Z up), as in\nthe preview. Computed on first ask and cached beside the output.",
+        "description": "Printability measurements of the closed per-colour solids on one plate of the\noutput (#284): open and non-manifold edges with their locations, bounding box,\nbed contact, height-to-base ratio, overhang area by angle, and estimates of the\nthinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),\nas in the preview. A 3MF with more than one plate (#289) is measured a plate at\na time; ``plates`` in the result says how many there are. Computed on first ask\nand cached beside the output.",
         "operationId": "get_output_geometry_api_v1_outputs__output_id__geometry_get",
         "parameters": [
           {
@@ -8969,6 +9019,19 @@
               "pattern": "^[0-9a-f]{32}$",
               "title": "Output Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "The plate to measure (1-based)",
+            "in": "query",
+            "name": "plate",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "The plate to measure (1-based)",
+              "minimum": 1,
+              "title": "Plate",
+              "type": "integer"
             }
           }
         ],
@@ -9041,7 +9104,7 @@
     },
     "/api/v1/outputs/{output_id}/plates": {
       "get": {
-        "description": "What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are\nalways one plate, which the picker does not ask about.",
+        "description": "What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are\none plate unless the template asks for more (#289).",
         "operationId": "get_output_plates_api_v1_outputs__output_id__plates_get",
         "parameters": [
           {
