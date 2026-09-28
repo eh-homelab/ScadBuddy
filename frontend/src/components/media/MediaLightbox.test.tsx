@@ -2,12 +2,12 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
-import { BUILTIN_SLUG, media } from '../../mocks/fixtures'
+import { GALLERY_SLUG, media } from '../../mocks/fixtures'
 import { MediaCarousel } from './MediaCarousel'
 import { MediaLightbox } from './MediaLightbox'
 import { toSlides } from './slides'
 
-const slides = toSlides(BUILTIN_SLUG, media[BUILTIN_SLUG]!)
+const slides = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
 
 /** A carousel whose media opens the lightbox, as every surface wires them. */
 function Gallery() {
@@ -15,7 +15,7 @@ function Gallery() {
   return (
     <>
       <button type="button">Before</button>
-      <MediaCarousel slides={slides} onOpen={setIndex} label="Keychain Template" />
+      <MediaCarousel slides={slides} onOpen={setIndex} label="Crème Coaster" />
       <MediaLightbox slides={slides} index={index} onClose={() => setIndex(null)} />
     </>
   )
@@ -47,7 +47,7 @@ describe('MediaLightbox (#275)', () => {
         slides[1]!.src,
       ),
     )
-    expect(dialog).toHaveTextContent('The hole side')
+    expect(dialog).toHaveTextContent('The raised rim')
   })
 
   it('closes on Esc and gives focus back to the media that opened it', async () => {

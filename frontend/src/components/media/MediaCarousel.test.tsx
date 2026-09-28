@@ -1,18 +1,18 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { BUILTIN_SLUG, media } from '../../mocks/fixtures'
+import { GALLERY_SLUG, media } from '../../mocks/fixtures'
 import { MediaCarousel } from './MediaCarousel'
 import { toSlides, type Slide } from './slides'
 
-const slides: Slide[] = toSlides(BUILTIN_SLUG, media[BUILTIN_SLUG]!)
+const slides: Slide[] = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
 const images = slides.slice(0, 3)
 
 function setup(props: Partial<Parameters<typeof MediaCarousel>[0]> = {}) {
   const onOpen = vi.fn()
   const user = userEvent.setup()
   const view = render(
-    <MediaCarousel slides={images} onOpen={onOpen} label="Keychain Template" {...props} />,
+    <MediaCarousel slides={images} onOpen={onOpen} label="Crème Coaster" {...props} />,
   )
   return { user, onOpen, ...view }
 }
@@ -42,7 +42,7 @@ describe('MediaCarousel (#275)', () => {
 
   it('is a labelled carousel of labelled slides', () => {
     setup()
-    const region = screen.getByRole('region', { name: 'Keychain Template' })
+    const region = screen.getByRole('region', { name: 'Crème Coaster' })
     expect(region).toHaveAttribute('aria-roledescription', 'carousel')
     const groups = within(region).getAllByRole('group')
     expect(groups.map((group) => group.getAttribute('aria-label'))).toEqual([
@@ -122,7 +122,7 @@ describe('MediaCarousel (#275)', () => {
 
   it('moves with the arrow keys when focused', async () => {
     const { user, onOpen } = setup()
-    screen.getByRole('region', { name: 'Keychain Template' }).focus()
+    screen.getByRole('region', { name: 'Crème Coaster' }).focus()
 
     await user.keyboard('{ArrowRight}')
     expect(current()).toBe('2 of 3')
