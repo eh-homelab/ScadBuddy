@@ -1063,8 +1063,9 @@ default `pipeline_id`.
 Flows (all server-side, so the browser never sees the API key):
 
 1. **Send to library** — `POST /api/v1/library/files?folder_id=…`
-   (multipart) with `model.3mf`; the returned `library_file_id` is stored in
-   `meta.json`.
+   (multipart) with `model.3mf`; the returned file id is recorded as one of the
+   output's library copies, one per folder and printer (print-flow spec §7), in
+   Postgres (`output_bambuddy_uploads`, #455).
 2. **Slice and queue** — if a pipeline is configured:
    `POST /api/v1/slicer-pipelines/{id}/run` with `source_library_file_id`,
    `copies`. Otherwise `POST /library/files/{id}/slice` with presets from

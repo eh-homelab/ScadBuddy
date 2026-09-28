@@ -8,12 +8,14 @@ import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import {
   BUILTIN_SLUG,
+  keychainSchema,
   printOptions,
   settings as settingsFixture,
   targets,
   versionIds,
 } from '../mocks/fixtures'
 import { setMockPlates } from '../mocks/handlers'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
@@ -1019,6 +1021,72 @@ describe('CustomizePage', () => {
     await screen.findByRole('button', { name: 'Duplicate' })
     expect(screen.queryByTestId('update-badge')).not.toBeInTheDocument()
     expect(screen.queryByTestId('upstream-gone')).not.toBeInTheDocument()
+  })
+})
+
+describe('CustomizePage, live (#269)', () => {
+  /** The source changed elsewhere: the name's default is now 'Agent'. */
+  function changeSourceElsewhere() {
+    server.use(
+      http.get('/api/v1/models/name-keychain/schema', () =>
+        HttpResponse.json({
+          ...keychainSchema,
+          parameters: (keychainSchema.parameters ?? []).map((p) =>
+            p.name === 'name' ? { ...p, initial: 'Agent' } : p,
+          ),
+        }),
+      ),
+    )
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+  }
+
+  it('follows a source change made elsewhere when nothing has been edited', async () => {
+    render()
+    await firstRender()
+    changeSourceElsewhere()
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Agent'),
+    )
+  })
+
+  it('keeps edited values and asks before reloading the parameters', async () => {
+    const { user } = render()
+    await firstRender()
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Mine')
+
+    changeSourceElsewhere()
+    expect(await screen.findByText(/source changed elsewhere/)).toBeInTheDocument()
+    expect(name).toHaveValue('Mine')
+
+    await user.click(screen.getByRole('button', { name: 'Reload parameters' }))
+    await waitFor(() => expect(name).toHaveValue('Agent'))
+    expect(screen.queryByText(/source changed elsewhere/)).not.toBeInTheDocument()
+  })
+
+  it('does not carry the banner to the copy Duplicate opens', async () => {
+    const { user } = render()
+    await firstRender()
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Mine')
+    changeSourceElsewhere()
+    await screen.findByText(/source changed elsewhere/)
+
+    await user.click(screen.getByRole('button', { name: 'Duplicate' }))
+    const dialog = screen.getByRole('dialog', { name: /^Duplicate / })
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await screen.findByTestId('duplicated-from')
+    expect(screen.queryByText(/source changed elsewhere/)).not.toBeInTheDocument()
+  })
+
+  it('shows details edited elsewhere without a reload', async () => {
+    render()
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    await api.updateModel('name-keychain', { name: 'Renamed Elsewhere' })
+    emitRealtime('model.updated', ['model:name-keychain', 'models'], { slug: 'name-keychain' })
+    expect(await screen.findByRole('heading', { name: 'Renamed Elsewhere' })).toBeInTheDocument()
   })
 })
 

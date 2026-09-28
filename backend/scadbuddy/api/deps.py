@@ -12,6 +12,7 @@ from starlette.requests import HTTPConnection
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -59,6 +60,9 @@ class AppState:
     history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
+    #: An output's uploads to Bambuddy's file library (#455), on the render queue's
+    #: Postgres pool. Without a database every use raises (#401).
+    uploads: BambuddyUploadStore
     presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
@@ -163,6 +167,7 @@ def build_state(settings: Settings) -> AppState:
         PostgresDecisionStore(settings.database_url) if settings.database_url else None
     )
     outputs = OutputStore(paths)
+    uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -223,6 +228,7 @@ def build_state(settings: Settings) -> AppState:
         history=history,
         catalogue=catalogue,
         outputs=outputs,
+        uploads=uploads,
         presets=PresetStore(paths),
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
         fonts=FontService(
@@ -296,6 +302,10 @@ def get_outputs(state: StateDep) -> OutputStore:
     return state.outputs
 
 
+def get_uploads(state: StateDep) -> BambuddyUploadStore:
+    return state.uploads
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -364,6 +374,7 @@ PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
+UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
