@@ -25,14 +25,12 @@ export function ModelRow({ model, onOpen, onTag }: Props) {
   const slides = useMemo(() => namedSlides(model), [model])
   // The backend's cover rule (`catalogue._cover`): a video with no poster has no frame
   // to show, so the cover is the first image or poster'd video. It only picks the
-  // picture: poster-less videos alone still open, at the first one.
+  // picture: poster-less videos alone still open, at the first one. As on a card, a
+  // template with media shows only its media, never an output's plate or the preview
+  // that `has_thumbnail` may name, so the picture is always the slide it opens on.
   const coverIndex = slides.findIndex((slide) => slide.kind === 'image' || slide.poster)
   const cover = coverIndex >= 0 ? slides[coverIndex] : undefined
-  const src = model.has_thumbnail
-    ? api.modelThumbnailUrl(model)
-    : cover?.kind === 'image'
-      ? cover.src
-      : cover?.poster
+  const src = cover?.kind === 'image' ? cover.src : cover?.poster
   const tags = model.tags ?? []
 
   return (
