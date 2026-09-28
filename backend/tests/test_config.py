@@ -23,6 +23,16 @@ def test_a_negative_lsp_sessions_is_refused_by_name() -> None:
         load_config({"SCADBUDDY_LSP_SESSIONS": "-1"})
 
 
+def test_a_negative_realtime_sockets_is_refused_by_name() -> None:
+    with pytest.raises(ValueError, match="SCADBUDDY_REALTIME_SOCKETS must be at least 0"):
+        load_config({"SCADBUDDY_REALTIME_SOCKETS": "-1"})
+
+
+def test_realtime_sockets_defaults_and_loads() -> None:
+    assert load_config({}).realtime_sockets == 256
+    assert load_config({"SCADBUDDY_REALTIME_SOCKETS": "3"}).realtime_sockets == 3
+
+
 def test_zero_lsp_sessions_loads() -> None:
     assert load_config({"SCADBUDDY_LSP_SESSIONS": "0"}).lsp_sessions == 0
 

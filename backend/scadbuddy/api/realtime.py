@@ -41,7 +41,8 @@ Security
   the backend has no auth today (spec §4.3).
 - Topics are authorised as their REST routes are: everything the UI can GET, it may
   follow.
-- Per-connection caps on topics and on inbound frame rate.
+- Per-connection caps on topics and on inbound frame rate, and a cap on open sockets
+  (``SCADBUDDY_REALTIME_SOCKETS``): each one is a standing bus subscription.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ from urllib.parse import urlsplit
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from scadbuddy.api.deps import JOB_ID_PATTERN, STATE_ATTR, AppState
+from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
     Event,
     FontInstalled,
@@ -261,24 +262,47 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
         if kind == "unsubscribe":
             topics.difference_update(requested)
             continue
-        if len(topics | set(requested)) > MAX_TOPICS:
-            await send({"type": "error", "message": f"at most {MAX_TOPICS} topics"})
-            continue
-        topics.update(requested)
-        await send({"type": "subscribed", "topics": requested})
+        # What fits is followed and the rest refused, so a client that resubscribes
+        # everything in one frame after a reconnect never loses all of it to the cap.
+        accepted: list[str] = []
+        refused: list[str] = []
+        for topic in dict.fromkeys(requested):
+            if topic in topics or len(topics) < MAX_TOPICS:
+                topics.add(topic)
+                accepted.append(topic)
+            else:
+                refused.append(topic)
+        if accepted:
+            await send({"type": "subscribed", "topics": accepted})
+        if refused:
+            await send(
+                {
+                    "type": "error",
+                    "message": f"at most {MAX_TOPICS} topics; not following {refused[:5]}",
+                }
+            )
 
 
 @router.websocket("/ws")
-async def realtime(websocket: WebSocket) -> None:
-    state: AppState = getattr(websocket.app.state, STATE_ATTR)
+async def realtime(websocket: WebSocket, state: StateDep) -> None:
     origin = websocket.headers.get("origin")
     public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
     if not origin_allowed(origin, public_url):
         logger.warning("refused a realtime socket from origin %r", origin)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await websocket.accept()
+    # No await between the check and the acquire, so nothing can take the permit in
+    # between (the same pattern as `api/lsp.py`). Refused sockets reconnect with
+    # back-off, and the UI polls meanwhile.
+    if state.realtime_sockets.locked():
+        await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+        return
+    async with state.realtime_sockets:
+        await websocket.accept()
+        await _serve(websocket, state)
 
+
+async def _serve(websocket: WebSocket, state: AppState) -> None:
     lock = asyncio.Lock()
 
     async def send(frame: dict[str, Any]) -> None:
