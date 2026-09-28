@@ -78,6 +78,30 @@ describe('McpAuthSection', () => {
     await waitFor(() => expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull())
   })
 
+  it('asks for confirmation before raising the anonymous cap while authentication is off', async () => {
+    setMcpAuthMode('disabled', 'read')
+    const set = vi.spyOn(api, 'setMcpAuth')
+    const { user } = renderPage(<McpAuthSection />)
+    expect(await screen.findByTestId('mcp-auth-disabled-warning')).toHaveTextContent('with read only')
+    await user.selectOptions(screen.getByLabelText('Access without a token'), 'outward')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Give MCP calls without a token more access?',
+    })
+    expect(dialog).toHaveTextContent('as an anonymous caller with full access')
+    expect(set).not.toHaveBeenCalled()
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(set).not.toHaveBeenCalled()
+    expect(await api.getMcpAuth()).toEqual({ mode: 'disabled', anonymous_cap: 'read' })
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Raise access' }))
+    expect(set).toHaveBeenCalledWith({ mode: 'disabled', anonymous_cap: 'outward' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.getByTestId('mcp-auth-disabled-warning')).toHaveTextContent('with full access')
+  })
+
   it('shows the warning when authentication is already off', async () => {
     setMcpAuthMode('disabled')
     renderPage(<McpAuthSection />)

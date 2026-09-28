@@ -14,7 +14,8 @@ import { Spinner } from './ui/Spinner'
 //
 // Turning authentication off is the operator trusting the network: every caller that
 // reaches /mcp over HTTPS gets the anonymous cap (full access by default). It takes an
-// explicit confirmation here. Outward actions still wait for a person to approve them
+// explicit confirmation here, as does raising the cap while it stays off. The
+// confirmation is UI-only: the PUT route does not require it (#258). Outward actions still wait for a person to approve them
 // in ScadBuddy whatever the mode (§8.2). Save and the confirmation are USER_ONLY:
 // changing the auth mode is an outward settings write the browser agent may not make.
 
@@ -32,6 +33,8 @@ const CAP_HELP: Record<McpTokenTier, string> = {
   outward:
     'An anonymous caller can also ask to send, print, delete or change settings; each of those still waits for a person to approve it here.',
 }
+
+const CAP_RANK: Record<McpTokenTier, number> = { read: 0, write: 1, outward: 2 }
 
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
@@ -61,6 +64,9 @@ export function McpAuthSection({ onSaved }: Props) {
     current !== undefined &&
     chosenMode !== undefined &&
     (chosenMode !== current.mode || chosenCap !== current.anonymous_cap)
+  // Calls without a token are allowed already; this save only raises what they may do.
+  const raisingCap =
+    current?.mode === 'disabled' && CAP_RANK[chosenCap] > CAP_RANK[current.anonymous_cap]
 
   async function save() {
     if (!chosenMode) return
@@ -83,8 +89,9 @@ export function McpAuthSection({ onSaved }: Props) {
   }
 
   function submit() {
-    // Turning authentication off always asks first; anything else saves at once.
-    if (chosenMode === 'disabled' && current?.mode !== 'disabled') {
+    // Anything that lets an unauthenticated caller do more asks first: turning
+    // authentication off, or raising the anonymous cap while it stays off.
+    if (chosenMode === 'disabled' && (current?.mode !== 'disabled' || raisingCap)) {
       setError(null)
       setConfirming(true)
       return
@@ -233,7 +240,9 @@ export function McpAuthSection({ onSaved }: Props) {
 
       <Dialog
         open={confirming}
-        title="Allow MCP calls without a token?"
+        title={
+          raisingCap ? 'Give MCP calls without a token more access?' : 'Allow MCP calls without a token?'
+        }
         onClose={closeConfirm}
         footer={
           <>
@@ -241,7 +250,7 @@ export function McpAuthSection({ onSaved }: Props) {
               Cancel
             </Button>
             <Button variant="danger" onClick={() => void save()} disabled={saving} {...USER_ONLY}>
-              {saving ? <Spinner /> : 'Turn authentication off'}
+              {saving ? <Spinner /> : raisingCap ? 'Raise access' : 'Turn authentication off'}
             </Button>
           </>
         }

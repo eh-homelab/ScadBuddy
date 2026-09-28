@@ -60,8 +60,9 @@ export function resetMcpTokens(): void {
 }
 
 /** For tests: the mode GET reports (spec §8.3). */
-export function setMcpAuthMode(mode: McpAuthMode | null): void {
+export function setMcpAuthMode(mode: McpAuthMode | null, anonymousCap?: McpTokenTier): void {
   state.authMode = mode
+  if (anonymousCap) state.anonymousCap = anonymousCap
 }
 
 function detail(status: number, message: string) {
