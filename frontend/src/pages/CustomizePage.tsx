@@ -12,6 +12,7 @@ import { EditDetailsButton } from '../components/EditDetailsButton'
 import { MediaButton } from '../components/media/MediaButton'
 import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
+import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { PresetPicker } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
@@ -628,34 +629,37 @@ export function CustomizePage() {
         </div>
 
         <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center bg-bg text-[13px] text-faint">
-                Loading the viewer
-              </div>
-            }
-          >
-            <Preview
-              job={job}
-              rendering={rendering || !settled}
-              stage={renderStage}
-              plate={plate}
-              captureRef={captureRef}
-              leading={
-                full && (
-                  <ParametersButton
-                    ref={flyoutButton}
-                    open={flyout}
-                    flyout={FLYOUT_ID}
-                    onClick={() => setFlyout((open) => !open)}
-                  />
-                )
+          {/* #280 — the template's media beside the preview; nothing at all without any. */}
+          <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center bg-bg text-[13px] text-faint">
+                  Loading the viewer
+                </div>
               }
-              controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
-              // The flyout lies over the scene; the readouts move clear of it.
-              covered={full && flyout ? FLYOUT_WIDTH : undefined}
-            />
-          </Suspense>
+            >
+              <Preview
+                job={job}
+                rendering={rendering || !settled}
+                stage={renderStage}
+                plate={plate}
+                captureRef={captureRef}
+                leading={
+                  full && (
+                    <ParametersButton
+                      ref={flyoutButton}
+                      open={flyout}
+                      flyout={FLYOUT_ID}
+                      onClick={() => setFlyout((open) => !open)}
+                    />
+                  )
+                }
+                controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
+                // The flyout lies over the scene; the readouts move clear of it.
+                covered={full && flyout ? FLYOUT_WIDTH : undefined}
+              />
+            </Suspense>
+          </PreviewGallery>
           {misfit.length > 0 && (
             <p
               role="status"
