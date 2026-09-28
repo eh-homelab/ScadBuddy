@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from temporalio import activity
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.worker import Worker
 
 from scadbuddy.render.glb import BoundingBox
@@ -35,11 +35,16 @@ class FakeActivities:
     main render raise the way openscad does."""
 
     def __init__(
-        self, *, fail_main: bool = False, block_solids: asyncio.Event | None = None
+        self,
+        *,
+        fail_main: bool = False,
+        block_main: asyncio.Event | None = None,
+        block_solids: asyncio.Event | None = None,
     ) -> None:
         self.calls: list[str] = []
         self.projections: list[Projection] = []
         self.fail_main = fail_main
+        self.block_main = block_main
         self.block_solids = block_solids
 
     @activity.defn(name="prepare")
@@ -55,6 +60,8 @@ class FakeActivities:
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
         self.calls.append("render_main")
+        if self.block_main is not None:
+            await self.block_main.wait()
         if self.fail_main:
             raise ApplicationError(
                 "openscad exited with 1",
@@ -124,6 +131,19 @@ def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
     )
 
 
+async def _until_the_piece_is_waited_on(client: Client, width: int) -> None:
+    """Until a second job's `wait_for_me` has reached the piece."""
+    piece = client.get_workflow_handle(
+        f"piece-{piece_key('demo', None, 'model.scad', {'width': width})}"
+    )
+    while not [
+        e
+        async for e in piece.fetch_history_events()
+        if e.HasField("workflow_execution_signaled_event_attributes")
+    ]:
+        await asyncio.sleep(0.05)
+
+
 async def test_a_default_render_runs_the_four_stages_and_projects_done() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -187,20 +207,49 @@ async def test_cancelling_one_parent_leaves_a_shared_piece_running() -> None:
             ha = await client.start_workflow(
                 TemplatePipeline.run, a, id=f"render-{a.id}", task_queue=queue
             )
+            while "render_solids" not in acts.calls:
+                await asyncio.sleep(0.05)
+            # A owns the piece; B only waits on it.
             hb = await client.start_workflow(
                 TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
             )
-            while "render_solids" not in acts.calls:
-                await asyncio.sleep(0.05)
+            await _until_the_piece_is_waited_on(client, 3)
             await ha.cancel()
-            with pytest.raises(WorkflowFailureError):
+            with pytest.raises(WorkflowFailureError) as raised:
                 await ha.result()
+            assert isinstance(raised.value.cause, CancelledError)
             gate.set()
             await hb.result()
         assert acts.calls.count("render_main") == 1
         assert acts.calls.count("finish_piece") == 1
-        cancelled = [p for p in acts.projections if p.job_id == a.id and p.state]
-        assert cancelled[-1].state == "cancelled"
+        assert [p.state for p in acts.projections if p.job_id == a.id and p.state][
+            -1
+        ] == "cancelled"
+        assert [p.state for p in acts.projections if p.job_id == b.id and p.state][-1] == "done"
+
+
+async def test_a_job_waiting_on_a_failing_piece_projects_the_failure() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = FakeActivities(fail_main=True, block_main=gate)
+        async with _worker(client, queue, acts):
+            a, b = _job(width=6), _job(width=6)
+            ha = await client.start_workflow(
+                TemplatePipeline.run, a, id=f"render-{a.id}", task_queue=queue
+            )
+            while "render_main" not in acts.calls:
+                await asyncio.sleep(0.05)
+            hb = await client.start_workflow(
+                TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
+            )
+            await _until_the_piece_is_waited_on(client, 6)
+            gate.set()
+            await asyncio.gather(ha.result(), hb.result())
+        assert acts.calls.count("render_main") == 1
+        last_b = [p for p in acts.projections if p.job_id == b.id and p.state][-1]
+        assert last_b.state == "failed" and last_b.failure is not None
+        assert last_b.failure.log_tail == ["ERROR: boom"]
 
 
 async def test_cancelling_a_job_that_waits_on_another_jobs_piece_leaves_the_piece_running() -> None:
@@ -220,18 +269,11 @@ async def test_cancelling_a_job_that_waits_on_another_jobs_piece_leaves_the_piec
             hb = await client.start_workflow(
                 TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
             )
-            piece = client.get_workflow_handle(
-                f"piece-{piece_key('demo', None, 'model.scad', {'width': 5})}"
-            )
-            while not [
-                e
-                async for e in piece.fetch_history_events()
-                if e.HasField("workflow_execution_signaled_event_attributes")
-            ]:
-                await asyncio.sleep(0.05)
+            await _until_the_piece_is_waited_on(client, 5)
             await hb.cancel()
-            with pytest.raises(WorkflowFailureError):
+            with pytest.raises(WorkflowFailureError) as raised:
                 await hb.result()
+            assert isinstance(raised.value.cause, CancelledError)
             gate.set()
             await ha.result()
         assert acts.calls.count("render_main") == 1
