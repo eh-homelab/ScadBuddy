@@ -134,7 +134,7 @@ for hexagons.
 | Parameter | Default | What it does |
 |---|---|---|
 | `overlay_file` | *(empty)* | Upload an SVG or PNG in the customizer (a `// file:svg,png` parameter, #204), or give a bare file name in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = no overlay. A path (`/`, `\`) or a leading dot is refused and turns the overlay off, so the parameter cannot read files outside the model. |
-| `overlay_type` | `auto` | `auto` picks by extension: `.png` goes through `surface()`, anything else is imported as an SVG. `svg` imports the outline; `image_threshold` reads a PNG through `surface()` and keeps the pixels darker than `image_threshold`. |
+| `overlay_type` | `auto` | `auto` picks by extension: `.png` goes through `surface()`, anything else is imported as an SVG. `svg` imports the outline; `png_threshold` reads a PNG through `surface()` and keeps the pixels darker than `image_threshold`. The old value `image_threshold` still works (see below). |
 | `overlay_detail` | `links` | `links`: every link whose centre falls inside the picture takes `overlay_color` whole, so the picture appears in link-sized pixels. `inlay`: the exact outline, cut into the top `top_layers` of the links it covers. |
 | `overlay_color` | `#212121` | Overlay colour. |
 | `overlay_scale` | `80` | Picture width as % of the sheet width (aspect kept). |
@@ -142,6 +142,14 @@ for hexagons.
 | `overlay_rotation` | `0` | Rotate the picture, degrees. |
 | `image_threshold` | `50` | Brightness cut-off (%) for images. |
 | `overlay_invert` | `false` | Swap picture and background. |
+
+**`overlay_type` value renamed (#318).** The PNG choice's value is
+`png_threshold`; it was `image_threshold`, the same spelling as the numeric `image_threshold` parameter. The
+model still reads the old value as `png_threshold`, so saved presets and past outputs
+that hold it render exactly as before, with no migration step. The customizer does
+not offer the old value, so a preset that holds it shows no matching dropdown
+choice, and saving that preset again is refused (422, not one of the options) until
+the PNG choice is re-picked.
 
 **Getting a picture in.** In a ScadBuddy with file parameters (#204, shipped by
 PR #231), drop an SVG or PNG on the `overlay_file` field; on an older ScadBuddy the
@@ -209,7 +217,9 @@ ONLY='overlay' ./verify.sh   # a subset by name regex
 
 The pattern and colour-mode lists are read from the dropdown annotations in
 `model.scad`, so every pattern and every mode is rendered; on top of those it
-renders two-tone, SVG links / inlay, PNG threshold, inverted and rotated
+renders two-tone, SVG links / inlay, PNG threshold (and the pre-#318
+`overlay_type="image_threshold"` value, which must render the same parts as
+`png_threshold`), inverted and rotated
 overlays, overlays on hexagons and TriFlex, a missing overlay file, every
 outline, tight (5 mm links at 0.6 mm clearance), large links on thin layers, a
 tiny sheet, and the largest sheet (300 x 300 mm, 5 mm links, timed). Each 3MF
@@ -230,7 +240,7 @@ is checked for:
   through a `color()`-filtering wrapper like ScadBuddy's closed-part renderer,
   and the closed parts' volumes add up to the whole render's.
 
-Last run: `OK: all cases passed` (36 cases). Sampled minimum gaps at 0.3 mm
+Last run: `OK: all cases passed` (37 cases). Sampled minimum gaps at 0.3 mm
 clearance: square 0.600 (the vertical gap), rings 0.404, diamond 0.419, hexagon
 0.458, TriFlex 0.353.
 

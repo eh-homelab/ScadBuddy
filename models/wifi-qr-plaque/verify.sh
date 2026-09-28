@@ -173,7 +173,7 @@ for name, over in VARIANTS:
     for k, v in over.items():
         args += ["-D", "%s=%s" % (k, scad_value(v))]
     t0 = time.time()
-    r = subprocess.run(["docker", "run", "--rm", "-v", cwd + ":/w", "-w", "/w", IMAGE,
+    r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", cwd + ":/w", "-w", "/w", IMAGE,
                         "openscad", "--backend=Manifold", *args,
                         "-o", "%s/%s.3mf" % (OUT, name), "model.scad"],
                        capture_output=True, text=True)
@@ -291,7 +291,7 @@ for name, over in VARIANTS:
             fh.write('_sb_target = %s;\nmodule color(c, alpha = 1) { if (_sb_target == "" || c == _sb_target) children(); }\n'
                      'include <../model.scad>\n' % scad_value(target))
         out = "%s/%s-%s.3mf" % (OUT, name, tag)
-        rr = subprocess.run(["docker", "run", "--rm", "-v", cwd + ":/w", "-w", "/w", IMAGE,
+        rr = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", cwd + ":/w", "-w", "/w", IMAGE,
                              "openscad", "--backend=Manifold", *args, "-o", out, wrap],
                             capture_output=True, text=True)
         if rr.returncode != 0:
@@ -364,7 +364,7 @@ for v in range(1, 11):
                      % (scad_value(text), ecl))
         cases.append((name, v, ecl, text))
 t0 = time.time()
-r = subprocess.run(["docker", "run", "--rm", "-v", cwd + ":/w", "-w", "/w/" + sweep_dir, IMAGE, "sh", "-c",
+r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", cwd + ":/w", "-w", "/w/" + sweep_dir, IMAGE, "sh", "-c",
                     'for f in *.scad; do openscad -o "${f%.scad}.echo" "$f" 2>/dev/null || echo "FAILED $f"; done'],
                    capture_output=True, text=True)
 print("\n[sweep] 40 echo-only runs in %.1f s" % (time.time() - t0))

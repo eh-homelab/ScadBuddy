@@ -11,7 +11,7 @@ import trimesh
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render import jobs
-from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.bambu3mf import write_plates_3mf
 from scadbuddy.render.jobs import Job, JobResult, RenderQueue
 from tests.conftest import FIXTURES, installed_font_families
 
@@ -119,9 +119,9 @@ async def test_the_3mf_is_written_off_the_event_loop(
 
     def record(*args: object, **kwargs: object) -> None:
         wrote_on.append(threading.current_thread().name)
-        write_bambu_3mf(*args, **kwargs)  # type: ignore[arg-type]
+        write_plates_3mf(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(jobs, "write_bambu_3mf", record)
+    monkeypatch.setattr(jobs, "write_plates_3mf", record)
     await _render(data, SLUG, {"name": "Ada"})
 
     assert wrote_on and threading.main_thread().name not in wrote_on

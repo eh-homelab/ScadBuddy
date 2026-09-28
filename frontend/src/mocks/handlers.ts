@@ -1,6 +1,7 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
   BoundingBox,
   CatalogueFont,
@@ -96,6 +97,10 @@ const state = {
   libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
   /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
   assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
+  /** #237 — other files a duplicate's merge takes or keeps; none unless a test sets them. */
+  mergeFiles: {} as Record<string, MergeFiles>,
+  /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
+  plates: {} as Record<string, NonNullable<Job['plates']>>,
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -127,6 +132,8 @@ export function resetMockState(): void {
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
+  state.mergeFiles = {}
+  state.plates = {}
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -135,6 +142,25 @@ export function resetMockState(): void {
 /** Replaces a template's presets, so a test can start at a state that is slow to build. */
 export function setMockPresets(slug: string, presets: ParamPreset[]): void {
   state.presets[slug] = presets
+}
+
+type MergeFiles = Pick<MergePreview, 'taken' | 'kept'>
+
+/**
+ * #237 — the files besides `model.scad` that merging `slug`'s upstream takes (unchanged
+ * here since `base`) or keeps (changed on both sides). The mock tracks no other files,
+ * so without this both lists are empty.
+ */
+export function setMockMergeFiles(slug: string, files: MergeFiles): void {
+  state.mergeFiles[slug] = files
+}
+
+/**
+ * #289 — the plates every finished render of `slug` reports, as a template that asks for
+ * more than one plate would (spec §6.4). Unset, a render is one plate: `plates: []`.
+ */
+export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
+  state.plates[slug] = plates
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -240,7 +266,8 @@ function planMerge(slug: string, model: ModelSummary): MergePreview {
   const theirs = state.sources[upstream.id] ?? ''
   // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
   const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
-  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
+  const { taken = [], kept = [] } = state.mergeFiles[slug] ?? {}
+  const plan = { ours, base: baseSource, theirs, patch, taken, kept }
   if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
   if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
   const merged =
@@ -619,19 +646,38 @@ export const handlers = [
         description?: string
         tags?: string[]
         force?: boolean
+        libraries?: string[]
       }
       const pastedSlug = slugify(body.name)
       if (!pastedSlug) return problem(422, 'Unprocessable Content', 'that name yields no slug')
       if (state.models.some((m) => m.slug === pastedSlug)) {
         return problem(409, 'Conflict', `a model named '${pastedSlug}' already exists`)
       }
+      // #169 — curated names only, each pinned at the catalogue's ref.
+      const named = [...new Set(body.libraries ?? [])]
+      const unknown = named.filter((name) => !state.libraries.some((entry) => entry.name === name))
+      if (unknown.length > 0) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `not in the library catalogue: ${unknown.join(', ')}`,
+        )
+      }
       const check = checkOf(body.source)
       if (!check.ok && !body.force) return refusal(check)
+      const libraries = state.libraries
+        .filter((entry) => named.includes(entry.name))
+        .map((entry) => {
+          state.seq += 1
+          const commit = state.seq.toString(16).padStart(40, 'c')
+          return { name: entry.name, url: entry.url, ref: entry.ref, commit }
+        })
       const pasted: ModelSummary = {
         slug: pastedSlug,
         name: body.name,
         description: body.description ?? '',
         tags: body.tags ?? [],
+        libraries,
         updated_at: new Date().toISOString(),
         has_thumbnail: false,
         has_readme: false,
@@ -846,7 +892,8 @@ export const handlers = [
       upstream: model.upstream,
       revision:
         upstreamState === 'gone' ? null : (state.versions[model.upstream.id]?.[0]?.commit ?? null),
-      preview: upstreamState === 'update' ? planMerge(slug, model) : null,
+      preview:
+        upstreamState === 'update' || upstreamState === 'dismissed' ? planMerge(slug, model) : null,
     }
     return HttpResponse.json(status)
   }),
@@ -865,7 +912,7 @@ export const handlers = [
         'Conflict',
         `the merge into '${slug}' has 1 conflict(s); resolve them and save with ` +
           `PUT /models/${slug}/source?merge_base=${revision}`,
-        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: [], kept: [] },
+        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: plan.taken, kept: plan.kept },
       )
     }
     state.sources[slug] = plan.merged
@@ -1317,6 +1364,17 @@ export const handlers = [
       : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
   }),
 
+  // #296 — the server's defaults for the caps.
+  http.get(`${base}/assets/usage`, () => {
+    const metas = [...state.assets.values()].map((asset) => asset.meta)
+    return HttpResponse.json({
+      count: metas.length,
+      bytes: metas.reduce((total, meta) => total + meta.size, 0),
+      max_count: 10_000,
+      max_total_bytes: 1_000_000_000,
+    } satisfies AssetUsage)
+  }),
+
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
     return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
@@ -1361,8 +1419,13 @@ export const handlers = [
     job.status = 'done'
     job.bbox_mm = bboxOf(job.params ?? {})
     job.colors = colorsOf(job.slug, job.params ?? {})
+    job.plates = state.plates[job.slug] ?? []
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+    job.notes =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
+    job.warnings =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME ? fixtures.JOB_WARNINGS : []
     return HttpResponse.json(jobView(job))
   }),
 

@@ -116,19 +116,30 @@ class UpstreamStatus(BaseModel):
         description="The upstream's current revision; None when it is gone"
     )
     preview: MergePreview | None = Field(
-        default=None, description="The merge a `POST …/upstream/merge` would make; on update only"
+        default=None,
+        description="The merge a `POST …/upstream/merge` would make; on update or dismissed",
     )
 
 
 @dataclass
 class MergePlan:
     """A merge worked out but not yet written. ``files`` maps a path relative to the
-    template to the upstream's bytes, or ``None`` where the upstream removed it."""
+    template to the upstream's bytes, or ``None`` where the upstream removed it;
+    ``local`` is every file of the template's the plan was read from, as it read it."""
 
     revision: str
     preview: MergePreview
     conflicts: int
     files: dict[str, bytes | None] = field(default_factory=dict)
+    local: dict[str, bytes | None] = field(default_factory=dict)
+
+    def still_applies(self, directory: Path) -> bool:
+        """Whether the template in ``directory`` still reads as this plan found it."""
+        return all(_local(directory / name) == content for name, content in self.local.items())
+
+
+def _local(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
 
 
 def _read(history: ModelHistory, commit: str | None, path: str) -> bytes | None:
@@ -151,7 +162,9 @@ def plan_merge(
     theirs_path = model_path(upstream.id)
     # All three sides as bytes, decoded alike: no newline translation, so a CRLF
     # source compares line for line and keeps its line endings.
-    ours = (directory / SOURCE_NAME).read_bytes().decode()
+    ours_bytes = (directory / SOURCE_NAME).read_bytes()
+    local: dict[str, bytes | None] = {SOURCE_NAME: ours_bytes}
+    ours = ours_bytes.decode()
     base = (_read(history, upstream.base, f"{upstream.path}/{SOURCE_NAME}") or b"").decode()
     theirs = (_read(history, revision, f"{theirs_path}/{SOURCE_NAME}") or b"").decode()
     base_label = f"{upstream.id}@{upstream.base[:7]}" if upstream.base else "base"
@@ -170,8 +183,7 @@ def plan_merge(
         at_theirs = _read(history, revision, f"{theirs_path}/{name}")
         if at_theirs == at_base:
             continue
-        local = directory / name
-        at_ours = local.read_bytes() if local.is_file() else None
+        at_ours = local[name] = _local(directory / name)
         if at_ours == at_theirs:
             continue
         if at_ours == at_base:
@@ -197,4 +209,6 @@ def plan_merge(
         taken=sorted(files),
         kept=kept,
     )
-    return MergePlan(revision=revision, preview=preview, conflicts=conflicts, files=files)
+    return MergePlan(
+        revision=revision, preview=preview, conflicts=conflicts, files=files, local=local
+    )

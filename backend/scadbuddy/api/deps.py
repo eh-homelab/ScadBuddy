@@ -22,10 +22,11 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import LibraryStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -57,6 +58,8 @@ class AppState:
     settings_store: SettingsStore
     fonts: FontService
     libraries: LibraryStore
+    #: Uploads for `// file` parameters, with their caps (#296).
+    assets: AssetStore
     queue: RenderQueue
     #: Where every state change is published (spec §7): `PgNotifyEventBus` on
     #: #241's database when one is configured, `InProcessEventBus` otherwise.
@@ -80,6 +83,9 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
+    #: Pins and renders share it; deleting a checkout takes it alone (#253). The
+    #: render queue holds the same one.
+    checkouts: CheckoutGate = field(default_factory=CheckoutGate)
     #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
     #: held for as long as the editor stays open rather than for one piece of work —
     #: the third term in the pod's worst case above.
@@ -142,8 +148,16 @@ def build_state(settings: Settings) -> AppState:
         # No database: the UI keeps working, events reach this process only.
         store, events = JobStore(paths), InProcessEventBus()
     outputs = OutputStore(paths)
+    checkouts = CheckoutGate()
+    assets = AssetStore(
+        paths.assets,
+        max_total_bytes=config.asset_max_total_bytes,
+        max_count=config.asset_max_count,
+    )
     # The outputs feed the catalogue's fallback thumbnail (#179).
-    catalogue = Catalogue(paths, history, outputs)
+    catalogue = Catalogue(
+        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+    )
     history.on_commit = announce_commits(events, catalogue)
     return AppState(
         settings=settings,
@@ -160,12 +174,21 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
+        assets=assets,
         queue=RenderQueue(
-            config, paths, store=store, history=history, metrics=metrics, events=events
+            config,
+            paths,
+            store=store,
+            history=history,
+            metrics=metrics,
+            events=events,
+            checkouts=checkouts,
+            assets=assets,
         ),
         metrics=metrics,
         events=events,
         print_progress=ProgressObserver(events),
+        checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
     )
@@ -236,6 +259,10 @@ def get_libraries(state: StateDep) -> LibraryStore:
     return state.libraries
 
 
+def get_assets(state: StateDep) -> AssetStore:
+    return state.assets
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
@@ -256,6 +283,10 @@ def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
 
 
+def get_checkouts(state: StateDep) -> CheckoutGate:
+    return state.checkouts
+
+
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
@@ -265,11 +296,13 @@ PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
+AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

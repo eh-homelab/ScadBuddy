@@ -276,8 +276,13 @@ jobs:
           # the design spec IS this repo's institutional memory, and reading it
           # is what lets the agent tell "renderer" from "api" on an issue whose
           # title says neither.
+          #
+          # `list_sub_issues` and `get_pull_request` are read-only and the agent
+          # reaches for them on nearly every run (checking an epic's children,
+          # reading a linked PR). Leaving them out got each such run denied and
+          # stamped failed:issue-intake despite a completed intake.
           claude_args: |
-            --allowedTools "Read,Glob,Grep,Bash(gh:*),mcp__github__get_issue,mcp__github__search_issues,mcp__github__update_issue,mcp__github__add_issue_comment,mcp__github__get_issue_comments" --model "claude-sonnet-5" --max-turns 60
+            --allowedTools "Read,Glob,Grep,Bash(gh:*),mcp__github__get_issue,mcp__github__search_issues,mcp__github__update_issue,mcp__github__add_issue_comment,mcp__github__get_issue_comments,mcp__github__list_sub_issues,mcp__github__get_pull_request" --model "claude-sonnet-5" --max-turns 60
           prompt: |
             You are the issue intake agent for eh-homelab/ScadBuddy — a self-hosted OpenSCAD customizer that reproduces MakerWorld's Parametric Model Maker inside Bambuddy (Python/FastAPI backend that shells out to `openscad`, React 19 + Vite frontend, `.scad` models, one container). The approved design spec is `docs/superpowers/specs/2026-09-22-scadbuddy-design.md`; read it when an issue's area is unclear. Your job is to triage one GitHub issue: check for duplicates, apply labels, wire it to an existing epic if one fits, and note blockers.
 
@@ -427,15 +432,12 @@ jobs:
       # cross-referencing Actions run history by hand (that manual
       # cross-reference is how forge#3053 was found in the first place).
       #
-      # claude-code-action does NOT propagate the agent's own error — turn-cap
-      # exhaustion, tool permission denials — into the step exit code, so an
-      # aborted run otherwise reports green and looks like intake never fired.
-      # Read the verdict out of the execution log instead.
-      #
-      # Inlined rather than extracted into a composite action (which is what
-      # clusters does): there is exactly one call site here, so an extraction
-      # would add a directory and a second file to keep in sync for no
-      # duplication avoided.
+      # claude-code-action does NOT propagate the agent's own error (turn-cap
+      # exhaustion) into the step exit code, so an aborted run otherwise
+      # reports green and looks like intake never fired. Read the verdict out
+      # of the execution log instead. A permission denial the agent recovered
+      # from is a warning, not a failure (forge#3219) — the rule and its tests
+      # are in .github/scripts/intake-verify{,.test}.sh.
       - name: Verify intake completed
         id: verify
         if: always() && steps.intake.outcome != 'skipped'
@@ -445,43 +447,7 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           EXECUTION_FILE: ${{ steps.intake.outputs.execution_file }}
           STEP_OUTCOME: ${{ steps.intake.outcome }}
-        run: |
-          # `set -uo pipefail` only ADDS flags; Actions' `bash -e {0}` stays.
-          # Every command whose non-zero exit is expected carries `|| true`.
-          set -uo pipefail
-
-          is_error=false
-          denials=0
-
-          if [ -n "${EXECUTION_FILE:-}" ] && [ -s "${EXECUTION_FILE}" ]; then
-            result="$(jq -c '[.[] | select(.type == "result")] | last // empty' "$EXECUTION_FILE" 2>/dev/null || true)"
-            if [ -n "$result" ]; then
-              is_error="$(printf '%s' "$result" | jq -r '.is_error // false')"
-              denials="$(printf '%s' "$result" | jq -r '(.permission_denials // []) | length')"
-              echo "is_error=${is_error} permission_denials=${denials}"
-            else
-              echo "::warning::execution log has no result message."
-            fi
-          else
-            echo "::warning::no execution log at '${EXECUTION_FILE:-<unset>}'."
-          fi
-
-          {
-            echo "is_error=$is_error"
-            echo "denials=$denials"
-          } >> "$GITHUB_OUTPUT"
-
-          if [ "$STEP_OUTCOME" = "success" ] && [ "$is_error" != "true" ] && [ "$denials" = "0" ]; then
-            echo "Intake completed without errors or tool denials."
-            exit 0
-          fi
-
-          echo "::error::Intake did not complete cleanly (outcome=${STEP_OUTCOME} is_error=${is_error} denials=${denials})."
-          gh label create "failed:issue-intake" --repo "$REPO" --color b60205 \
-            --description "The issue-intake workflow errored or hit a tool permission denial" >/dev/null 2>&1 || true
-          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
-            || echo "::warning::Failed to apply failed:issue-intake."
-          exit 1
+        run: bash .github/scripts/intake-verify.sh
 
       # Runs `if: always()` so a board problem can never block triage -- the
       # labelling above has already happened by the time we get here -- but it
@@ -615,7 +581,7 @@ jobs:
         run: |
           set -uo pipefail
           gh label create "failed:issue-intake" --repo "$REPO" --color b60205 \
-            --description "The issue-intake workflow errored or hit a tool permission denial" >/dev/null 2>&1 || true
+            --description "The issue-intake agent aborted on this issue — it needs re-driving" >/dev/null 2>&1 || true
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
             || echo "::warning::Failed to apply failed:issue-intake."
           echo "::error::Issue #${ISSUE_NUMBER} still carries needs-triage after intake ran — the agent reported success but changed nothing."

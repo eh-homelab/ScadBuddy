@@ -75,16 +75,47 @@ for the project picker).
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
+  `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
-  can overshoot by roughly one poll interval's worth of transfer, 0.2 to 2 s,
-  before it is stopped).
+  can overshoot by roughly one poll interval's worth of transfer, 0.2 to 2 s, plus
+  one walk of the clone, which takes longer the more files it has, before it is
+  stopped); `SCADBUDDY_DUPLICATE_STAGING_MAX_AGE` (default 3600 s, at least 1: how
+  old a duplicate's staging copy under `/data/cache` must be before it is treated
+  as a crashed copy and removed, at startup, after a duplicate and with the
+  periodic upload sweep; keep it well above the longest copy, since replicas
+  sharing `/data` may be mid-copy).
   Each concurrent render or check is its own `openscad` process, and each open
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
   editor still works, without completion and hover.
+  A render's closed parts take one more `openscad` run per colour, and
+  `SCADBUDDY_SOLID_CONCURRENCY` of those run at once per render. Left at 0 it is
+  the CPUs the container may use (a cgroup v1 or v2 CPU limit counts), less
+  `SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, between
+  1 and 8, so renders and checks together stay at one process per CPU. If no
+  cgroup CPU controller is readable, a warning is logged at the first render and it
+  sizes for every CPU it can see; set it by hand there. It reads no memory limit:
+  size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
+  Each of them gets the whole `SCADBUDDY_RENDER_TIMEOUT` from when it starts.
+- **Uploaded files** (the SVGs and PNGs for `// file` parameters, in
+  `/data/assets`):
+  - `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1000000000) and
+    `SCADBUDDY_ASSET_MAX_COUNT` (10000), 0 for no limit: a new upload that would
+    take the store past either is refused with 413. Re-uploading a file already
+    stored is never refused.
+  - `SCADBUDDY_ASSET_SWEEP_GRACE` (default 604800 s, a week; at least 3600): a
+    file that no saved output, preset or render job references is removed once
+    nothing has uploaded or used it for this long.
+  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
+    after the one at startup; 0 turns it off.
+  - The same periodic sweep also clears old duplicate staging
+    (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
+    next duplicate.
+  - Settings shows the usage under "Uploaded files"; so do
+    `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
@@ -136,7 +167,8 @@ for the project picker).
   (read from the store, so across replicas with Postgres), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
   the queue's store can be read (`scadbuddy_render_store_up`), the
-  SLO targets, and HTTP requests by route. It is unauthenticated, like the rest of
+  SLO targets, the upload store's files and bytes against its caps
+  (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
 
 ## Deploying
@@ -148,7 +180,7 @@ pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
-database at startup (migration 2 adds the `events` log). The event log's retention
+database at startup (migration 3 adds the `events` log). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
@@ -213,10 +245,85 @@ merges). The two containers share the pod network, so the agent reaches
 the backend on `http://127.0.0.1:8080` (§4.3).
 
 - It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
-- It reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
-  `http://127.0.0.1:8080`) and `SCADBUDDY_SECRET_KEY_FILE`
-  (`agent/src/config.ts`; spec §9). With no database URL it still runs and
-  `/healthz` reports `"ai": "disabled (no database)"`.
+- It reads only infrastructure variables (`agent/src/config.ts`; spec §9):
+  `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
+  `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL` and
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each described below. With no database
+  URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
+- **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
+  credential, which is stored encrypted in the database (envelope encryption,
+  spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,
+  base64-encoded; mount it from a Kubernetes Secret:
+
+  ```bash
+  openssl rand -base64 32 > scadbuddy-secret.key
+  kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
+    --from-file=secret.key=scadbuddy-secret.key
+  # container: volumeMount at /etc/scadbuddy/kek, readOnly;
+  # env SCADBUDDY_SECRET_KEY_FILE=/etc/scadbuddy/kek/secret.key
+  ```
+
+  It is read once at start. Without it (or with a malformed one) the service
+  still runs, but saving a credential answers `503` naming the reason and
+  `/healthz` reports `"ai": "disabled (no key-encryption key: …)"` (the
+  reason names the variable, never the path; the log has the detail). Keep a
+  copy: a credential sealed under a lost key cannot be decrypted and must be
+  entered again (`/healthz` then says it was sealed with a different key).
+- **Rotating the key** (spec §9, "re-wraps the data keys only"): create a new
+  key file, mount it as `SCADBUDDY_SECRET_KEY_FILE`, mount the old one as
+  **`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`**, and restart. Once migrations have
+  applied, every credential sealed under the old key has its data key
+  re-sealed under the new one (the secret itself is not decrypted into a
+  route or re-entered); the log says how many. Then remove the previous file
+  and restart again. A row the old key cannot open is left as it is and
+  counted in that log line.
+- `/healthz` reports `"ai": "enabled"` only when the database answers, its
+  `ai_*` migrations have applied (`agent/src/db/migrations.ts`, run at start
+  under an advisory lock with a lock timeout, retried on the next call), the
+  key is loaded and a Claude credential is saved. Otherwise `ai` names the
+  first missing piece; each database step is bounded (2 s), so a stuck lock
+  shows as `"unavailable (database timed out)"` instead of a hung probe. An
+  edited, already-applied migration stops the service at start with a message
+  naming it (each entry's sha256 is recorded).
+- The Claude credential (an Anthropic API key, or a gateway base URL plus
+  token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
+  tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
+  one per 10 s; otherwise `429` with `Retry-After`). No route returns the
+  secret. The sealed value is bound to its `kind` and `base_url`, so editing
+  either in the database makes it fail to decrypt rather than send the token
+  elsewhere.
+- **Where writes may come from** (`agent/src/http/origins.ts`,
+  `agent/src/routes/guard.ts`). Credential writes need both:
+  - HTTPS: `X-Forwarded-Proto: https` from a peer in
+    **`SCADBUDDY_AGENT_TRUSTED_PROXIES`** (comma-separated CIDRs, e.g. the
+    ingress controller's pod range `10.42.0.0/16`), or a loopback peer.
+    `X-Forwarded-*` from any other peer is ignored; unset, it is ignored from
+    everyone.
+  - The UI's origin: `Origin` and the request's host (`X-Forwarded-Host` from a
+    trusted proxy, else `Host`) must both be the origin of
+    **`SCADBUDDY_PUBLIC_URL`**, the same variable the backend reads for
+    Bambuddy's sidebar link (set it to the `https://` URL users open). Default
+    ports are normalised. Unset, only `localhost`/`127.0.0.1`/`[::1]` with the
+    matching Origin, from a loopback peer, is accepted. This is what stops DNS
+    rebinding: an attacker's page re-pointed at the agent sends its own name
+    in both `Host` and `Origin`, which is not on the list.
+
+  That is not authentication, and the human approval spec §8.2 asks for comes
+  with #258.
+- **Gateway base URLs** may be public, private (`10/8`, `172.16/12`,
+  `192.168/16`, `fc00::/7`) or loopback, since a LiteLLM gateway on the LAN or
+  in the cluster is the usual reason to use one. Link-local
+  (`169.254.0.0/16`, `fe80::/10`) and cloud metadata hosts
+  (`metadata.google.internal`, `100.100.100.200`, `fd00:ec2::254`, …) are
+  refused, checked against every address the name resolves to, at save and
+  again at test time (`agent/src/http/egress.ts`). Claude Code resolves the
+  name again when it connects, so this narrows SSRF; an egress
+  NetworkPolicy is the boundary.
+- Plugins handed to the harness must not start processes of their own: command
+  hooks, stdio MCP servers, LSP servers and monitors are refused
+  (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
+  credential's environment.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it

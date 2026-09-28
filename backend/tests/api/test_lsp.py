@@ -19,7 +19,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.lsp import frame, read_message
 from scadbuddy.main import create_app
 
-from .conftest import MODEL_SLUG
+from .conftest import MODEL_SLUG, set_fake_env
 
 # A stand-in for openscad-lsp: it speaks the same Content-Length framing on stdio and
 # answers every request with what it saw, so a test can read the server's side of the
@@ -32,7 +32,9 @@ import pathlib
 import sys
 import time
 
-pid_file = os.environ.get("FAKE_LSP_PID")
+sidecar = pathlib.Path(sys.argv[0]).with_name("fake-env.json")
+settings = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+pid_file = settings.get("FAKE_LSP_PID")
 if pid_file:
     pathlib.Path(pid_file).write_text(str(os.getpid()))
 assert sys.argv[1:] == ["--stdio"], sys.argv
@@ -101,9 +103,9 @@ def fake_lsp(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-def pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def pid_file(tmp_path: Path) -> Path:
     path = tmp_path / "lsp.pid"
-    monkeypatch.setenv("FAKE_LSP_PID", str(path))
+    set_fake_env(tmp_path, "FAKE_LSP_PID", str(path))
     return path
 
 

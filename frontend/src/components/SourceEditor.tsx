@@ -1,6 +1,6 @@
 import Editor from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor/editor/editor.api'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type { Diagnostic } from '../api/types'
 import { connectLanguageServer } from '../lib/languageClient'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
@@ -8,6 +8,20 @@ import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
 import { SCADBUDDY_DARK, SCADBUDDY_LIGHT } from '../lib/openscadLanguage'
 
 setupMonaco()
+
+/**
+ * #254 — how the agent's `replace_range` reaches the editor: as one Monaco edit between
+ * undo stops, so Ctrl+Z takes it back exactly as it would a paste, and `onChange` runs
+ * as it does for typing.
+ */
+export interface SourceEditHandle {
+  replace: (
+    range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number },
+    text: string,
+  ) => void
+  /** The editor's own element, for the highlight. */
+  element: () => HTMLElement | null
+}
 
 interface Props {
   value: string
@@ -23,6 +37,8 @@ interface Props {
   languageServer?: string
   label: string
   readOnly?: boolean
+  /** Filled in once the editor mounts; see `SourceEditHandle`. */
+  editRef?: RefObject<SourceEditHandle | null>
 }
 
 const OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
@@ -53,6 +69,7 @@ export function SourceEditor({
   languageServer,
   label,
   readOnly = false,
+  editRef,
 }: Props) {
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const [textModel, setTextModel] = useState<Monaco.editor.ITextModel | null>(null)
@@ -64,6 +81,13 @@ export function SourceEditor({
   }, [errors])
 
   useEffect(applyMarkers, [applyMarkers])
+
+  useEffect(
+    () => () => {
+      if (editRef) editRef.current = null
+    },
+    [editRef],
+  )
 
   // `path` puts @monaco-editor/react in multi-model mode: it creates a text model per
   // URI and leaves the lifecycle to us. Without this, every model opened in a session
@@ -97,6 +121,17 @@ export function SourceEditor({
       onChange={(next) => onChange(next ?? '')}
       onMount={(instance) => {
         editor.current = instance
+        if (editRef) {
+          editRef.current = {
+            replace: (range, text) => {
+              instance.pushUndoStop()
+              instance.executeEdits('scadbuddy-agent', [{ range, text, forceMoveMarkers: true }])
+              instance.pushUndoStop()
+              instance.revealRangeInCenterIfOutsideViewport(range)
+            },
+            element: () => instance.getDomNode(),
+          }
+        }
         instance.updateOptions({ ariaLabel: label })
         applyMarkers()
         setTextModel(instance.getModel())
