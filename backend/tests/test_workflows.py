@@ -309,3 +309,18 @@ async def test_a_piece_resumes_from_the_activity_it_was_on() -> None:
             await handle.result()
         assert "render_main" not in second.calls
         assert second.calls == ["render_solids", "finish_piece"]
+
+
+async def test_a_job_with_a_slug_the_api_would_refuse_projects_failed_unrendered() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=1).model_copy(update={"slug": "../../etc"})
+            await client.execute_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+        assert acts.calls == []
+        last = acts.projections[-1]
+        assert last.state == "failed" and last.failure is not None
+        assert "../../etc" in last.failure.error

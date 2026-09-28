@@ -17,6 +17,7 @@ import math
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import timedelta
 from typing import Any
 
 from fastapi import status
@@ -39,6 +40,10 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
+
+#: How long a request waits on one Temporal call before leaving it to the reconciler
+#: (a start) or giving up (a cancel): the SDK's own retry budget is ~10 s per call.
+RPC_TIMEOUT = timedelta(seconds=5)
 
 #: The largest `Job` a submit sends as a workflow input. Temporal refuses a payload
 #: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
@@ -244,6 +249,7 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
+            rpc_timeout=RPC_TIMEOUT,
         )
         try:
             png: bytes = await asyncio.wait_for(handle.result(), timeout)
@@ -286,6 +292,7 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=conflict,
             memo=self._memo(),
+            rpc_timeout=RPC_TIMEOUT,
         )
 
     async def _fail_unstartable(self, job: Job, error: Exception) -> None:
@@ -304,7 +311,9 @@ class RenderService:
     async def _cancel_workflow(self, job: Job) -> None:
         assert self.client is not None
         try:
-            await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel()
+            await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel(
+                rpc_timeout=RPC_TIMEOUT
+            )
         except RPCError:
             # Never started (the reconciler had not got to it) or already closed.
             logger.debug("no workflow to cancel", extra={"job_id": job.id})

@@ -100,3 +100,23 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
         assert body["status"] == "done", body
         preview = client.get(f"/api/v1/jobs/{job_id}/preview.glb")
         assert preview.status_code == 200
+
+
+def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconciler(
+    settings: Settings, model: str
+) -> None:
+    cfg = settings.model_copy(
+        update={
+            # Nothing listens on port 1: every call fails to connect.
+            "temporal_address": "127.0.0.1:1",
+            "temporal_task_queue_render": f"t-{uuid.uuid4().hex[:8]}",
+        }
+    )
+    app = create_app(cfg)
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}})
+        assert accepted.status_code == 202, accepted.text
+        job = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}").json()
+        assert job["status"] == "pending"

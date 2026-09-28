@@ -326,7 +326,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
   the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
   same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
-  may mount it.
+  may mount it. A piece no job references any more is removed by the API's periodic
+  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention a
+  render has on the legacy queue.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
   the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,

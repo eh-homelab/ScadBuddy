@@ -307,6 +307,8 @@ worker build-ID versioning semantics in the pinned SDK release (§3.5).
 - The real `openscad` path runs in the Dockerfile's `test` image as today.
 - CI's `postgres:17` service stays; a `temporalio/auto-setup` service is added to the
   backend job for an end-to-end submit → done test against a fake store.
+  (Phase 1 note: there is no such service. The `requires_temporal` tests start the
+  `temporal` CLI's dev server, which the Dockerfile's `test` image carries.)
 
 ## 4. Template UI
 
@@ -713,7 +715,8 @@ leaves every template working.
    Deployment at **one replica** sharing the API's data volume, with the `BlobStore`
    interface over the `local` backend (§6.2); worker versioning; `clusters`
    manifests (Temporal operator + CNPG, §3.1); `bambuddy_render_api_key` in
-   Settings (§9). Visible change: none,
+   Settings (§9). (Phase 1 note: the render key moved to phase 3, store-backed with
+   the Bambuddy blob store that uses it.) Visible change: none,
    except a worker restart no longer loses a render. Scaling render workers past one
    waits for phase 3.
 2. **Template UI** (§4, §8.1). `ui` in `model.json`, served modules, `Host` v1,

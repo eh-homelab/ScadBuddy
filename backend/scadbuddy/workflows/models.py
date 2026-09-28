@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from scadbuddy.library.history import COMMIT_ID_PATTERN
+from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.job_models import JobResult, StepInfo
 from scadbuddy.render.schema import ParamValue
@@ -19,6 +22,17 @@ def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, P
     template's own last commit, which one commit can give to many templates."""
     raw = json.dumps([slug, revision, file, dict(params)], sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def input_problem(slug: str, revision: str | None) -> str | None:
+    """Why a workflow must not render ``slug`` at ``revision``, or None. The API
+    validates both already; this is for a run started straight on the (unauthenticated,
+    in-cluster) Temporal frontend, whose slug the worker would resolve into a path."""
+    if not re.fullmatch(MODEL_ID_PATTERN, slug):
+        return f"not a template id: {slug!r}"
+    if revision is not None and not re.fullmatch(COMMIT_ID_PATTERN, revision):
+        return f"not a revision: {revision!r}"
+    return None
 
 
 class PieceRequest(BaseModel):
@@ -32,6 +46,9 @@ class PieceRequest(BaseModel):
 
     @model_validator(mode="after")
     def _key_matches(self) -> Self:
+        problem = input_problem(self.slug, self.revision)
+        if problem is not None:
+            raise ValueError(problem)
         expected = piece_key(self.slug, self.revision, self.file, self.params)
         if self.piece_key != expected:
             raise ValueError(f"piece_key {self.piece_key} does not match its request")
