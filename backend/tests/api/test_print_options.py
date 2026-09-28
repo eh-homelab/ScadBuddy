@@ -9,6 +9,9 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.bambuddy.conftest import recording
 
 ROUTE = "/api/v1/settings/print-options"
@@ -168,17 +171,20 @@ def test_remembering_an_option_never_needs_a_reachable_bambuddy(client: TestClie
 
 
 @respx.mock
-def test_a_models_own_pipeline_decides_the_printer_the_scope_keys_on(
-    client: TestClient, model: str
+def test_a_models_stored_pipeline_no_longer_decides_the_printer_the_scope_keys_on(
+    client: TestClient, model: str, paths: DataPaths, settings: Settings
 ) -> None:
-    """#86 lets a model default to its own pipeline, which may aim elsewhere."""
+    """Final review 3: the send runs the Settings pipeline only, so the scope keys on
+    that pipeline's printer even when a legacy per-model pipeline is still stored."""
     client.put(
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
     )
-    assert (
-        client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}).status_code
-        == 200
+    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
+    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
+        return_value=httpx.Response(
+            200, json={**recording("slicer-pipeline.json"), "id": 4, "target_printer_id": 2}
+        )
     )
     respx.get("https://bambuddy.test/api/v1/slicer-pipelines/9").mock(
         return_value=httpx.Response(
@@ -186,7 +192,7 @@ def test_a_models_own_pipeline_decides_the_printer_the_scope_keys_on(
         )
     )
 
-    assert client.get(ROUTE, params={"slug": model}).json()["printer_id"] == 3
+    assert client.get(ROUTE, params={"slug": model}).json()["printer_id"] == 2
 
 
 @respx.mock

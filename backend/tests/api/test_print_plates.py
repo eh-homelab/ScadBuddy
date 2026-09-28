@@ -1,11 +1,9 @@
 """Issue #83: the plate type and the plate index, chosen in the print picker.
 
-Neither rides on a pipeline run — ``PipelineRunCreateRequest`` carries a source,
-``copies`` and ``force`` and nothing else — so either one moves the print onto
-slice-and-queue, where the slice request's ``bed_type`` and ``plate`` and the queue
-item's ``plate_id`` say it. ``PrintQueueItemCreate`` has no ``bed_type``: Bambuddy
-reports it on the queue item from the sliced file, which is why the slice is where it
-goes. Assertions are on the request bodies, because that is all Bambuddy sees.
+The slice request's ``bed_type`` and ``plate`` and the queue item's ``plate_id`` say
+them. ``PrintQueueItemCreate`` has no ``bed_type``: Bambuddy reports it on the queue
+item from the sliced file, which is why the slice is where it goes. Assertions are on
+the request bodies, because that is all Bambuddy sees.
 """
 
 from __future__ import annotations
@@ -22,29 +20,15 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from tests.api.test_print import API, pipelines_route, presets_routes, printers_route
-from tests.api.test_print_filaments import inventory_routes, slice_routes
+from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
-from tests.api.test_print_options_picker import slice_route
+from tests.api.test_print_filaments import slice_routes
+from tests.api.test_print_run_choices import body as choices_body
+from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route, remember
+from tests.api.test_send_options import queue_route
 from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
-
-H2C_BED_TYPES = [
-    {"value": "Engineering Plate", "label": "Engineering Plate"},
-    {"value": "Textured PEI Plate", "label": "Textured PEI Plate"},
-    {"value": "Supertack Plate", "label": "Bambu Cool Plate SuperTack"},
-]
-
-
-def _class_pipeline(model_class: str) -> dict[str, Any]:
-    body = recording("slicer-pipelines-configured.json")
-    for row in body["pipelines"]:
-        row.update(
-            target_kind="printer_class", target_printer_id=None, target_model_class=model_class
-        )
-    return dict(body)
 
 
 def _output_3mf(paths: DataPaths, output_id: str) -> Path:
@@ -55,58 +39,28 @@ def _output_3mf(paths: DataPaths, output_id: str) -> Path:
 # --- plate type ---------------------------------------------------------------------
 
 
-@respx.mock
-def test_a_pipeline_offers_the_bed_types_its_printer_takes(client: TestClient, model: str) -> None:
-    """The recorded pipeline targets printer 1, an H2C, whose Bambu Studio profile
-    refuses the Cool and the Smooth PEI / High Temp plates."""
-    configure(client)
-    pipelines_route()
-    printers_route()
-    presets_routes()
+def test_the_plate_type_is_remembered_per_printer(client: TestClient, data_dir: Path) -> None:
+    """The plate lives on the machine, not on any one model, so the route takes only a
+    printer id (#83) — no pipeline resolves it any more, and ``printer_bed_types`` has
+    no model key to begin with, so there is nothing for a model to leak into.
 
-    pipeline = client.get(f"/api/v1/print/models/{model}/pipelines").json()["pipelines"][0]
-
-    assert pipeline["bed_types"] == H2C_BED_TYPES
-
-
-@respx.mock
-def test_a_class_pipeline_offers_the_bed_types_of_its_class(client: TestClient, model: str) -> None:
-    configure(client)
-    pipelines_route(_class_pipeline("P1S"))
-    printers_route()
-    presets_routes()
-
-    pipeline = client.get(f"/api/v1/print/models/{model}/pipelines").json()["pipelines"][0]
-
-    assert [entry["value"] for entry in pipeline["bed_types"]] == [
-        "Cool Plate",
-        "Engineering Plate",
-        "High Temp Plate",
-        "Textured PEI Plate",
-        "Supertack Plate",
-    ]
-
-
-@respx.mock
-def test_the_plate_type_is_remembered_per_printer(client: TestClient, model: str) -> None:
-    configure(client)
-    pipelines_route()
-    printers_route()
-    presets_routes()
-
+    Verified by reading the persisted file back: a store that ignored the printer id
+    would still echo each PUT's own response correctly while sharing one entry between
+    printers, and only a real readback of both keys together catches that.
+    """
     answer = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"})
-
     assert answer.json() == {"printer_id": 1, "bed_type": "Supertack Plate"}
-    body = client.get(f"/api/v1/print/models/{model}/pipelines").json()
-    # Per printer, not per model: the plate is on the machine, whatever is printed on it.
-    assert body["printer_bed_types"] == {"1": "Supertack Plate"}
-    other = client.get("/api/v1/print/models/some-other-model/pipelines").json()
-    assert other["printer_bed_types"] == {"1": "Supertack Plate"}
+    other = client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Cool Plate"})
+    assert other.json() == {"printer_id": 2, "bed_type": "Cool Plate"}
 
-    client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": None})
+    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    assert stored["printer_bed_types"] == {"1": "Supertack Plate", "2": "Cool Plate"}
 
-    body = client.get(f"/api/v1/print/models/{model}/pipelines").json()
-    assert body["printer_bed_types"] == {}
+    cleared = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": None})
+    assert cleared.json() == {"printer_id": 1, "bed_type": None}
+
+    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    assert stored["printer_bed_types"] == {"2": "Cool Plate"}
 
 
 @pytest.mark.requires_postgres
@@ -115,74 +69,40 @@ def test_a_chosen_plate_type_is_sliced_with_and_queued_on_the_printer(
     client: TestClient, model: str
 ) -> None:
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     upload_route()
-    run = respx.post(f"{API}/slicer-pipelines/1/run")
-    sliced = slice_route()
+    run_routes()
+    sliced = slice_routes()
     queue = queue_route()
 
-    body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
-        json={"pipeline_id": 1, "printer_id": 1, "bed_type": "Supertack Plate"},
+    result = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=choices_body(bed_type="Supertack Plate")
     ).json()
 
-    assert not run.called
     sent = json.loads(sliced.calls.last.request.read())
     # The first layer follows the plate: the slice is where the bed type goes.
     assert sent["bed_type"] == "Supertack Plate"
-    # Everything else is still the pipeline's own.
-    assert sent["printer_preset"] == {"source": "cloud", "id": "GM041"}
     assert sent["plate"] == 1
     queued = json.loads(queue.calls.last.request.read())
     assert queued["printer_id"] == 1
     assert "bed_type" not in queued
-    assert body["route"] == "slice_queue"
-    assert body["warnings"] == []
+    assert result["route"] == "slice_queue"
 
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_no_plate_type_slices_with_the_pipelines_own(client: TestClient, model: str) -> None:
-    """A remembered option forces the queue route; the bed type is then the pipeline's."""
+def test_no_plate_type_slices_on_textured_pei(client: TestClient, model: str) -> None:
+    """Textured PEI is the default when the dialog names no plate (spec §4.4)."""
     configure(client)
-    remember(client, "global", {"timelapse": False})
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     upload_route()
-    sliced = slice_route()
+    run_routes()
+    sliced = slice_routes()
     queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=choices_body())
 
     assert json.loads(sliced.calls.last.request.read())["bed_type"] == "Textured PEI Plate"
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_a_plate_type_on_a_class_pipeline_says_it_did_not_fan_out(
-    client: TestClient, model: str
-) -> None:
-    configure(client)
-    pipelines_route(_class_pipeline("H2C"))
-    printers_route()
-    output_id = make_output(client, model)
-    upload_route()
-    slice_route()
-    queue = queue_route()
-
-    result = client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
-        json={"pipeline_id": 1, "bed_type": "Engineering Plate"},
-    ).json()
-
-    assert json.loads(queue.calls.last.request.read())["target_model"] == "H2C"
-    [warning] = result["warnings"]
-    assert warning["kind"] == "no-fan-out"
-    assert "plate" in warning["message"]
-    assert "H2C" in warning["message"]
 
 
 # --- plate index --------------------------------------------------------------------
@@ -222,21 +142,17 @@ def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
-    run = respx.post(f"{API}/slicer-pipelines/1/run")
-    sliced = slice_route()
+    run_routes()
+    sliced = slice_routes()
     queue = queue_route()
 
     body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "plate_id": 2}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(plate_id=2)
     ).json()
 
-    # A run slices plate 1 whatever it is asked, so another plate is sliced here.
-    assert not run.called
     assert json.loads(sliced.calls.last.request.read())["plate"] == 2
     assert json.loads(queue.calls.last.request.read())["plate_id"] == 2
     assert body["route"] == "slice_queue"
@@ -248,17 +164,15 @@ def test_all_plates_are_queued_as_one_item_each(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
-    sliced = slice_route()
+    run_routes()
+    sliced = slice_routes()
     queue = queue_route()
 
     body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
-        json={"pipeline_id": 1, "all_plates": True, "copies": 2},
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True, copies=2)
     ).json()
 
     assert [json.loads(call.request.read())["plate"] for call in sliced.calls] == [1, 2]
@@ -276,11 +190,10 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
 ) -> None:
     """Plate 1 is on Bambuddy's queue when plate 2's slice fails; the output keeps it."""
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
+    run_routes()
     respx.post(f"{API}/library/files/41/slice").mock(
         side_effect=[
             httpx.Response(202, json={"job_id": 9, "status": "pending"}),
@@ -298,7 +211,7 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     queue = queue_route()
 
     answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
     )
 
     assert answer.status_code == 502
@@ -317,11 +230,10 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
 ) -> None:
     """The single ids hold one plate; ``plates`` keeps each plate's queue item and slice."""
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
+    run_routes()
     respx.post(f"{API}/library/files/41/slice").mock(
         side_effect=[
             httpx.Response(202, json={"job_id": 9, "status": "pending"}),
@@ -348,7 +260,7 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
     )
 
     answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
     )
 
     assert answer.status_code == 200
@@ -365,15 +277,13 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client)
-    pipelines_route()
-    printers_route()
     output_id = make_output(client, model)
     upload = upload_route()
     _drop_plates(_output_3mf(paths, output_id))
     queue = queue_route()
 
     answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
     )
 
     assert answer.status_code == 422
@@ -439,27 +349,24 @@ def _plan_run(
     all_plates: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     configure(client)
-    pipelines_route()
-    printers_route()
-    presets_routes()
     output_id = make_output(client, model)
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
-    inventory_routes()
+    run_routes()
     _plates_use(used, grams)
     slice_routes()
     queue = filament_queue_route()
-    body = client.post(
+    response = client.post(
         f"/api/v1/print/outputs/{output_id}/run",
-        json={
-            "pipeline_id": 1,
-            "printer_id": 1,
-            "all_plates": all_plates,
+        json=run_request(
+            all_plates=all_plates,
             # Picked against plate 1, as the picker does for "all plates".
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
-        },
-    ).json()
-    return body, [json.loads(call.request.read()) for call in queue.calls]
+            filament_plan={"slots": [{"slot_id": 1, "spool_id": 9}]},
+        ),
+    )
+    return response.json() | {"status": response.status_code}, [
+        json.loads(call.request.read()) for call in queue.calls
+    ]
 
 
 @pytest.mark.requires_postgres
@@ -485,18 +392,18 @@ def test_one_plan_maps_the_same_slot_on_every_plate(
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_a_slot_only_a_later_plate_uses_is_left_to_the_pipeline_and_said(
+def test_a_slot_only_a_later_plate_uses_is_refused_before_anything_is_queued(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """Plate 2 uses slot 2, which the plan (built from plate 1) does not cover: the
-    single-plate rule for an unpicked slot, no override and a warning, naming the plate."""
+    """Plate 2 uses slot 2, which the plan (built from plate 1) does not cover. A slot
+    with no spool has no filament preset (spec §4.3), and every plate is resolved before
+    any is sliced, so plate 1 is not left on the queue on its own."""
     body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1, 2}})
 
-    assert [override["slot_id"] for override in queued[1]["filament_overrides"]] == [1]
-    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "no-choice"]
-    assert warning["slot_id"] == 2
-    assert "Plate 2" in warning["message"]
-    assert "slot 2" in warning["message"]
+    assert body["status"] == 422
+    assert "Plate 2" in body["detail"]
+    assert "Slot 2" in body["detail"]
+    assert queued == []
 
 
 @pytest.mark.requires_postgres

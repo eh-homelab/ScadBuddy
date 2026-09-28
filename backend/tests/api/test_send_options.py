@@ -16,6 +16,9 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.api.test_send import (
     API,
     PRESETS,
@@ -403,13 +406,16 @@ def test_the_targeted_printers_override_still_takes_the_queue_path(
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_a_models_own_pipeline_is_the_one_read(client: TestClient, model: str) -> None:
-    """#86 lets a model default to its own pipeline; the send must follow that one."""
+def test_a_models_stored_pipeline_is_ignored_for_the_settings_one(
+    client: TestClient, model: str, paths: DataPaths, settings: Settings
+) -> None:
+    """Final review 3: a per-model pipeline (#86) can no longer be set or seen — its
+    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale entry in an
+    existing ``settings.json`` must not quietly override the one Settings shows. It stays
+    stored, unread.
+    """
     configure(client, pipeline_id=4)
-    assert (
-        client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}).status_code
-        == 200
-    )
+    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
     remember(client, "global", {"timelapse": False})
     output_id = make_output(client, model)
     upload_route()
@@ -420,8 +426,8 @@ def test_a_models_own_pipeline_is_the_one_read(client: TestClient, model: str) -
 
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
 
-    assert model_pipeline.called
-    assert not global_pipeline.called
+    assert global_pipeline.called
+    assert not model_pipeline.called
 
 
 @pytest.mark.requires_postgres

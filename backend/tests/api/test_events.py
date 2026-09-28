@@ -19,7 +19,8 @@ from scadbuddy.core.events import Event, InProcessEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.api.test_fonts import FakeBackedService, FakeClient
-from tests.api.test_print import pipelines_route, printers_route, run_body
+from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
 
@@ -81,6 +82,10 @@ def published(events: list[Event], kind: str | None = None) -> list[dict[str, An
         for event in events
         if kind is None or event.kind == kind
     ]
+
+
+def queue_item(status: str) -> dict[str, Any]:
+    return {"id": 51, "printer_id": 1, "printer_name": "3DP-31B-598", "status": status}
 
 
 def _ok(response: httpx.Response, status: int = 200) -> Any:
@@ -369,31 +374,18 @@ def test_a_print_publishes_progress_and_then_settled_once(
     configure(client)
     output_id = make_output(client, model)
     upload_route()
-    pipelines_route()
-    printers_route()
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
-    run = respx.get(f"{API}/pipeline-runs/12").mock(
-        return_value=httpx.Response(200, json=run_body())
+    run_routes()
+    slice_routes()
+    queue_route()
+    item = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item("pending"))
     )
     events.clear()
 
-    _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1}))
+    _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))  # nothing new
-    run.mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                **run_body(),
-                "status": "completed",
-                "copies_completed": 2,
-                "copies_in_progress": 0,
-                "jobs": [{**run_body()["jobs"][0], "status": "completed"}],
-            },
-        )
-    )
+    item.mock(return_value=httpx.Response(200, json=queue_item("completed")))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
 
@@ -419,14 +411,12 @@ def test_every_settings_write_publishes_settings_changed(
             json={"scope": "global", "options": {"use_ams": False}},
         )
     )
-    _ok(client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}))
     _ok(client.put(f"/api/v1/print/models/{model}/choices", json={"printer_id": 2}))
     _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
 
     assert [event["section"] for event in published(events, "settings.changed")] == [
         "connection",
         "print_options",
-        "model_pipeline",
         "model_choices",
         "printer_bed_type",
     ]

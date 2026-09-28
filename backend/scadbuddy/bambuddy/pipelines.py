@@ -1,38 +1,23 @@
-"""Pipeline selection: which of Bambuddy's slicer pipelines to print an output with.
+"""Slicing an output for print: the filament step's options, and the spool-first run.
 
-ScadBuddy owns no slicing settings. A pipeline is Bambuddy's own object — printer
-preset + process preset (where the nozzle diameter lives) + one filament preset per
-slot + a bed type, aimed at a printer or a printer *class* — and everything here is
-either a read of those, a pass-through create, or a run.
-
-Three things about Bambuddy's model shape this module:
-
-* **``check-eligibility`` is a 200 carrying the report**; only ``run`` turns the same
-  report into a 409. So the picker can filter on eligibility without risking a print.
-* **Under ``target_kind="printer_class"`` a report's ``ok`` means *at least one*
-  printer passes**, and the per-printer reasons live in ``printer_reports``. That is
-  why :class:`PipelineView` resolves the target to a list of printer ids: with more
-  than one, the picker has to ask which printer's reasons it is showing.
-* **``PipelineRunRequest`` carries no printer**, so a class-targeted run cannot be
-  pinned to the printer the picker asked about — Bambuddy fans out by
-  ``fanout_strategy`` and reports what it chose in ``PipelineRun.jobs[]``. The chosen
-  printer therefore scopes what the UI *shows*, not where the print goes.
+ScadBuddy owns no slicing settings. The print dialog's run (:func:`run_for_output`)
+derives every preset from the dialog's choices — spools, nozzles, quality and plate
+(spec 2026-09-27 §4) — and always slices then queues; there is no pipeline to run or
+choose from here. Bambuddy's own slicer pipelines are still what the send bar runs
+(``scadbuddy.bambuddy.send``), which is unaffected by this module.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-from dataclasses import dataclass
-from functools import partial
 from typing import Literal
 
 from fastapi import status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
+from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import QueueOutcome, slice_and_queue, target_of
+from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
@@ -40,43 +25,37 @@ from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     across_plates,
     check,
+    every_plate,
     gather_options,
-    nozzle_warnings,
+    normalise_colour,
     queue_filaments,
-    slice_filament_presets,
-    spool_preset_alternatives,
 )
-from scadbuddy.bambuddy.models import (
-    EligibilityReport,
-    EligibilityRequest,
-    FanoutStrategy,
-    LocalPreset,
-    Pipeline,
-    PipelineCreate,
-    PipelineRun,
-    PipelineRunRequest,
-    Preset,
-    PresetRef,
-    Printer,
-    TargetKind,
+from scadbuddy.bambuddy.hardware import (
+    installed_nozzles,
+    last_bed_type,
+    nozzle_warning,
+    plate_warning,
 )
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
+from scadbuddy.bambuddy.resolver import (
+    PRINTER_MODEL,
+    PrintChoices,
+    Resolved,
+    choice_errors,
+    resolve,
+)
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
-    pipeline_slice_request,
     request_scope,
     resolve_print_options,
-    scope_printer,
     target_for,
 )
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
-from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
-from scadbuddy.render.plate import bed_types_for, nozzle_diameter_of
-from scadbuddy.render.plate_profiles import BED_TYPE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -97,165 +76,28 @@ BED_TYPES: tuple[str, ...] = (
 )
 
 
-class PresetChoice(BaseModel):
-    """One row of the "New pipeline" form's pickers.
-
-    ``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns
-    one, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.
-    An empty list means the preset declares no restriction, not that it fits nothing.
-    """
-
-    ref: PresetRef
-    name: str
-    filament_type: str | None = None
-    filament_colour: str | None = None
-    compatible_printers: list[str] = Field(default_factory=list)
-
-
-class PresetOptions(BaseModel):
-    """Printer presets and bed types always; process and filament only once a printer
-    preset is named, because unfiltered those two tiers are thousands of rows."""
-
-    printer: list[PresetChoice] = Field(default_factory=list)
-    process: list[PresetChoice] = Field(default_factory=list)
-    filament: list[PresetChoice] = Field(default_factory=list)
-    bed_types: list[str] = Field(default_factory=lambda: list(BED_TYPES))
-    #: Echoed back so the browser can tell a filtered answer from an unfiltered one.
-    printer_preset: PresetRef | None = None
-
-
-class BedTypeChoice(BaseModel):
-    """One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``
-    carries, ``label`` what Bambu Studio's own bed picker calls it."""
-
-    value: str
-    label: str
-
-
-class PipelineView(BaseModel):
-    """A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and
-    the printers its target comes out as."""
-
-    id: int
-    name: str
-    description: str | None = None
-    bed_type: str | None = None
-    target_kind: TargetKind
-    target_printer_id: int | None = None
-    target_printer_name: str | None = None
-    target_model_class: str | None = None
-    fanout_strategy: FanoutStrategy
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] = Field(default_factory=list)
-    #: ``None``/``[]`` where a ref could not be resolved — Bambuddy has no
-    #: preset-by-id route, so a name comes from the catalogue or not at all.
-    printer_preset_name: str | None = None
-    process_preset_name: str | None = None
-    filament_preset_names: list[str | None] = Field(default_factory=list)
-    #: The nozzle the process preset's name states ("0.2"), or ``None`` where it states
-    #: none. Read here, where the catalogue already is, so the filament step can compare
-    #: it with the mounted nozzles without reading the catalogue again (#78).
-    nozzle_diameter: str | None = None
-    #: The target as printer ids: one for ``specific_printer``, every active printer of
-    #: the class for ``printer_class``. More than one means the picker must ask.
-    printer_ids: list[int] = Field(default_factory=list)
-    #: The plate types the target's printer model takes, from its Bambu Studio profile
-    #: (#83). Every type where the model is not one ScadBuddy knows. Bambuddy's printer
-    #: status reports no plate type, so this is what a choice is checked against.
-    bed_types: list[BedTypeChoice] = Field(default_factory=list)
-
-
-class PipelineChoices(BaseModel):
-    pipelines: list[PipelineView] = Field(default_factory=list)
-    printers: list[Printer] = Field(default_factory=list)
-    #: This model's own default, the global fallback, and the one that would be used.
-    model_pipeline_id: int | None = None
-    global_pipeline_id: int | None = None
-    default_pipeline_id: int | None = None
-    #: The printer and spools this model last printed with (#78).
-    model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
-    #: Stringified printer id -> the plate type last printed on that printer (#83).
-    printer_bed_types: dict[str, str] = Field(default_factory=dict)
-
-
-class PipelineDefault(BaseModel):
-    slug: str
-    pipeline_id: int | None = None
-    global_pipeline_id: int | None = None
-
-
-class PipelineReport(BaseModel):
-    """Bambuddy's report for one pipeline, passed through as it came.
-
-    ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
-    judged, which is neither ready nor blocked, and the picker says so rather than
-    guessing either way. That either-or is enforced below rather than merely described,
-    because the browser branches on it: a row with neither would render as silently
-    absent, and one with both would claim two states at once.
-    """
-
-    pipeline_id: int
-    report: EligibilityReport | None = None
-    error: str | None = None
-
-    @model_validator(mode="after")
-    def _either_a_report_or_a_reason(self) -> PipelineReport:
-        # ``not self.error`` rather than ``is None``: a blank reason is no reason, and it
-        # would reach the browser as a row with nothing to say either way.
-        if (self.report is None) == (not self.error):
-            raise ValueError(
-                "a pipeline report carries either a report or a non-empty error, "
-                "never both or neither"
-            )
-        return self
-
-
-class EligibilityOverview(BaseModel):
-    library_file_id: int
-    reports: list[PipelineReport] = Field(default_factory=list)
-
-
 class PrintRunRequest(BaseModel):
-    """``pipeline_id`` omitted means "whatever this model defaults to".
-
-    ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
-    only offers it once the issues have been shown.
-
-    The request does not choose its route; what it needs does. A pipeline run takes
-    only a source, ``copies`` and ``force``, so it is sliced and queued instead when
-    either:
-
-    - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
-      queue-item fields exist on no other Bambuddy call (#87); or
-    - a remembered print option applies that a run cannot carry (#124). The options
-      resolve global → per-printer → per-model → this request's ``options`` and
-      ``copies``; or
-    - it names a plate type, or any plate but the first (#83). A run slices plate 1
-      with the pipeline's own bed type.
-
-    Otherwise it runs the pipeline exactly as before.
+    """The print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and
+    plate. Every slicer preset is derived from them by the resolver; there is no
+    pipeline to name, and the run always slices then queues.
     """
 
-    pipeline_id: int | None = None
+    #: The printer to queue on, whose loaded spools and rack the dialog showed. Omitted
+    #: means the configured printer. It is also the printer the per-printer option scope
+    #: keys on.
+    printer_id: int | None = None
+    #: One spool per plate slot. Every slot a plate uses needs one: a slot with no spool
+    #: has no filament preset, which the resolver reports as an error (spec §4.3).
+    filament_plan: FilamentPlan
+    #: Nozzles, quality tier or process, plate type and per-slot preset overrides.
+    choices: PrintChoices
     #: Omitted means "the remembered quantity, else 1" (#124): a number here is the
     #: caller's explicit choice for this print and wins over any remembered one.
     copies: int | None = Field(default=None, ge=1, le=1000)
-    force: bool = False
-    #: The printer to queue on, whenever this request is sliced and queued: with a plan
-    #: it is the printer whose trays the mapping addresses, and with remembered options
-    #: that force the queue route it overrides the pipeline's own target (#124). It is
-    #: also the printer the per-printer option scope keys on, ahead of the configured
-    #: printer and the pipeline's target. A plain pipeline run ignores it.
-    printer_id: int | None = None
-    filament_plan: FilamentPlan | None = None
     plate_id: int = Field(default=1, ge=1)
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
-    #: The plate type to slice for, in place of the pipeline's own (#83). Omitted means
-    #: the pipeline's. Bambuddy's own limit on ``SliceRequest.bed_type``.
-    bed_type: str | None = Field(default=None, max_length=64)
     #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
     #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
     #: be — a print with no project is simply one nobody filed.
@@ -267,305 +109,29 @@ class PrintRunRequest(BaseModel):
 
 
 class PrintRunResult(BaseModel):
-    """One shape for both routes, so the caller need not know which one ran.
-
-    ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
-    populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
-    is a single row carrying ``quantity``. Following either to completion is #89.
+    """What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
+    reader of the result need not change until the dialog does (following it to
+    completion is #89).
     """
 
-    pipeline_id: int
     library_file_id: int
-    route: Literal["pipeline", "slice_queue"] = "pipeline"
-    #: Verbatim, including ``jobs[]`` — which printer each copy landed on is Bambuddy's
-    #: answer, not ScadBuddy's choice. ``None`` on the slice-and-queue route.
-    run: PipelineRun | None = None
+    route: Literal["slice_queue"] = "slice_queue"
     slice_job_id: int | None = None
     sliced_library_file_id: int | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
-    #: The printer the copies will actually print on, where that is knowable. On a
-    #: class-targeted pipeline run it is not — Bambuddy fans out and reports per copy.
     printer_id: int | None = None
-    #: How many copies were asked for, whichever route ran (#148): the request's own
-    #: ``copies`` when it set one, else the remembered quantity, else 1. On the queue
-    #: route that is the item's ``quantity``, not ``len(queue_item_ids)``.
+    #: How many copies were asked for (#148): the request's own ``copies`` when it set
+    #: one, else the remembered quantity, else 1. That is the item's ``quantity``, not
+    #: ``len(queue_item_ids)``.
     copies: int
-    #: ScadBuddy's own advisories about the chosen filaments, carried through so the
-    #: dialog can keep showing them after the click.
+    #: ScadBuddy's own advisories — the resolver's, the chosen spools', and the chosen
+    #: nozzle and plate against the printer — carried through so the dialog can keep
+    #: showing them after the click.
     warnings: list[FilamentWarning] = Field(default_factory=list)
     #: The project this print was filed under, and the folder its 3MF went into (#79).
     project_id: int | None = None
     folder_id: int | None = None
     bambuddy_url: str
-
-
-def _local_list(raw: str | None) -> list[str]:
-    """``compatible_printers`` on a local preset is a JSON-encoded string."""
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        # Bambuddy stores the OrcaSlicer column verbatim; a non-JSON one is not fatal.
-        logger.info("a local preset's compatible_printers was not JSON")
-        return []
-    return [str(entry) for entry in parsed] if isinstance(parsed, list) else []
-
-
-def _choice(preset: Preset) -> PresetChoice:
-    return PresetChoice(
-        ref=PresetRef(source=preset.source, id=preset.id),
-        name=preset.name or f"{preset.source}:{preset.id}",
-        filament_type=preset.filament_type,
-        filament_colour=preset.filament_colour,
-        compatible_printers=list(preset.compatible_printers or []),
-    )
-
-
-def _local_choice(preset: LocalPreset) -> PresetChoice:
-    colours = _local_list(preset.default_filament_colour)
-    return PresetChoice(
-        ref=preset.ref(),
-        name=preset.name,
-        filament_type=preset.filament_type,
-        filament_colour=colours[0] if colours else None,
-        compatible_printers=_local_list(preset.compatible_printers),
-    )
-
-
-def _fits(choice: PresetChoice, printer_preset_name: str | None) -> bool:
-    """A preset with no ``compatible_printers`` declares no restriction."""
-    if not choice.compatible_printers:
-        return True
-    if printer_preset_name is None:
-        return True
-    return printer_preset_name in choice.compatible_printers
-
-
-@dataclass(frozen=True)
-class _Catalogue:
-    """Every preset Bambuddy offers, normalised into :class:`PresetChoice` rows.
-
-    Both catalogues go in: ``/local-presets/`` (OrcaSlicer imports) is *not* the
-    ``local`` tier of ``/slicer/presets``, and a user's own filament profile lives only
-    there.
-    """
-
-    printer: list[PresetChoice]
-    process: list[PresetChoice]
-    filament: list[PresetChoice]
-
-    def names(self) -> dict[tuple[str, str], str]:
-        """``(source, id) -> name``, for resolving the refs a pipeline carries."""
-        return {
-            (choice.ref.source, choice.ref.id): choice.name
-            for choice in (*self.printer, *self.process, *self.filament)
-        }
-
-
-async def _catalogue(client: BambuddyClient) -> _Catalogue:
-    catalogue = await client.presets()
-    local = await client.local_presets()
-    printers: list[PresetChoice] = []
-    processes: list[PresetChoice] = []
-    filaments: list[PresetChoice] = []
-    for tier in (catalogue.cloud, catalogue.standard, catalogue.local, catalogue.orca_cloud):
-        printers.extend(_choice(preset) for preset in tier.printer)
-        processes.extend(_choice(preset) for preset in tier.process)
-        filaments.extend(_choice(preset) for preset in tier.filament)
-    printers.extend(_local_choice(row) for row in local.printer)
-    processes.extend(_local_choice(row) for row in local.process)
-    filaments.extend(_local_choice(row) for row in local.filament)
-    return _Catalogue(printer=printers, process=processes, filament=filaments)
-
-
-async def preset_options(
-    client: BambuddyClient, *, printer_preset: PresetRef | None = None
-) -> PresetOptions:
-    """The presets a new pipeline can be built from.
-
-    Without ``printer_preset`` only the printer tier is returned: the live instance has
-    ~4000 process and filament presets across tiers, which is not a payload to hand a
-    browser so it can filter client-side. With one, process and filament are filtered
-    to those whose ``compatible_printers`` names it.
-    """
-    catalogue = await _catalogue(client)
-    if printer_preset is None:
-        return PresetOptions(printer=catalogue.printer, bed_types=list(BED_TYPES))
-
-    chosen = next((choice for choice in catalogue.printer if choice.ref == printer_preset), None)
-    name = chosen.name if chosen else None
-    return PresetOptions(
-        printer=catalogue.printer,
-        process=[choice for choice in catalogue.process if _fits(choice, name)],
-        filament=[choice for choice in catalogue.filament if _fits(choice, name)],
-        bed_types=list(BED_TYPES),
-        printer_preset=printer_preset,
-    )
-
-
-def _names(catalogue_by_ref: dict[tuple[str, str], str], ref: PresetRef | None) -> str | None:
-    if ref is None:
-        return None
-    return catalogue_by_ref.get((ref.source, ref.id))
-
-
-def _target_printer_ids(pipeline: Pipeline, printers: list[Printer]) -> list[int]:
-    if pipeline.target_kind == "specific_printer":
-        return [pipeline.target_printer_id] if pipeline.target_printer_id is not None else []
-    model = pipeline.target_model_class
-    if model is None:
-        return [printer.id for printer in printers if printer.is_active]
-    return [printer.id for printer in printers if printer.is_active and printer.model == model]
-
-
-def _view(
-    pipeline: Pipeline,
-    printers: list[Printer],
-    preset_names: dict[tuple[str, str], str],
-) -> PipelineView:
-    by_id = {printer.id: printer for printer in printers}
-    target = by_id.get(pipeline.target_printer_id) if pipeline.target_printer_id else None
-    model = target.model if target else pipeline.target_model_class
-    return PipelineView(
-        id=pipeline.id,
-        name=pipeline.name,
-        description=pipeline.description,
-        bed_type=pipeline.bed_type,
-        target_kind=pipeline.target_kind,
-        target_printer_id=pipeline.target_printer_id,
-        target_printer_name=target.name if target else None,
-        target_model_class=pipeline.target_model_class,
-        fanout_strategy=pipeline.fanout_strategy,
-        printer_preset=pipeline.printer_preset,
-        process_preset=pipeline.process_preset,
-        filament_presets=list(pipeline.filament_presets),
-        printer_preset_name=_names(preset_names, pipeline.printer_preset),
-        process_preset_name=_names(preset_names, pipeline.process_preset),
-        filament_preset_names=[_names(preset_names, ref) for ref in pipeline.filament_presets],
-        nozzle_diameter=nozzle_diameter_of(_names(preset_names, pipeline.process_preset)),
-        printer_ids=_target_printer_ids(pipeline, printers),
-        bed_types=[
-            BedTypeChoice(value=value, label=BED_TYPE_LABELS[value])
-            for value in bed_types_for(model)
-        ],
-    )
-
-
-async def describe_pipelines(
-    client: BambuddyClient, settings: StoredSettings, slug: str
-) -> PipelineChoices:
-    """Every pipeline, with its presets named and its target resolved to printers."""
-    pipelines = await client.pipelines()
-    printers = await client.printers()
-    # Bambuddy has no preset-by-id route, so naming the five refs a pipeline carries
-    # means reading the whole catalogue. It is read server-side; only the names travel.
-    preset_names = (await _catalogue(client)).names()
-    return PipelineChoices(
-        pipelines=[_view(pipeline, printers, preset_names) for pipeline in pipelines],
-        printers=printers,
-        model_pipeline_id=settings.model_pipelines.get(slug),
-        global_pipeline_id=settings.pipeline_id,
-        default_pipeline_id=settings.pipeline_for(slug),
-        model_choices=settings.model_print_choices.get(slug, ModelPrintChoices()),
-        printer_bed_types=dict(settings.printer_bed_types),
-    )
-
-
-async def create_pipeline(client: BambuddyClient, request: PipelineCreate) -> PipelineView:
-    """Pass-through create, then re-read the printers so the new row's target resolves.
-
-    ``SlicerPipelineCreate`` carries no target fields, so Bambuddy targets the new
-    pipeline itself; the view reports what it chose rather than what was asked for.
-    """
-    created = await client.create_pipeline(request)
-    printers = await client.printers()
-    preset_names = (await _catalogue(client)).names()
-    return _view(created, printers, preset_names)
-
-
-async def check_pipelines(
-    client: BambuddyClient,
-    store: OutputStore,
-    uploads: BambuddyUploadStore,
-    meta: OutputMeta,
-    settings: StoredSettings,
-    *,
-    pipeline_ids: list[int] | None = None,
-) -> EligibilityOverview:
-    """Ask Bambuddy whether each pipeline would refuse this file, without printing.
-
-    ``pipeline_ids`` omitted means every pipeline. Nothing here is a 409: an ineligible
-    answer is a 200 carrying the report, so the picker can mark a row not-ready rather
-    than discover the problem on Run.
-
-    The checks run **concurrently and independently**: the picker cannot open until the
-    last of them answers, so a sequential loop would cost the sum of every pipeline's
-    latency rather than the slowest one's — and one pipeline Bambuddy cannot judge must
-    not blank every row that did answer. ``gather`` keeps the order of ``pipeline_ids``;
-    ``return_exceptions`` is what keeps a single failure local to its own row.
-
-    Concurrency is deliberately unbounded. A Bambuddy holds a handful of pipelines, and
-    the client's own connection pool is the limit that matters; a semaphore here would be
-    a guess about a number nothing has yet needed.
-    """
-    # One upload is judged against every pipeline, including pipelines aimed at
-    # different printer models — so the file carries one model's placement while
-    # being checked for several. That is safe because eligibility does not look at
-    # geometry: Bambuddy's ``EligibilityIssueResponse.kind`` is a closed enum of
-    # ``printer_not_set``, ``printer_not_found``, ``printer_disabled``,
-    # ``printer_offline``, ``filament_type_mismatch``, ``filament_color_mismatch``,
-    # ``ams_slot_missing``, ``filament_unverified``, ``no_class_matches`` and
-    # ``class_not_set`` — printer availability and filament matching, nothing that
-    # reads the plate. The unprintable-area failure this module exists to prevent
-    # is a slicing-time G-code check, which eligibility never performs.
-    #
-    # So the placement here only has to be right for the pipeline that will
-    # actually run, and ``run_for_output`` re-places for whichever that turns out
-    # to be. Uploading once is the point of this endpoint — the picker opens on it.
-    # If that enum ever grows a geometry issue, this has to become one upload per
-    # distinct target instead.
-    target = await target_for(client, settings, meta.slug)
-    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings, target=target)
-    if pipeline_ids is None:
-        pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
-    request = EligibilityRequest(source_library_file_id=library_file_id)
-    checks = await asyncio.gather(
-        *(client.check_eligibility(pipeline_id, request) for pipeline_id in pipeline_ids),
-        return_exceptions=True,
-    )
-    reports: list[PipelineReport] = []
-    for pipeline_id, outcome in zip(pipeline_ids, checks, strict=True):
-        if isinstance(outcome, EligibilityReport):
-            reports.append(PipelineReport(pipeline_id=pipeline_id, report=outcome))
-            continue
-        if not isinstance(outcome, ApiError):
-            # Anything that is not the client's own mapped failure is a bug here, not a
-            # pipeline that cannot be judged, so it is not swallowed into a row.
-            raise outcome
-        logger.info(
-            "a pipeline could not be judged for eligibility",
-            extra={"pipeline_id": pipeline_id, "status": outcome.status},
-        )
-        reports.append(PipelineReport(pipeline_id=pipeline_id, error=outcome.detail))
-    return EligibilityOverview(library_file_id=library_file_id, reports=reports)
-
-
-def filament_preset_index(catalogue: _Catalogue) -> dict[str, PresetRef]:
-    """``preset id -> ref``, so a spool's ``slicer_filament`` string can be resolved.
-
-    The inventory stores the preset as a bare id ("GFG00", or a local preset's row id
-    "2") with no tier, while a :class:`PresetRef` needs both. The catalogue is the only
-    place the tier is written down, so an id it does not hold cannot be turned into a
-    ref — and is left as the pipeline's own preset rather than guessed at.
-
-    A cloud id and a local id could in principle collide; the first tier read wins and
-    the later one is ignored, which matches ``_catalogue``'s own ordering.
-    """
-    index: dict[str, PresetRef] = {}
-    for choice in catalogue.filament:
-        index.setdefault(choice.ref.id, choice.ref)
-    return index
 
 
 async def filament_options_for_output(
@@ -576,36 +142,63 @@ async def filament_options_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
-    nozzle_diameter: str | None = None,
     plate_id: int = 1,
+    all_plates: bool = False,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
 
-    Uploads the 3MF if Bambuddy has not got it, for the same reason the eligibility
-    check does: the plate's slots are read out of a *library file*, so there is no
-    answer before one exists. An output is immutable, so this uploads once.
+    ``all_plates`` answers for every plate of the output at once — one row per slot any
+    plate uses, in place of ``plate_id``'s own — which is what an all-plates print
+    needs a spool for.
 
-    With a printer it also carries that printer's mounted nozzles, compared with
-    ``nozzle_diameter`` — the pipeline's, as :class:`PipelineView` already reported it —
-    so a mismatch is shown before the click (#78). A class target with no printer chosen
-    yet has no nozzles to read.
+    Uploads the 3MF if Bambuddy has not got it: the plate's slots are read out of a
+    *library file*, so there is no answer before one exists. An output is immutable,
+    so this uploads once per folder and target (#316).
+
+    With a printer it also carries that printer's mounted nozzles (#78). Without one
+    there are no nozzles to read. An offline printer's status is unreadable the same way (spec §3):
+    the step still opens, with no mounted nozzles to compare against.
     """
     library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
-    options = await gather_options(
-        client,
-        library_file_id=library_file_id,
-        printer_id=printer_id,
-        plate_id=plate_id,
-        fallback_colours=list(meta.colors),
+    plate_ids = (
+        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)] or [1]
+        if all_plates
+        else [plate_id]
     )
+    read = [
+        await gather_options(
+            client,
+            library_file_id=library_file_id,
+            printer_id=printer_id,
+            plate_id=plate,
+            fallback_colours=list(meta.colors),
+        )
+        for plate in plate_ids
+    ]
+    options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
-    options.nozzles = (await client.printer_status(printer_id)).nozzles
-    options.pipeline_nozzle_diameter = nozzle_diameter
-    options.warnings.extend(
-        nozzle_warnings(options.nozzles, nozzle_diameter, printer_name=options.printer_name)
-    )
+    try:
+        options.nozzles = (await client.printer_status(printer_id)).nozzles
+    except (ApiError, ValueError):
+        logger.info("printer status unreadable; the filament step opens with no nozzles known")
+        options.nozzles = []
     return options
+
+
+async def _spool_colours(
+    client: BambuddyClient, meta: OutputMeta, plan: FilamentPlan
+) -> list[str] | None:
+    """One colour per filament of the output: the chosen spool's, or the model's own
+    for a slot with no spool (#476). ``None`` when no spool is chosen at all, which
+    leaves the file in the model's colours."""
+    if not plan.slots:
+        return None
+    rgba = {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+    return [
+        rgba.get(plan.spool_for(index + 1) or 0) or colour
+        for index, colour in enumerate(meta.colors)
+    ]
 
 
 async def run_for_output(
@@ -616,31 +209,17 @@ async def run_for_output(
     settings: StoredSettings,
     request: PrintRunRequest,
 ) -> PrintRunResult:
-    """Print this output, by whichever of Bambuddy's two routes the request needs.
+    """Slice with presets derived from the dialog's choices, then queue (spec §4).
 
-    Without a filament plan this is unchanged from #86: ``POST
-    /slicer-pipelines/{id}/run`` with ``copies`` and an explicit ``force``. A blocking
-    eligibility issue is Bambuddy's 409, whose report the client passes through
-    verbatim, and ``force`` is what turns it into a run recorded as
-    ``eligibility_overridden``.
+    Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
+    decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
+    (spec §6).
 
-    **With** a plan the run route cannot express it — ``ams_mapping`` and friends live
-    only on the queue item — so the plate is sliced from this same pipeline's presets
-    and queued against one printer. That is a real difference in behaviour, not an
-    implementation detail: a class-targeted pipeline fans out and a queue item does
-    not, which is why the dialog says so before the click.
-
-    Remembered print options (#88) take the same route for the same reason (#124): the
-    run request has nowhere to put ``timelapse`` or ``bed_levelling``, so an option the
-    run cannot carry slices with the pipeline's own filament presets and queues with
-    the options set. Without one, nothing changes.
+    What the choices alone decide (nozzle sizes, printer and process preset) is
+    refused before the 3MF is uploaded. Every plate is then resolved before any is
+    sliced, so a slot error is a 422 with nothing on Bambuddy's queue, however many
+    plates the print has.
     """
-    pipeline_id = request.pipeline_id or settings.pipeline_for(meta.slug)
-    if pipeline_id is None:
-        raise not_configured(
-            "no slicer pipeline is set for this model and there is no default, "
-            "so there is nothing to print with"
-        )
     plate_ids = (
         [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
         if request.all_plates
@@ -654,9 +233,33 @@ async def run_for_output(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
-    # Placed for the pipeline being run, which ``request.pipeline_id`` may have
-    # overridden — not for whatever the settings would have defaulted to.
-    target = await target_for(client, settings, meta.slug, pipeline_id=pipeline_id)
+    printer_id = request.printer_id or settings.printer_id
+    if printer_id is None:
+        raise not_configured(
+            "no printer is chosen and none is configured, so there is nothing to print on"
+        )
+    await _require_resolvable_printer(client, printer_id)
+    choices = request.choices
+    # Read once for every plate: the catalogue is ~4000 presets on the live instance.
+    # Read before the upload, so that what the choices alone refuse — mixed nozzle
+    # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
+    # library. Slot errors need the plate's slots, which only a library file answers,
+    # so those are still found after the upload, by `resolve` below.
+    catalogue = await _catalogue(client)
+    refused = choice_errors(choices, catalogue)
+    if refused:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
+        )
+    # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
+    target = await target_for(
+        client,
+        settings,
+        meta.slug,
+        printer_id=printer_id,
+        nozzle_diameter=choices.nozzles[0].size,
+        colours=await _spool_colours(client, meta, request.filament_plan),
+    )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # the copy is looked up by (folder, target): a project gets a copy of its own, and
@@ -666,133 +269,23 @@ async def run_for_output(
     library_file_id = await ensure_uploaded(
         client, store, uploads, meta, settings, target=target, folder_id=folder_id
     )
-
-    scope_printer_id, pipeline = await scope_printer(
-        settings, request.printer_id, partial(_pipeline_or_conflict, client, pipeline_id)
-    )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
-    # one), so a remembered project_id is dropped here: left in, it would force the
-    # queue route and then lose to the picker's project anyway.
+    # one), so a remembered project_id is dropped here rather than half-applied.
     print_options = resolve_print_options(
-        settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
+        settings, meta.slug, printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
-    plate_chosen = request.bed_type is not None or plate_ids != [1]
 
-    if request.filament_plan is None and not plate_chosen and not print_options.beyond_pipeline():
-        run = await client.run_pipeline(
-            pipeline_id,
-            PipelineRunRequest(
-                source_library_file_id=library_file_id,
-                copies=copies,
-                force=request.force,
-            ),
-        )
-        store.record_send(
-            meta.id,
-            pipeline_run_id=run.id,
-            print_route="pipeline",
-            project_id=project_id,
-        )
-        if run.sliced_library_file_id is not None:
-            # Usually null on the 202; the progress read records it once it appears.
-            await uploads.record_sliced(
-                meta.id,
-                library_file_id,
-                SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
-            )
-        return PrintRunResult(
-            pipeline_id=pipeline_id,
-            library_file_id=library_file_id,
-            route="pipeline",
-            run=run,
-            copies=copies,
-            project_id=project_id,
-            folder_id=folder_id,
-            bambuddy_url=client.config.web_url(QUEUE_PATH),
-        )
-
-    if pipeline is None:
-        pipeline = await _pipeline_or_conflict(client, pipeline_id)
-    if request.filament_plan is None:
-        # Only the options or the plate forced this route: slice what the run would have.
-        slice_request = pipeline_slice_request(pipeline, meta)
-        outcomes = []
-        sent: list[PlateSend] = []
-        for plate_id in plate_ids:
-            outcome = await slice_and_queue(
-                client,
-                library_file_id=library_file_id,
-                pipeline=pipeline,
-                printer_id=request.printer_id,
-                filament_presets=slice_request.filament_presets,
-                filament_colours=slice_request.filament_colours,
-                plate_id=plate_id,
-                bed_type=request.bed_type,
-                copies=copies,
-                project_id=project_id,
-                options=print_options,
-            )
-            sent = await _record_queued(
-                store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
-            )
-            outcomes.append(outcome)
-        warnings: list[FilamentWarning] = []
-        target_model = outcomes[0].target_model
-        if target_model is not None:
-            # The picker says this before a filament plan pins a printer; a remembered
-            # option has no dialog moment, so it is said here, after the fact.
-            # No option names: the labels live in the frontend, and Bambuddy's field
-            # names (bed_levelling, nozzle_offset_cali) are not words for a person.
-            why = "The chosen plate" if plate_chosen else "Remembered print options"
-            warnings.append(
-                FilamentWarning(
-                    kind="no-fan-out",
-                    message=(
-                        f"{why} cannot ride on a pipeline run, so this was queued once "
-                        f"against the {target_model} class instead of fanned out across "
-                        "its printers."
-                    ),
-                )
-            )
-        return _queued(
-            client,
-            outcomes,
-            pipeline_id,
-            library_file_id,
-            project_id,
-            folder_id,
-            copies=copies,
-            warnings=warnings,
-        )
-
-    printer_id, _ = target_of(pipeline, request.printer_id)
-    # Read once and used twice. The catalogue is ~4000 presets across four tiers on the
-    # live instance, which is why `preset_options` filters it server-side in the first
-    # place; asking for it a second time in the same request is the same cost again.
-    catalogue = await _catalogue(client)
-    printer_preset = pipeline.printer_preset
-    printer_preset_name = (
-        catalogue.names().get((printer_preset.source, printer_preset.id))
-        if printer_preset is not None
-        else None
-    )
-    compatible = (
-        {choice.ref.id for choice in catalogue.filament if _fits(choice, printer_preset_name)}
-        if printer_preset_name is not None
-        else None
-    )
-    outcomes = []
-    sent = []
-    warnings = []
-    plate_options: list[FilamentOptions] = []
-    # Each plate's slots are read on their own: a plate uses only some of the
-    # project's filaments, and its requirements say which (#83). The one plan applies to
-    # every plate because a slot is a project filament, not a plate position: extruders
-    # are numbered by colour parameter across the whole output (#180), so slot 2 is the
-    # same colour on plate 1 and plate 2. A slot a later plate uses and the plan (picked
-    # against plate 1) does not cover is what a single plate does with an unpicked slot:
-    # sliced with its own colour and the pipeline's preset, and said in a warning.
+    # Read once for every plate: the plan's spools are the same on every plate.
+    spool_presets = {
+        spool_id: await client.spool_filament_presets(spool_id)
+        for spool_id in sorted({slot.spool_id for slot in request.filament_plan.slots})
+    }
+    # Each plate's slots are read on their own: a plate uses only some of the project's
+    # filaments (#83). The one plan applies to every plate because a slot is a project
+    # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
+    planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
+    errors: list[str] = []
     for plate_id in plate_ids:
         options = await gather_options(
             client,
@@ -801,26 +294,50 @@ async def run_for_output(
             plate_id=plate_id,
             fallback_colours=list(meta.colors),
         )
-        presets, colours, preset_warnings = slice_filament_presets(
-            options,
-            request.filament_plan,
-            pipeline_presets=list(pipeline.filament_presets),
-            resolve=filament_preset_index(catalogue),
-            compatible=compatible,
-            alternatives=await spool_preset_alternatives(
-                client, options, request.filament_plan, compatible
-            ),
+        resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
+        for error in resolved.errors:
+            message = (
+                f"Plate {plate_id}: {error.message}"
+                if error.slot_id is not None and len(plate_ids) > 1
+                else error.message
+            )
+            if message not in errors:
+                errors.append(message)
+        if resolved.errors:
+            continue
+        if resolved.printer_preset is None or resolved.process_preset is None:
+            # The resolver reports both as errors, so this only narrows the types; it
+            # is still a refusal, never an assertion.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Bambuddy has no printer preset {resolved.printer_preset_name!r} or no "
+                "process preset for the chosen nozzle.",
+            )
+        plan = SlicePlan(
+            printer_preset=resolved.printer_preset,
+            process_preset=resolved.process_preset,
+            filament_presets=resolved.filament_presets,
+            filament_colours=resolved.filament_colours,
+            bed_type=resolved.bed_type,
         )
+        planned.append((plate_id, options, resolved, plan))
+    if errors:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+
+    hardware = await _hardware_warnings(
+        client, printer_id, choices, printer_name=planned[0][1].printer_name
+    )
+    outcomes: list[QueueOutcome] = []
+    sent: list[PlateSend] = []
+    warnings: list[FilamentWarning] = []
+    for plate_id, options, resolved, plan in planned:
         outcome = await slice_and_queue(
             client,
             library_file_id=library_file_id,
-            pipeline=pipeline,
-            printer_id=request.printer_id,
-            filament_presets=presets,
-            filament_colours=colours,
+            plan=plan,
+            printer_id=printer_id,
             filaments=queue_filaments(options, request.filament_plan),
             plate_id=plate_id,
-            bed_type=request.bed_type,
             copies=copies,
             project_id=project_id,
             options=print_options,
@@ -829,53 +346,76 @@ async def run_for_output(
             store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
         )
         outcomes.append(outcome)
-        plate_options.append(options)
-        for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
+        for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
             # Checked once below, against what every plate needs together.
-            if warning.kind == "low-filament":
-                continue
-            if warning.kind == "no-choice" and warning.slot_id is not None and len(plate_ids) > 1:
-                warning = warning.model_copy(
-                    update={
-                        "message": (
-                            f"Plate {plate_id} uses slot {warning.slot_id}, which has no "
-                            "filament chosen, so it is sliced with its own colour and the "
-                            "pipeline's filament preset."
-                        )
-                    }
-                )
-            if warning not in warnings:
+            if warning.kind != "low-filament" and warning not in warnings:
                 warnings.append(warning)
     warnings += [
         warning
-        for warning in check(across_plates(plate_options), request.filament_plan, copies=copies)
+        for warning in check(
+            across_plates([options for _, options, _, _ in planned]),
+            request.filament_plan,
+            copies=copies,
+        )
         if warning.kind == "low-filament"
     ]
     return _queued(
         client,
         outcomes,
-        pipeline_id,
         library_file_id,
         project_id,
         folder_id,
         copies=copies,
-        warnings=warnings,
+        warnings=warnings + hardware,
     )
 
 
-async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pipeline:
-    """The pipeline by id, or the same friendly 409 whichever path first needs it.
-
-    Read from the list rather than ``GET /slicer-pipelines/{id}``: a pipeline deleted
-    in Bambuddy is then this app's "not configured", not a raw upstream 404.
-    """
-    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
-    if pipeline is None:
-        raise not_configured(
-            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so ScadBuddy cannot "
-            "slice with it"
+async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
+    """A 422 before anything is uploaded or sliced when the resolver cannot serve this
+    printer: one Bambuddy does not list, or any model but the H2C, whose presets are the
+    only ones the resolver knows (``PRINTER_MODEL``)."""
+    printer = next((row for row in await client.printers() if row.id == printer_id), None)
+    if printer is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Bambuddy has no printer {printer_id}. Pick another printer.",
         )
-    return pipeline
+    if (printer.model or "").upper() != PRINTER_MODEL:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"ScadBuddy can only choose slicer presets for a Bambu Lab {PRINTER_MODEL} so "
+            f"far, and {printer.name}'s model is {printer.model or 'not reported'}.",
+        )
+
+
+async def _hardware_warnings(
+    client: BambuddyClient,
+    printer_id: int,
+    choices: PrintChoices,
+    *,
+    printer_name: str | None,
+) -> list[FilamentWarning]:
+    """The chosen nozzles and plate against what the printer reports (spec §4.4-4.5).
+
+    Advisory only: an offline printer's status and an unreadable archive list mean
+    "unknown", which says nothing rather than failing the print.
+    """
+    try:
+        installed = installed_nozzles(await client.printer_status(printer_id))
+    except (ApiError, ValueError):
+        logger.info("printer status unreadable; no nozzle is warned about")
+        installed = []
+    try:
+        last = last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
+    except (ApiError, ValueError):
+        logger.info("archives unreadable; the plate is not compared with the last print")
+        last = None
+    found = [
+        nozzle_warning(size, installed)
+        for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
+    ]
+    found.append(plate_warning(choices.bed_type, last, printer_name))
+    return [warning for warning in found if warning is not None]
 
 
 async def _record_queued(
@@ -919,7 +459,6 @@ async def _record_queued(
 def _queued(
     client: BambuddyClient,
     outcomes: list[QueueOutcome],
-    pipeline_id: int,
     library_file_id: int,
     project_id: int | None,
     folder_id: int | None,
@@ -933,9 +472,7 @@ def _queued(
     """
     first = outcomes[0]
     return PrintRunResult(
-        pipeline_id=pipeline_id,
         library_file_id=library_file_id,
-        route="slice_queue",
         slice_job_id=first.slice_job_id,
         sliced_library_file_id=first.sliced_library_file_id,
         queue_item_ids=[item for outcome in outcomes for item in outcome.queue_item_ids],
