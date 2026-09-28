@@ -220,7 +220,10 @@ export function FilamentPicker({
           left {mounted[1]?.nozzle_diameter} mm.
         </p>
       )}
-      {nozzleSize && fits.length === 1 && slots.length > 1 && (
+      {/* Only with both sizes reported: a single-nozzle printer (X1C, P1S, A1) prints
+          every color through its one nozzle, and an unreported side is the server's
+          warning, not a refusal (#469). */}
+      {nozzleSize && bothKnown && fits.length === 1 && slots.length > 1 && (
         <p className="mt-1 text-[12px] text-warn" data-testid="one-fitting-nozzle">
           Only the {fits[0] === 1 ? 'left' : 'right'} nozzle is {nozzleSize} mm, and the slicer
           spreads a multi-color print across both, so this can&apos;t print. Fit a {nozzleSize} mm

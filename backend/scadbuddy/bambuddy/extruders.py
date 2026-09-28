@@ -11,8 +11,8 @@ ScadBuddy can't hold a filament to one extruder. Bambu Studio ignores a Manual
 So the run refuses, before upload, what would pause the printer:
 
 * a size neither mounted nozzle has;
-* more than one filament when only one side has the chosen size, since the slicer
-  would spread them onto the other;
+* more than one filament on the plates printed when only one side has the chosen size
+  and the other reports another, since the slicer would spread them onto it;
 * without the Filament Track Switch, a spool whose AMS is wired to the side with
   another size.
 
@@ -34,7 +34,7 @@ Anything else is ``None``, "unknown" — never quietly the right-hand side.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -90,6 +90,20 @@ def fitted_size(status: PrinterStatus | None, extruder: int) -> str | None:
     if status is None or extruder >= len(status.nozzles):
         return None
     return status.nozzles[extruder].nozzle_diameter or None
+
+
+def two_nozzles(status: PrinterStatus | None) -> bool:
+    """Whether the printer has a left extruder at all. Bambuddy reports a second
+    ``nozzles`` entry, empty, for a single-nozzle printer (X1C, P1S, A1) too, so a left
+    side counts only when something names it: a nozzle type or size, an AMS wired to
+    it, or the Filament Track Switch."""
+    if status is None:
+        return False
+    if len(status.nozzles) > LEFT and (
+        status.nozzles[LEFT].nozzle_type or status.nozzles[LEFT].nozzle_diameter
+    ):
+        return True
+    return LEFT in status.ams_extruder_map.values() or track_switch(status)
 
 
 @dataclass(frozen=True)
@@ -179,9 +193,11 @@ def plan_extruders(
     status: PrinterStatus | None,
     *,
     size: str,
-    filament_count: int,
+    used_slots: Collection[int],
 ) -> ExtruderPlan:
     """Refuse a print the nozzles can't take, or say what nobody could check.
+
+    ``used_slots`` are the filaments (1-based) the plate or plates being printed use.
 
     * Neither side has ``size``: refused. Nozzles the printer doesn't report: a
       warning, since nothing can be checked.
@@ -189,9 +205,12 @@ def plan_extruders(
     * One side has ``size``: more than one filament is refused, because the slicer
       spreads them across both extruders — what paused queue item 108. One filament
       prints with a warning, since the slicer, not ScadBuddy, picks its extruder.
+    * One side has ``size`` and the other reports none: a single-nozzle printer prints
+      any filament through it; on a two-nozzle printer that side is unknown, so a
+      warning, as when nothing is reported.
     * Both have it: either extruder prints any filament.
     """
-    own = [side for side in sides if side.slot_id <= filament_count]
+    own = [side for side in sides if side.slot_id in used_slots]
     fitted = {extruder: fitted_size(status, extruder) for extruder in (RIGHT, LEFT)}
     matching = [extruder for extruder in (RIGHT, LEFT) if fitted[extruder] == size]
     right, left = fitted[RIGHT], fitted[LEFT]
@@ -223,7 +242,22 @@ def plan_extruders(
 
     only = matching[0]
     other = LEFT if only == RIGHT else RIGHT
-    if filament_count > 1:
+    if fitted[other] is None:
+        if only == RIGHT and not two_nozzles(status):
+            return ExtruderPlan()
+        return ExtruderPlan(
+            warnings=[
+                FilamentWarning(
+                    kind="side-unknown",
+                    message=(
+                        f"The {_side_word(only)} nozzle is {size} mm, but the printer didn't "
+                        f"report the {_side_word(other)} one, so nothing checks that the "
+                        f"slicer's extruders match them."
+                    ),
+                )
+            ]
+        )
+    if len(used_slots) > 1:
         return ExtruderPlan(
             errors=[
                 f"This printer has a {right} mm nozzle on the right and {left} mm on the "

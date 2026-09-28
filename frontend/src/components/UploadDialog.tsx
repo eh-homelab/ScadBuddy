@@ -15,6 +15,7 @@ import {
   type ModelFiles,
   type Skipped,
 } from '../lib/modelFolder'
+import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -34,10 +35,17 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  // #279 — images and videos, uploaded in this order once the model exists.
+  const [media, setMedia] = useState<File[]>([])
+  const [progress, setProgress] = useState<string | null>(null)
+  // The model, when it was made but some of its media did not go up.
+  const [created, setCreated] = useState<ModelSummary | null>(null)
+  const uploadLimit = useUploadLimit()
   const inputRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const thumbnailRef = useRef<HTMLInputElement>(null)
   const readmeRef = useRef<HTMLInputElement>(null)
+  const mediaRef = useRef<HTMLInputElement>(null)
 
   // Set here rather than as a JSX prop: React's input typings do not know the
   // directory-picker attribute, though every current browser supports it.
@@ -108,6 +116,15 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
     setFiles({ ...files, [kind]: file })
   }
 
+  async function attachMedia(chosen: File[]) {
+    if (chosen.length === 0) return
+    const limit = await uploadLimit()
+    const problems = chosen.map((file) => mediaProblem(file, limit))
+    const refused = problems.filter(Boolean)
+    setError(refused.length > 0 ? refused.join(' ') : null)
+    setMedia((all) => [...all, ...chosen.filter((_, index) => !problems[index])])
+  }
+
   function detach(kind: Extra) {
     if (!files) return
     setFiles({ ...files, [kind]: undefined })
@@ -127,18 +144,40 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
     setUploading(true)
     setError(null)
     try {
-      const model = await api.uploadModel(files.scad, {
+      let model = await api.uploadModel(files.scad, {
         filename: uploadFilename(files, metaName),
         meta: files.meta,
         thumbnail: files.thumbnail,
         readme: files.readme,
       })
+      // One at a time and in order: each is appended, so the first is the cover
+      // (after the thumbnail, when the upload has one).
+      const failed: string[] = []
+      for (const [index, file] of media.entries()) {
+        const step = `Uploading ${file.name} (${index + 1} of ${media.length})`
+        setProgress(step)
+        try {
+          model = await api.uploadMedia(model.slug, file, {}, (fraction) =>
+            setProgress(`${step}, ${Math.round(fraction * 100)}%`),
+          )
+        } catch (cause) {
+          failed.push(`${file.name}: ${failure(cause)}`)
+        }
+      }
+      if (failed.length > 0) {
+        setCreated(model)
+        setError(
+          `The model was added, but not all of its media: ${failed.join('; ')}. Add them from the model's Media.`,
+        )
+        return
+      }
       onUploaded(model)
       reset()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Upload failed. Try again.')
     } finally {
       setUploading(false)
+      setProgress(null)
     }
   }
 
@@ -148,6 +187,8 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
     setIgnored([])
     setError(null)
     setDragging(false)
+    setMedia([])
+    setCreated(null)
     onClose()
   }
 
@@ -158,15 +199,28 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
       description="Drop an OpenSCAD source file, or a model folder holding model.scad with its model.json, thumbnail.png and README.md. Its customizer parameters are read on upload."
       onClose={reset}
       footer={
-        <>
-          <Button onClick={reset} disabled={uploading}>
-            Cancel
+        created ? (
+          <Button
+            variant="primary"
+            onClick={() => {
+              onUploaded(created)
+              reset()
+            }}
+          >
+            Open model
           </Button>
-          <Button variant="primary" onClick={() => void upload()} disabled={!files || uploading}>
-            {uploading && <Spinner />}
-            {uploading ? 'Uploading' : 'Add model'}
-          </Button>
-        </>
+        ) : (
+          <>
+            {progress && <span className="mr-auto truncate text-[12px] text-muted">{progress}</span>}
+            <Button onClick={reset} disabled={uploading}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={() => void upload()} disabled={!files || uploading}>
+              {uploading && <Spinner />}
+              {uploading ? 'Uploading' : 'Add model'}
+            </Button>
+          </>
+        )
       }
     >
       <div
@@ -275,6 +329,45 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
             )}
           </dd>
 
+          <dt className="self-start text-muted">Media</dt>
+          <dd className="min-w-0" data-testid="upload-media">
+            {media.length === 0 ? (
+              <span className="text-faint">No images or videos</span>
+            ) : (
+              <>
+                <ol className="flex flex-col gap-1">
+                  {media.map((file, index) => (
+                    <li key={`${file.name}-${index}`} className="flex items-center gap-2">
+                      <span className="sb-num min-w-0 truncate">{file.name}</span>
+                      {index === 0 && !files.thumbnail && (
+                        <span className="text-[11px] text-accent">cover</span>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="ml-auto"
+                        aria-label={`Remove ${file.name}`}
+                        onClick={() => setMedia((all) => all.filter((_, at) => at !== index))}
+                      >
+                        Remove
+                      </Button>
+                    </li>
+                  ))}
+                </ol>
+                {files.thumbnail && (
+                  <p className="mt-1 text-[12px] text-faint">
+                    Added after the thumbnail, which stays the cover.
+                  </p>
+                )}
+              </>
+            )}
+          </dd>
+          <dd className="self-start">
+            <Button size="sm" variant="ghost" onClick={() => mediaRef.current?.click()}>
+              Add media
+            </Button>
+          </dd>
+
           <dt className="text-muted">README</dt>
           <dd className="truncate" data-testid="upload-readme">
             {files.readme ? (
@@ -309,6 +402,18 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         aria-label="Thumbnail (PNG)"
         onChange={(event) => {
           void attach('thumbnail', event.target.files?.[0])
+          event.target.value = ''
+        }}
+      />
+      <input
+        ref={mediaRef}
+        type="file"
+        multiple
+        accept={MEDIA_ACCEPT}
+        className="sr-only"
+        aria-label="Images and videos"
+        onChange={(event) => {
+          void attachMedia(Array.from(event.target.files ?? []))
           event.target.value = ''
         }}
       />

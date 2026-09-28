@@ -162,7 +162,6 @@ def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, mode
     right extruder), AMS 2 on inlet A (the left). A shelf spool has no side."""
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     inventory_routes()
     nozzle_routes()
 

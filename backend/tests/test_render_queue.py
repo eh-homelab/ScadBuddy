@@ -4,6 +4,7 @@ against both job stores, and the metrics that show whether they hold."""
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 import uuid
@@ -39,6 +40,7 @@ from scadbuddy.render.pg_store import (
     PostgresJobStore,
     QueueListener,
 )
+from scadbuddy.render.render_cache import RENDERS_DIR_NAME
 from scadbuddy.render.runner import OpenSCADError
 
 CONFIG = Config(
@@ -962,6 +964,31 @@ async def test_a_failed_start_releases_the_store(paths: DataPaths) -> None:
     queue.close_thumbnails()
 
 
+async def test_a_failed_start_leaves_a_store_opened_by_open_store_to_its_caller(
+    paths: DataPaths,
+) -> None:
+    """The lifespan opens the store with `open_store` and closes it with
+    `close_store` when the boot fails: `start` must not close it as well."""
+    closed: list[bool] = []
+
+    class Failing(JobStore):
+        def abandon_orphans(self) -> list[Job]:
+            raise ConnectionError("the database went away mid-startup")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    queue = RenderQueue(CONFIG, paths, store=Failing(paths), render=Gate())
+    await queue.open_store()
+    with pytest.raises(ConnectionError):
+        await queue.start()
+    assert closed == []
+
+    await queue.close_store()
+    assert closed == [True]
+    queue.close_thumbnails()
+
+
 # ── the background lane (default-render previews) ─────────────────────────────
 
 
@@ -1047,3 +1074,148 @@ async def test_background_work_is_not_admitted_or_counted(make_queue: QueueFacto
     await queue.join()
     assert queue.store.read(waiting.id).state == "done"
     assert _sample(queue.metrics, "scadbuddy_render_jobs_submitted_total") == 2
+
+
+# --- Finished renders are kept under the template and answer a resubmit ------------
+
+
+class Renders:
+    """A render that writes its files where `render_job` would, and can be held."""
+
+    def __init__(self, paths: DataPaths) -> None:
+        self.paths = paths
+        self.release = asyncio.Event()
+        self.release.set()
+        self.started: list[str] = []
+
+    async def __call__(self, job: Job) -> tuple[JobResult, list[str]]:
+        self.started.append(job.id)
+        await self.release.wait()
+        work = attempt_work_dir(self.paths, job)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "model.3mf").write_bytes(b"3mf " + job.id.encode())
+        (work / "preview.glb").write_bytes(b"glb " + job.id.encode())
+        result = _result().model_copy(
+            update={
+                "model_3mf": str((work / "model.3mf").relative_to(self.paths.root)),
+                "preview_glb": str((work / "preview.glb").relative_to(self.paths.root)),
+                "source_version": job.model_version or "sha256:local",
+            }
+        )
+        return result, ["rendered"]
+
+
+async def _settled(queue: RenderQueue, job: Job) -> Job:
+    for _ in range(400):
+        current = queue.store.read(job.id)
+        if current.state in ("done", "failed"):
+            return current
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"job {job.id} never settled")
+
+
+async def test_a_finished_render_answers_the_same_submit_without_rendering(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    first = await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+    assert first.state == "done"
+    assert first.result is not None
+
+    again = await queue.submit("demo", {"n": 1}, model_version="abc")
+
+    assert again.state == "done"
+    assert again.id != first.id
+    assert again.result == first.result
+    assert again.log_tail == ["rendered"]
+    assert renders.started == [first.id]
+    assert (paths.root / first.result.model_3mf).is_relative_to(
+        paths.model_dir("demo") / RENDERS_DIR_NAME
+    )
+    assert queue.store.read(again.id).state == "done"
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_cached_total") == 1
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_submitted_total") == 1
+
+
+async def test_other_parameters_or_another_revision_render_again(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+
+    await _settled(queue, await queue.submit("demo", {"n": 2}, model_version="abc"))
+    await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="def"))
+
+    assert len(renders.started) == 3
+
+
+async def test_a_kept_render_missing_a_file_is_rendered_again(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    first = await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+    assert first.result is not None
+    (paths.root / first.result.preview_glb).unlink()
+
+    again = await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+
+    assert len(renders.started) == 2
+    assert again.result is not None
+    assert (paths.root / again.result.preview_glb).is_file()
+
+
+async def test_a_model_without_a_revision_is_never_answered_from_a_kept_render(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    await _settled(queue, await queue.submit("demo", {"n": 1}))
+
+    await _settled(queue, await queue.submit("demo", {"n": 1}))
+
+    assert len(renders.started) == 2
+    assert not (paths.model_dir("demo") / RENDERS_DIR_NAME).exists()
+
+
+async def test_a_submit_answered_from_a_kept_render_still_supersedes(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+    renders.release.clear()
+    running = await queue.submit("demo", {"n": 5}, model_version="abc")
+    for _ in range(200):
+        if running.id in renders.started:
+            break
+        await asyncio.sleep(0.01)
+    assert running.id in renders.started
+    waiting = await queue.submit("demo", {"n": 6}, model_version="abc")
+
+    back = await queue.submit("demo", {"n": 1}, model_version="abc", supersedes=waiting.id)
+
+    assert back.state == "done"
+    dropped = queue.store.read(waiting.id)
+    assert (dropped.state, dropped.error) == ("failed", SUPERSEDED_ERROR)
+    assert _pending(queue) == 0
+    renders.release.set()
+
+
+async def test_start_evicts_kept_renders_unused_for_the_job_ttl(
+    make_queue: QueueFactory, paths: DataPaths
+) -> None:
+    renders = Renders(paths)
+    queue = await make_queue(renders)
+    first = await _settled(queue, await queue.submit("demo", {"n": 1}, model_version="abc"))
+    assert first.result is not None
+    entry = (paths.root / first.result.model_3mf).parent
+    stale = time.time() - 2 * CONFIG.job_ttl
+    os.utime(entry, (stale, stale))
+    await queue.aclose()
+
+    await make_queue(Renders(paths))
+
+    assert not entry.exists()
