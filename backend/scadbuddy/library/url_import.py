@@ -33,9 +33,10 @@ is globally routable (`is_public`). That is checked in two places, for two reaso
 
 A refused address, a name that does not resolve, a refused connection and a
 timeout all read the same (`unreachable`), so the endpoint cannot tell an internal
-name that exists from one that does not. What a server answered -- its status, a
-web page instead of a file, too large, not text -- is still reported as it is,
-because only a vetted public address can have produced it.
+name that exists from one that does not. After a redirect it names the hop that
+failed and the pasted host it came from, in that same one text. What a server
+answered -- its status, a web page instead of a file, too large, not text -- is
+still reported as it is, because only a vetted public address can have produced it.
 """
 
 from __future__ import annotations
@@ -77,10 +78,21 @@ class ResolverUnavailableError(Exception):
     `RESOLVE_TIMEOUT` -- so it says nothing about the host either way."""
 
 
-def unreachable(host: str) -> ImportRefusedError:
-    """The one answer for every destination that did not answer as a public server."""
-    return ImportRefusedError(
-        f"could not fetch from {host}: it did not answer, or it is not a public internet address"
+class UnreachableError(ImportRefusedError):
+    """What :func:`unreachable` raises, so `fetch_model` can name the hop it was on."""
+
+
+def unreachable(host: str, *, redirected_from: str | None = None) -> UnreachableError:
+    """The one answer for every destination that did not answer as a public server.
+
+    ``redirected_from`` is the pasted URL's host when a redirect led to ``host``, so
+    the error names the hop that failed rather than the one that was pasted (#178).
+    The text is the same whether that hop was refused or did not answer.
+    """
+    via = f" (redirected from {redirected_from})" if redirected_from not in (None, host) else ""
+    return UnreachableError(
+        f"could not fetch from {host}{via}: it did not answer, or it is not a public "
+        "internet address"
     )
 
 
@@ -345,6 +357,15 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
     resolver = next(candidate for candidate in RESOLVERS if candidate.handles(url))
+    # The hop in flight, so whatever stops it -- a refused address, no answer, the
+    # deadline -- names the host that failed, not only the one that was pasted.
+    hop = url
+
+    async def vet_hop(request: httpx.Request) -> None:
+        nonlocal hop
+        hop = request.url
+        await _vet_hop(request)
+
     try:
         async with (
             asyncio.timeout(IMPORT_TIMEOUT),
@@ -352,7 +373,7 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
                 timeout=IMPORT_TIMEOUT,
                 # `_fetch` follows them itself; see why there.
                 follow_redirects=False,
-                event_hooks={"request": [_vet_hop]},
+                event_hooks={"request": [vet_hop]},
                 headers={"Accept-Encoding": "identity"},
                 # Its own transport, which also means no proxy from the environment:
                 # a proxy would make the connection, and the vetting with it.
@@ -361,5 +382,5 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
             ) as client,
         ):
             return await resolver.resolve(url, client, limit=limit)
-    except (TimeoutError, httpx.HTTPError):
-        raise unreachable(url.host) from None
+    except (UnreachableError, TimeoutError, httpx.HTTPError):
+        raise unreachable(hop.host, redirected_from=url.host) from None

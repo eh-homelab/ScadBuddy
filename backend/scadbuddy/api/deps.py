@@ -53,6 +53,9 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
+#: URL imports fetching at once (#178). As many as the import resolver has threads:
+#: a third fetch could not resolve its host anyway.
+IMPORT_CONCURRENCY = 2
 
 
 @dataclass
@@ -102,6 +105,12 @@ class AppState:
     #: the loop, not in a thread.
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
+    )
+    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once. Held for the
+    #: fetch only -- the parse check after it takes `checks` like any create -- and
+    #: an import that finds it full is refused at once, not queued.
+    imports: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
     )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
     #: render queue holds the same one.
@@ -399,6 +408,10 @@ def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
 
 
+def get_imports(state: StateDep) -> asyncio.Semaphore:
+    return state.imports
+
+
 def get_checkouts(state: StateDep) -> CheckoutGate:
     return state.checkouts
 
@@ -422,6 +435,7 @@ OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 

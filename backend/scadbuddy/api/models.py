@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    IMPORT_CONCURRENCY,
     AssetsDep,
     CatalogueDep,
     CheckoutsDep,
@@ -34,6 +35,7 @@ from scadbuddy.api.deps import (
     EventsDep,
     FetcherDep,
     HistoryDep,
+    ImportsDep,
     InstallsDep,
     LibrariesDep,
     OutputsDep,
@@ -726,6 +728,11 @@ async def _create(
     return record
 
 
+#: What a 503 from a full import budget says to wait. A fetch ends within
+#: `IMPORT_TIMEOUT`, most within a second or two.
+IMPORT_RETRY_AFTER = 5
+
+
 class UrlImport(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to the model's source")
     name: str | None = Field(
@@ -748,18 +755,39 @@ class UrlImport(BaseModel):
         "refusal is a 422, and an address that is not public reads the same as one that "
         "did not answer."
     ),
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                f"{IMPORT_CONCURRENCY} imports are already fetching; retry after "
+                "`Retry-After` seconds"
+            )
+        }
+    },
 )
 async def import_model(
     body: UrlImport,
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
+    imports: ImportsDep,
     events: EventsDep,
 ) -> ModelRecord:
-    try:
-        imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
-    except ImportRefusedError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    # No await between the check and the acquire, so nothing can take the permit in
+    # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
+    # spend its wait against the client's patience, not the import's deadline.
+    if imports.locked():
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{IMPORT_CONCURRENCY} imports are already fetching; "
+            f"try again in {IMPORT_RETRY_AFTER} s",
+            headers={"Retry-After": str(IMPORT_RETRY_AFTER)},
+            retry_after=IMPORT_RETRY_AFTER,
+        )
+    async with imports:
+        try:
+            imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
+        except ImportRefusedError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(
