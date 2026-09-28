@@ -3,7 +3,7 @@
 Kept out of the route module so they can be tested against respx recordings without
 a FastAPI app, and so the route stays a thin adapter. The send bar only uploads
 (#312); slicing and queueing is the print dialog's run, in
-``scadbuddy.bambuddy.pipelines``.
+``scadbuddy.bambuddy.print_run``.
 """
 
 from __future__ import annotations

@@ -25,7 +25,7 @@ from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
-from scadbuddy.bambuddy.pipelines import (
+from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     PrintRunResult,
     filament_options_for_output,

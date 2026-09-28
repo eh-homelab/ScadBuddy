@@ -1,9 +1,9 @@
 """Bambuddy's preset catalogue: every printer/process/filament preset it offers,
 normalised into one shape.
 
-Split out of ``pipelines.py`` so that ``resolver.py`` can
-depend on it without ``pipelines.py`` depending on ``resolver.py`` — the catalogue is
-the only piece of ``pipelines.py`` the resolver needs.
+Split out of ``print_run.py`` so that ``resolver.py`` can
+depend on it without ``print_run.py`` depending on ``resolver.py`` — the catalogue is
+the only piece of ``print_run.py`` the resolver needs.
 """
 
 from __future__ import annotations
