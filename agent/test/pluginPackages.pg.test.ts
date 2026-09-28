@@ -139,6 +139,10 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
 
       const approved = await store.approve('greeter', repos.moved.commit, pending.pending!.content_hash)
       expect(approved.source).toMatchObject({ plugin_url: 'https://git.test/moved.git' })
+      // A new source is approved disabled: it loads only once enabled again.
+      expect(approved.enabled).toBe(false)
+      expect(await store.enabledPins()).toEqual([])
+      await store.setEnabled('greeter', true)
       expect((await store.enabledPins())[0]).toMatchObject({ fetchUrl: 'https://git.test/moved.git', commit: repos.moved.commit })
       rmSync(cacheRoot, { recursive: true, force: true }) // a fresh replica: fetched from the pin
       const loaded = await loadPackagesForRun(store, installer)

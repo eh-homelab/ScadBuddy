@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 // Settings → MCP authentication (#251), against the msw stand-in for the agent
-// service's /api/v1/ai/mcp/auth (src/mocks/mcpTokens.ts).
+// service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
 
 test.describe('MCP authentication', () => {
   test.skip(

@@ -124,7 +124,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
-  the mocked e2e run.
+  the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
+  `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
+  up without editing `handlers.ts`, and must export `handlers` (and optionally
+  `reset`) (#508).
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
@@ -245,9 +248,17 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `open_in_new_tab=false`, which Bambuddy renders in a sandboxed iframe at
   `/external/{id}` with `sandbox="allow-scripts allow-same-origin allow-forms
   allow-popups allow-popups-to-escape-sandbox"` (verified in the 1.2.5.5 bundle).
-- Consequences in `frontend/src/lib/embed.ts`: downloads are fetched as a blob and
-  opened with `target=_blank`; deep links to Bambuddy use `window.open(..., '_blank')`
-  when embedded.
+- Downloads (`frontend/src/lib/embed.ts`): the sandbox has no `allow-downloads`, so
+  Chromium silently drops a download started in the frame, `target=_blank` or not.
+  When embedded, `downloadBlob` opens a blank popup first (it escapes the sandbox via
+  `allow-popups-to-escape-sandbox` and is same-origin via `allow-same-origin`, so it can
+  use the frame's blob URL), fetches the file as a blob, and clicks the download anchor
+  in the popup. The popup is opened before the fetch, while the click still permits it.
+  A blocked popup, or one closed before the file loaded, is an error the user sees
+  (`DownloadBlockedError`, `DownloadWindowClosedError`), never a fallback to the
+  frame's own anchor, which would fail silently.
+  `e2e/downloads.spec.ts` checks this in a replica of the frame.
+- Deep links to Bambuddy use `window.open(..., '_blank')` when embedded.
 - Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
   where it is refused (`document.fullscreenEnabled` is false, or the request is
