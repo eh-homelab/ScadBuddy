@@ -15,6 +15,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    FetcherDep,
     HistoryDep,
     JobIdPath,
     PathsDep,
@@ -33,6 +34,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
@@ -187,6 +189,7 @@ async def schema_of(
     history: ModelHistory,
     config: Config,
     version: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> tuple[ModelSource, CustomizerSchema]:
     """The source a render of ``slug`` at ``requested`` reads, and its schema.
 
@@ -196,7 +199,9 @@ async def schema_of(
     ``version`` is what the client asked for, for the 404's message.
     """
     try:
-        source = await resolve_source(slug, requested, paths=paths, history=history)
+        source = await resolve_source(
+            slug, requested, paths=paths, history=history, fetcher=fetcher
+        )
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
         )
@@ -252,11 +257,18 @@ async def render_model(
     config: ConfigDep,
     queue: QueueDep,
     assets: AssetsDep,
+    fetcher: FetcherDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
-        slug, requested, paths=paths, history=history, config=config, version=body.version
+        slug,
+        requested,
+        paths=paths,
+        history=history,
+        config=config,
+        version=body.version,
+        fetcher=fetcher,
     )
     require_valid_params(schema, body.params)
     try:
