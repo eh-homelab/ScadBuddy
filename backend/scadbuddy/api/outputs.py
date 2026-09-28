@@ -25,7 +25,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
@@ -271,6 +271,20 @@ def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> FileRespons
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
     return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+
+
+@router.get(
+    "/outputs/{output_id}/preview.glb",
+    response_class=FileResponse,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+    summary="The output's preview mesh",
+)
+def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+    require_output(outputs, output_id)
+    path = outputs.directory(output_id) / PREVIEW_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
+    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
 
 
 @router.get(

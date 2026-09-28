@@ -11,6 +11,7 @@ from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
+from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
@@ -115,6 +116,8 @@ class AppState:
     language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: Bambuddy's archive reads, kept 30 s for the prints API (#308).
+    archive_cache: ArchiveCache = field(default_factory=ArchiveCache)
     openscad_version: str | None = field(default=None)
 
 
@@ -357,6 +360,10 @@ def get_print_links(state: StateDep) -> PrintLinkStore:
     return state.print_links
 
 
+def get_archive_cache(state: StateDep) -> ArchiveCache:
+    return state.archive_cache
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -431,6 +438,7 @@ HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
 PrintLinksDep = Annotated[PrintLinkStore, Depends(get_print_links)]
+ArchiveCacheDep = Annotated[ArchiveCache, Depends(get_archive_cache)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
