@@ -1,7 +1,8 @@
 import type { RequestHandler, WebSocketHandler } from 'msw'
 
 /**
- * A feature's mock API lives in its own `features/<feature>.ts`, so a feature PR adds
+ * A feature's mock API lives in its own `features/<feature>.ts` (or a
+ * `features/<feature>/` folder), so a feature PR adds
  * a file instead of editing `handlers.ts`, the list every PR touches (#508). A module
  * exports `handlers` and, if it keeps state, `reset`, which `resetMockState` calls.
  */
@@ -10,11 +11,26 @@ export type MockFeature = {
   reset?: () => void
 }
 
-const modules = import.meta.glob<MockFeature>(['./features/*.ts', '!./features/*.test.ts'], {
+/**
+ * Checks each module at the glob boundary: a file that forgets to export `handlers` fails
+ * here, naming the file, instead of its mocks silently going missing.
+ */
+export function toFeatures(modules: Record<string, unknown>): MockFeature[] {
+  return Object.keys(modules)
+    .sort()
+    .map((path) => {
+      const module = modules[path] as Partial<MockFeature> | undefined
+      if (!Array.isArray(module?.handlers)) {
+        throw new Error(`mock feature ${path} must export a \`handlers\` array`)
+      }
+      return module as MockFeature
+    })
+}
+
+// Nested folders (`features/<feature>/index.ts`) count too; colocated tests do not.
+const modules = import.meta.glob(['./features/**/*.ts', '!./features/**/*.test.ts'], {
   eager: true,
 })
 
-/** Every feature module, in file-name order. */
-export const features: MockFeature[] = Object.keys(modules)
-  .sort()
-  .map((path) => modules[path] as MockFeature)
+/** Every feature module, in file-path order. */
+export const features: MockFeature[] = toFeatures(modules)
