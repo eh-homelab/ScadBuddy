@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { claudeConfigDir, scratchDir } from '../src/harness/options.js'
+import { claudeConfigDir, pluginCacheDir, scratchDir } from '../src/harness/options.js'
 import { ensureSessionDir, ensureStateDirs, isUuid, sessionWorkDir, StateDirError } from '../src/harness/stateDirs.js'
 
 describe('ensureStateDirs', () => {
@@ -14,17 +14,27 @@ describe('ensureStateDirs', () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it('recreates claude/ and work/ in an empty mounted volume', async () => {
+  it('recreates claude/, work/ and plugins/ in an empty mounted volume', async () => {
     const paths = { stateDir: root }
-    expect(await ensureStateDirs(paths)).toEqual([claudeConfigDir(paths), scratchDir(paths)])
+    expect(await ensureStateDirs(paths)).toEqual([claudeConfigDir(paths), scratchDir(paths), pluginCacheDir(paths)])
     expect((await stat(claudeConfigDir(paths))).isDirectory()).toBe(true)
     expect((await stat(scratchDir(paths))).isDirectory()).toBe(true)
+    expect((await stat(pluginCacheDir(paths))).isDirectory()).toBe(true)
+  })
+
+  it('fails fast when the plugin cache cannot be created, naming it', async () => {
+    // A file where plugins/ should be: mkdir fails with EEXIST/ENOTDIR for any user.
+    const paths = { stateDir: root }
+    await writeFile(pluginCacheDir(paths), '')
+    const err = await ensureStateDirs(paths).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(StateDirError)
+    expect((err as Error).message).toContain(pluginCacheDir(paths))
   })
 
   it('is idempotent', async () => {
     const paths = { stateDir: root }
     await ensureStateDirs(paths)
-    await expect(ensureStateDirs(paths)).resolves.toHaveLength(2)
+    await expect(ensureStateDirs(paths)).resolves.toHaveLength(3)
   })
 
   it('fails fast, naming the directory, when the state dir cannot hold them', async () => {

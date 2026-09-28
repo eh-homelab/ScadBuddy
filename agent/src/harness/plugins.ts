@@ -58,10 +58,22 @@ function isRecord(value: Json): value is Record<string, Json> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Whether `target` (an absolute, resolved path) is `root` or inside it. A
+ * path-boundary test, not a string prefix: `<root>x` and `<root>/../x` are
+ * outside. Every containment check on plugin-supplied paths goes through it
+ * (here and in src/plugins/packages/vet.ts).
+ */
+export function isInside(root: string, target: string): boolean {
+  const base = path.resolve(root)
+  const resolved = path.resolve(target)
+  return resolved === base || resolved.startsWith(base.endsWith(path.sep) ? base : base + path.sep)
+}
+
 /** Reads a JSON file inside the plugin; a missing default file is `undefined`. */
 function readJson(root: string, relative: string, problems: string[], required: boolean): Json {
   const file = path.resolve(root, relative)
-  if (file !== root && !file.startsWith(root + path.sep)) {
+  if (!isInside(root, file)) {
     problems.push(`${relative} is outside the plugin`)
     return undefined
   }

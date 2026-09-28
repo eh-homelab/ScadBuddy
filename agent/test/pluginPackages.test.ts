@@ -12,7 +12,8 @@ import {
 } from '../src/plugins/packages/install.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
-import { frontmatter, isAllowlistedTool, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import { isInside } from '../src/harness/plugins.js'
+import { frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
@@ -166,6 +167,36 @@ describe('vetting a package', () => {
     expect(isAllowlistedTool('mcp__scadbuddy__list_models')).toBe(true)
     expect(isAllowlistedTool('mcp__plugin_greeter_mem')).toBe(true)
     expect(isAllowlistedTool('Bash')).toBe(false)
+  })
+})
+
+describe('containment of manifest paths', () => {
+  it('isInside is a path-boundary test, not a string prefix', () => {
+    const root = path.join(os.tmpdir(), 'pkg', 'greeter')
+    expect(isInside(root, root)).toBe(true)
+    expect(isInside(root, path.join(root, 'skills'))).toBe(true)
+    expect(isInside(root, `${root}x`)).toBe(false)
+    expect(isInside(root, `${root}-evil/skills`)).toBe(false)
+    expect(isInside(root, path.resolve(root, '..', 'other'))).toBe(false)
+    expect(isInside(`${root}${path.sep}`, path.join(root, 'a'))).toBe(true)
+  })
+
+  it('ignores skill, command and agent paths that leave the package, sibling-prefix or ..', () => {
+    const parent = tree({})
+    const root = path.join(parent, 'pkg')
+    mkdirSync(path.join(root, 'skills', 'hello'), { recursive: true })
+    writeFileSync(path.join(root, 'skills', 'hello', 'SKILL.md'), 'hi')
+    // A sibling whose name has the package root as a string prefix, and a directory above it.
+    mkdirSync(path.join(`${root}x`, 'stolen'), { recursive: true })
+    writeFileSync(path.join(`${root}x`, 'stolen', 'SKILL.md'), 'no')
+    writeFileSync(path.join(`${root}x`, 'SKILL.md'), 'no')
+    mkdirSync(path.join(parent, 'up', 'escaped'), { recursive: true })
+    writeFileSync(path.join(parent, 'up', 'escaped', 'SKILL.md'), 'no')
+    writeFileSync(path.join(`${root}x`, 'cmd.md'), 'no')
+
+    const skills = skillNames(root, { skills: ['../pkgx', '../pkgx/', './../up', '../pkg/../up'] })
+    expect(skills).toEqual(['hello'])
+    expect(markdownIn(root, ['../pkgx', '../pkgx/cmd.md'], 'commands', false)).toEqual([])
   })
 })
 

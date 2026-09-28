@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { declaredConfigs, pluginProblems } from '../../harness/plugins.js'
+import { declaredConfigs, isInside, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
@@ -170,14 +170,14 @@ function mcpEntries(map: unknown): [string, unknown][] {
   return isRecord(servers) ? Object.entries(servers) : []
 }
 
-function skillNames(root: string, manifest: Record<string, unknown>): string[] {
+export function skillNames(root: string, manifest: Record<string, unknown>): string[] {
   const dirs = ['skills', ...(Array.isArray(manifest.skills) ? manifest.skills : [manifest.skills])]
     .filter((d): d is string => typeof d === 'string')
     .map((d) => d.replace(/^\.\/+/, '').replace(/\/+$/, '') || '.')
   const names = new Set<string>()
   for (const dir of dirs) {
     const abs = path.resolve(root, dir)
-    if (!abs.startsWith(root) || !existsSync(abs) || !statSync(abs).isDirectory()) continue
+    if (!isInside(root, abs) || !existsSync(abs) || !statSync(abs).isDirectory()) continue
     if (existsSync(path.join(abs, 'SKILL.md')) && dir !== 'skills') {
       names.add(path.basename(dir === '.' ? root : abs))
       continue
@@ -192,14 +192,14 @@ function skillNames(root: string, manifest: Record<string, unknown>): string[] {
   return [...names].sort()
 }
 
-function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
+export function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
   const entries = value === undefined ? [fallback] : Array.isArray(value) ? value : [value]
   const out = new Set<string>()
   for (const entry of entries) {
     if (typeof entry !== 'string') continue
     const rel = entry.replace(/^\.\/+/, '').replace(/\/+$/, '')
     const abs = path.resolve(root, rel)
-    if (!abs.startsWith(root + path.sep) || !existsSync(abs)) continue
+    if (abs === root || !isInside(root, abs) || !existsSync(abs)) continue
     if (statSync(abs).isFile()) {
       if (rel.endsWith('.md')) out.add(rel.replace(/\.md$/, '').split('/').pop()!)
       continue

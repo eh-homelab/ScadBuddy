@@ -36,7 +36,8 @@ covers the same ground more briefly.
   `emptyDir` there and run the root filesystem read-only (spec §4.4). At start,
   `ensureStateDirs()` in
   [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) recreates
-  `claude/` and `work/` and checks both are writable. If it cannot, the process exits 1
+  `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
+  writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
 - **Pinned Claude Code.** The build runs `node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"`
   (currently `2.1.283`) and fails when the SDK's bundled binary differs
