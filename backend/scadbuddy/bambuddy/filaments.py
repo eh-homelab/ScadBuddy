@@ -46,7 +46,6 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import (
     NozzleInfo,
-    PresetRef,
     Printer,
     SlotChoice,
     SlotMaterial,
@@ -63,7 +62,16 @@ logger = logging.getLogger(__name__)
 COLOUR_MATCH_DISTANCE = 48.0
 
 WarningKind = Literal[
-    "not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "nozzle-mismatch"
+    "not-loaded",
+    "low-filament",
+    "no-choice",
+    "no-preset",
+    "no-fan-out",
+    "mixed-sizes",
+    "no-process",
+    "not-installed",
+    "plate-differs",
+    "hf-unsupported",
 ]
 
 
@@ -155,8 +163,6 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
     #: printer: a class target nobody has narrowed yet has no hardware to read.
     nozzles: list[NozzleInfo] = Field(default_factory=list)
-    #: The nozzle the pipeline slices for, read off its process preset's name.
-    pipeline_nozzle_diameter: str | None = None
 
 
 class QueueFilaments(BaseModel):
@@ -399,7 +405,24 @@ def across_plates(plates: list[FilamentOptions]) -> FilamentOptions:
             elif slot.used_grams is not None:
                 total = (seen.used_grams or 0.0) + slot.used_grams
                 slots[slot.slot_id] = seen.model_copy(update={"used_grams": total})
-    return plates[0].model_copy(update={"slots": list(slots.values())})
+    return plates[0].model_copy(update={"slots": sorted(slots.values(), key=_slot_order)})
+
+
+def _slot_order(slot: SlotNeed) -> int:
+    return slot.slot_id
+
+
+def every_plate(plates: list[FilamentOptions]) -> FilamentOptions:
+    """The filament step for an all-plates print: one row per slot any plate uses.
+
+    :func:`across_plates` with the opening selection and its warnings recomputed over
+    the union, so a slot only a later plate uses is offered and pre-selected too (spec
+    §2 step 1) rather than reaching the run with no spool.
+    """
+    merged = across_plates(plates)
+    merged.suggested = suggest(merged.slots, merged.spools, printer_id=merged.printer_id)
+    merged.warnings = check(merged, FilamentPlan(slots=merged.suggested), copies=1)
+    return merged
 
 
 def _slot_warnings(
@@ -452,47 +475,6 @@ def _slot_warnings(
     return found
 
 
-def nozzle_warnings(
-    nozzles: list[NozzleInfo], diameter: str | None, *, printer_name: str | None
-) -> list[FilamentWarning]:
-    """A pipeline slicing for a nozzle the printer has not mounted, said before the click.
-
-    Any extruder's nozzle counts: which extruder prints which slot is Bambuddy's mapping,
-    not ScadBuddy's. Compared as numbers, since ``"0.40"`` and ``"0.4"`` are one nozzle.
-    Nothing to compare — a preset name that states no nozzle, or a printer reporting
-    none — is not a mismatch. Neither is a diameter that is not a number: live status is
-    the firmware's to spell, and one garbled value must not fail the whole filament step.
-    """
-    wanted = _millimetres(diameter)
-    mounted = [
-        nozzle.nozzle_diameter
-        for nozzle in nozzles
-        if _millimetres(nozzle.nozzle_diameter) is not None
-    ]
-    if wanted is None or not mounted:
-        return []
-    if any(_millimetres(each) == wanted for each in mounted):
-        return []
-    return [
-        FilamentWarning(
-            kind="nozzle-mismatch",
-            message=(
-                f"This pipeline slices for a {diameter} mm nozzle, but "
-                f"{printer_name or 'the chosen printer'} has "
-                f"{' and '.join(f'{each} mm' for each in mounted)} mounted."
-            ),
-        )
-    ]
-
-
-def _millimetres(raw: str | None) -> float | None:
-    """``"0.4"`` → ``0.4``; empty or not a number → ``None``."""
-    try:
-        return float(raw) if raw else None
-    except ValueError:
-        return None
-
-
 def _label(option: SpoolOption) -> str:
     parts = [part for part in (option.brand, option.material, option.subtype) if part]
     name = " ".join(parts)
@@ -528,123 +510,6 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
             types.append(option.material)
 
     return QueueFilaments(filament_overrides=overrides, required_filament_types=types)
-
-
-def slice_filament_presets(
-    options: FilamentOptions,
-    plan: FilamentPlan,
-    *,
-    pipeline_presets: list[PresetRef],
-    resolve: dict[str, PresetRef],
-    compatible: set[str] | None = None,
-    alternatives: dict[int, list[str]] | None = None,
-) -> tuple[list[PresetRef], list[str], list[FilamentWarning]]:
-    """The filament presets and colours to slice this plan with.
-
-    A spool names its own slicer preset (``slicer_filament``, e.g. ``"GFG00"``), so
-    that is the one used — no preset is chosen for it here. The pipeline's own presets
-    are the baseline and stay in place wherever the spool names none or names one
-    Bambuddy's catalogue cannot look up, because sending an id it cannot resolve fails
-    the slice naming a preset nobody chose. ``resolve`` is that catalogue, by preset id.
-
-    A spool's ``slicer_filament`` is only its default, usually the 0.4 nozzle's (#161).
-    ``compatible`` is the set of preset ids that fit the pipeline's printer preset
-    (``None``: no restriction), and ``alternatives`` the spool's own per-nozzle presets
-    by spool id. The first of the spool's presets that fits is used; when none does,
-    the pipeline's own preset stays, since slicing a 0.2 nozzle with 0.4 settings is
-    worse than slicing it with the pipeline's generic ones.
-    """
-    by_id = {option.spool_id: option for option in options.spools}
-    presets = list(pipeline_presets)
-    colours: list[str] = []
-    warnings: list[FilamentWarning] = []
-    width = max((slot.slot_id for slot in options.slots), default=0)
-    if not presets:
-        # A pipeline always carries at least one filament preset (Bambuddy's own
-        # ``minItems: 1``), so this is unreachable through the picker — but padding an
-        # empty list would mean inventing a preset id, and an id Bambuddy cannot look
-        # up fails the slice with a message about a preset nobody chose.
-        return (
-            [],
-            [],
-            [
-                FilamentWarning(
-                    kind="no-choice",
-                    message=(
-                        "This pipeline carries no filament preset, so the plate cannot be sliced."
-                    ),
-                )
-            ],
-        )
-    while len(presets) < width:
-        presets.append(presets[-1])
-
-    for slot in options.slots:
-        option = by_id.get(plan.spool_for(slot.slot_id) or -1)
-        colours.append((option.colour if option else slot.colour) or "#FFFFFF")
-        if option is None or option.slicer_filament is None:
-            continue
-        candidates = [option.slicer_filament, *(alternatives or {}).get(option.spool_id, [])]
-        known = [preset_id for preset_id in candidates if preset_id in resolve]
-        fitting = [
-            preset_id for preset_id in known if compatible is None or preset_id in compatible
-        ]
-        if known and not fitting:
-            warnings.append(
-                FilamentWarning(
-                    kind="no-preset",
-                    slot_id=slot.slot_id,
-                    message=(
-                        f"None of {_label(option)}'s slicer presets is for this pipeline's "
-                        "printer and nozzle, so the pipeline's own filament preset is used "
-                        "for this slot."
-                    ),
-                )
-            )
-            continue
-        ref = resolve[fitting[0]] if fitting else None
-        if ref is None:
-            warnings.append(
-                FilamentWarning(
-                    kind="no-preset",
-                    slot_id=slot.slot_id,
-                    message=(
-                        f"Bambuddy has no slicer preset called {option.slicer_filament!r} for "
-                        f"{_label(option)}, so the pipeline's own filament preset is used for "
-                        "this slot."
-                    ),
-                )
-            )
-            continue
-        presets[slot.slot_id - 1] = ref
-
-    return presets, colours, warnings
-
-
-async def spool_preset_alternatives(
-    client: BambuddyClient,
-    options: FilamentOptions,
-    plan: FilamentPlan,
-    compatible: set[str] | None,
-) -> dict[int, list[str]]:
-    """Each picked spool's per-nozzle presets, for :func:`slice_filament_presets` (#161).
-
-    Only read for a spool whose own ``slicer_filament`` does not fit the pipeline's
-    printer — the common case needs no extra call.
-    """
-    if compatible is None:
-        return {}
-    by_id = {option.spool_id: option for option in options.spools}
-    alternatives: dict[int, list[str]] = {}
-    for slot in options.slots:
-        option = by_id.get(plan.spool_for(slot.slot_id) or -1)
-        if option is None or option.slicer_filament in compatible:
-            continue
-        if option.spool_id in alternatives:
-            continue
-        rows = await client.spool_filament_presets(option.spool_id)
-        alternatives[option.spool_id] = [row.slicer_filament for row in rows]
-    return alternatives
 
 
 async def gather_options(

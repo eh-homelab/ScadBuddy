@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import functools
 import json
+import os
+import tempfile
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from scadbuddy.bambuddy.models import PresetRef, SlotChoice
+from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import Settings
@@ -20,6 +25,25 @@ DisplayUnit = Literal["mm", "in"]
 
 #: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
 ENV_SEEDED = ("bambuddy_url", "bambuddy_api_key", "public_url", "default_plate")
+
+#: Held across every setter's load -> mutate -> write (PR #335 review 1). Sync route
+#: handlers run on FastAPI's threadpool, so two setters overlap for real — the print
+#: picker fires two remember PUTs back to back — and without this the second write
+#: would silently drop the first's change. Process-wide rather than per instance, since
+#: each request builds its own store over the same file. Re-entrant so a
+#: ``settings.changed`` listener, which runs inside the write, may itself call a setter.
+_WRITE_LOCK = threading.RLock()
+
+
+def _serialized[**P, R](setter: Callable[P, R]) -> Callable[P, R]:
+    """Run ``setter``'s whole read-modify-write under :data:`_WRITE_LOCK`."""
+
+    @functools.wraps(setter)
+    def locked(*args: P.args, **kwargs: P.kwargs) -> R:
+        with _WRITE_LOCK:
+            return setter(*args, **kwargs)
+
+    return locked
 
 
 class BambuddyIds(BaseModel):
@@ -42,10 +66,23 @@ class ModelPrintChoices(BaseModel):
     one case the picker asks. ``filament_plan`` is only a plan the user moved off the
     auto-match: a spool no longer in the inventory is dropped by the picker, which then
     falls back to the auto-match for that slot.
+
+    ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
+    (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
+    written before them still loads; an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
     filament_plan: list[SlotChoice] = Field(default_factory=list)
+    nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
+    tier: Tier | None = None
+    process_name: str | None = Field(default=None, max_length=200)
+
+    @field_validator("nozzles")
+    @classmethod
+    def _both_sides(cls, nozzles: list[NozzleChoice]) -> list[NozzleChoice]:
+        """None or two: the dialog has two sides, so one entry means it on both."""
+        return [nozzles[0], nozzles[0].model_copy()] if len(nozzles) == 1 else nozzles
 
 
 class StoredSettings(BambuddyIds):
@@ -66,10 +103,10 @@ class StoredSettings(BambuddyIds):
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
 
-    #: Model slug -> the pipeline that model prints with, which wins over
-    #: ``pipeline_id``. Deliberately not part of :class:`SettingsPatch`: a patch
-    #: replaces a whole value, while a per-model default has to be settable one model
-    #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
+    #: Model slug -> the pipeline that model once printed with (#86). Kept so an
+    #: existing ``settings.json`` still loads and round-trips, but no longer read: its
+    #: routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here can
+    #: be neither seen nor changed and must not override the Settings pipeline.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
     #: Model slug -> the rest of what the picker chose, set one model at a time for the
     #: same reason (:meth:`SettingsStore.set_model_choices`).
@@ -86,8 +123,12 @@ class StoredSettings(BambuddyIds):
     last_project_id: int | None = None
 
     def pipeline_for(self, slug: str) -> int | None:
-        """This model's own pipeline, else the global fallback (#86)."""
-        return self.model_pipelines.get(slug, self.pipeline_id)
+        """The pipeline the send bar runs for ``slug``: the Settings one, for every model.
+
+        ``model_pipelines`` is deliberately not consulted — see its note.
+        """
+        del slug
+        return self.pipeline_id
 
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
@@ -158,6 +199,7 @@ class SettingsStore:
             merged[name] = None
         return StoredSettings.model_validate(merged)
 
+    @_serialized
     def save(self, patch: SettingsPatch) -> StoredSettings:
         current = self.load().model_dump()
         # exclude_unset, not exclude_none: an omitted key leaves the stored value
@@ -179,6 +221,7 @@ class SettingsStore:
         current.update(changes, cleared=sorted(cleared))
         return self._write(StoredSettings.model_validate(current), "connection")
 
+    @_serialized
     def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
         """Point one model at a pipeline, or clear it back to the global fallback.
 
@@ -195,11 +238,12 @@ class SettingsStore:
             settings.model_copy(update={"model_pipelines": pipelines}), "model_pipeline"
         )
 
+    @_serialized
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
         settings = self.load()
         remembered = dict(settings.model_print_choices)
-        if choices.printer_id is None and not choices.filament_plan:
+        if choices == ModelPrintChoices():
             remembered.pop(slug, None)
         else:
             remembered[slug] = choices
@@ -207,6 +251,7 @@ class SettingsStore:
             settings.model_copy(update={"model_print_choices": remembered}), "model_choices"
         )
 
+    @_serialized
     def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
         """Remember the plate on one printer; ``None`` forgets it."""
         settings = self.load()
@@ -219,6 +264,7 @@ class SettingsStore:
             settings.model_copy(update={"printer_bed_types": remembered}), "printer_bed_type"
         )
 
+    @_serialized
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
         return self._write(
@@ -226,14 +272,23 @@ class SettingsStore:
         )
 
     def _write(self, settings: StoredSettings, section: SettingsSection) -> StoredSettings:
+        # A temporary file renamed over the old one, so a concurrent ``load`` (which
+        # takes no lock) reads the old file or the new one, never a half-written one.
+        # ``mkstemp`` creates it 0600, so the API key is never readable in between.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(settings.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
-        )
-        self.path.chmod(KEY_FILE_MODE)
+        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(settings.model_dump(mode="json"), indent=2) + "\n")
+            os.chmod(temporary, KEY_FILE_MODE)
+            os.replace(temporary, self.path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
         emit(self.events, SettingsChanged(section=section))
         return settings
 
+    @_serialized
     def save_print_options(
         self, scope: OptionScope, key: str | None, options: PrintOptions
     ) -> StoredSettings:

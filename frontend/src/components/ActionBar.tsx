@@ -36,7 +36,7 @@ interface Props {
   onPrinterModel: (model: string | null) => void
   onGenerated: (output: Output) => void
   onSent: (result: SendResult) => void
-  /** #86 — a pipeline run started from the print picker. */
+  /** A print sliced and queued from the print dialog (spec 2026-09-27). */
   onRan: (result: PrintRunResult) => void
 }
 
