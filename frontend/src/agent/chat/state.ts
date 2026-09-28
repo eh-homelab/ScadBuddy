@@ -117,8 +117,14 @@ function push(session: SessionState, item: FeedItem): SessionState {
 
 function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
-    case 'sessions.snapshot':
-      return event.sessions.reduce(upsertSummary, state)
+    case 'sessions.snapshot': {
+      // Sent on connect and again whenever the list changes (the agent re-reads it
+      // while the socket is open), so a session started elsewhere shows up live.
+      // Sessions new to the panel go first, newest first as the server lists them.
+      const next = event.sessions.reduce(upsertSummary, state)
+      const fresh = next.order.filter((id) => !(id in state.sessions))
+      return { ...next, order: [...fresh, ...state.order] }
+    }
 
     case 'session.started': {
       const known = event.sessionId in state.sessions

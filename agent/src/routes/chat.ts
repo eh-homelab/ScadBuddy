@@ -17,7 +17,10 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 // the UI's domain events: "The agent's own streams (sessions, approvals, the
 // browser bridge, #254) are served by the agent under /api/v1/ai/*".
 //
-//   on open                → sessions.snapshot (every session the browser user sees)
+//   on open                → sessions.snapshot (every session the browser user sees),
+//                            then again whenever that list changes (read every
+//                            SNAPSHOT_MS), so a session started elsewhere, over
+//                            /mcp or on another tab or replica, shows up live
 //   user.message           → SessionManager.start (no sessionId: a new `chat`
 //                            session) or .send; the page context rides along
 //                            for the model only (manager.ts SendOptions)
@@ -40,6 +43,9 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 
 export const CHAT_PATH = '/api/v1/ai/chat'
 
+/** How often an open connection re-reads the session list, sending it only when it changed. */
+export const SNAPSHOT_MS = 5_000
+
 /** Sessions one connection follows at once; the oldest is dropped past this. */
 export const MAX_FOLLOWS = 16
 
@@ -52,6 +58,8 @@ export type ChatRouteDeps = {
   /** The runtime's WebSocket upgrade (`@hono/node-server`'s in main.ts). No socket route without it. */
   upgradeWebSocket: UpgradeWebSocket | undefined
   log?: (message: string) => void
+  /** SNAPSHOT_MS when omitted. */
+  snapshotMs?: number
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -81,27 +89,45 @@ export class ChatConnection {
   private readonly follows = new Map<string, AbortController>()
   private queue: Promise<void> = Promise.resolve()
   private closed = false
+  private readonly snapshotMs: number
+  private snapshotTimer: NodeJS.Timeout | undefined
+  /** The last session list sent, as JSON, so an unchanged list is not sent again. */
+  private lastSnapshot = ''
 
   constructor(
     sessions: SessionManager,
     out: (e: ServerEvent) => void,
-    options: { principal?: Owner; log?: (message: string) => void } = {},
+    options: { principal?: Owner; log?: (message: string) => void; snapshotMs?: number } = {},
   ) {
     this.sessions = sessions
     this.out = out
     this.principal = options.principal ?? BROWSER_USER
     this.log = options.log ?? ((m) => console.error(m))
+    this.snapshotMs = options.snapshotMs ?? SNAPSHOT_MS
   }
 
   private emit(e: ServerEvent): void {
     if (!this.closed) this.out(e)
   }
 
-  /** Sends the session picker's snapshot. */
+  /** Sends the session picker's snapshot, and keeps it current while open. */
   open(): Promise<void> {
-    return this.enqueue(async () => {
-      this.emit(await this.sessions.snapshot(this.principal))
-    })
+    const first = this.enqueue(() => this.sendSnapshot(true))
+    this.snapshotTimer = setInterval(() => {
+      // Queued like a frame, so a list never overtakes the events before it.
+      // A failed re-read is skipped quietly; the next one tries again.
+      void this.enqueue(() => this.sendSnapshot(false).catch(() => {}))
+    }, this.snapshotMs)
+    this.snapshotTimer.unref()
+    return first
+  }
+
+  private async sendSnapshot(always: boolean): Promise<void> {
+    const snapshot = await this.sessions.snapshot(this.principal)
+    const key = JSON.stringify(snapshot)
+    if (!always && key === this.lastSnapshot) return
+    this.lastSnapshot = key
+    this.emit(snapshot)
   }
 
   receive(raw: string): Promise<void> {
@@ -116,6 +142,7 @@ export class ChatConnection {
 
   close(): void {
     this.closed = true
+    clearInterval(this.snapshotTimer)
     for (const controller of this.follows.values()) controller.abort()
     this.follows.clear()
   }
@@ -243,7 +270,10 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
           if (!sessions) return ws.close(1011, 'no database')
-          connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), { log })
+          connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
+            log,
+            ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
+          })
           void connection.open()
         },
         onMessage: (evt: MessageEvent, ws: WSContext) => {

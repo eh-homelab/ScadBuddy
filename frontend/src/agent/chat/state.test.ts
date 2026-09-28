@@ -125,6 +125,27 @@ describe('chatReducer', () => {
     expect(state.sessions.s1?.items).toEqual([])
   })
 
+  it('takes a later snapshot as a live update: new sessions first, known ones kept and refreshed', () => {
+    const state = run(
+      [
+        server({ type: 'user.turn', sessionId: 's1', turnId: 'u1', text: 'hi', author: you }),
+        server({
+          type: 'sessions.snapshot',
+          sessions: [
+            { sessionId: 'x', title: 'Bin', origin: 'mcp', owner: desktop, status: 'running' },
+            { sessionId: 's1', title: 'Mine', origin: 'chat', owner: you, status: 'idle' },
+          ],
+        }),
+      ],
+      started,
+    )
+    expect(state.order).toEqual(['x', 's1'])
+    expect(state.activeId).toBe('s1')
+    expect(state.sessions.s1).toMatchObject({ title: 'Mine', status: 'idle' })
+    // The transcript already on screen is kept.
+    expect(state.sessions.s1?.items).toHaveLength(1)
+  })
+
   it('records a handoff', () => {
     const state = run(
       [

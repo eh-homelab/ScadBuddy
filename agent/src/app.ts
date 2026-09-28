@@ -70,6 +70,8 @@ export type AppDeps = {
   sessions?: SessionManager | undefined
   /** The runtime's WebSocket upgrade; without it there is no chat socket (and status says so). */
   upgradeWebSocket?: UpgradeWebSocket | undefined
+  /** How often the chat socket re-reads the session list (routes/chat.ts SNAPSHOT_MS when omitted). */
+  chatSnapshotMs?: number
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -278,6 +280,7 @@ export function createApp(deps: AppDeps): AgentApp {
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
     upgradeWebSocket: deps.upgradeWebSocket,
+    ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
   })
 
   if (deps.mcp) {
