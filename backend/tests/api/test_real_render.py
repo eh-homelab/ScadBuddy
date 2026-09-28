@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +16,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.config import load_config
 from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, JobProgress
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
@@ -232,9 +234,12 @@ def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None
     app = client.app
     assert isinstance(app, FastAPI)
     bus = getattr(app.state, STATE_ATTR).events
-    assert isinstance(bus, InProcessEventBus)
+    # With a database (required since #467) the bus is Postgres's, which delivers
+    # through its in-process bus once LISTEN hands an event back (#374).
+    local = bus.local if isinstance(bus, PgNotifyEventBus) else bus
+    assert isinstance(local, InProcessEventBus)
     seen: list[Event] = []
-    bus.add_listener(seen.append)
+    local.add_listener(seen.append)
     client.post(
         "/api/v1/models",
         files={"file": ("Stages.scad", TWO_COLOUR.encode(), "application/octet-stream")},
@@ -242,6 +247,9 @@ def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None
     accepted = client.post("/api/v1/models/stages/render", json={"params": {"size": 6}})
     job = wait_for_job(client, accepted.json()["job_id"])
     assert job["status"] == "done", job["error"]
+    deadline = time.monotonic() + 5
+    while not any(event.kind == "job.done" for event in seen) and time.monotonic() < deadline:
+        time.sleep(0.05)
 
     mine = [event for event in seen if isinstance(event, JobEvent | JobProgress)]
     assert [event.stage if isinstance(event, JobProgress) else event.kind for event in mine] == [
