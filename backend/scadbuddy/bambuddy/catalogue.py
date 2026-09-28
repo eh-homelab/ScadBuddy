@@ -1,7 +1,7 @@
 """Bambuddy's preset catalogue: every printer/process/filament preset it offers,
 normalised into one shape.
 
-Split out of ``pipelines.py`` (task-4-addendum.md R10) so that ``resolver.py`` can
+Split out of ``pipelines.py`` so that ``resolver.py`` can
 depend on it without ``pipelines.py`` depending on ``resolver.py`` — the catalogue is
 the only piece of ``pipelines.py`` the resolver needs.
 """

@@ -291,24 +291,6 @@ class Pipeline(BambuddyModel):
     fanout_strategy: FanoutStrategy = "max_parallel"
 
 
-class PipelineCreate(BambuddyModel):
-    """``POST /api/v1/slicer-pipelines/``.
-
-    ``SlicerPipelineCreate`` carries **no** target or fanout fields even though
-    ``SlicerPipelineResponse`` returns them — a pipeline is created against the
-    defaults and re-targeted with ``PUT``, which ScadBuddy does not do.
-    """
-
-    name: str
-    description: str | None = None
-    printer_preset: PresetRef
-    process_preset: PresetRef
-    #: One per AMS slot, in the source plate's filament-slot order. Bambuddy rejects
-    #: an empty list (``minItems: 1``).
-    filament_presets: list[PresetRef]
-    bed_type: str | None = None
-
-
 class PipelineList(BambuddyModel):
     pipelines: list[Pipeline] = Field(default_factory=list)
 
@@ -441,49 +423,6 @@ class PipelineRunRequest(BambuddyModel):
     source_archive_id: int | None = None
     copies: int = 1
     force: bool = False
-
-
-class EligibilityRequest(BambuddyModel):
-    """``POST /api/v1/slicer-pipelines/{id}/check-eligibility``. One source, as above."""
-
-    source_library_file_id: int | None = None
-    source_archive_id: int | None = None
-    force: bool = False
-
-
-class EligibilityIssue(BambuddyModel):
-    """``kind`` is an open enum here on purpose — Bambuddy adds kinds between
-    releases and an unknown one must still render, not 502 the whole report."""
-
-    kind: str
-    slot_index: int | None = None
-    expected: str | None = None
-    actual: str | None = None
-
-
-class PerPrinterReport(BambuddyModel):
-    printer_id: int
-    printer_name: str
-    ok: bool
-    issues: list[EligibilityIssue] = Field(default_factory=list)
-
-
-class EligibilityReport(BambuddyModel):
-    """Returned by ``check-eligibility`` and, on a 409, by ``run``.
-
-    Under ``target_kind="printer_class"`` ``ok`` is true when *at least one* matching
-    printer passes, and the per-printer detail moves to ``printer_reports`` — ``issues``
-    then carries only class-level problems. Reading ``ok`` as "every printer is ready"
-    is wrong for that target kind.
-    """
-
-    ok: bool
-    target_kind: TargetKind = "specific_printer"
-    target_printer_id: int | None = None
-    target_printer_name: str | None = None
-    target_model_class: str | None = None
-    issues: list[EligibilityIssue] = Field(default_factory=list)
-    printer_reports: list[PerPrinterReport] = Field(default_factory=list)
 
 
 class Spool(BambuddyModel):

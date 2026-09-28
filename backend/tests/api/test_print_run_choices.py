@@ -125,10 +125,58 @@ def test_a_resolver_error_is_a_422_before_anything_is_sliced(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    ("choices", "detail"),
+    [
+        ({"nozzles": [{"size": "0.2"}, {"size": "0.4"}]}, "different sizes"),
+        ({"process_name": "No Such Process @BBL H2C"}, "is not a process"),
+    ],
+    ids=["mixed-sizes", "unknown-process"],
+)
+def test_a_choice_the_resolver_refuses_uploads_nothing(
+    client: TestClient, model: str, choices: dict[str, Any], detail: str
+) -> None:
+    """A refusal that the choices alone decide is made before the 3MF reaches Bambuddy's
+    library, so iterating through invalid nozzle combinations leaves no uploads behind."""
+    output_id = prepared(client, model)
+    uploaded = upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body(**choices))
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    assert not uploaded.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_every_slot_refused_is_a_422_with_nothing_sliced(client: TestClient, model: str) -> None:
+    """No slot resolves, so ``filament_presets`` is empty: the run refuses rather than
+    ever handing Bambuddy an empty (or ``null``-padded) preset array."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "filament_plan": {"slots": []}},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "Slot 1 has no spool chosen." in detail
+    assert "Slot 2 has no spool chosen." in detail
+    assert not sliced.called
+
+
+@respx.mock
 def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
     client: TestClient, model: str
 ) -> None:
-    """Addendum: Bambuddy refuses a ScadBuddy-made printer preset, so High Flow slices
+    """Spec §4.1: Bambuddy refuses a ScadBuddy-made printer preset, so High Flow slices
     as Bambu's own 0.4 preset, and the result carries the warning."""
     output_id = prepared(client, model)
     upload_route()
@@ -305,7 +353,7 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
     slice_body: dict[str, Any] = json.loads(sliced.calls.last.request.content)
     assert slice_body["filament_colours"] == ["#688197", "#0047BB"]
     # Both slots are used, so this is a dense (unpadded) array — slot 1's preset at
-    # index 0, slot 2's at index 1 (task-5-fix-1 covers the padded case).
+    # index 0, slot 2's at index 1 (the next test covers the padded case).
     assert slice_body["filament_presets"] == [
         {"source": "cloud", "id": "GFSG00_24"},
         {"source": "cloud", "id": "GFSA05_21"},
@@ -316,7 +364,7 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
 def test_all_plates_pads_a_plate_that_uses_only_slot_2(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """task-5-fix-1: plate 2 of an all_plates run using only slot 2 must still slice a
+    """Plate 2 of an all_plates run using only slot 2 must still slice a
     length-2 ``filament_presets`` array with slot 2's spool at index 1 — not a length-1
     array that slices the wrong preset onto the wrong filament."""
     configure(client)

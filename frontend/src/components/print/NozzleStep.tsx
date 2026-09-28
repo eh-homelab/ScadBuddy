@@ -11,7 +11,7 @@ type Props = {
 const SIDES = ['Left', 'Right'] as const
 
 /**
- * R9 (task-8 addendum) — Bambuddy rejects mixed nozzle sizes on the left and right
+ * Spec 2026-09-27 §4.1 — Bambuddy rejects mixed nozzle sizes on the left and right
  * extruder (422 "different sizes"), so size is ONE radiogroup setting both sides, in
  * both Simple and Advanced mode. There is no per-side size selector at all. Flow
  * (Standard / High Flow) is per-side, but only exposed in Advanced mode — Bambuddy has

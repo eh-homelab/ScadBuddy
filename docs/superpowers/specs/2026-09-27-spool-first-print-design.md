@@ -124,7 +124,7 @@ passthrough preset, one with a `default_nozzle_volume_type` override, one with a
 explicit `compatible_printers`, and one created via `POST /local-presets/import`. That
 isolated the failure to the local-preset tier itself, not to the HF override or to mixed
 sizes, so both are handled without ever naming a printer preset ScadBuddy invented
-(controller rulings R8/R9, `task-3-addendum.md`):
+(see §5's Results):
 
 | Nozzles | Printer preset |
 |---|---|
