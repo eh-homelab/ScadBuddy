@@ -19,7 +19,7 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import link_by_hash
-from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
@@ -124,6 +124,42 @@ def archive_row(archive_id: int, content_hash: str | None) -> dict[str, Any]:
         "created_at": "2026-09-27T03:40:10",
         "content_hash": content_hash,
     }
+
+
+@respx.mock
+async def test_a_settled_print_is_not_scanned_for_again_once_it_is_linked(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """The progress dialog reads a settled print on every open; the archive list is
+    scanned once, not each time (#522 review)."""
+    await _sliced(uploads)
+    respx.get(f"{API}/queue/34").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    respx.get(f"{API}/library/files/80").mock(
+        return_value=httpx.Response(
+            200, json={"id": 80, "filename": "name-keychain.gcode.3mf", "file_hash": HASH}
+        )
+    )
+    scan = archives_page(archive_row(18, HASH))
+
+    await progress_for(bambuddy, queued(), uploads=uploads, links=links)
+    await progress_for(bambuddy, queued(), uploads=uploads, links=links)
+
+    assert scan.call_count == 1
+    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+
+
+@respx.mock
+async def test_an_item_linked_before_it_went_is_not_scanned_for(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    await _sliced(uploads)
+    await links.record(OUTPUT, PrintLink(archive_id=18, matched_by="queue_item", queue_item_id=34))
+    respx.get(f"{API}/queue/34").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    scan = archives_page(archive_row(18, HASH))
+
+    await progress_for(bambuddy, queued(), uploads=uploads, links=links)
+
+    assert not scan.called
 
 
 @respx.mock

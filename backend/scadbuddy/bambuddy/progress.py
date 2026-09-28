@@ -274,11 +274,21 @@ class _Linker:
     async def item(self, item: QueueItem, plate_id: int | None) -> None:
         await link_item(self.links, self.meta.id, item, plate_id=plate_id)
 
-    async def gone(self) -> None:
+    async def gone(self, queue_item_id: int) -> None:
         # Once per read, however many plates' items are gone: one scan covers them all.
-        if not self._searched:
-            self._searched = True
-            await link_by_hash(self.client, self.uploads, self.links, self.meta)
+        if self._searched:
+            return
+        self._searched = True
+        # A settled print is polled again whenever its dialog opens. The archive list is
+        # scanned only while the output has no link to show for the item: not one read
+        # off the item before it went, and not one an earlier scan already found.
+        known = await self.links.for_output(self.meta.id)
+        if any(
+            link.queue_item_id == queue_item_id or link.matched_by == "content_hash"
+            for link in known
+        ):
+            return
+        await link_by_hash(self.client, self.uploads, self.links, self.meta)
 
     async def run(self, run: PipelineRun) -> None:
         await link_run(self.client, self.links, self.meta.id, run)
@@ -308,7 +318,7 @@ async def _queued_progress(
             # deleted it, or deleted its archive. That is not a failure of the print,
             # and reporting one would contradict what the user can see in Bambuddy.
             if linker is not None:
-                await linker.gone()
+                await linker.gone(queue_item_id)
             return PrintProgress(
                 route="slice_queue",
                 stage="done",

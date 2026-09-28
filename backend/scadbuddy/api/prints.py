@@ -57,7 +57,8 @@ async def require_linked_archive(archive_id: ArchiveIdPath, links: PrintLinksDep
     a window onto all of Bambuddy's history (#305 plan §2.3). The check is
     ``output_bambuddy_prints`` (#306): an archive is linked once a progress read or a
     project attach has seen it."""
-    if await links.output_for(archive_id) is None:
+    # Without a database nothing is linked, so nothing is served (#522 review).
+    if not links.available or await links.output_for(archive_id) is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,
             f"archive {archive_id} is not a print of any ScadBuddy output",
