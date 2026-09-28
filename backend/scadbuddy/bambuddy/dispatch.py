@@ -1,4 +1,4 @@
-"""Slicing a pipeline's plate and queueing it against one printer.
+"""Slicing one plate with resolved presets and queueing it against one printer.
 
 **Why this exists at all.** ``filament_overrides`` and ``required_filament_types``
 are fields of ``PrintQueueItemCreate`` and of nothing else.
@@ -7,16 +7,12 @@ are fields of ``PrintQueueItemCreate`` and of nothing else.
 task then builds each copy's queue entry from Bambuddy's own defaults. So a print that
 names the spools it must use cannot go through ``run``; it has to be sliced and queued.
 
-**The pipeline is not bypassed.** The slice borrows the chosen pipeline's own
-``printer_preset``, ``process_preset``, ``bed_type`` and target, so "which pipeline"
-still means exactly what it meant on the pipeline path; only the filament presets are
-swapped per slot, and only where the chosen spool resolves to a preset Bambuddy knows.
-Nothing here invents a slicing setting, which is the same rule the rest of ScadBuddy
-follows.
+Presets come from the resolver (spec 2026-09-27 §4), which supersedes the earlier rule
+that the slice borrows a pipeline's presets. This module invents none: a
+:class:`SlicePlan` arrives with every preset already chosen.
 
-**What is lost by taking this route**, stated so the UI can say it before the click: a
-class-targeted pipeline fans out across every printer of the class, and a queue item
-does not. Naming the spools therefore also names the printer.
+A queue item names one printer, so there is no fan-out across a printer class on this
+route. The spools are loaded in one machine, which is the printer the item goes to.
 """
 
 from __future__ import annotations
@@ -28,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import QueueFilaments
-from scadbuddy.bambuddy.models import Pipeline, PresetRef, QueueItemCreate, SliceRequest
+from scadbuddy.bambuddy.models import PresetRef, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
 
@@ -41,68 +37,52 @@ class QueueOutcome(BaseModel):
     slice_job_id: int
     sliced_library_file_id: int
     queue_item_ids: list[int] = Field(default_factory=list)
-    printer_id: int | None = None
-    target_model: str | None = None
+    printer_id: int
 
 
-def target_of(pipeline: Pipeline, printer_id: int | None) -> tuple[int | None, str | None]:
-    """``(printer_id, target_model)`` — exactly one of the two, as Bambuddy expects.
+class SlicePlan(BaseModel):
+    """Everything the slice needs, already resolved (spec 2026-09-27 §4)."""
 
-    An explicit printer wins, because on this route the caller has chosen spools that
-    are loaded in one particular machine. With no explicit printer the pipeline's own
-    target is used: its printer if it names one, otherwise its model class, which lets
-    Bambuddy's scheduler pick as it would have — matching on the overrides it was sent.
-    """
-    if printer_id is not None:
-        return printer_id, None
-    if pipeline.target_kind == "specific_printer" and pipeline.target_printer_id is not None:
-        return pipeline.target_printer_id, None
-    return None, pipeline.target_model_class
+    printer_preset: PresetRef
+    process_preset: PresetRef
+    filament_presets: list[PresetRef]
+    filament_colours: list[str]
+    bed_type: str
 
 
 async def slice_and_queue(
     client: BambuddyClient,
     *,
     library_file_id: int,
-    pipeline: Pipeline,
-    printer_id: int | None,
-    filament_presets: list[PresetRef],
-    filament_colours: list[str],
+    plan: SlicePlan,
+    printer_id: int,
     filaments: QueueFilaments | None = None,
     plate_id: int = 1,
-    bed_type: str | None = None,
     copies: int = 1,
     project_id: int | None = None,
     options: PrintOptions | None = None,
 ) -> QueueOutcome:
-    """Slice with the pipeline's presets, wait for it, then queue the result once.
+    """Slice ``plate_id`` with ``plan``, wait for it, then queue the result once.
 
     ``quantity`` rather than one queue item per copy: Bambuddy's queue models repeats
     itself, and N identical items would show up as N rows the user has to cancel one at
     a time.
 
-    ``bed_type`` replaces the pipeline's own for this slice (#83): the queue item has no
-    such field, and the slice is what sets the first layer for the plate.
+    ``plan.bed_type`` goes on the slice, not the queue item: the item has no such field,
+    and the slice is what sets the first layer for the plate (#83).
 
     ``options`` are the resolved print options (#88); ``copies`` and ``project_id``
     still win over the quantity and project they carry, because those two are what
     the caller asked for on this request.
     """
-    if pipeline.printer_preset is None or pipeline.process_preset is None:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"pipeline {pipeline.name!r} has no printer or process preset, so its plate "
-            "cannot be sliced with the chosen filaments",
-        )
-
     accepted = await client.slice(
         library_file_id,
         SliceRequest(
-            printer_preset=pipeline.printer_preset,
-            process_preset=pipeline.process_preset,
-            filament_presets=filament_presets,
-            filament_colours=filament_colours,
-            bed_type=bed_type or pipeline.bed_type,
+            printer_preset=plan.printer_preset,
+            process_preset=plan.process_preset,
+            filament_presets=plan.filament_presets,
+            filament_colours=plan.filament_colours,
+            bed_type=plan.bed_type,
             plate=plate_id,
         ),
     )
@@ -124,23 +104,20 @@ async def slice_and_queue(
             slice_job_id=accepted.job_id,
         )
 
-    printer, target_model = target_of(pipeline, printer_id)
     remembered = options.queue_fields() if options is not None else {}
     remembered.pop("quantity", None)
     remembered.pop("project_id", None)
     item = await client.enqueue(
         QueueItemCreate(
             **remembered,
-            printer_id=printer,
-            target_model=target_model,
+            printer_id=printer_id,
             library_file_id=sliced,
             quantity=copies,
             plate_id=plate_id,
             filament_overrides=filaments.filament_overrides if filaments else None,
             required_filament_types=filaments.required_filament_types if filaments else None,
             # On this route the project can ride on the item itself, so there is no
-            # window in which the entry exists unfiled. The pipeline route has no such
-            # field and has to attach afterwards (#79).
+            # window in which the entry exists unfiled (#79).
             project_id=project_id,
         )
     )
@@ -148,6 +125,5 @@ async def slice_and_queue(
         slice_job_id=accepted.job_id,
         sliced_library_file_id=sliced,
         queue_item_ids=[item.id],
-        printer_id=printer,
-        target_model=target_model,
+        printer_id=printer_id,
     )

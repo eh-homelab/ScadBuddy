@@ -15,6 +15,12 @@
 # The one exception is `--target agent`: the AI agent service, a separate
 # Node image deployed as a sidecar container beside this one (see its stage).
 
+# The library pins the `libraries` stage bakes in (#169), global so that stage and
+# the `app` stage's catalogue check read one value. See that stage.
+# Moving BOSL2_REF/BOSL2_COMMIT or baking in another library: update THIRD_PARTY_NOTICES.md.
+ARG BOSL2_REF=v2.0.761
+ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
+
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
 # can never reach the image (.dockerignore drops it from the context too).
@@ -67,11 +73,11 @@ FROM node:24-bookworm-slim AS agent-build
 WORKDIR /src/agent
 RUN corepack enable
 
-# agent/ has no pnpm-workspace.yaml because none of its dependencies has an
-# install script to approve (a frozen install passes without one). If one ever
-# does, pnpm fails here with ERR_PNPM_IGNORED_BUILDS: add the file with its
-# `allowBuilds` entry and copy it in on this line, as the frontend stage does.
-COPY agent/package.json agent/pnpm-lock.yaml ./
+# agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
+# install script that is declined there); without it the frozen install fails
+# with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
+# stage does.
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY agent/ ./
@@ -83,7 +89,7 @@ FROM node:24-bookworm-slim AS agent-deps
 
 WORKDIR /src/agent
 RUN corepack enable
-COPY agent/package.json agent/pnpm-lock.yaml ./
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:24-bookworm-slim AS agent
@@ -246,6 +252,41 @@ RUN case "$TARGETARCH" in \
     && install -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
     && openscad-lsp --version
 
+# ── libraries: the catalogue's common libraries, baked in (#169) ──────────────
+# A fresh install renders a BOSL2 model offline: at boot the backend copies each
+# checkout here onto the volume if it is not there yet
+# (backend/scadbuddy/library/library_seed.py). Laid out as the volume lays out
+# checkouts, `<name>/<commit>/<name>/`, without `.git`.
+#
+# The ref is the curated catalogue's (CURATED in
+# backend/scadbuddy/library/libraries.py; the `app` stage fails the build when
+# they differ), and the commit it resolves to is pinned here the way
+# OPENSCAD_VERSION is: a tag moved upstream fails the build rather than shipping a
+# different tree under the same commit's name. Bump the pair together with the
+# catalogue's ref.
+#
+# Only BOSL2, by size: its checkout is ~12 MB. dotSCAD (~17 MB) and NopSCADlib
+# (~44 MB) are left to be cloned when pinned; Round-Anything's ~8 MB is almost all
+# a demo STL; MCAD already ships in the base image
+# (/usr/local/share/openscad/libraries) and its catalogue ref is a branch, which
+# would fail this check on every upstream commit. Each seeded library costs its
+# size twice: once in the image, once on each volume.
+FROM base AS libraries
+
+ARG BOSL2_REF
+ARG BOSL2_COMMIT
+
+WORKDIR /opt/scadbuddy-libraries
+RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
+        https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
+    && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
+    && if [ "$actual" != "$BOSL2_COMMIT" ]; then \
+         echo "ERROR: BOSL2 '${BOSL2_REF}' now resolves to '${actual}', this build pins '${BOSL2_COMMIT}'." >&2; \
+         echo "       Check what moved the tag upstream, then bump BOSL2_COMMIT." >&2; \
+         exit 1; \
+       fi \
+    && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git"
+
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
 
@@ -356,6 +397,17 @@ ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/scadbuddy
 
+# The baked-in libraries (see the `libraries` stage), after everything above so a
+# bump rebuilds only these two layers. Root-owned and read-only: the boot copies
+# them onto the volume and never writes here. The check fails the build when a
+# seeded ref is not the catalogue's, the seed holds anything not listed, or
+# THIRD_PARTY_NOTICES.md does not name each seeded library's ref and commit.
+ARG BOSL2_REF
+COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+RUN python -m scadbuddy.library.library_seed verify /app/libraries \
+        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
+
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is
 # what those tests are marked for, and it exists nowhere else in CI.
@@ -388,7 +440,12 @@ VOLUME ["/data"]
 # uvicorn, which does not reap, and a killed-on-timeout openscad stays a zombie
 # for the life of the pod.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# --ws-max-size bounds one inbound WebSocket message before the app sees it (uvicorn's
+# default is 16 MiB: https://www.uvicorn.org/settings/#implementation). It is the same
+# 8 MiB ceiling `api/limits.py` puts on a text body, because the LSP bridge carries a
+# whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
+# frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
+CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.

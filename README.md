@@ -32,9 +32,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
   plate cover images and a layout sized for the target printer's plate.
 - **Send to Bambuddy**: upload to a library folder, or slice and queue it.
-- **Print picker**: run one of Bambuddy's slicer pipelines, or create a new one. It
-  shows eligibility per pipeline, and lets you set copies, a project, filaments per
-  colour from spool inventory, and print options.
+- **Print picker**: spool-first — pick spools, nozzle size, a quality tier and a plate,
+  and ScadBuddy derives the printer, process and filament presets and slices and queues
+  through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
+  nozzle flow, the full process list and a per-slot filament preset override. Also lets
+  you set copies, a project, and print options.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
@@ -70,13 +72,22 @@ for the project picker).
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
   outputs, saved presets (`presets/`, outside the git repository), settings,
-  downloaded fonts and caches. Back up the volume.
+  downloaded fonts and caches. Back up the volume. The image carries BOSL2 at the
+  catalogue's ref and copies it into `/data/libraries` at start when it is not
+  there, so a fresh install renders BOSL2 models without network access (licence:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
+  `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
+  `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
+  generated output is rendered at its default settings in the background, one at
+  a time and behind any render someone asked for, and that plate image is its
+  catalogue thumbnail; `false` renders nothing, and such a model shows no image
+  until one is set or generated);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -164,6 +175,12 @@ for the project picker).
   SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
+
+**Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
+backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
+origin (Settings, seeded from `SCADBUDDY_PUBLIC_URL`) or a loopback origin;
+anything else is refused, which stops DNS rebinding. If the socket can't
+connect, the header shows "Live updates unavailable" and views poll instead.
 
 ## Deploying
 
@@ -319,7 +336,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   recreates `claude/` and `work/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
 - Nothing deploys it yet. The clusters manifest, and the ingress routes for
-  `/mcp`, `/api/v1/ai/*` and `/api/v1/ws` (spec §4.2), come with the stories
+  `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories
   that give it routes. Until then the image's publish job is
   `continue-on-error`, so it cannot hold back a backend deploy, and the new
   GHCR package needs the same one-time **public** visibility step as

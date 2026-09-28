@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import (
@@ -20,7 +21,9 @@ from contextlib import (
     suppress,
 )
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
@@ -35,9 +38,11 @@ from scadbuddy.core.paths import (
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
+    CheckoutFetcher,
     CheckoutGate,
     model_search_path,
     require_checkouts,
+    resolve_search_path,
     revision_search_path,
 )
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
@@ -86,6 +91,8 @@ UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
 MISSING_FILE_WARNING = "OpenSCAD could not open {name}; the model rendered without it"
+#: The same fact on a render that failed, where "rendered without it" is untrue.
+MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
 #: The most plates a template may ask for with `echo(plates = N)`. Each plate is a
 #: render plus a solid render per colour of its own, so this bounds a job's cost.
 MAX_PLATES = 16
@@ -107,6 +114,18 @@ def unreadable_colour_warnings(
                 "it gets no extruder"
             )
     return warnings
+
+
+def failed_render_warnings(
+    missing_files: Sequence[str], schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> list[str]:
+    """The warnings a failed render can still give (#408): a file it could not open
+    is often why it failed -- a template that draws only the picture then renders
+    nothing -- and an unreadable colour is a fact about the parameters either way."""
+    return [
+        *(MISSING_FILE_FAILED_WARNING.format(name=name) for name in missing_files),
+        *unreadable_colour_warnings(schema, params),
+    ]
 
 
 def extruder_order(
@@ -430,6 +449,7 @@ async def resolve_source(
     *,
     paths: DataPaths,
     history: ModelHistory | None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> ModelSource:
     """Resolve a model to the source a render reads: the live one, or an export of
     an older revision.
@@ -441,6 +461,9 @@ async def resolve_source(
     renderer -- including the wrapper `render_solids` drops next to the source --
     works on it unchanged, and nothing generated lands in the repository. Commits
     are immutable, so a populated export is never stale.
+
+    With a ``fetcher``, a pinned library checkout missing from the volume is cloned
+    back into place rather than failing the resolve (#169).
     """
     current = (
         await asyncio.to_thread(history.last_commit, model_path(slug))
@@ -454,7 +477,9 @@ async def resolve_source(
             version=current,
             # Off the loop: `model.json` and each checkout are reads
             # on the same PVC the history's calls are offloaded for.
-            library_path=await asyncio.to_thread(model_search_path, paths, slug),
+            library_path=await resolve_search_path(
+                fetcher, partial(model_search_path, paths, slug)
+            ),
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
@@ -471,8 +496,8 @@ async def resolve_source(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
-        library_path=await asyncio.to_thread(
-            revision_search_path, history, paths, directory, requested
+        library_path=await resolve_search_path(
+            fetcher, partial(revision_search_path, history, paths, directory, requested)
         ),
     )
 
@@ -533,7 +558,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
 
 
 @asynccontextmanager
-async def _library_lease(
+async def library_lease(
     checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease on the checkouts a render resolved, when there are any to hold.
@@ -574,6 +599,7 @@ async def render_job(
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
     checkouts: CheckoutGate | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         return metrics.stage(name) if metrics is not None else nullcontext()
@@ -583,7 +609,9 @@ async def render_job(
     # render newer source while claiming the older revision.
     async with AsyncExitStack() as held:
         with stage("source"):
-            source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+            source = await resolve_source(
+                job.slug, job.model_version, paths=paths, history=history, fetcher=fetcher
+            )
             scad = source.scad
             # #90 stamps the model's own commit id, which `provenance.source_version`
             # was written to accept (a free string, never a structured field). The
@@ -599,16 +627,20 @@ async def render_job(
             # Held from here for every openscad run below -- the schema derivation
             # included: those are what read the checkouts on OPENSCADPATH, and a
             # removal must not take one out from under them (#253).
-            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            await held.enter_async_context(library_lease(checkouts, job.id, source.library_path))
             schema = await cached_schema(scad, source.schema_cache, config=config)
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
 
         with staged_assets(schema, job.params, scad.parent, assets) as params:
             with stage("render"):
-                output = await render_3mf(
-                    scad, schema, params, work / RAW_RENDER_NAME, config=config
-                )
+                try:
+                    output = await render_3mf(
+                        scad, schema, params, work / RAW_RENDER_NAME, config=config
+                    )
+                except OpenSCADError as error:
+                    error.warnings = failed_render_warnings(error.missing_files, schema, job.params)
+                    raise
             with stage("split"):
                 preview_parts = extruder_order(
                     split_by_material(work / RAW_RENDER_NAME), schema, params
@@ -619,6 +651,8 @@ async def render_job(
                         output.log_tail,
                         diagnostics=output.diagnostics,
                         diagnostics_dropped=output.diagnostics_dropped,
+                        missing_files=output.missing_files,
+                        warnings=failed_render_warnings(output.missing_files, schema, job.params),
                     )
                 preview_path = work / PREVIEW_NAME
                 box = write_glb(preview_parts, preview_path)
@@ -685,6 +719,16 @@ INITIAL_RENDER_ESTIMATE = 10.0
 RENDER_ESTIMATE_WEIGHT = 0.2
 
 
+@dataclass
+class _Background[T]:
+    """A piece of background work, and the future its caller awaits for what the
+    work returns. Held in the process, never in the job store (see
+    `RenderQueue.run_background`)."""
+
+    work: Callable[[], Awaitable[T]]
+    done: asyncio.Future[T]
+
+
 class RenderQueue:
     """The render queue: every submit is accepted, and `render_concurrency` workers
     per process render them oldest first.
@@ -730,6 +774,7 @@ class RenderQueue:
         metrics: Metrics | None = None,
         events: EventBus | None = None,
         checkouts: CheckoutGate | None = None,
+        fetcher: CheckoutFetcher | None = None,
         assets: AssetStore | None = None,
     ) -> None:
         self.config = config
@@ -764,6 +809,7 @@ class RenderQueue:
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
                 checkouts=checkouts,
+                fetcher=fetcher,
             )
         )
         self._tasks: list[asyncio.Task[None]] = []
@@ -777,6 +823,14 @@ class RenderQueue:
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
+        #: Background work waiting for a worker with no render to claim. Each entry's
+        #: work returns its own type; only its caller's future carries it.
+        self._background: deque[_Background[Any]] = deque()
+
+    @property
+    def thumbnail_executor(self) -> Executor:
+        """The cover rasteriser's pool, for background work that draws plate images."""
+        return self._thumbnails
 
     async def start(self) -> None:
         self.paths.ensure()
@@ -865,6 +919,42 @@ class RenderQueue:
             self._wakeup.set()
         return submitted.job
 
+    async def run_background[T](self, work: Callable[[], Awaitable[T]]) -> T:
+        """Run ``work`` on one of this process's render workers, once no render is
+        waiting to be claimed -- the default-render previews.
+
+        A worker takes it only when `store.claim` finds nothing, so it never starts
+        ahead of a render someone asked for, including one submitted after it was
+        queued (with Postgres, one waiting on any replica). It holds a worker while
+        it runs, so the process never runs more openscad than `render_concurrency`
+        allows. It is not preempted once started: a caller keeps at most one of
+        these in flight, which leaves every other worker to requested renders.
+
+        It never touches the job store. So it is never a job: never a row or a job
+        file, never listed, never counted by admission (`render_queue_max`) or the
+        queue metrics, never announced as a `job.*` event, and never makes a model's
+        delete wait. Returns what ``work`` returns, or raises what it raised.
+        """
+        done: asyncio.Future[T] = asyncio.get_running_loop().create_future()
+        self._background.append(_Background[T](work=work, done=done))
+        self._wakeup.set()
+        return await done
+
+    async def _run_background[T](self, item: _Background[T]) -> None:
+        if item.done.done():  # its caller gave up waiting
+            return
+        try:
+            result = await item.work()
+        except asyncio.CancelledError:
+            item.done.cancel()
+            raise
+        except Exception as error:  # the caller's to handle; the worker lives on
+            if not item.done.done():
+                item.done.set_exception(error)
+        else:
+            if not item.done.done():
+                item.done.set_result(result)
+
     def _announce(self, job: Job, kind: JobKind) -> None:
         emit(self.events, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
@@ -940,10 +1030,15 @@ class RenderQueue:
             # the wait below sets it again, so the wait returns at once.
             self._wakeup.clear()
             self._busy += 1
+            background: _Background[Any] | None = None
             try:
                 job = await asyncio.to_thread(self.store.claim)
                 if job is not None:
                     await self._run(job)
+                elif self._background:
+                    # Only with no render to claim; the next loop claims again first.
+                    background = self._background.popleft()
+                    await self._run_background(background)
             except asyncio.CancelledError:
                 raise
             except Exception:  # a store outage must not kill the worker
@@ -960,7 +1055,7 @@ class RenderQueue:
             if failed:
                 await asyncio.sleep(self.config.render_poll_interval)
                 continue
-            if job is None:
+            if job is None and background is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._wakeup.wait(), timeout=self.idle_poll_interval)
 
@@ -1033,6 +1128,7 @@ class RenderQueue:
             job.log_tail = error.log_tail
             job.diagnostics = error.diagnostics
             job.diagnostics_dropped = error.diagnostics_dropped
+            job.warnings = error.warnings
         except Exception as error:  # the job carries the failure, the worker lives on
             outcome = "failed"
             job.state = "failed"
@@ -1044,6 +1140,7 @@ class RenderQueue:
             job.log_tail = log_tail
             job.diagnostics = result.diagnostics
             job.diagnostics_dropped = result.diagnostics_dropped
+            job.warnings = result.warnings
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

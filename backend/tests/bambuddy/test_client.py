@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.errors import (
 from scadbuddy.bambuddy.models import (
     PipelineRunRequest,
     PresetRef,
+    PrinterStatus,
     QueueItemCreate,
     SliceRequest,
 )
@@ -311,6 +312,24 @@ async def test_external_link_upsert_uses_patch_for_an_existing_row(
     import json as _json
 
     assert _json.loads(patch.calls.last.request.read()) == {"url": "https://scadbuddy.test/other"}
+
+
+@respx.mock
+async def test_archives_are_read_for_one_printer(bambuddy: BambuddyClient) -> None:
+    route = respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(200, json=recording("archives.json"))
+    )
+    rows = await bambuddy.archives(printer_id=1, limit=5)
+    assert route.calls.last.request.url.params["printer_id"] == "1"
+    assert route.calls.last.request.url.params["limit"] == "5"
+    assert rows and all(row.printer_id == 1 for row in rows)
+    assert rows[0].bed_type == "Textured PEI Plate"
+
+
+def test_the_rack_recording_parses_every_slot() -> None:
+    status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
+    assert {slot.nozzle_diameter for slot in status.nozzle_rack} >= {"0.2", "0.4"}
+    assert any(slot.nozzle_type.startswith("HH") for slot in status.nozzle_rack)
 
 
 # --- error mapping -----------------------------------------------------------------

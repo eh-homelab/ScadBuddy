@@ -9,8 +9,8 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print import pipelines_route, presets_routes, printers_route, run_body
-from tests.api.test_print_filaments import inventory_routes, queue_route, slice_routes
+from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -78,19 +78,15 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
     uploaded = upload_route()
-    # A send resolves the target printer's plate before uploading, to lay the 3MF out
-    # on it (#105) — a read of the pipeline list and the printers.
-    pipelines_route()
-    printers_route()
+    run_routes()
+    slice_routes()
+    queue_route()
     respx.get(f"{API}/library/folders/by-project/7").mock(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
 
     body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "project_id": 7}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7)
     ).json()
     assert body["project_id"] == 7
     assert body["folder_id"] == 9
@@ -109,28 +105,24 @@ def test_an_already_uploaded_output_is_moved_into_the_project_folder(
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
     uploaded = upload_route()
-    # A send resolves the target printer's plate before uploading, to lay the 3MF out
-    # on it (#105) — a read of the pipeline list and the printers.
-    pipelines_route()
-    printers_route()
+    run_routes()
+    slice_routes()
+    queue_route()
     respx.get(f"{API}/library/folders/by-project/7").mock(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )
     moved = respx.post(f"{API}/library/files/move").mock(
         return_value=httpx.Response(200, json={"moved": 1, "skipped": []})
     )
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
 
     # First run, no project: the 3MF lands in the folder from Settings.
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
     assert uploaded.call_count == 1
     assert not moved.called
 
     # Second run, this time filed under a project.
     body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "project_id": 7}
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7)
     ).json()
     assert body["folder_id"] == 9
     # Not re-uploaded, and not left behind either.
@@ -142,30 +134,19 @@ def test_an_already_uploaded_output_is_moved_into_the_project_folder(
 def test_the_queue_route_files_the_item_under_the_project_with_no_race(
     client: TestClient, model: str
 ) -> None:
-    """``PrintQueueItemCreate`` carries ``project_id``, so on this route there is no
-    window in which the entry exists unfiled — unlike the pipeline route."""
+    """``PrintQueueItemCreate`` carries ``project_id``, so there is no window in which
+    the entry exists unfiled."""
     configure(client)
     output_id = make_output(client, model)
     upload_route()
     respx.get(f"{API}/library/folders/by-project/7").mock(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )
-    pipelines_route()
-    printers_route()
-    presets_routes()
-    inventory_routes()
+    run_routes()
     slice_routes()
     queued = queue_route()
 
-    client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
-        json={
-            "pipeline_id": 1,
-            "printer_id": 1,
-            "project_id": 7,
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
-        },
-    )
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7))
     sent: dict[str, Any] = json.loads(queued.calls.last.request.content)
     assert sent["project_id"] == 7
 

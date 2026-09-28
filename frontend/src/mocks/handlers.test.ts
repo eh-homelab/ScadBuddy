@@ -2,7 +2,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
-import { BUILTIN_SLUG, MEDIA_MP4_BASE64, keychainSource, versionIds } from './fixtures'
+import {
+  BUILTIN_PREVIEW_ID,
+  BUILTIN_SLUG,
+  GALLERY_SLUG,
+  MEDIA_MP4_BASE64,
+  keychainSource,
+  versionIds,
+} from './fixtures'
 import {
   MAX_PRESET_NAME,
   MAX_PRESETS,
@@ -310,7 +317,11 @@ describe('mock PUT /models/:slug/thumbnail, as _require_png holds it', () => {
   it('sets a PNG within the limit', async () => {
     const { status, body } = await put(png())
     expect(status).toBe(200)
-    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+    expect(body).toMatchObject({
+      has_thumbnail: true,
+      thumbnail_source: 'model',
+      thumbnail_preview_id: null,
+    })
   })
 
   it.each([
@@ -369,6 +380,53 @@ describe('mock API: a built-in template (#192)', () => {
     })
     expect(response.status).toBe(403)
     expect(await response.json()).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  it('gives a new model with no thumbnail its preview on a later read, as the backend does', async () => {
+    const created = await api.createModelFromSource({
+      name: 'Fresh Widget',
+      source: 'cube(1);\n',
+      description: '',
+      force: false,
+    })
+    // The render runs in the background: the create answers before it.
+    expect(created).toMatchObject({ has_thumbnail: false })
+    expect(created.thumbnail_source ?? null).toBeNull()
+
+    const read = await api.getModel(created.slug)
+    expect(read).toMatchObject({ has_thumbnail: true, thumbnail_source: 'preview' })
+    expect(read.thumbnail_preview_id).toMatch(/^[0-9a-f]{16}$/)
+    const listed = (await api.listModels()).find((model) => model.slug === created.slug)
+    expect(listed?.thumbnail_preview_id).toBe(read.thumbnail_preview_id)
+
+    // Each model's render is its own.
+    const other = await api.createModelFromSource({
+      name: 'Other Widget',
+      source: 'cube(2);\n',
+      description: '',
+      force: false,
+    })
+    expect((await api.getModel(other.slug)).thumbnail_preview_id).not.toBe(read.thumbnail_preview_id)
+  })
+
+  it('lists its default-render preview, having no thumbnail of its own', async () => {
+    const builtin = await api.getModel(BUILTIN_SLUG)
+    expect(builtin).toMatchObject({
+      has_thumbnail: true,
+      thumbnail_source: 'preview',
+      thumbnail_output_id: null,
+      thumbnail_preview_id: BUILTIN_PREVIEW_ID,
+    })
+    expect(api.modelThumbnailUrl(builtin)).toContain(BUILTIN_PREVIEW_ID)
+  })
+
+  it('does not hand its preview to a duplicate, which is rendered afresh', async () => {
+    const copy = await api.duplicateModel(BUILTIN_SLUG, 'My Keychain')
+    expect(copy).toMatchObject({
+      has_thumbnail: false,
+      thumbnail_source: null,
+      thumbnail_preview_id: null,
+    })
   })
 
   it('still serves every read', async () => {
@@ -659,8 +717,9 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     const models = await api.listModels()
     const of = (slug: string) => models.find((model) => model.slug === slug)?.media
     expect(of('name-keychain')).toEqual([expect.objectContaining({ id: 'thumbnail', kind: 'image' })])
-    expect(of(BUILTIN_SLUG)?.map((item) => item.kind)).toEqual(['image', 'image', 'image', 'video'])
+    expect(of(GALLERY_SLUG)?.map((item) => item.kind)).toEqual(['image', 'image', 'image', 'video'])
     expect(of('gridfinity-bin')).toEqual([])
+    expect(of(BUILTIN_SLUG)).toEqual([])
   })
 
   it('adds an image last, converting a legacy thumbnail into an ordinary item', async () => {
@@ -696,15 +755,16 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
   })
 
   it('refuses every write to a built-in with a 403', async () => {
-    const [first] = (await api.getModel(BUILTIN_SLUG)).media ?? []
+    // Refused before the item is looked up, as `require_mine` does.
+    const id = 'a1b2c3d4e5f6'
     expect((await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])).status).toBe(403)
-    await expect(api.patchMedia(BUILTIN_SLUG, first!.id, 'x')).rejects.toMatchObject({ status: 403 })
-    await expect(api.reorderMedia(BUILTIN_SLUG, [first!.id])).rejects.toMatchObject({ status: 403 })
-    await expect(api.deleteMedia(BUILTIN_SLUG, first!.id)).rejects.toMatchObject({ status: 403 })
+    await expect(api.patchMedia(BUILTIN_SLUG, id, 'x')).rejects.toMatchObject({ status: 403 })
+    await expect(api.reorderMedia(BUILTIN_SLUG, [id])).rejects.toMatchObject({ status: 403 })
+    await expect(api.deleteMedia(BUILTIN_SLUG, id)).rejects.toMatchObject({ status: 403 })
   })
 
   it('refuses an order that is not a permutation with a 422', async () => {
-    const copy = await api.duplicateModel(BUILTIN_SLUG, 'Gallery')
+    const copy = await api.duplicateModel(GALLERY_SLUG, 'Gallery')
     const ids = (copy.media ?? []).map((item) => item.id)
     for (const order of [ids.slice(1), [...ids, ids[0]!], [...ids.slice(1), 'ffffffffffff']]) {
       await expect(api.reorderMedia(copy.slug, order)).rejects.toMatchObject({ status: 422 })
@@ -717,8 +777,8 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
   })
 
   it('serves an item and a poster with their types', async () => {
-    const video = (await api.getModel(BUILTIN_SLUG)).media?.find((item) => item.kind === 'video')
-    const slug = encodeURIComponent(BUILTIN_SLUG)
+    const video = (await api.getModel(GALLERY_SLUG)).media?.find((item) => item.kind === 'video')
+    const slug = encodeURIComponent(GALLERY_SLUG)
     const file = await fetch(`/api/v1/models/${slug}/media/${video!.id}`)
     expect(file.headers.get('Content-Type')).toBe('video/mp4')
     expect(new Uint8Array(await file.arrayBuffer())).toEqual(MP4)
@@ -759,7 +819,7 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
   })
 
   it('copies the media with a duplicate', async () => {
-    const copy = await api.duplicateModel(BUILTIN_SLUG, 'Gallery')
-    expect(copy.media).toEqual((await api.getModel(BUILTIN_SLUG)).media)
+    const copy = await api.duplicateModel(GALLERY_SLUG, 'Gallery')
+    expect(copy.media).toEqual((await api.getModel(GALLERY_SLUG)).media)
   })
 })
