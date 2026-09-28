@@ -55,6 +55,46 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     assert body["filaments"]["slots"]
 
 
+MIXED_ARCHIVES = [
+    {"id": 1, "printer_id": 1, "status": "completed", "bed_type": "Cool Plate"},
+    {
+        "id": 2,
+        "printer_id": 1,
+        "status": "completed",
+        "bed_type": "Engineering Plate",
+        "started_at": "2026-09-27T04:09:36Z",
+    },
+    {
+        "id": 3,
+        "printer_id": 1,
+        "status": "completed",
+        "bed_type": "Supertack Plate",
+        "started_at": "2026-09-27T09:00:00",
+    },
+]
+"""Null, aware and naive timestamps together (PR #335 review 3). Newest is row 3, its
+naive time read as UTC."""
+
+
+@respx.mock
+def test_archives_with_null_and_mixed_timestamps_still_open_the_dialog(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=MIXED_ARCHIVES))
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["last_bed_type"] == "Supertack Plate"
+    assert response.json()["bed_type"] == "Supertack Plate"
+
+
 @respx.mock
 def test_an_offline_printer_still_opens_the_dialog(client: TestClient, model: str) -> None:
     output_id = prepared(client, model)

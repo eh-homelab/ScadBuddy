@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import wait_for_job
 from tests.api.test_print import printers_route
-from tests.api.test_print_choices import h2c_presets
+from tests.api.test_print_choices import MIXED_ARCHIVES, h2c_presets
 from tests.api.test_print_filaments import (
     inventory_routes,
     prepared,
@@ -226,6 +226,47 @@ def test_an_unreadable_printer_still_prints_without_hardware_warnings(
     assert not [
         w for w in response.json()["warnings"] if w["kind"] in {"plate-differs", "not-installed"}
     ]
+
+
+@respx.mock
+def test_archives_with_null_and_mixed_timestamps_still_run_and_compare_the_plate(
+    client: TestClient, model: str
+) -> None:
+    """PR #335 review 3: the plate warning is advisory, so odd archive timestamps must
+    neither 500 the run nor lose the comparison."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=MIXED_ARCHIVES))
+    slice_routes()
+    queue_route()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "plate-differs"]
+    assert "Supertack Plate" in warning["message"]
+
+
+@respx.mock
+def test_an_unknown_advanced_override_is_a_422_naming_the_slot_before_slicing(
+    client: TestClient, model: str
+) -> None:
+    """PR #335 review 2: an override is checked against the catalogue like every other
+    preset, rather than failing later inside Bambuddy's slice."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json=body(filament_overrides={"2": {"source": "cloud", "id": "GONE404"}}),
+    )
+
+    assert response.status_code == 422
+    assert "slot 2" in response.json()["detail"]
+    assert not sliced.called
 
 
 # --- the queue side: moved here from test_print_filaments.py (#87) --------------------

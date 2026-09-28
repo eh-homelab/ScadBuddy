@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import Archive, PresetRef, Printer, PrinterStatus
+from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
 from scadbuddy.bambuddy.pipelines import BED_TYPES, filament_options_for_output
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.core.problems import ApiError
@@ -115,14 +115,18 @@ async def choices_for_output(
         or (printers[0].id if printers else None)
     )
     status: PrinterStatus | None = None
-    archives: list[Archive] = []
+    last: str | None = None
     if printer_id is not None:
         try:
             status = await client.printer_status(printer_id)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; offering every nozzle size unmarked")
+        # Advisory, like the run's plate warning: an archive list that cannot be read or
+        # ordered preselects nothing rather than failing the dialog.
         try:
-            archives = await client.archives(printer_id=printer_id)
+            last = last_bed_type(
+                await client.archives(printer_id=printer_id), printer_id=printer_id
+            )
         except (ApiError, ValueError):
             logger.info("archives unreadable; the plate falls back to the remembered one")
     catalogue = await _catalogue(client)
@@ -136,7 +140,6 @@ async def choices_for_output(
         )
         for size in SIZES
     }
-    last = last_bed_type(archives, printer_id=printer_id) if printer_id is not None else None
     bed = (
         last
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)

@@ -9,7 +9,7 @@ needs these, which would otherwise be an import cycle.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.models import Archive, PrinterStatus
 from scadbuddy.bambuddy.resolver import FlowType
 
 _RAN = {"completed", "cancelled", "failed"}
+_OLDEST = datetime.min.replace(tzinfo=UTC)
 
 
 class InstalledNozzle(BaseModel):
@@ -50,7 +51,13 @@ def last_bed_type(archives: list[Archive], *, printer_id: int) -> str | None:
     ran = [row for row in archives if row.printer_id == printer_id and row.status in _RAN]
 
     def when(row: Archive) -> datetime:
-        return row.started_at or row.completed_at or row.created_at or datetime.min
+        # Aware throughout, or ``max`` raises on a naive/aware pair (PR #335 review 3):
+        # a row with no timestamp at all is the oldest, and a naive one is read as UTC,
+        # which is what the recorded archives' offset-less times are.
+        stamp = row.started_at or row.completed_at or row.created_at
+        if stamp is None:
+            return _OLDEST
+        return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
     newest = max(ran, key=when, default=None)
     return newest.bed_type if newest else None

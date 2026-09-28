@@ -80,3 +80,47 @@ def test_a_size_not_in_the_rack_warns() -> None:
     assert nozzle_warning("0.8", installed) is not None
     assert nozzle_warning("0.4", installed) is None
     assert nozzle_warning("0.8", []) is None  # nothing known, nothing claimed
+
+
+def test_a_row_with_no_timestamp_is_the_oldest_and_never_crashes_the_ordering() -> None:
+    """PR #335 review 3: ``datetime.min`` is naive and Bambuddy's rows are aware, so a
+    timestampless row next to a stamped one raised ``TypeError`` from ``max``."""
+    rows = [
+        Archive(id=1, printer_id=1, status="completed", bed_type="Cool Plate"),
+        Archive(
+            id=2,
+            printer_id=1,
+            status="completed",
+            bed_type="Engineering Plate",
+            started_at=datetime(2026, 9, 27, 4, tzinfo=UTC),
+        ),
+    ]
+    assert last_bed_type(rows, printer_id=1) == "Engineering Plate"
+    assert last_bed_type(list(reversed(rows)), printer_id=1) == "Engineering Plate"
+
+
+def test_naive_and_aware_timestamps_compare_with_the_naive_one_read_as_utc() -> None:
+    """The recorded archives are naive; a row that carries an offset is still ordered."""
+    rows = [
+        Archive(
+            id=1,
+            printer_id=1,
+            status="completed",
+            bed_type="Engineering Plate",
+            started_at=datetime(2026, 9, 27, 4, tzinfo=UTC),
+        ),
+        Archive(
+            id=2,
+            printer_id=1,
+            status="completed",
+            bed_type="Supertack Plate",
+            started_at=datetime(2026, 9, 27, 9),
+        ),
+        Archive(id=3, printer_id=1, status="failed", bed_type="Cool Plate"),
+    ]
+    assert last_bed_type(rows, printer_id=1) == "Supertack Plate"
+
+
+def test_only_timestampless_rows_still_name_a_plate() -> None:
+    rows = [Archive(id=1, printer_id=1, status="completed", bed_type="Cool Plate")]
+    assert last_bed_type(rows, printer_id=1) == "Cool Plate"
