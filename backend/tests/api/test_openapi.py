@@ -64,11 +64,17 @@ EXPECTED_PATHS = {
     "/api/v1/plate/fit",
     "/api/v1/plates",
     "/api/v1/libraries",
+    "/api/v1/assets/usage",
     "/api/v1/models/{slug}/assets",
     "/api/v1/models/{slug}/assets/{asset_id}",
     "/api/v1/models/{slug}/assets/{asset_id}/content",
     "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
+    "/api/v1/libraries/installed",
+    "/api/v1/libraries/{name}",
+    "/api/v1/models/{slug}/diagnostics",
+    "/api/v1/jobs/{job_id}/views/{view}.png",
+    "/api/v1/outputs/{output_id}/views/{view}.png",
 }
 
 
@@ -116,3 +122,13 @@ def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
     for case in ("merge_base", "`current`", "`gone`", "kept changing", "retry"):
         assert case in conflict, case
         assert case in merge["description"], case
+
+
+def test_the_view_routes_document_a_png(tmp_path: Path) -> None:
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+
+    for path in (
+        "/api/v1/jobs/{job_id}/views/{view}.png",
+        "/api/v1/outputs/{output_id}/views/{view}.png",
+    ):
+        assert set(paths[path]["get"]["responses"]["200"]["content"]) == {"image/png"}, path

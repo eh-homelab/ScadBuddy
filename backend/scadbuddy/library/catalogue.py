@@ -32,7 +32,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -116,6 +116,11 @@ class ModelExistsError(ValueError):
 
 class LibraryNotDeclaredError(KeyError):
     """The model has no library of that name to remove."""
+
+
+class LibraryPinChangedError(RuntimeError):
+    """A re-pin found the model's entry for the library changed, or gone, since it
+    was read: another request moved or removed it while the clone ran."""
 
 
 class InvalidModelMetaError(ValueError):
@@ -433,12 +438,46 @@ class Catalogue:
     def _has_history(self) -> bool:
         return self.history is not None and self.history.available
 
+    def slugs(self) -> list[str]:
+        """Every template id, mine then the built-ins, without building records."""
+        return _templates_in(self.paths.models) + [
+            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
+        ]
+
+    def library_users(self, name: str, commit: str | None = None) -> list[str]:
+        """The models whose live ``model.json`` pins ``name`` (at ``commit``).
+
+        Read leniently and counted conservatively, because the answer decides
+        whether a checkout may be deleted: an entry that only names the library --
+        a bare name from before per-model pins, or a hand edit with no readable
+        commit -- counts at every commit, and a ``model.json`` that is not JSON
+        counts when its text mentions the name at all.
+        """
+        users: list[str] = []
+        for slug in self.slugs():
+            try:
+                raw = self.read_raw_meta(slug)
+            except InvalidModelMetaError:
+                with contextlib.suppress(OSError):
+                    if name in self.paths.model_meta(slug).read_text(errors="replace"):
+                        users.append(slug)
+                continue
+            entries = raw.get("libraries")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if entry_name(entry) != name:
+                    continue
+                pinned = entry.get("commit") if isinstance(entry, dict) else None
+                if commit is None or not isinstance(pinned, str) or pinned == commit:
+                    users.append(slug)
+                    break
+        return users
+
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one."""
-        slugs = _templates_in(self.paths.models) + [
-            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
-        ]
+        slugs = self.slugs()
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
@@ -574,15 +613,26 @@ class Catalogue:
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
 
-    def pin_library(self, slug: str, library: ModelLibrary) -> ModelRecord:
+    def pin_library(
+        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+    ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
-        or at the end. One revision of the model; no other model moves."""
+        or at the end. One revision of the model; no other model moves.
+
+        With ``replacing``, only in place of that entry: checked in the same
+        read-modify-write as the pin (under the history's write lock), and
+        :class:`LibraryPinChangedError` when the entry is no longer what the
+        caller read -- so a re-pin cannot bring back a library an unpin removed
+        while its clone ran, nor overwrite a pin another request just moved.
+        """
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if replacing is not None and not _declares(entries, library.name, replacing):
+                raise LibraryPinChangedError(library.name)
             # Where the old entry was, so a re-pin is a one-line diff; any duplicate a
             # hand edit left goes with it.
             index = next(
@@ -1194,6 +1244,20 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     if not resolved or not any(history.touched(resolved, place) for place in places):
         raise InvalidMergeBaseError(f"merge_base {commit!r} is not a revision of {upstream.id!r}")
     return resolved
+
+
+def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+    """Is ``expected`` still the entry ``entries`` has for ``name``?"""
+    found = [entry for entry in entries if entry_name(entry) == name]
+    if len(found) != 1:
+        return False
+    [entry] = found
+    if isinstance(expected, str):
+        return bool(entry == expected)
+    try:
+        return ModelLibrary.model_validate(entry) == expected
+    except ValidationError:
+        return False
 
 
 def _templates_in(directory: Path) -> list[str]:

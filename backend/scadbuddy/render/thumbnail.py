@@ -25,6 +25,7 @@ import struct
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -298,13 +299,17 @@ def _pick_colours(count: int) -> list[tuple[int, int, int]]:
     return [(0, (index >> 8) & 0xFF, index & 0xFF) for index in range(1, count + 1)]
 
 
-def render_plate_thumbnails(parts: Sequence[ColourPart]) -> PlateThumbnails:
-    if not parts:
-        raise ValueError("a plate thumbnail needs at least one colour part")
-    colours = [
+def _part_colours(parts: Sequence[ColourPart]) -> list[tuple[int, int, int]]:
+    return [
         (int(part.colour[1:3], 16), int(part.colour[3:5], 16), int(part.colour[5:7], 16))
         for part in parts
     ]
+
+
+def render_plate_thumbnails(parts: Sequence[ColourPart]) -> PlateThumbnails:
+    if not parts:
+        raise ValueError("a plate thumbnail needs at least one colour part")
+    colours = _part_colours(parts)
     supersampled = PLATE_PNG_SIZE * SUPERSAMPLE
     looking = tuple(-axis for axis in VIEW_POSITION)
     lit = _rasterise(parts, looking, supersampled, shaded=True, colours=colours)
@@ -318,3 +323,40 @@ def render_plate_thumbnails(parts: Sequence[ColourPart]) -> PlateThumbnails:
         top=encode_png(_downsample(top, PLATE_PNG_SIZE)),
         pick=encode_png(pick),
     )
+
+
+# ── named views (#252) ───────────────────────────────────────────────────────
+
+#: The edge a named view may be asked for; it is rasterised at SUPERSAMPLE times it.
+MIN_VIEW_SIZE = 64
+MAX_VIEW_SIZE = 1024
+
+#: The direction each named view LOOKS, in OpenSCAD's Z-up millimetres. "front"
+#: stands at -Y looking +Y, as OpenSCAD's own front view does; "iso" is the plate
+#: cover's 3/4 view.
+ViewName = Literal["iso", "front", "back", "left", "right", "top", "bottom"]
+VIEW_DIRECTIONS: dict[ViewName, tuple[float, float, float]] = {
+    "iso": (-VIEW_POSITION[0], -VIEW_POSITION[1], -VIEW_POSITION[2]),
+    "front": (0.0, 1.0, 0.0),
+    "back": (0.0, -1.0, 0.0),
+    "left": (1.0, 0.0, 0.0),
+    "right": (-1.0, 0.0, 0.0),
+    "top": (0.0, 0.0, -1.0),
+    "bottom": (0.0, 0.0, 1.0),
+}
+
+
+def render_view(parts: Sequence[ColourPart], view: ViewName, size: int = PLATE_PNG_SIZE) -> bytes:
+    """One named view of ``parts`` as a shaded, antialiased RGBA PNG: the plate
+    cover's rasteriser pointed along :data:`VIEW_DIRECTIONS`, so a client -- or a
+    vision model -- can check the geometry from more than one side."""
+    if not parts:
+        raise ValueError("a view needs at least one colour part")
+    if view not in VIEW_DIRECTIONS:
+        raise ValueError(f"unknown view {view!r}")
+    if not MIN_VIEW_SIZE <= size <= MAX_VIEW_SIZE:
+        raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_VIEW_SIZE}")
+    image = _rasterise(
+        parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts)
+    )
+    return encode_png(_downsample(image, size))
