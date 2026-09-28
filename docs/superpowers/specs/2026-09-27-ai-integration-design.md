@@ -442,8 +442,8 @@ socket can't replace the read (§3.1). When each print started is kept in Postgr
 prints after a restart; a settled print is forgotten. A session advisory lock per print
 means one replica follows each print. Reading a print's progress re-arms its watcher,
 and an open dialog reads at least every 30 s while the socket is up, so it never waits
-on a watcher that is not there (or, until #374 carries events across replicas, on
-another replica's). #270 moves #241's render workers from interval polling to the
+on a watcher that is not there. With Postgres, `print.*` events cross replicas on the
+event bus. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
 **The database is required** (decided while building #266; tracked in #401). The

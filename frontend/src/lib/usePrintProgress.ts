@@ -7,9 +7,9 @@ import { getRealtime } from './realtime'
 const POLL_MS = 2000
 /**
  * While the socket is up, one read at least this often anyway: the watcher's longest
- * wait (`MAX_INTERVAL`). A dialog then never freezes on a print no watcher here is
- * following (another replica holds it and, until #374, its events stay there; or the
- * watcher stopped), and each read re-arms the watcher (the progress route).
+ * wait (`MAX_INTERVAL`). A dialog then never freezes on a print no watcher is
+ * following (it stopped, or a restart without a database forgot it), and each read
+ * re-arms the watcher (the progress route).
  */
 const LIVE_BACKSTOP_MS = 30_000
 

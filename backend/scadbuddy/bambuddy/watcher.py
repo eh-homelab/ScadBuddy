@@ -39,9 +39,9 @@ Lifecycle
 - ``MAX_AGE`` counts from the latest of the print's start, the watch or its last
   poke, and the last change seen: a long print that keeps moving is followed to the
   end, and a forgotten quiet one is not followed for ever.
-- Until the Postgres event bus (#374), ``print.*`` events stay in the process that
-  follows the print. A UI on another replica still sees the print move through the
-  dialog's 30 s backstop read (``frontend/src/lib/usePrintProgress.ts``).
+- With a database, ``print.*`` events reach every replica through the Postgres event
+  bus (``core/pg_events.py``), so a UI on another replica than the one following the
+  print hears them too.
 - With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
   (a ``render/pg_store.py`` migration) and a Postgres session advisory lock makes
   sure one replica follows each print (:class:`WatchLock`). There is no other store
