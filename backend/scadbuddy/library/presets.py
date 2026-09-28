@@ -25,9 +25,16 @@ import threading
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
@@ -41,6 +48,11 @@ MAX_PRESET_NAME = 80
 #: Per template. Far past what a picker is usable with; it bounds the file a
 #: template's presets live in, which is rewritten whole on every save.
 MAX_PRESETS = 200
+#: A preset's description and tags (#327): short enough that the most presets a
+#: template can define still make a small model.json commit.
+MAX_PRESET_DESCRIPTION = 2000
+MAX_PRESET_TAGS = 20
+MAX_PRESET_TAG = 40
 #: A template preset's id is this plus its key (:func:`template_preset_keys`), so it can
 #: never be taken for the id of a saved one (32 hex digits) and a write addressed to
 #: it can be refused.
@@ -135,8 +147,10 @@ class TemplatePreset(_PresetBody):
     id: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=MAX_SLUG_LENGTH)
     # A factory, not `= ""`: a literal default makes the generated TypeScript type
     # require the field, which a client editing presets has no reason to send.
-    description: str = Field(default_factory=str)
-    tags: list[str] = Field(default_factory=list)
+    description: str = Field(default_factory=str, max_length=MAX_PRESET_DESCRIPTION)
+    tags: list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]] = Field(
+        default_factory=list, max_length=MAX_PRESET_TAGS
+    )
 
 
 def _checked(presets: list[TemplatePreset]) -> list[TemplatePreset]:

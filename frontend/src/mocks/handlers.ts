@@ -517,6 +517,10 @@ export const MAX_PRESETS = 200
 /** `library/slugs.py`'s `SLUG_PATTERN` and `MAX_SLUG_LENGTH`: what a template preset's `id` may be. */
 export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 export const MAX_PRESET_ID = 100
+/** `library/presets.py`'s bounds on a preset's description and tags. */
+export const MAX_PRESET_DESCRIPTION = 2000
+export const MAX_PRESET_TAGS = 20
+export const MAX_PRESET_TAG = 40
 
 /**
  * `template_preset_keys` in `library/presets.py`: a preset's explicit id, else its name
@@ -1055,6 +1059,21 @@ export const handlers = [
           (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID)
         ) {
           return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
+        }
+        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
+          return problem(
+            422,
+            'Unprocessable Content',
+            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
+          )
+        }
+        const tags = preset.tags ?? []
+        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
+          return problem(
+            422,
+            'Unprocessable Content',
+            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+          )
         }
         cleaned.push({ ...preset, name })
       }

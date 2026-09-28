@@ -13,7 +13,14 @@ from fastapi.testclient import TestClient
 
 import scadbuddy.api.presets as presets_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
-from scadbuddy.library.presets import MAX_PRESET_NAME, MAX_PRESETS
+from scadbuddy.library.catalogue import ModelMeta
+from scadbuddy.library.presets import (
+    MAX_PRESET_DESCRIPTION,
+    MAX_PRESET_NAME,
+    MAX_PRESET_TAG,
+    MAX_PRESET_TAGS,
+    MAX_PRESETS,
+)
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 
 BUILTIN = "builtin:keychain"
@@ -398,3 +405,49 @@ def test_a_template_preset_edit_is_checked(client: TestClient, model: str) -> No
 @pytest.mark.requires_git
 def test_a_built_in_s_presets_cannot_be_edited(client: TestClient) -> None:
     assert _patch_presets(client, BUILTIN, []).status_code == 403
+
+
+def test_a_legacy_preset_never_takes_a_key_model_json_had_to_disambiguate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # Two model.json names slug alike, so the second is keyed `foo-2`. The legacy file
+    # claims `foo-2` explicitly, and has "Foo 2", which within the legacy file alone is
+    # keyed `foo-2-2` (its own `foo-2` being taken there).
+    _define(paths, model, [{"name": "Foo"}, {"name": "Foo!"}])
+    legacy = {"presets": [{"name": "Foo 2"}, {"id": "foo-2", "name": "Other"}, {"name": "Bar"}]}
+    (paths.model_dir(model) / LEGACY_PRESETS_NAME).write_text(json.dumps(legacy), "utf-8")
+    listed = [(p["id"], p["name"]) for p in client.get(_url(model)).json()]
+    # model.json's keys hold; the legacy entry claiming `foo-2` is dropped; the rest keep
+    # keys of their own; no two ids are the same.
+    assert listed == [
+        ("template-foo", "Foo"),
+        ("template-foo-2", "Foo!"),
+        ("template-foo-2-2", "Foo 2"),
+        ("template-bar", "Bar"),
+    ]
+
+
+def test_model_metadata_ignores_the_presets_key() -> None:
+    """Presets live in model.json but not in ModelMeta: it must keep ignoring the key,
+    or every model that has presets would stop reading as metadata."""
+    meta = ModelMeta.model_validate({"name": "X", "presets": [{"name": "Y"}]})
+    assert "presets" not in meta.model_dump()
+
+
+def test_a_model_json_that_is_not_json_costs_only_the_template_presets(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    paths.model_meta(model).write_text("{not json", encoding="utf-8")
+    assert [p["id"] for p in client.get(_url(model)).json()] == [saved["id"]]
+
+
+def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, model: str) -> None:
+    long_description = [{"name": "X", "description": "d" * (MAX_PRESET_DESCRIPTION + 1)}]
+    assert _patch_presets(client, model, long_description).status_code == 422
+    many_tags = [{"name": "X", "tags": [f"t{n}" for n in range(MAX_PRESET_TAGS + 1)]}]
+    assert _patch_presets(client, model, many_tags).status_code == 422
+    long_tag = [{"name": "X", "tags": ["t" * (MAX_PRESET_TAG + 1)]}]
+    assert _patch_presets(client, model, long_tag).status_code == 422
+    fine = [{"name": "X", "description": "d" * MAX_PRESET_DESCRIPTION, "tags": ["a", "b"]}]
+    assert _patch_presets(client, model, fine).status_code == 200

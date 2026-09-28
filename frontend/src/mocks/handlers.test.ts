@@ -4,7 +4,10 @@ import type { ModelPatch, ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
 import {
+  MAX_PRESET_DESCRIPTION,
   MAX_PRESET_ID,
+  MAX_PRESET_TAG,
+  MAX_PRESET_TAGS,
   MAX_PRESET_NAME,
   MAX_PRESETS,
   resetMockState,
@@ -692,6 +695,9 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
     await refused(Array.from({ length: MAX_PRESETS + 1 }, (_, n) => ({ name: `Preset ${n}` })))
     await refused([{ id: 'Not A Slug', name: 'X' }])
     await refused([{ id: 'a'.repeat(MAX_PRESET_ID + 1), name: 'X' }])
+    await refused([{ name: 'X', description: 'd'.repeat(MAX_PRESET_DESCRIPTION + 1) }])
+    await refused([{ name: 'X', tags: Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`) }])
+    await refused([{ name: 'X', tags: ['t'.repeat(MAX_PRESET_TAG + 1)] }])
     await refused([{ name: '   ' }])
     await refused([{ name: 'x'.repeat(MAX_PRESET_NAME + 1) }])
     // Over-long before blank, as the server checks them: 81 spaces is a length problem.
