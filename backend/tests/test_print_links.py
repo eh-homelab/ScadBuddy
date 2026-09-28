@@ -105,3 +105,48 @@ async def test_a_slice_keeps_the_hash_of_its_file(jobs: PostgresJobStore) -> Non
 
     [copy] = await uploads.for_output(OUTPUT)
     assert copy.sliced == [SlicedCopy(id=21, file_hash="f0744d1e")]
+
+
+async def test_a_page_has_one_row_per_archive_newest_first(links: PrintLinkStore) -> None:
+    # #308: the prints list is driven by this table, keyed by archive.
+    await links.record(OUTPUT, link(18, printer_id=1))
+    await links.record(OUTPUT, link(32))
+    await links.record(OTHER, link(40))
+    # A second output reaching the same archive: the first one to see it keeps it.
+    await links.record(OTHER, link(18))
+
+    page = await links.page(limit=10)
+
+    assert [(row.archive_id, row.output_id) for row in page] == [
+        (40, OTHER),
+        (32, OUTPUT),
+        (18, OUTPUT),
+    ]
+    assert page[2].printer_id == 1
+
+
+async def test_a_page_continues_below_a_cursor_and_is_bounded(links: PrintLinkStore) -> None:
+    for archive_id in (10, 11, 12, 13):
+        await links.record(OUTPUT, link(archive_id))
+
+    assert [row.archive_id for row in await links.page(limit=2)] == [13, 12]
+    assert [row.archive_id for row in await links.page(before=12, limit=2)] == [11, 10]
+    assert await links.page(before=10, limit=2) == []
+
+
+async def test_a_page_can_be_limited_to_some_outputs(links: PrintLinkStore) -> None:
+    await links.record(OUTPUT, link(18))
+    await links.record(OTHER, link(40))
+
+    assert [row.archive_id for row in await links.page(limit=10, output_ids=[OUTPUT])] == [18]
+    assert await links.page(limit=10, output_ids=[]) == []
+
+
+async def test_one_archive_is_found_with_its_output(links: PrintLinkStore) -> None:
+    await links.record(OUTPUT, link(18, plate_id=2))
+
+    found = await links.linked(18)
+
+    assert found is not None
+    assert (found.output_id, found.archive_id, found.plate_id) == (OUTPUT, 18, 2)
+    assert await links.linked(99) is None
