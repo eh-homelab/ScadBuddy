@@ -163,6 +163,38 @@ describe('AnalyzerPanel · fixes', () => {
     expect(within(preview).getByRole('button', { name: 'Apply' })).toBeDisabled()
   })
 
+  it('drops an apply refusal when the scope changes, since that previews anew', async () => {
+    setMockAnalyzerDiagnostics([verifiedFixDiagnostic])
+    server.use(
+      http.post('/api/v1/analyzers/fixes/apply', () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/analyzer-fix-unverified',
+            title: 'Conflict',
+            status: 409,
+            detail: 'this fix cannot be applied until where its settings land is verified',
+            to_verify: ['Whether the queue item takes timelapse'],
+          },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+    await waitFor(() => expect(within(preview).getByRole('button', { name: 'Apply' })).toBeEnabled())
+    await user.click(within(preview).getByRole('button', { name: 'Apply' }))
+    expect(await within(preview).findByRole('alert')).toHaveTextContent(
+      'until where its settings land is verified — Whether the queue item takes timelapse',
+    )
+
+    await user.selectOptions(within(preview).getByLabelText('Accept for'), 'This template')
+    expect(within(preview).queryByRole('alert')).toBeNull()
+    await waitFor(() => expect(within(preview).getByRole('button', { name: 'Apply' })).toBeEnabled())
+    expect(within(preview).queryByRole('alert')).toBeNull()
+  })
+
   it('says an accepted fix went stale, and lets it be removed', async () => {
     const stale: AnalyzerDiagnostic = {
       ...overhangDiagnostic,

@@ -140,9 +140,14 @@ export function FixPreviewCard({
   const moved = read.data !== undefined && read.data.requestKey !== requestKey
   const stale = refusedStale ?? (moved ? 'the print choices changed since this preview' : null)
 
-  function previewAgain() {
+  /** An apply's refusal is about the preview it was tried on; a new preview starts clean. */
+  function clearRefusals() {
     setRefusedStale(null)
     setRefusal(null)
+  }
+
+  function previewAgain() {
+    clearRefusals()
     read.reload()
   }
 
@@ -189,7 +194,7 @@ export function FixPreviewCard({
           id={`${id}-scope`}
           value={scope ? scopeValue(scope) : ''}
           onChange={(event) => {
-            setRefusedStale(null)
+            clearRefusals()
             setChoice(event.target.value)
           }}
           className="sb-field"
