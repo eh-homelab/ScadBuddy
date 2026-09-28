@@ -46,9 +46,21 @@ _ANNOTATION_RE = re.compile(
     re.MULTILINE,
 )
 
+#: `// retired overlay_type = "image_threshold"` on a line of its own: a value a
+#: `select` parameter no longer offers but the template still renders (#432), so a
+#: preset or output saved before the option was renamed keeps rendering. Accepted
+#: by the server, never offered by the picker. One value per line; a string in
+#: double quotes or a number.
+_RETIRED_RE = re.compile(
+    r"^[^\S\n]*//[^\S\n]*retired[^\S\n]+(?P<name>[A-Za-z_]\w*)[^\S\n]*=[^\S\n]*"
+    r'(?:"(?P<string>[^"\\\n]*)"|(?P<number>-?\d+(?:\.\d+)?))[^\S\n]*;?[^\S\n]*$',
+    re.MULTILINE,
+)
+
 #: Bumped when the derived schema changes shape for an UNCHANGED source, so a cache
 #: entry written by an older ScadBuddy is re-derived rather than served. 2: `file`.
-SCHEMA_FORMAT = 2
+#: 3: `retired` (#432).
+SCHEMA_FORMAT = 3
 
 
 @dataclass(frozen=True)
@@ -79,6 +91,9 @@ class Parameter(BaseModel):
     #: own directory whose extension it accepts. Listed when the schema is served,
     #: never cached, since a sample can change without the source changing.
     samples: list[str] = Field(default_factory=list)
+    #: A `select` parameter's retired values: accepted in a render or a preset, never
+    #: offered (`// retired name = value`, #432).
+    retired: list[ParamValue] = Field(default_factory=list)
 
 
 class CustomizerSchema(BaseModel):
@@ -115,6 +130,19 @@ def find_annotations(source: str) -> dict[str, Annotation]:
     }
 
 
+def find_retired(source: str) -> dict[str, list[ParamValue]]:
+    found: dict[str, list[ParamValue]] = {}
+    for m in _RETIRED_RE.finditer(source):
+        value: ParamValue
+        if m["string"] is not None:
+            value = m["string"]
+        else:
+            number = float(m["number"])
+            value = int(number) if number.is_integer() and "." not in m["number"] else number
+        found.setdefault(m["name"], []).append(value)
+    return found
+
+
 def _is_whole(value: Any) -> TypeGuard[int | float]:
     if not isinstance(value, int | float) or isinstance(value, bool):
         return False
@@ -145,7 +173,11 @@ def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> Paramet
     return "number"
 
 
-def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, Annotation]) -> Parameter:
+def _normalise_parameter(
+    raw: dict[str, Any],
+    annotations: dict[str, Annotation],
+    retired: dict[str, list[ParamValue]] | None = None,
+) -> Parameter:
     name = str(raw["name"])
     annotation = annotations.get(name)
     resolved = _resolve_type(raw, annotation)
@@ -172,15 +204,17 @@ def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, Annotation]
         max_length=raw.get("maxLength"),
         options=[Option(name=str(o["name"]), value=o["value"]) for o in raw.get("options", [])],
         accept=list(annotation.accept) if resolved == "file" and annotation else [],
+        retired=list((retired or {}).get(name, [])) if resolved == "select" else [],
     )
 
 
 def build_schema(param_json: dict[str, Any], source: str) -> CustomizerSchema:
     annotations = find_annotations(source)
+    retired = find_retired(source)
     parameters: list[Parameter] = []
     groups: list[str] = []
     for raw in param_json.get("parameters", []):
-        parameter = _normalise_parameter(raw, annotations)
+        parameter = _normalise_parameter(raw, annotations, retired)
         if parameter.group == HIDDEN_GROUP:
             continue
         parameters.append(parameter)

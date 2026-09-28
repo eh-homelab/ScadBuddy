@@ -285,3 +285,40 @@ def test_a_cache_entry_from_before_file_parameters_is_rederived(tmp_path: Path) 
     del body["format"]
     cache.write_text(json.dumps(body), encoding="utf-8")
     assert load_cached_schema(cache, source_sha256(FILE_SOURCE)) is None
+
+
+def test_a_retired_value_is_kept_on_its_select_only() -> None:
+    """`// retired name = value` (#432): accepted by a render, never offered."""
+    source = (
+        'kind = "auto"; // [auto, png_threshold]\n'
+        "count = 2; // [1, 2]\n"
+        'label = "x";\n'
+        '// retired kind = "image_threshold"\n'
+        "// retired count = 3\n"
+        '// retired label = "y"\n'
+    )
+    param_json = {
+        "parameters": [
+            {
+                "name": "kind",
+                "type": "string",
+                "initial": "auto",
+                "options": [
+                    {"name": "auto", "value": "auto"},
+                    {"name": "png_threshold", "value": "png_threshold"},
+                ],
+            },
+            {
+                "name": "count",
+                "type": "number",
+                "initial": 2,
+                "options": [{"name": "1", "value": 1}, {"name": "2", "value": 2}],
+            },
+            {"name": "label", "type": "string", "initial": "x"},
+        ]
+    }
+    by_name = {p.name: p for p in build_schema(param_json, source).parameters}
+    assert by_name["kind"].retired == ["image_threshold"]
+    assert by_name["count"].retired == [3]
+    assert by_name["label"].retired == []
+    assert [o.value for o in by_name["kind"].options] == ["auto", "png_threshold"]

@@ -7,6 +7,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR, get_queue
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
@@ -406,7 +407,11 @@ def test_the_sweep_keeps_what_outputs_and_jobs_use(
     for asset_id in (in_output, in_job, unused):
         _age(paths, asset_id, 30 * 86400)
 
-    assert sweep_assets(getattr(app.state, STATE_ATTR)) == [unused]
+    # The jobs are in the stubbed queue the `app` fixture swaps in, not in the app's
+    # own (Postgres) one, so the sweep reads that queue's store.
+    assert client.portal is not None
+    stubbed = client.portal.call(app.dependency_overrides[get_queue])
+    assert sweep_assets(replace(getattr(app.state, STATE_ATTR), queue=stubbed)) == [unused]
 
     for asset_id in (in_output, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200

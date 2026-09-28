@@ -21,7 +21,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 SLUG = "widget"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -68,7 +68,7 @@ def _generate(client: TestClient, paths: DataPaths, slug: str, cover: bytes | No
     ).json()["job_id"]
     wait_for_job(client, job_id)
     if cover is not None:
-        with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+        with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
             archive.writestr(PLATE_THUMBNAIL, cover)
     response = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text

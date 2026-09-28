@@ -3,7 +3,7 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
-import { FailClosedTokenStore } from './auth/tokens.js'
+import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
@@ -12,6 +12,8 @@ import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
+import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { loadKek } from './secrets.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
@@ -70,6 +72,13 @@ const database = config.databaseUrl
               (failed ? `; ${failed} could not be opened with the previous key and were left as they are` : ''),
           )
         }
+        const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (plugins.rewrapped || plugins.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
+              (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -78,6 +87,10 @@ const database = config.databaseUrl
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
+const plugins = database ? new PluginStore(database.sql) : undefined
+// Plugin traffic (connection tests, and each session turn's enabled plugins)
+// goes through this loopback forwarder (plugins/forwarder.ts).
+const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
@@ -94,6 +107,13 @@ const sessions =
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Enabled plugins (#297), per turn, through the loopback forwarder.
+        ...(plugins
+          ? {
+              remotePlugins: async () =>
+                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
+            }
+          : {}),
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)
@@ -112,6 +132,8 @@ const app = createApp({
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  plugins,
+  pluginForwarder,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -134,11 +156,11 @@ const app = createApp({
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
     },
-    // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
-    // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
-    // Until then `bearer` (the default) verifies no token, so /mcp answers
-    // 401 to every request in production: fail closed, not open.
-    tokens: new FailClosedTokenStore(),
+    // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
+    // Without a database /mcp answers 503 before auth (app.ts), and the
+    // fail-closed store only makes sure nothing could verify anyway.
+    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
+    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
@@ -162,8 +184,10 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
       closeSessions: () => app.close(),
-      closeServer: () =>
-        new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+      closeServer: async () => {
+        await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+        await pluginForwarder.close()
+      },
       closeDatabase: database ? () => database.close() : undefined,
       timeoutMs: 10_000,
     }).then((result) => {
