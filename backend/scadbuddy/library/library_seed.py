@@ -106,11 +106,14 @@ def verify_seed(
     seed_dir: Path,
     refs: Mapping[str, str],
     catalogue: Sequence[CatalogueLibrary] = CURATED,
+    notices: str | None = None,
 ) -> None:
     """Fail unless ``seed_dir`` holds one checkout of each library in ``refs`` and
     nothing else, and each ref is the catalogue's. Run by the image build, so a
     catalogue bump that leaves the baked-in seed behind breaks the build instead of
-    shipping a seed nothing pins."""
+    shipping a seed nothing pins. Given ``notices`` (THIRD_PARTY_NOTICES.md), each
+    library's section there must name the seeded ref and commit, so a bump cannot
+    ship a stale notice either."""
     known = {entry.name: entry for entry in catalogue}
     problems: list[str] = []
     for name, ref in refs.items():
@@ -129,23 +132,61 @@ def verify_seed(
         for name in dict.fromkeys(names)
         if name not in refs
     )
+    if notices is not None:
+        problems.extend(
+            _notice_problems(notices, name, refs[name], commit)
+            for name, commit in checkouts
+            if name in refs
+        )
+    problems = [problem for problem in problems if problem]
     if problems:
         raise SeedError("; ".join(problems))
 
 
+def _notice_problems(notices: str, name: str, ref: str, commit: str) -> str:
+    """What the ``## <name>`` section of the notices fails to name, or ``""``."""
+    section = re.search(rf"^## {re.escape(name)}[ \t]*\n(.*?)(?=^## |\Z)", notices, re.M | re.S)
+    if section is None:
+        return f"THIRD_PARTY_NOTICES.md has no '## {name}' section"
+    missing = [
+        f"{label} {value!r}"
+        for label, value in (("ref", ref), ("commit", commit))
+        if not re.search(rf"(?<![\w.-]){re.escape(value)}(?![\w.-])", section.group(1))
+    ]
+    if missing:
+        return f"THIRD_PARTY_NOTICES.md's {name!r} section does not name {' or '.join(missing)}"
+    return ""
+
+
+USAGE = "usage: library_seed verify <seed dir> <notices file> NAME=REF..."
+
+
 def main(argv: Sequence[str]) -> int:
-    """``python -m scadbuddy.library.library_seed verify <dir> NAME=REF...``"""
-    if len(argv) < 2 or argv[0] != "verify" or not all("=" in arg for arg in argv[2:]):
-        print("usage: library_seed verify <seed dir> NAME=REF...", file=sys.stderr)
+    """``python -m scadbuddy.library.library_seed verify <dir> <notices> NAME=REF...``"""
+    if len(argv) < 3 or argv[0] != "verify":
+        print(USAGE, file=sys.stderr)
         return 2
-    refs = dict(arg.split("=", 1) for arg in argv[2:])
+    refs: dict[str, str] = {}
+    for arg in argv[3:]:
+        name, _, ref = arg.partition("=")
+        if not name or not ref:
+            print(f"ERROR: {arg!r} is not NAME=REF with both parts set", file=sys.stderr)
+            print(USAGE, file=sys.stderr)
+            return 2
+        refs[name] = ref
     try:
-        verify_seed(Path(argv[1]), refs)
+        notices = Path(argv[2]).read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"ERROR: cannot read the notices file: {error}", file=sys.stderr)
+        return 2
+    try:
+        verify_seed(Path(argv[1]), refs, notices=notices)
     except SeedError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         print(
             "       Bump the library's *_REF and *_COMMIT build args to the catalogue's"
-            " ref (scadbuddy/library/libraries.py CURATED).",
+            " ref (scadbuddy/library/libraries.py CURATED), and its entry in"
+            " THIRD_PARTY_NOTICES.md with them.",
             file=sys.stderr,
         )
         return 1

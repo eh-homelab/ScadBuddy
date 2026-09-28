@@ -400,11 +400,13 @@ ENV SCADBUDDY_DATA_DIR=/data \
 # The baked-in libraries (see the `libraries` stage), after everything above so a
 # bump rebuilds only these two layers. Root-owned and read-only: the boot copies
 # them onto the volume and never writes here. The check fails the build when a
-# seeded ref is not the catalogue's, or the seed holds anything not listed.
+# seeded ref is not the catalogue's, the seed holds anything not listed, or
+# THIRD_PARTY_NOTICES.md does not name each seeded library's ref and commit.
 ARG BOSL2_REF
 COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
 COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
-RUN python -m scadbuddy.library.library_seed verify /app/libraries "BOSL2=${BOSL2_REF}"
+RUN python -m scadbuddy.library.library_seed verify /app/libraries \
+        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is

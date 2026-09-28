@@ -235,14 +235,62 @@ def test_verify_refuses_a_library_with_no_checkout_or_two(tmp_path: Path) -> Non
         verify_seed(tmp_path / "two", {"BOSL2": "v1"}, catalogue)
 
 
+def _notices(ref: str = BOSL2.ref, commit: str = COMMIT) -> str:
+    return (
+        "# Third-party notices\n\n## BOSL2\n\n"
+        f"- Pinned ref: `{ref}` (commit `{commit}`)\n\n## Other\n\nv9 {OTHER}\n"
+    )
+
+
+def test_verify_accepts_notices_that_name_the_seeded_ref_and_commit(seed: Path) -> None:
+    verify_seed(seed, {"BOSL2": BOSL2.ref}, notices=_notices())
+
+
+@pytest.mark.parametrize(
+    ("notices", "message"),
+    [
+        (_notices(ref="v0.0.1"), f"does not name ref '{BOSL2.ref}'"),
+        (_notices(commit=OTHER), f"does not name commit '{COMMIT}'"),
+        # A longer ref that starts with the seeded one does not count.
+        (_notices(ref=BOSL2.ref + "1"), "does not name ref"),
+        # The right values in another library's section do not count either.
+        (f"## Other\n\n{BOSL2.ref} {COMMIT}\n", "no '## BOSL2' section"),
+    ],
+)
+def test_verify_refuses_stale_notices(seed: Path, notices: str, message: str) -> None:
+    with pytest.raises(SeedError, match=message):
+        verify_seed(seed, {"BOSL2": BOSL2.ref}, notices=notices)
+
+
+def test_the_shipped_notices_match_the_catalogue(seed: Path) -> None:
+    notices = Path(__file__).parents[2] / "THIRD_PARTY_NOTICES.md"
+    verify_seed(seed, {"BOSL2": BOSL2.ref}, notices=notices.read_text(encoding="utf-8"))
+
+
 def test_the_build_check_exits_non_zero_on_drift(
-    seed: Path, capsys: pytest.CaptureFixture[str]
+    seed: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["verify", str(seed), f"BOSL2={BOSL2.ref}"]) == 0
-    assert main(["verify", str(seed), "BOSL2=v0.0.1"]) == 1
+    notices = tmp_path / "NOTICES.md"
+    notices.write_text(_notices(), encoding="utf-8")
+    assert main(["verify", str(seed), str(notices), f"BOSL2={BOSL2.ref}"]) == 0
+    assert main(["verify", str(seed), str(notices), "BOSL2=v0.0.1"]) == 1
     assert "the catalogue pins" in capsys.readouterr().err
+    notices.write_text(_notices(ref="v0.0.1"), encoding="utf-8")
+    assert main(["verify", str(seed), str(notices), f"BOSL2={BOSL2.ref}"]) == 1
+    assert "does not name ref" in capsys.readouterr().err
     assert main(["verify"]) == 2
-    assert main(["verify", str(seed), "BOSL2"]) == 2
+    assert main(["verify", str(seed)]) == 2
+    assert main(["verify", str(seed), str(tmp_path / "missing.md"), f"BOSL2={BOSL2.ref}"]) == 2
+
+
+@pytest.mark.parametrize("pair", ["BOSL2", "=v1", "BOSL2=", "="])
+def test_the_build_check_refuses_a_malformed_pair(
+    seed: Path, tmp_path: Path, pair: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    notices = tmp_path / "NOTICES.md"
+    notices.write_text(_notices(), encoding="utf-8")
+    assert main(["verify", str(seed), str(notices), f"BOSL2={BOSL2.ref}", pair]) == 2
+    assert f"{pair!r} is not NAME=REF" in capsys.readouterr().err
 
 
 # ── boot ──────────────────────────────────────────────────────────────────────
