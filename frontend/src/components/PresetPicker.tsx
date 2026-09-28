@@ -1,9 +1,16 @@
 import { useState, type FormEvent } from 'react'
+import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
 import { sameValues, type ParamValues } from '../lib/params'
-import { applyPreset, presetParams } from '../lib/presets'
+import {
+  MAX_PRESET_DESCRIPTION,
+  applyPreset,
+  parsePresetTags,
+  presetParams,
+  presetTagsProblem,
+} from '../lib/presets'
 import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -27,6 +34,9 @@ function message(caught: unknown): string {
   return caught instanceof ApiError ? caught.detail : String(caught)
 }
 
+const FIELD =
+  'w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong'
+
 /**
  * Named parameter sets for this template: the ones it ships with and the ones saved on
  * it, built-ins included. Picking one puts its values on screen over the defaults, and
@@ -43,9 +53,15 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
   const [skipped, setSkipped] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  /** Which dialog asks for a name: a save of the values on screen, or a copy of a preset. */
-  const [naming, setNaming] = useState<'save' | 'duplicate' | null>(null)
+  /**
+   * Which dialog is open: a save of the values on screen, a copy of a preset, or the
+   * details (name, description, tags) of a saved one. Only a copy takes a name alone:
+   * it keeps the original's details.
+   */
+  const [naming, setNaming] = useState<'save' | 'duplicate' | 'details' | null>(null)
   const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [tagsText, setTagsText] = useState('')
   const [nameError, setNameError] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
@@ -69,6 +85,8 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
 
   function openSaveAs() {
     setName(selected && modified ? `${selected.name} (variant)` : '')
+    setDescription('')
+    setTagsText('')
     setNameError(null)
     setNaming('save')
   }
@@ -80,6 +98,26 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setNaming('duplicate')
   }
 
+  function openDetails() {
+    if (!selected) return
+    setName(selected.name)
+    setDescription(selected.description)
+    setTagsText(selected.tags.join(', '))
+    setNameError(null)
+    setNaming('details')
+  }
+
+  /** The details as typed, or null after saying why they cannot be sent. */
+  function details(): { description: string; tags: string[] } | null {
+    const tags = parsePresetTags(tagsText)
+    const problem = presetTagsProblem(tags)
+    if (problem) {
+      setNameError(problem)
+      return null
+    }
+    return { description: description.trim(), tags }
+  }
+
   function closeNaming() {
     if (!busy) setNaming(null)
   }
@@ -88,12 +126,15 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     event?.preventDefault()
     const chosen = name.trim()
     if (!chosen || busy) return
-    setBusy(true)
     setNameError(null)
+    const described = details()
+    if (!described) return
+    setBusy(true)
     try {
       const created = await api.createPreset(slug, {
         name: chosen,
         params: presetParams(schema, values),
+        ...described,
       })
       presetsState.setData([...presets, created])
       setSelection({ preset: created, applied: values })
@@ -128,6 +169,37 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     } finally {
       setBusy(false)
     }
+  }
+
+  /**
+   * Renames the selected saved preset and sets its description and tags. Its values
+   * stay as they were, and so does the screen: an edit made since picking it still
+   * shows as a change, for Update to save.
+   */
+  async function saveDetails(event?: FormEvent) {
+    event?.preventDefault()
+    const chosen = name.trim()
+    if (!selected || selected.origin !== 'mine' || !chosen || busy) return
+    setNameError(null)
+    const described = details()
+    if (!described) return
+    setBusy(true)
+    try {
+      const updated = await api.updatePreset(slug, selected.id, { name: chosen, ...described })
+      presetsState.setData(presets.map((preset) => (preset.id === updated.id ? updated : preset)))
+      setSelection((current) => (current ? { ...current, preset: updated } : current))
+      setNaming(null)
+    } catch (caught) {
+      setNameError(message(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function submitNaming(event?: FormEvent) {
+    if (naming === 'duplicate') void duplicate(event)
+    else if (naming === 'details') void saveDetails(event)
+    else void saveAs(event)
   }
 
   async function update() {
@@ -230,6 +302,16 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
         {editable && (
           <Button
             size="sm"
+            onClick={openDetails}
+            disabled={busy}
+            aria-label={`Edit details of preset ${selected.name}`}
+          >
+            Edit details
+          </Button>
+        )}
+        {editable && (
+          <Button
+            size="sm"
             variant="ghost"
             onClick={() => setConfirmingDelete(true)}
             disabled={busy}
@@ -239,6 +321,24 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
           </Button>
         )}
       </div>
+
+      {selected && (selected.description || selected.tags.length > 0) && (
+        <div data-testid="preset-details" className="flex flex-col gap-1 text-[12px] text-muted">
+          {selected.tags.length > 0 && (
+            <ul aria-label="Preset tags" className="flex flex-wrap gap-1">
+              {selected.tags.map((tag) => (
+                <li
+                  key={tag}
+                  className="rounded-full border border-line bg-surface-2 px-2 py-px text-[11px]"
+                >
+                  {tag}
+                </li>
+              ))}
+            </ul>
+          )}
+          {selected.description && <Markdown text={selected.description} />}
+        </div>
+      )}
 
       {skipped.length > 0 && (
         <p role="status" className="text-[12px] text-warn">
@@ -254,11 +354,19 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
 
       <Dialog
         open={naming !== null}
-        title={naming === 'duplicate' ? `Duplicate ${selected?.name ?? 'preset'}` : 'Save as preset'}
+        title={
+          naming === 'duplicate'
+            ? `Duplicate ${selected?.name ?? 'preset'}`
+            : naming === 'details'
+              ? `Edit details of ${selected?.name ?? 'preset'}`
+              : 'Save as preset'
+        }
         description={
           naming === 'duplicate'
-            ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values. The original stays as it is.`
-            : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
+            ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values, description and tags. The original stays as it is.`
+            : naming === 'details'
+              ? 'Its values stay as they are: Update saves the ones on screen.'
+              : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
         }
         onClose={closeNaming}
         footer={
@@ -268,7 +376,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
             </Button>
             <Button
               variant="primary"
-              onClick={() => void (naming === 'duplicate' ? duplicate() : saveAs())}
+              onClick={() => submitNaming()}
               disabled={busy || !name.trim()}
             >
               {busy && <Spinner />}
@@ -277,9 +385,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
           </>
         }
       >
-        <form
-          onSubmit={(event) => void (naming === 'duplicate' ? duplicate(event) : saveAs(event))}
-        >
+        <form onSubmit={submitNaming} className="flex flex-col gap-3">
           <label className="flex flex-col gap-1 text-[13px] text-muted">
             Preset name
             <input
@@ -287,9 +393,32 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
               onChange={(event) => setName(event.target.value)}
               maxLength={80}
               autoFocus
-              className="h-8 w-full rounded-[6px] border border-line bg-surface-2 px-2 text-[13px] outline-none focus:border-line-strong"
+              className={`h-8 ${FIELD}`}
             />
           </label>
+          {naming !== 'duplicate' && (
+            <>
+              <label className="flex flex-col gap-1 text-[13px] text-muted">
+                Description (optional, Markdown)
+                <textarea
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  maxLength={MAX_PRESET_DESCRIPTION}
+                  rows={3}
+                  className={`py-1.5 ${FIELD}`}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[13px] text-muted">
+                Tags (optional, comma-separated)
+                <input
+                  value={tagsText}
+                  onChange={(event) => setTagsText(event.target.value)}
+                  placeholder="gift, small"
+                  className={`h-8 ${FIELD}`}
+                />
+              </label>
+            </>
+          )}
         </form>
         {nameError && (
           <p role="alert" className="mt-3 text-[13px] text-warn">

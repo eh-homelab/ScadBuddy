@@ -32,3 +32,35 @@ export function presetParams(
 ): Record<string, ParamValue> {
   return Object.fromEntries(diffFromDefaults(schema, values).map((diff) => [diff.name, diff.value]))
 }
+
+/** The server's bounds on a preset's details (#327, `library/presets.py`). */
+export const MAX_PRESET_DESCRIPTION = 2000
+export const MAX_PRESET_TAGS = 20
+export const MAX_PRESET_TAG = 40
+
+/**
+ * Tags as typed, comma-separated, cleaned as the server cleans them: trimmed, inner
+ * whitespace collapsed, blanks dropped, each kept once ignoring case.
+ */
+export function parsePresetTags(text: string): string[] {
+  const seen = new Set<string>()
+  const tags: string[] = []
+  for (const raw of text.split(',')) {
+    const tag = raw.trim().replace(/\s+/g, ' ')
+    if (tag && !seen.has(tag.toLowerCase())) {
+      seen.add(tag.toLowerCase())
+      tags.push(tag)
+    }
+  }
+  return tags
+}
+
+/**
+ * Why these tags would be refused, in words, or null. Checked before a save: the
+ * server's own refusal of a body is a generic "did not match the expected shape".
+ */
+export function presetTagsProblem(tags: readonly string[]): string | null {
+  if (tags.length > MAX_PRESET_TAGS) return `At most ${MAX_PRESET_TAGS} tags.`
+  const long = tags.find((tag) => tag.length > MAX_PRESET_TAG)
+  return long ? `“${long}” is longer than ${MAX_PRESET_TAG} characters.` : null
+}

@@ -94,6 +94,8 @@ describe('PresetPicker', () => {
     expect(create).toHaveBeenCalledWith('name-keychain', {
       name: 'Nova tag',
       params: { name: 'Nova' },
+      description: '',
+      tags: [],
     })
     const select = screen.getByRole('combobox', { name: 'Preset' })
     expect(select).toHaveDisplayValue('Nova tag')
@@ -203,6 +205,111 @@ describe('PresetPicker', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(name).toHaveValue('Dad')
     expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum copy')
+  })
+
+  it('shows the picked preset\'s tags and description under the picker', async () => {
+    const { user } = render()
+    const select = await picker()
+    expect(screen.queryByTestId('preset-details')).not.toBeInTheDocument()
+    await user.selectOptions(select, 'Tiny')
+    const details = screen.getByTestId('preset-details')
+    const tags = within(details).getByRole('list', { name: 'Preset tags' })
+    expect(within(tags).getAllByRole('listitem').map((t) => t.textContent)).toEqual([
+      'small',
+      'zip pull',
+    ])
+    // Markdown, rendered as elements: the bold is a <strong>, not asterisks.
+    expect(within(details).getByText('zip pull', { selector: 'strong' })).toBeInTheDocument()
+    // A preset with neither shows nothing.
+    await user.selectOptions(select, 'Old engraving')
+    expect(screen.queryByTestId('preset-details')).not.toBeInTheDocument()
+  })
+
+  it('saves a description and tags with a new preset', async () => {
+    const create = vi.spyOn(api, 'createPreset')
+    const { user } = render()
+    await picker()
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Bag tag')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'Description (optional, Markdown)' }),
+      '  For **bags**. ',
+    )
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'Tags (optional, comma-separated)' }),
+      'bags, Bags,  big  tag ,',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(create).toHaveBeenCalledWith('name-keychain', {
+      name: 'Bag tag',
+      params: {},
+      description: 'For **bags**.',
+      tags: ['bags', 'big tag'],
+    })
+    const details = screen.getByTestId('preset-details')
+    expect(within(details).getAllByRole('listitem').map((t) => t.textContent)).toEqual([
+      'bags',
+      'big tag',
+    ])
+  })
+
+  it('edits a saved preset\'s name and details, leaving its values alone', async () => {
+    const update = vi.spyOn(api, 'updatePreset')
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Mum')
+    // An edit made first stays a change to the preset, for Update to save.
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'my')
+
+    await user.click(screen.getByRole('button', { name: 'Edit details of preset Mum' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details of Mum' })
+    const tags = within(dialog).getByRole('textbox', { name: 'Tags (optional, comma-separated)' })
+    expect(tags).toHaveValue('gift')
+    const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    await user.clear(name)
+    await user.type(name, 'Mum (black)')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'Description (optional, Markdown)' }),
+      'Black with white text.',
+    )
+    await user.clear(tags)
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
+      name: 'Mum (black)',
+      description: 'Black with white text.',
+      tags: [],
+    })
+    expect(select).toHaveDisplayValue('Mum (black)')
+    expect(screen.getByTestId('preset-details')).toHaveTextContent('Black with white text.')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mummy')
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum (black)')
+  })
+
+  it('says why tags are refused before sending them', async () => {
+    const create = vi.spyOn(api, 'createPreset')
+    const { user } = render()
+    await picker()
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Many')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'Tags (optional, comma-separated)' }),
+      Array.from({ length: 21 }, (_, n) => `t${n}`).join(','),
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('At most 20 tags.')
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('offers Edit details only on a saved preset', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Tiny')
+    expect(screen.queryByRole('button', { name: /^Edit details of preset/ })).not.toBeInTheDocument()
   })
 
   it('offers no Duplicate until a preset is picked', async () => {

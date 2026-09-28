@@ -620,6 +620,63 @@ describe('mock API: delete a template duplicates track (#223)', () => {
   })
 })
 
+describe('mock API: a preset\'s description and tags (#327)', () => {
+  beforeEach(() => resetMockState())
+
+  it('cleans tags and trims the description as the server does', async () => {
+    const created = await api.createPreset('name-keychain', {
+      name: 'Bag tag',
+      params: {},
+      description: '  For bags. ',
+      tags: [' big ', 'Big', '', 'kids  size'],
+    })
+    expect(created.description).toBe('For bags.')
+    expect(created.tags).toEqual(['big', 'kids size'])
+  })
+
+  it('refuses details past their bounds as a body shape (422), before the route', async () => {
+    const refused = (body: object) =>
+      expect(
+        api.createPreset('no-such-model', { name: 'X', params: {}, ...body }),
+      ).rejects.toMatchObject({
+        status: 422,
+        detail: 'the request did not match the expected shape',
+      })
+    await refused({ description: 'd'.repeat(MAX_PRESET_DESCRIPTION + 1) })
+    await refused({ tags: Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`) })
+    await refused({ tags: ['t'.repeat(MAX_PRESET_TAG + 1)] })
+    // Repeats are dropped before the bound: this many copies of one tag is one tag.
+    const created = await api.createPreset('name-keychain', {
+      name: 'Many',
+      params: {},
+      tags: Array.from({ length: MAX_PRESET_TAGS * 2 }, () => 'same'),
+    })
+    expect(created.tags).toEqual(['same'])
+  })
+
+  it('edits and clears a saved preset\'s details, keeping what is left out', async () => {
+    const saved = await api.createPreset('name-keychain', { name: 'P', params: {}, tags: ['a'] })
+    const edited = await api.updatePreset('name-keychain', saved.id, { description: 'D' })
+    expect([edited.description, edited.tags]).toEqual(['D', ['a']])
+    const cleared = await api.updatePreset('name-keychain', saved.id, { description: '', tags: [] })
+    expect([cleared.description, cleared.tags]).toEqual(['', []])
+  })
+
+  it('copies the description and tags to a duplicate', async () => {
+    const copy = await api.duplicatePreset('name-keychain', 'template-tiny', { name: 'Tiny 2' })
+    expect(copy.description).toContain('zip pull')
+    expect(copy.tags).toEqual(['small', 'zip pull'])
+  })
+
+  it('keeps a template\'s own details from its metadata', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [{ id: 'wide', name: 'Wide', description: ' Wide. ', tags: ['w', 'W', ' x '] }],
+    })
+    const [wide] = await api.listPresets('name-keychain')
+    expect([wide?.description, wide?.tags]).toEqual(['Wide.', ['w', 'x']])
+  })
+})
+
 describe('mock API: presets keep the server limits', () => {
   beforeEach(() => resetMockState())
 
@@ -643,6 +700,8 @@ describe('mock API: presets keep the server limits', () => {
       name: `Preset ${index}`,
       origin: 'mine' as const,
       params: {},
+      description: '',
+      tags: [],
     }))
     setMockPresets('name-keychain', existing)
     const refused = api.createPreset('name-keychain', { name: 'One too many', params: {} })
