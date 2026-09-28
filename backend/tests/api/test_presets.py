@@ -38,7 +38,15 @@ pytestmark = pytest.mark.requires_postgres
 
 BUILTIN = "builtin:keychain"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
-SHIPPED = [{"id": "wide", "name": "Wide", "params": {"width": 40}}]
+SHIPPED = [
+    {
+        "id": "wide",
+        "name": "Wide",
+        "params": {"width": 40},
+        "description": "For a wide label.",
+        "tags": ["wide", "bags"],
+    }
+]
 
 
 @pytest.fixture
@@ -555,6 +563,91 @@ def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, 
     assert _patch_presets(client, model, long_tag).status_code == 422
     fine = [{"name": "X", "description": "d" * MAX_PRESET_DESCRIPTION, "tags": ["a", "b"]}]
     assert _patch_presets(client, model, fine).status_code == 200
+
+
+def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model: str) -> None:
+    response = client.post(
+        _url(model),
+        json={
+            "name": "Big",
+            "params": {"width": 25},
+            "description": "  For **bags**.  ",
+            "tags": [" big ", "Big", "", "kids  size", "big"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    saved = response.json()
+    # Trimmed, blanks dropped, each tag kept once ignoring case, in the order given.
+    assert saved["description"] == "For **bags**."
+    assert saved["tags"] == ["big", "kids size"]
+    listed = client.get(_url(model)).json()
+    assert [(p["description"], p["tags"]) for p in listed] == [
+        ("For **bags**.", ["big", "kids size"])
+    ]
+    # Without them, a preset has none.
+    plain = _save(client, model, "Plain", {})
+    assert (plain["description"], plain["tags"]) == ("", [])
+
+
+def test_a_saved_preset_s_details_are_edited_and_cleared(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    url = _url(model, saved["id"])
+    edited = client.patch(url, json={"description": "Wide", "tags": ["a", "b"]})
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["description"], edited.json()["tags"]) == ("Wide", ["a", "b"])
+    # A field left out stays as it was.
+    renamed = client.patch(url, json={"name": "Bigger"}).json()
+    assert (renamed["name"], renamed["description"], renamed["tags"]) == (
+        "Bigger",
+        "Wide",
+        ["a", "b"],
+    )
+    assert renamed["params"] == {"width": 25}
+    # An empty one clears it.
+    cleared = client.patch(url, json={"description": "", "tags": []}).json()
+    assert (cleared["description"], cleared["tags"]) == ("", [])
+
+
+def test_a_saved_preset_s_details_are_bounded(client: TestClient, model: str) -> None:
+    def refused(body: dict[str, Any]) -> bool:
+        status: int = client.post(_url(model), json={"name": "X", **body}).status_code
+        return status == 422
+
+    assert refused({"description": "d" * (MAX_PRESET_DESCRIPTION + 1)})
+    assert refused({"tags": [f"t{n}" for n in range(MAX_PRESET_TAGS + 1)]})
+    assert refused({"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    # Repeats count once: they are dropped before the bound is checked.
+    repeated = [f"t{n % MAX_PRESET_TAGS}" for n in range(MAX_PRESET_TAGS * 2)]
+    assert not refused({"tags": repeated, "description": "d" * MAX_PRESET_DESCRIPTION})
+    saved = client.get(_url(model)).json()[0]
+    too_long = client.patch(_url(model, saved["id"]), json={"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    assert too_long.status_code == 422
+
+
+@pytest.mark.requires_git
+def test_a_shipped_preset_s_details_come_from_model_json_and_survive_a_duplicate(
+    client: TestClient,
+) -> None:
+    shipped = client.get(_url(BUILTIN)).json()[0]
+    assert (shipped["description"], shipped["tags"]) == ("For a wide label.", ["wide", "bags"])
+    copy = _duplicate(client, BUILTIN, shipped["id"], "Wide copy")
+    assert copy.status_code == 201, copy.text
+    assert (copy.json()["description"], copy.json()["tags"]) == (
+        "For a wide label.",
+        ["wide", "bags"],
+    )
+
+
+@pytest.mark.requires_git
+def test_a_template_duplicate_copies_its_saved_presets_details(client: TestClient) -> None:
+    client.post(
+        _url(BUILTIN),
+        json={"name": "Mine", "params": {}, "description": "Mine", "tags": ["x"]},
+    )
+    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    assert created.status_code == 201, created.text
+    copied = client.get(_url(created.json()["slug"])).json()[1]
+    assert (copied["name"], copied["description"], copied["tags"]) == ("Mine", "Mine", ["x"])
 
 
 @pytest.mark.requires_git

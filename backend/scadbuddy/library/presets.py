@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     StringConstraints,
     TypeAdapter,
@@ -96,12 +97,47 @@ def _clean_name(name: str) -> str:
     return cleaned
 
 
+def _clean_tags(value: object) -> object:
+    """Tags trimmed (inner whitespace collapsed), blanks dropped, and each kept once,
+    ignoring case, in the order given: a tag is a label to filter by, not text."""
+    if not isinstance(value, list):
+        return value
+    seen: set[str] = set()
+    cleaned: list[object] = []
+    for tag in value:
+        if not isinstance(tag, str):
+            cleaned.append(tag)  # refused by the item type, with its own message
+            continue
+        tag = " ".join(tag.split())
+        if tag and tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            cleaned.append(tag)
+    return cleaned
+
+
+#: A preset's tags (#327): cleaned before the bounds are checked, so padding and
+#: repeats never count against them.
+PresetTags = Annotated[
+    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]],
+    BeforeValidator(_clean_tags),
+    Field(max_length=MAX_PRESET_TAGS),
+]
+#: A preset's description (#327): short Markdown, trimmed.
+PresetDescription = Annotated[
+    str, StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION)
+]
+
+
 class _PresetBody(BaseModel):
-    """What a preset is, wherever it is written: in a template's ``presets.json`` or
+    """What a preset is, wherever it is written: in a template's ``model.json`` or
     in the body of a save."""
 
     name: str = Field(min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    # Factories, not `= ""`: a literal default makes the generated TypeScript type
+    # require the field, which a client has no reason to send.
+    description: PresetDescription = Field(default_factory=str)
+    tags: PresetTags = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -114,10 +150,13 @@ class ParamPresetCreate(_PresetBody):
 
 
 class ParamPresetUpdate(BaseModel):
-    """A rename, a new set of values, or both. ``params`` replaces the old ones whole."""
+    """What changes: a rename, new values, new details, or any of them. Each field
+    given replaces the old one whole -- an empty description or tag list clears it."""
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] | None = None
+    description: PresetDescription | None = None
+    tags: PresetTags | None = None
 
     @field_validator("name")
     @classmethod
@@ -141,16 +180,9 @@ class TemplatePreset(_PresetBody):
 
     ``id`` is what keeps it the same preset when the list is reordered or it is
     renamed; without one, the key is derived from the name (:func:`template_preset_keys`).
-    ``description`` and ``tags`` are carried for #327, which puts them in the API.
     """
 
     id: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=MAX_SLUG_LENGTH)
-    # A factory, not `= ""`: a literal default makes the generated TypeScript type
-    # require the field, which a client editing presets has no reason to send.
-    description: str = Field(default_factory=str, max_length=MAX_PRESET_DESCRIPTION)
-    tags: list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]] = Field(
-        default_factory=list, max_length=MAX_PRESET_TAGS
-    )
 
 
 def _checked(presets: list[TemplatePreset]) -> list[TemplatePreset]:
@@ -227,6 +259,8 @@ class ParamPreset(BaseModel):
         description="`template`: defined by the template in its model.json, read-only. "
         "`mine`: saved here, editable -- on built-ins too."
     )
+    description: str = Field(description="Short Markdown; empty when there is none.")
+    tags: list[str]
     updated_at: datetime | None = None
 
 
@@ -331,6 +365,8 @@ class PresetStore:
                 name=preset.name,
                 params=preset.params,
                 origin="template",
+                description=preset.description,
+                tags=preset.tags,
             )
             for preset, key in zip(defined, template_preset_keys(defined), strict=True)
         ]
@@ -356,6 +392,8 @@ class PresetStore:
             name=row["name"],
             params=row["params"],
             origin="mine",
+            description=row["description"],
+            tags=row["tags"],
             updated_at=row["updated_at"],
         )
 
@@ -421,9 +459,19 @@ class PresetStore:
             self._require_free(model_id, saved, body.name, own="")
             now = datetime.now(UTC)
             row = conn.execute(
-                "INSERT INTO saved_presets (model_id, id, name, params, created_at, updated_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-                (model_id, uuid.uuid4().hex, body.name, Jsonb(body.params), now, now),
+                "INSERT INTO saved_presets"
+                " (model_id, id, name, params, description, tags, created_at, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (
+                    model_id,
+                    uuid.uuid4().hex,
+                    body.name,
+                    Jsonb(body.params),
+                    body.description,
+                    body.tags,
+                    now,
+                    now,
+                ),
             ).fetchone()
         assert row is not None
         return self._view(row)
@@ -437,11 +485,14 @@ class PresetStore:
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
             row = conn.execute(
-                "UPDATE saved_presets SET name = %s, params = %s, updated_at = %s"
+                "UPDATE saved_presets"
+                " SET name = %s, params = %s, description = %s, tags = %s, updated_at = %s"
                 " WHERE model_id = %s AND id = %s RETURNING *",
                 (
                     patch.name if patch.name is not None else current["name"],
                     Jsonb(patch.params if patch.params is not None else current["params"]),
+                    patch.description if patch.description is not None else current["description"],
+                    patch.tags if patch.tags is not None else current["tags"],
                     datetime.now(UTC),
                     model_id,
                     preset_id,
@@ -472,13 +523,15 @@ class PresetStore:
             for row in self._saved(conn, source_id):
                 conn.execute(
                     "INSERT INTO saved_presets"
-                    " (model_id, id, name, params, created_at, updated_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s)",
+                    " (model_id, id, name, params, description, tags, created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         target_id,
                         uuid.uuid4().hex,
                         row["name"],
                         Jsonb(row["params"]),
+                        row["description"],
+                        row["tags"],
                         row["created_at"],
                         row["updated_at"],
                     ),
