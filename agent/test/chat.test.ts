@@ -225,7 +225,7 @@ describe('body limits on the UI write routes', () => {
           // The server may close after answering while we are still writing.
           if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && (err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
         })
-        for (let i = 0; i < 8; i++) req.write('x'.repeat(16 * 1024))
+        for (let i = 0; i < Math.ceil(JSON_BODY_MAX / (16 * 1024)) + 2; i++) req.write('x'.repeat(16 * 1024))
         req.end()
       })
       expect(status).toBe(413)

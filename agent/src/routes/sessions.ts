@@ -79,6 +79,9 @@ const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
+/** The most sessions one list returns (manager.ts listQuery clamps to the same). */
+export const LIST_LIMIT_MAX = 500
+
 /** How long an idle event stream waits between SSE comments, so proxies keep it open. */
 export const SSE_KEEPALIVE_MS = 20_000
 
@@ -146,7 +149,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (status !== undefined && !(SESSION_STATUSES as readonly string[]).includes(status)) {
         return c.json({ detail: `status must be one of ${SESSION_STATUSES.join(', ')}` }, 400)
       }
-      const limit = seqFrom(c.req.query('limit'))
+      const rawLimit = c.req.query('limit')
+      const limit = rawLimit === undefined ? undefined : seqFrom(rawLimit)
+      // Refused like a bad status, rather than silently replaced by the default.
+      if (rawLimit !== undefined && (limit === undefined || limit < 1 || limit > LIST_LIMIT_MAX)) {
+        return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
+      }
       const list = await sessions.list(BROWSER_USER, {
         ...(status ? { status: status as SessionRecord['status'] } : {}),
         ...(limit ? { limit } : {}),

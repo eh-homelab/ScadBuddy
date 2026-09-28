@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
+import { JSON_BODY_MAX } from '../src/routes/guard.js'
+import { MESSAGE_MAX } from '../src/sessions/clientProtocol.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -149,6 +151,48 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(junk.status).toBe(404)
     const badStatus = await app.request('/api/v1/ai/sessions?status=bogus', { headers: UI_READ })
     expect(badStatus.status).toBe(400)
+  })
+
+  it('accepts a full-length message in any script, even with every character JSON-escaped', async () => {
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
+    await turn!.done
+    // 32 000 CJK characters: 96 000 bytes as UTF-8, 192 000 as \uXXXX escapes.
+    const text = '漢'.repeat(MESSAGE_MAX)
+    const raw = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ text }),
+    })
+    expect(raw.status).toBe(202)
+    await waitIdle(session.id)
+    const escaped = `{"text":"${'\\u6f22'.repeat(MESSAGE_MAX)}"}`
+    expect(escaped.length).toBeLessThanOrEqual(JSON_BODY_MAX)
+    const res = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: { ...JSON_UI, 'content-length': String(escaped.length) },
+      body: escaped,
+    })
+    expect(res.status).toBe(202)
+    await waitIdle(session.id)
+    // One character more is the schema's 400, not the byte cap's 413.
+    const over = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: JSON_UI,
+      body: JSON.stringify({ text: '漢'.repeat(MESSAGE_MAX + 1) }),
+    })
+    expect(over.status).toBe(400)
+  })
+
+  it('refuses a list limit that is not an integer from 1 to 500, as it does a bad status', async () => {
+    for (const limit of ['0', '-1', 'abc', '1.5', '501', '']) {
+      const res = await app.request(`/api/v1/ai/sessions?limit=${limit}`, { headers: UI_READ })
+      expect(res.status, `limit=${limit}`).toBe(400)
+      expect(await res.json()).toEqual({ detail: 'limit must be an integer from 1 to 500' })
+    }
+    await m.start(browser, { origin: 'chat', title: 'a' })
+    await m.start(browser, { origin: 'chat', title: 'b' })
+    const one = (await (await app.request('/api/v1/ai/sessions?limit=1', { headers: UI_READ })).json()) as { sessions: unknown[] }
+    expect(one.sessions).toHaveLength(1)
   })
 
   it('answers 409 to a send while a turn runs, and interrupts it', async () => {
