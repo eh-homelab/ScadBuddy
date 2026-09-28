@@ -264,7 +264,9 @@ export const printTools: Tool[] = [
       "the way the print dialog opens: the chosen printer, this model's remembered nozzles, tier or process " +
       "and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
-      'spool or preset) is refused before anything is sliced. Follow it with get_print_progress.',
+      'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
+      'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
+      'Follow it with get_print_progress.',
     input: z.object({
       output_id: outputId,
       printer_id: z.number().int().optional(),
@@ -284,7 +286,7 @@ export const printTools: Tool[] = [
         .catchall(presetRef)
         .optional()
         .describe('A filament preset per slot id, in place of the spool\'s own'),
-      project_id: z.number().int().optional().describe('Omit to file under the remembered project'),
+      project_id: nullable(z.number().int()).describe('Omit for the remembered project; null for "No project"'),
       options: printOptions,
     }),
     risk: 'outward',
@@ -376,7 +378,7 @@ export const printTools: Tool[] = [
                 bed_type: bedType,
                 filament_overrides: args.filament_overrides ?? {},
               },
-              // Omitted, not null: null is "No project", omitted the remembered one (#317).
+              // Omitted stays omitted (the remembered project); null is "No project" (#317).
               ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
             },
