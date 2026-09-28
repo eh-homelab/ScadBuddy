@@ -82,7 +82,11 @@ for the project picker).
   clone may take on the volume; the clone's size is measured while it runs, so it
   can overshoot by roughly one poll interval's worth of transfer, 0.2 to 2 s, plus
   one walk of the clone, which takes longer the more files it has, before it is
-  stopped).
+  stopped); `SCADBUDDY_DUPLICATE_STAGING_MAX_AGE` (default 3600 s, at least 1: how
+  old a duplicate's staging copy under `/data/cache` must be before it is treated
+  as a crashed copy and removed, at startup, after a duplicate and with the
+  periodic upload sweep; keep it well above the longest copy, since replicas
+  sharing `/data` may be mid-copy).
   Each concurrent render or check is its own `openscad` process, and each open
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
@@ -107,6 +111,9 @@ for the project picker).
     nothing has uploaded or used it for this long.
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
     after the one at startup; 0 turns it off.
+  - The same periodic sweep also clears old duplicate staging
+    (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
+    next duplicate.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Render queue.** By default every render request is accepted;

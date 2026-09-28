@@ -113,10 +113,20 @@ async def _sweep_assets_logged(state: AppState) -> None:
         logger.exception("could not sweep unused uploads")
 
 
+async def _sweep_duplicate_staging_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
+    except OSError:
+        logger.exception("could not sweep duplicate staging folders")
+
+
 async def _asset_sweeper(state: AppState) -> None:
     while True:
         await asyncio.sleep(state.config.asset_sweep_interval)
         await _sweep_assets_logged(state)
+        # The periodic housekeeping pass: a crashed duplicate's staging otherwise
+        # waits for the next boot or duplicate (#397).
+        await _sweep_duplicate_staging_logged(state)
 
 
 @asynccontextmanager
@@ -145,10 +155,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("could not sweep tombstones")
     # A duplicate the process died in the middle of left its staging copy. Nothing
     # is duplicating yet: no request has been served.
-    try:
-        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
-        logger.exception("could not sweep duplicate staging folders")
+    await _sweep_duplicate_staging_logged(state)
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)

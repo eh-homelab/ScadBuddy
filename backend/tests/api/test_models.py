@@ -372,7 +372,7 @@ def test_a_failed_tombstone_removal_is_logged_and_retried(
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
     with patch("scadbuddy.library.catalogue.shutil.rmtree", side_effect=OSError("busy")):
         assert client.delete(f"/api/v1/models/{model}").status_code == 204
-    assert "could not remove a deleted model's files" in caplog.text
+    assert "could not remove a path" in caplog.text
     assert [entry.name.split(".")[0] for entry in paths.tombstones.iterdir()] == [model]
 
     assert catalogue.sweep_tombstones() != []
