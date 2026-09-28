@@ -515,7 +515,7 @@ class BlobStore(Protocol):
 ```
 
 `BlobRef = {sha256, kind, backend_id}`; `Scope = {slug, folder: "work" | "output",
-project_id}`. References (`blob_refs` table: `ref`, `holder_kind`, `holder_id`) keep
+project_id}`. References (`blob_refs` table: `key`, `holder_kind`, `holder_id`) keep
 a blob alive; `sweep` deletes unreferenced blobs older than the grace period, and
 `put` refuses past `SCADBUDDY_STORE_MAX_TOTAL_BYTES` / `_MAX_COUNT`, except for
 re-puts of what already exists. Workers keep a local LRU cache by sha256 under
