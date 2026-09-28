@@ -95,6 +95,10 @@ class OutputMeta(BaseModel):
     #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on a
     #: pipeline run and on records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
+    #: When the last print of this output was started (#268): how the print watcher
+    #: finds the prints to resume after a restart. None if never printed, and on
+    #: records written before it was stamped.
+    printed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -227,8 +231,11 @@ class OutputStore:
         """
         directory = self._find_dir(output_id)
         meta = self.get(output_id)
-        if plates is None and print_route is not None:
-            plates = []
+        printed_at = None
+        if print_route is not None:
+            printed_at = datetime.now(UTC)
+            if plates is None:
+                plates = []
         updated = meta.model_copy(
             update={
                 key: value
@@ -241,12 +248,26 @@ class OutputStore:
                     ("slice_job_id", slice_job_id),
                     ("project_id", project_id),
                     ("plates", plates),
+                    ("printed_at", printed_at),
                 )
                 if value is not None
             }
         )
         self._write_meta(directory, updated)
         return updated
+
+    def printed_since(self, cutoff: datetime) -> list[OutputMeta]:
+        """Every output whose last print started at or after ``cutoff``. A record
+        that cannot be read is skipped: it cannot be followed either."""
+        found = []
+        for meta_path in self.paths.outputs.glob(f"*/*/{META_NAME}"):
+            try:
+                meta = OutputMeta.model_validate_json(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if meta.printed_at is not None and meta.printed_at >= cutoff:
+                found.append(meta)
+        return found
 
     def forget_library_file(self, output_id: str) -> OutputMeta:
         """Drop the recorded library file id, once the file has actually gone.

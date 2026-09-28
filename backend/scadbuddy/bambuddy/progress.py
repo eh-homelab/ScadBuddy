@@ -406,11 +406,12 @@ OBSERVED_OUTPUTS = 256
 class ProgressObserver:
     """Turns the progress reads the backend makes into ``print.*`` events.
 
-    Until the per-print watcher (#268) exists, the only time the backend sees a
-    print move is when someone asks: the progress route, a send or a run. Each
-    read is compared with the last one seen for that output, so a poll that finds
-    nothing new publishes nothing, and ``print.settled`` is published once, on the
-    read that first finds the print settled.
+    Its reads come from the per-print watcher (#268, ``bambuddy/watcher.py``) and
+    from the progress route, which the UI still calls when it subscribes and
+    while its realtime socket is down. Each read is compared with the last one seen
+    for that output, so a read that finds nothing new publishes nothing, and
+    ``print.settled`` is published once, on the read that first finds the print
+    settled.
     """
 
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
@@ -426,9 +427,10 @@ class ProgressObserver:
             self._seen.pop(meta.id, None)
         emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
 
-    def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> None:
+    def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> bool:
+        """Publish what changed since the last read of ``meta``; True if anything did."""
         if progress is None:
-            return
+            return False
         fingerprint = progress.model_dump_json()
         # Compare, decide and record under one hold of the lock, so two reads of the
         # same output racing each other (two tabs polling) cannot both decide they are
@@ -446,3 +448,4 @@ class ProgressObserver:
                     kinds.append("print.settled")
         for kind in kinds:
             emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))
+        return bool(kinds)

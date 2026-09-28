@@ -165,6 +165,17 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   `render_poll_interval`.
 - TLS is terminated in front of the app (`README.md` checks
   `https://scadbuddy.internal.nullreference.io/healthz`).
+- *Read 2026-09-28, for #268.* Bambuddy 1.2.5.5 has a push socket, `WS /api/v1/ws`. It
+  takes a token minted by `POST /api/v1/auth/ws-token`, and an API key with
+  `can_read_status` may mint one (bambuddy `v1.2.5.5`
+  `backend/app/api/routes/websocket.py`, `backend/app/api/routes/auth.py`
+  `mint_websocket_token`). It cannot stand in for reading a print's progress:
+  - nothing is broadcast for slice jobs;
+  - completion arrives as `print_complete` per *printer*, not per queue item;
+  - `pipeline_run_updated` goes through `broadcast_to_user(run.created_by)`
+    (`backend/app/core/websocket.py` `send_*`, `backend/app/api/routes/pipeline_runs.py`).
+
+  So the print watcher polls with back-off (§7).
 
 ### 3.2 To verify (each item names who verifies it)
 
@@ -420,8 +431,11 @@ UI socket does not replay: on every (re)subscribe the server confirms with
 `subscribed` only once it is listening, and the client re-reads then, so a reconnect
 cannot leave a gap.
 
-Print progress comes from **one server-side watcher per active print** (#268), not from
-one poll per open dialog. #270 moves #241's render workers from interval polling to the
+Print progress comes from **one server-side watcher per active print** (#268,
+`backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
+back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
+socket can't replace the read (§3.1). It resumes recent prints after a restart. With
+Postgres, a session advisory lock per print means one replica follows each print. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
 **The database is required** (decided while building #266; tracked in #401). The

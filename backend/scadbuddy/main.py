@@ -170,6 +170,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    # Follows the prints a previous process was following (#268).
+    await state.print_watcher.start()
     # After the queue has opened its store: the jobs in it are references too.
     sweeper: asyncio.Task[None] | None = None
     if state.config.asset_sweep_interval > 0:
@@ -193,6 +195,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        await state.print_watcher.aclose()
         await state.queue.aclose()
         await state.events.aclose()
 

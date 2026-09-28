@@ -9,7 +9,9 @@ from typing import Annotated
 
 from fastapi import Depends, Path, Request
 
-from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.watcher import PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -26,7 +28,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
@@ -65,6 +67,8 @@ class AppState:
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
+    #: Follows each started print until it settles (#268).
+    print_watcher: PrintWatcher
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -134,6 +138,13 @@ def build_state(settings: Settings) -> AppState:
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(paths, history, outputs)
     history.on_commit = announce_commits(events, catalogue)
+    settings_store = SettingsStore(paths.root / SETTINGS_NAME, settings, events=events)
+    print_progress = ProgressObserver(events)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(client, meta)
+
     return AppState(
         settings=settings,
         config=config,
@@ -142,7 +153,7 @@ def build_state(settings: Settings) -> AppState:
         catalogue=catalogue,
         outputs=outputs,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
+        settings_store=settings_store,
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
@@ -165,7 +176,14 @@ def build_state(settings: Settings) -> AppState:
         ),
         metrics=metrics,
         events=events,
-        print_progress=ProgressObserver(events),
+        print_progress=print_progress,
+        print_watcher=PrintWatcher(
+            outputs=outputs,
+            observer=print_progress,
+            read=read_progress,
+            events=events,
+            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
+        ),
         checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
@@ -253,6 +271,10 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
+def get_print_watcher(state: StateDep) -> PrintWatcher:
+    return state.print_watcher
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -278,6 +300,7 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
+PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]

@@ -6,6 +6,7 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from tests.api.test_print import pipelines_route, presets_routes, printers_route, run_body
 from tests.api.test_print_filaments import inventory_routes, queue_route, slice_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
@@ -154,3 +155,23 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     # Waiting is not failing.
     assert body["error_message"] is None
     assert body["copies_detail"][0]["waiting_reason"] == "No active H2C printers are idle"
+
+
+@respx.mock
+def test_a_run_starts_the_print_watcher_and_stamps_when_it_printed(
+    client: TestClient, model: str
+) -> None:
+    """#268: the backend follows the print itself from the moment it starts."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    pipelines_route()
+    printers_route()
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(200, json=run_body())
+    )
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert output_id in state.print_watcher.watching
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["printed_at"] is not None

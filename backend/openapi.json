@@ -2451,6 +2451,18 @@
             ],
             "title": "Print Route"
           },
+          "printed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printed At"
+          },
           "project_id": {
             "anyOf": [
               {

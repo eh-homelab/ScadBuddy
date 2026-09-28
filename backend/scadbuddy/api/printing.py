@@ -17,6 +17,7 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintProgressDep,
+    PrintWatcherDep,
     SettingsStoreDep,
     SlugPath,
 )
@@ -240,6 +241,7 @@ async def post_run(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintRunResult:
     """``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
     ``force``.
@@ -258,6 +260,7 @@ async def post_run(
     async with client_for(settings) as client:
         result = await run_for_output(client, outputs, meta, settings, body)
     observer.started(meta)
+    watcher.watch(meta.id)
     return result
 
 
