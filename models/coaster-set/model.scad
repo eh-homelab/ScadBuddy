@@ -29,13 +29,13 @@
 // Outline of each coaster
 shape = "round"; // [round:Round, square:Square, hexagon:Hexagon, rounded_square:Rounded square]
 
-// Size in mm: diameter (round), side (square), across the flats (hexagon)
+// Size in mm: diameter (round), side (square, rounded square), across the flats (hexagon)
 size = 95; // [60:1:150]
 
 // Thickness in mm
 thickness = 5; // [3:0.5:10]
 
-// Corner radius of the rounded square, in mm
+// Corner radius of the rounded square, in mm (at most half the size less 1 mm)
 corner_radius = 14; // [2:1:40]
 
 // Width of the border ring in its own colour, in mm (0 = no border)
@@ -58,7 +58,7 @@ spacing = 12; // [5:1:40]
 // Line width of the line patterns, in mm
 line_width = 2; // [0.8:0.2:6]
 
-// Rotate the pattern, in degrees
+// Rotate the pattern, in degrees (not the monogram or text)
 pattern_rotation = 0; // [0:5:180]
 
 // Monogram letters: one per coaster, in order, repeating ("ABCD" gives each coaster its own)
@@ -113,10 +113,10 @@ gap = 5; // [3:1:20]
 // Underside
 underside = "plain"; // [plain:Plain, recess:Recess for a cork or felt pad]
 
-// Recess depth, in mm (2 for 2 mm cork, 1 for felt)
+// Recess depth, in mm (2 for 2 mm cork, 1 for felt; with the recess only)
 recess_depth = 2; // [0.6:0.2:4]
 
-// Rim left around the recess, in mm
+// Rim left around the recess, in mm (with the recess only)
 recess_rim = 4; // [2:0.5:15]
 
 // Add a holder the stack of coasters drops into
@@ -274,6 +274,11 @@ module text_2d() {
     }
 }
 
+if (pattern == "text" && text == "")
+    echo("NOTE: pattern is Text but text is empty; the coasters are plain");
+if (pattern == "monogram" && len([for (ch = letters) if (ch != " ") ch]) == 0)
+    echo("NOTE: pattern is Monogram but letters is empty; the coasters are plain");
+
 module pattern_raw(i) {
     if (pattern == "monogram") monogram_2d(i);
     else if (pattern == "text") text_2d();
@@ -405,14 +410,27 @@ function layout(n) = (best_cols(n) > 0 || n == 1) ? [n, max(1, best_cols(n))] : 
 LAYOUT = layout(count);
 N = LAYOUT[0];
 COLS = LAYOUT[1];
-ROWS = ceil((N + extra) / COLS);
 if (N < count)
-    echo(str("NOTE: only ", N, " coasters of ", count, " fit on the plate; print the rest as a second plate"));
+    echo(str("NOTE: only ", N, N == 1 ? " coaster" : " coasters", " of ", count, N == 1 ? " fits" : " fit",
+             " on the plate; print the rest as a second plate"));
 
-W = plate_w(COLS, N);
-H = plate_h(COLS, N);
-function pos(i) = [-W / 2 + cell_x / 2 + (i % COLS) * px,
-                   H / 2 - cell_y / 2 - floor(i / COLS) * py];
+// A big coaster and its holder can be too big for two holder-sized cells
+// even alone (150 mm round: 2 x 156.8 + gap > 320). Then the one coaster sits
+// in a cell of its own size above the holder, with the gap cut to fit.
+STACKED = holder && best_cols(1) == 0;
+s_gap = min(gap, BED_Y - ext_y - h_ext_y);
+// 150 mm + a 3 mm clearance holder leaves 9.2 mm; a wider size or clearance
+// range must fail here, not overlap the coaster and the holder.
+assert(!STACKED || s_gap >= 0, str("a ", size, " mm coaster and its holder do not fit the plate"));
+ROWS = STACKED ? 2 : ceil((N + extra) / COLS);
+if (STACKED && s_gap < gap)
+    echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
+
+W = STACKED ? max(ext_x, h_ext_x) : plate_w(COLS, N);
+assert(!STACKED || W <= BED_X, str("a ", size, " mm coaster's holder is wider than the plate"));
+H = STACKED ? ext_y + s_gap + h_ext_y : plate_h(COLS, N);
+function pos(i) = STACKED ? (i == 0 ? [0, H / 2 - ext_y / 2] : [0, -H / 2 + h_ext_y / 2])
+                : [-W / 2 + cell_x / 2 + (i % COLS) * px, H / 2 - cell_y / 2 - floor(i / COLS) * py];
 
 // Holder: stack height is the coasters that fit, 70% of it is walled.
 stack = count * thickness;

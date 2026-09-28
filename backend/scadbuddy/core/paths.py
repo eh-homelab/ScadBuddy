@@ -109,6 +109,20 @@ class DataPaths:
         return self.schema_cache / f"{slug}.json"
 
     @property
+    def previews(self) -> Path:
+        """Default-render previews: the catalogue thumbnail of a model with no image
+        of its own and no generated output (#179 follow-up). Derived, like the
+        schema cache, so under ``cache/`` and never in the models repository."""
+        return self.cache / "previews"
+
+    def model_preview(self, slug: str) -> Path:
+        return self.previews / f"{slug}.png"
+
+    def model_preview_record(self, slug: str) -> Path:
+        """What the preview was rendered from, or that rendering it failed."""
+        return self.previews / f"{slug}.json"
+
+    @property
     def tombstones(self) -> Path:
         """Where a deleted model's directory waits for its ``rmtree`` -- outside
         ``models/``, so the listing and git never see a half-deleted model."""

@@ -282,6 +282,20 @@ async def test_a_run_reports_every_file_it_could_not_open(tmp_path: Path) -> Non
     assert not any("line 2" in line for line in output.log_tail)
 
 
+async def test_a_failed_run_names_the_files_it_could_not_open(tmp_path: Path) -> None:
+    """#408: the exit-1 case -- a template that draws only the missing picture ends
+    "Current top level object is empty." and exits 1 on the image's OpenSCAD."""
+    binary = tmp_path / "missing-openscad"
+    binary.write_text(MISSING_FILE_OPENSCAD + "exit 1\n", encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert raised.value.missing_files == ("pic.svg", "mask.png")
+
+
 # ── #281: free-text values that would steer import()/surface() off the model ──
 
 TEXT_PARAMETER = Parameter(name="label", type="string", initial="/default/is/the/templates")

@@ -180,6 +180,36 @@ test.describe('real backend', () => {
   })
 
   /**
+   * Issue #408, end to end: a model that draws only a picture it cannot open fails on a
+   * real OpenSCAD (exit 1, "Current top level object is empty."), and the failed job
+   * still says which file it could not open -- a failure has no result to carry it.
+   */
+  test('says which file a failed render could not open', async ({ page, request }) => {
+    test.setTimeout(180_000)
+
+    const slug = `e2e-missing-svg-${Date.now().toString(36)}`
+    // A parameter to change: the customizer renders on a change, not on open.
+    const source = `// ${slug}\ntag = "a";\ncolor("red") linear_extrude(2) import("pic.svg");\n`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(source) },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+
+    try {
+      await page.goto(`/m/${slug}`)
+      await page.getByRole('region', { name: 'Parameters' }).getByRole('textbox').first().fill('b')
+      await expect(page.getByTestId('render-log')).toBeVisible({ timeout: 120_000 })
+      await expect(page.getByRole('region', { name: 'Render warnings' })).toContainText(
+        'OpenSCAD could not open pic.svg',
+      )
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
+
+  /**
    * Issue #95, end to end: openscad-lsp in the image, the WebSocket bridge, and the
    * editor's client. `polyhedron` appears nowhere in the model, so Monaco's own
    * word-based suggestions cannot produce it — and only the server labels a builtin
@@ -222,6 +252,46 @@ test.describe('real backend', () => {
         'polyhedron(points',
         { timeout: 30_000 },
       )
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
+
+  /**
+   * #266, end to end: `WS /api/v1/ws` in the image. One tab follows `models`
+   * through the page's own socket, the way `lib/realtime.ts` does; a change made
+   * from elsewhere reaches it as an event.
+   */
+  test('delivers a change made elsewhere to a tab following it', async ({ page, request }) => {
+    await page.goto('/')
+    const url = new URL('/api/v1/ws', page.url())
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    type Frame = { type: string; kind?: string; data?: { slug?: string } }
+    type Page = { realtimeFrames: Frame[]; realtimeSocket: WebSocket }
+    await page.evaluate((socketUrl) => {
+      const w = globalThis as unknown as Page
+      w.realtimeFrames = []
+      w.realtimeSocket = new WebSocket(socketUrl)
+      w.realtimeSocket.onmessage = (message) => {
+        w.realtimeFrames.push(JSON.parse(String(message.data)) as Frame)
+      }
+      w.realtimeSocket.onopen = () =>
+        w.realtimeSocket.send(JSON.stringify({ type: 'subscribe', topics: ['models'] }))
+    }, url.toString())
+    const frames = () => page.evaluate(() => (globalThis as unknown as Page).realtimeFrames)
+    await expect.poll(frames).toContainEqual({ type: 'subscribed', topics: ['models'] })
+
+    const slug = `e2e-ws-${Date.now().toString(36)}`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+    try {
+      await expect
+        .poll(async () => (await frames()).find((f) => f.kind === 'model.created')?.data?.slug)
+        .toBe(slug)
     } finally {
       await request.delete(`/api/v1/models/${slug}`)
     }

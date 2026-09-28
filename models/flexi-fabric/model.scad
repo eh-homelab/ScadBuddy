@@ -57,7 +57,7 @@ bar_width = 1.2; // [0.8:0.1:2]
 // How links are coloured
 colour_mode = "rainbow"; // [single:Single colour, checker:Checker - neighbours differ, stripes:Vertical stripes, rows:Horizontal rows, gradient_bands:Gradient bands left to right, rainbow:Rainbow arcs, random_seeded:Random - seeded, overlay_only:Base colour plus overlay]
 
-// How many palette colours the multi-colour modes use
+// How many palette colours the multi-colour modes use (checker always uses the fewest that keep neighbours apart: 2, or 3 for hex scales)
 colour_count = 8; // [2:1:8]
 
 // Stripe / row width, in links
@@ -296,7 +296,8 @@ function fit_L(p, L) =
     (L >= 40 || pattern_spec(p, L, W_MIN)[S_GAP] >= clearance) ? L : fit_L(p, L + 0.5);
 
 // Keep at least four links across the narrower side of the sheet.
-LINK = fit_L(pattern, min(link_size, min(width, height) / 4));
+LINK_CAP = min(link_size, min(width, height) / 4);
+LINK = fit_L(pattern, LINK_CAP);
 BAR_W = fit_w(pattern, LINK, max(W_MIN, bar_width));
 SPEC = pattern_spec(pattern, LINK, BAR_W);
 
@@ -382,6 +383,9 @@ function cells_in(poly) = let (G = keep(keep(fit_grid(poly))))
 // so every setting renders something.
 CELLS_SHAPE = cells_in(SHAPE);
 CELLS0 = len(CELLS_SHAPE) > 1 ? CELLS_SHAPE : cells_in(shape_poly("rectangle", width, height));
+if (shape != "rectangle" && len(CELLS_SHAPE) <= 1)
+    echo(str("NOTE: a ", width, " x ", height, " mm ", shape, " has room for fewer than two ", LINK,
+             " mm links; made a rectangle instead"));
 
 // ===========================================================================
 // Colour modes
@@ -571,7 +575,14 @@ module overlay_part() {
 
 echo(FLEXI = [pattern, len(CELLS), LINK, BAR_W, SPEC[S_GAP], LEVELS, TOTAL_H, HB, VG,
               norm(A), CLS[0], len(VARIANTS)]);
-if (LINK > link_size) echo(str("WARNING: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance"));
+// Two separate steps, reported separately: the cap to four links across, then
+// the raise that keeps the clearance (which may undo part of the cap).
+if (LINK_CAP < link_size) echo(str("NOTE: link_size reduced to ", LINK_CAP, " mm to keep four links across the ",
+                                   min(width, height), " mm side"));
+if (LINK > LINK_CAP) echo(str("NOTE: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance",
+                              LINK_CAP < link_size ? " (fewer than four links fit across)" : ""));
+if (colour_mode == "checker" && colour_count != CLS[0])
+    echo(str("NOTE: checker uses ", CLS[0], " colours for this pattern (colour_count ", colour_count, " is ignored)"));
 if (BAR_W < bar_width) echo(str("NOTE: bar width reduced to ", BAR_W, " mm to keep ", clearance, " mm clearance"));
 
 for (col = [0 : 7])
