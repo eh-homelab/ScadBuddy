@@ -105,10 +105,14 @@ interface DialogProps {
   onDone: (action: UpstreamAction) => void
 }
 
-/** `dismissed`: the update was set aside; it can still be taken, not dismissed again. */
+/**
+ * `dismissed`: the update was set aside; it can still be taken, not dismissed again.
+ * The prop only frames the dialog until the status arrives; from then on it offers
+ * what the server reports now (#404), so a newer update is not missed.
+ */
 function UpdateDialog({
   slug,
-  dismissed = false,
+  dismissed: openedDismissed = false,
   onClose,
   onDone,
 }: DialogProps & { dismissed?: boolean }) {
@@ -116,8 +120,10 @@ function UpdateDialog({
   const status = useAsync(() => api.getUpstream(slug), [slug])
   const [busy, setBusy] = useState<'merge' | 'dismiss' | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const offered = dismissed ? 'dismissed' : 'update'
-  const preview = status.data?.state === offered ? status.data.preview : null
+  const state = status.data?.state
+  const dismissed = state ? state === 'dismissed' : openedDismissed
+  const preview =
+    state === 'update' || state === 'dismissed' ? (status.data?.preview ?? null) : null
 
   function close() {
     if (!busy) onClose()

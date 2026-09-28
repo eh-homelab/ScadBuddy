@@ -228,6 +228,43 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(await screen.findByTestId('where')).toHaveTextContent(`/m/${COPY}/source?merge`)
   })
 
+  it('offers a newer update when a dismissed one was superseded (#404)', async () => {
+    await duplicateWithUpdate()
+    const newer = await api.getUpstream(COPY)
+    await api.dismissUpstream(COPY)
+    const { user } = await renderButton()
+    // The server now reports an update that is not dismissed.
+    server.use(http.get('/api/v1/models/:slug/upstream', () => HttpResponse.json(newer)))
+
+    await user.click(screen.getByRole('button', { name: 'Update dismissed — review' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Update available' })
+    expect(await within(dialog).findByTestId('diff')).toHaveTextContent('+text_size = 16;')
+    expect(dialog).not.toHaveTextContent('There is no update to take any more')
+    expect(dialog).not.toHaveTextContent('you can still take it')
+    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeEnabled()
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeEnabled()
+  })
+
+  it('says there is no update when the server reports current (#404)', async () => {
+    await duplicateWithUpdate()
+    const status = await api.getUpstream(COPY)
+    const { user } = await renderButton()
+    server.use(
+      http.get('/api/v1/models/:slug/upstream', () =>
+        HttpResponse.json({ ...status, state: 'current', preview: null }),
+      ),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog')
+    expect(
+      await within(dialog).findByText('There is no update to take any more.'),
+    ).toBeInTheDocument()
+    expect(within(dialog).queryByTestId('merge-result')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeDisabled()
+    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeDisabled()
+  })
+
   it('offers Detach for an upstream that is gone', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
     await api.deleteModel(UPSTREAM, true)
