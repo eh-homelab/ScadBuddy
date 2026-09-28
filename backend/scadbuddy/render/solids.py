@@ -98,8 +98,10 @@ async def render_solids(
     OpenSCAD failure is a colour's fallback, never the job's (spec §6.3). Anything
     else -- or this coroutine being cancelled -- cancels every sibling, which kills
     its `openscad` (`run_openscad`), and the wrapper is removed only once they have
-    all stopped. Each render's `SCADBUDDY_RENDER_TIMEOUT` starts when its process
-    does, so a colour waiting for a slot is not charged for the wait.
+    all stopped -- except a mesh parse already running in its worker thread, which a
+    cancel abandons rather than stops (it is bounded work). Each render's
+    `SCADBUDDY_RENDER_TIMEOUT` starts when its process does, so a colour waiting for a
+    slot is not charged for the wait.
     """
     slots = asyncio.Semaphore(config.solid_slots())
     wrapper = scad_path.parent / f"{WRAPPER_PREFIX}{secrets.token_hex(8)}.scad"

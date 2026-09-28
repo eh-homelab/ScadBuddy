@@ -755,6 +755,10 @@ The semantics are unchanged from the sequential loop:
   job with that colour's own error, not an exception group, and cancels the
   siblings: their `openscad` processes are killed and colours still waiting for a
   slot never start. The wrapper is deleted only after every render has stopped.
+  One stage is not interrupted: each solid's 3MF is parsed in a worker thread
+  (off the event loop), and a cancelled task abandons that thread rather than
+  stopping it, so a parse already under way runs to completion — bounded work,
+  unlike an `openscad` run.
 
 ## 7. Bambuddy integration
 
@@ -850,8 +854,10 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 - `applications/scadbuddy/`: Deployment (1 replica, `Recreate`), Service
   `scadbuddy:8080`, PVC `scadbuddy-data` 5Gi on `vsphere-csi-sc`,
   `nodeSelector: kubernetes.io/arch: amd64` (image is multi-arch but keep it
-  next to the slicer), requests 250m/512Mi, limits 2/2Gi (Manifold is
-  multi-threaded; OpenSCAD text rendering allocates freely).
+  next to the slicer), requests 1/2Gi, limits 8/16Gi (Manifold is
+  multi-threaded; OpenSCAD text rendering allocates freely). Those are the values in
+  eh-homelab/clusters' `applications/scadbuddy/scadbuddy.yaml` as of #282; the
+  derived `SCADBUDDY_SOLID_CONCURRENCY` (§6.3) follows whatever limit is set there.
 - **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` × the solid concurrency +
   `SCADBUDDY_CHECK_CONCURRENCY` concurrent `openscad` processes**, not the render figure
   alone: each worker in its closed-parts stage runs up to `SCADBUDDY_SOLID_CONCURRENCY`
