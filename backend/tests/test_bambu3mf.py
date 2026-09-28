@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import zipfile
 from pathlib import Path
@@ -33,6 +34,7 @@ from scadbuddy.render.bambu3mf import (
     write_plates_3mf,
 )
 from scadbuddy.render.geometry import parts_from_3mf
+from scadbuddy.render.jobs import MAX_PLATES
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
@@ -578,6 +580,13 @@ class TestMultiplePlates:
     ) -> None:
         # `compute_colum_count` in PartPlate.hpp: sqrt, rounded, +1 when it rounded down.
         assert plate_columns(count) == columns
+
+    def test_the_column_count_is_the_ceiling_of_the_square_root(self) -> None:
+        """Spec §6.4 states the rule as ``ceil(sqrt(n))``: rounding up to the nearest
+        whole number, or down and adding one, lands on the ceiling either way, and on
+        the root itself for a square. Checked well past `MAX_PLATES`."""
+        for count in range(1, 10 * MAX_PLATES + 1):
+            assert plate_columns(count) == math.ceil(math.sqrt(count)), count
 
     def test_plate_origins_step_a_bed_and_a_fifth(self) -> None:
         h2c = plate_for("H2C")  # a 330 x 320 bed

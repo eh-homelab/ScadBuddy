@@ -904,11 +904,16 @@ area its bounding box intersects (`src/slic3r/GUI/PartPlate.cpp`), and the CLI
 Bambuddy slices with runs the same code (`src/BambuStudio.cpp`). Plate *i*
 (0-based) of *n* sits at `(col * W * 1.2, -row * D * 1.2)`, where `W` x `D` is
 the printer's bed (`printable_area`, truncated to whole millimetres),
-`cols = ceil(sqrt(n))` as `compute_colum_count` computes it, `row, col =
-divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
+`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
 `printable_area`, the CLI takes the printer's own as the file's
 (`old_printable_width = current_printable_width`), so there is no shrink and
-nothing moves (`shrink_to_new_bed == 0`). So:
+nothing moves (`shrink_to_new_bed == 0`). `compute_colum_count` does not spell
+it `ceil`: it rounds `sqrt(n)` to the nearest whole number and adds one when that
+rounded down. Rounding a non-integer root up gives its ceiling, and rounding it
+down and adding one gives the same; a whole root is its own ceiling. So the two
+agree for every `n`, and `bambu3mf.plate_columns` keeps Bambu Studio's form while
+a test checks it against `ceil(sqrt(n))` for `n` up to ten times `MAX_PLATES`.
+So:
 
 - Objects are numbered across plates: `object_1..object_M` are every plate's
   parts in plate order, each a component of its plate's assembly, and the
