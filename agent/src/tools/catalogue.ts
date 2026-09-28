@@ -79,16 +79,26 @@ export const catalogueTools: Tool[] = [
       json(await ok(backend.POST('/api/v1/models', { body }), `create model ${body.name}`)),
   }),
 
+  // `outward`, although the result is reversible, because the backend fetches a
+  // URL the caller chose. SSRF into the cluster is already blocked by the backend
+  // (backend/scadbuddy/library/url_import.py: https only, redirects included, each
+  // hop vetted by `public_addresses()` so every resolved address must be public,
+  // and the connection pinned to the vetted addresses). The tier is about
+  // EXFILTRATION: a prompt-injected agent could encode data into a URL on a
+  // public host it controls, so a human approves the fetch first (spec §8.2).
   defineTool({
     name: 'import_model',
-    description: 'Import a model from an https URL to its .scad source.',
+    description:
+      'Import a model from an https URL to its .scad source. The backend fetches the URL, so this needs a ' +
+      'human approval.',
     input: z.object({
       url: z.string().url().max(2048),
       name: z.string().optional(),
       force: z.boolean().default(false),
     }),
-    risk: 'write',
+    risk: 'outward',
     routes: ['POST /api/v1/models/import'],
+    summarize: ({ url, name }) => `Fetch and import a model from ${url}${name ? ` as "${name}"` : ''}`,
     handler: async ({ url, name, force }, { backend }) =>
       json(
         await ok(backend.POST('/api/v1/models/import', { body: { url, name: name ?? null, force } }), `import ${url}`),

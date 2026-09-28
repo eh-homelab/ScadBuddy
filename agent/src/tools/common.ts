@@ -31,7 +31,13 @@ export const params = z
 export const MAX_INLINE_BYTES = 8 * 1024 * 1024
 
 export function decodeBase64(value: string, what: string): Uint8Array<ArrayBuffer> {
-  const bytes = Buffer.from(value, 'base64')
+  // Node's decoder silently drops characters outside the alphabet, so check the
+  // shape first rather than upload silently truncated bytes.
+  const compact = value.replace(/\s+/g, '')
+  if (compact.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
+    throw new ToolError(`${what} is not valid base64`)
+  }
+  const bytes = Buffer.from(compact, 'base64')
   if (bytes.byteLength === 0) throw new ToolError(`${what} is empty or not base64`)
   return new Uint8Array(bytes)
 }
