@@ -45,15 +45,34 @@ type UpstreamAction = 'merge' | 'dismiss' | 'detach'
 /**
  * #160 — the same badge in a duplicate's header, as a button: "Update available" opens
  * the update (upstream diff, merge result, Take update / Not now), "Upstream gone"
- * offers Detach.
+ * offers Detach. #235: a dismissed update is still mergeable, so it stays reachable
+ * as a quieter "Update dismissed" link opening the same dialog.
  */
 export function UpstreamUpdateButton({ slug, state, onChanged }: Props) {
   const [open, setOpen] = useState(false)
-  if (state !== 'update' && state !== 'gone') return null
+  if (state !== 'update' && state !== 'dismissed' && state !== 'gone') return null
 
   function done(action: UpstreamAction) {
     setOpen(false)
     onChanged(action)
+  }
+
+  if (state === 'dismissed') {
+    return (
+      <>
+        <button
+          type="button"
+          data-testid="update-dismissed"
+          onClick={() => setOpen(true)}
+          className="shrink-0 rounded-[6px] px-1.5 py-0.5 text-[11px] text-muted hover:bg-surface-2 hover:text-ink"
+        >
+          Update dismissed — review
+        </button>
+        {open && (
+          <UpdateDialog slug={slug} dismissed onClose={() => setOpen(false)} onDone={done} />
+        )}
+      </>
+    )
   }
 
   return (
@@ -86,12 +105,19 @@ interface DialogProps {
   onDone: (action: UpstreamAction) => void
 }
 
-function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
+/** `dismissed`: the update was set aside; it can still be taken, not dismissed again. */
+function UpdateDialog({
+  slug,
+  dismissed = false,
+  onClose,
+  onDone,
+}: DialogProps & { dismissed?: boolean }) {
   const navigate = useNavigate()
   const status = useAsync(() => api.getUpstream(slug), [slug])
   const [busy, setBusy] = useState<'merge' | 'dismiss' | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const preview = status.data?.state === 'update' ? status.data.preview : null
+  const offered = dismissed ? 'dismissed' : 'update'
+  const preview = status.data?.state === offered ? status.data.preview : null
 
   function close() {
     if (!busy) onClose()
@@ -129,19 +155,26 @@ function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
   return (
     <Dialog
       open
-      title="Update available"
+      title={dismissed ? 'Dismissed update' : 'Update available'}
       description={
         status.data
-          ? `${status.data.upstream.id} has changed since this copy was made or last updated.`
+          ? `${status.data.upstream.id} has changed since this copy was made or last updated.` +
+            (dismissed ? ' You dismissed this update; you can still take it.' : '')
           : undefined
       }
       onClose={close}
       footer={
         <>
-          <Button variant="ghost" onClick={() => void dismiss()} disabled={!preview || !!busy}>
-            {busy === 'dismiss' && <Spinner />}
-            Not now
-          </Button>
+          {dismissed ? (
+            <Button variant="ghost" onClick={close} disabled={!!busy}>
+              Close
+            </Button>
+          ) : (
+            <Button variant="ghost" onClick={() => void dismiss()} disabled={!preview || !!busy}>
+              {busy === 'dismiss' && <Spinner />}
+              Not now
+            </Button>
+          )}
           <Button variant="primary" onClick={() => void take()} disabled={!preview || !!busy}>
             {busy === 'merge' && <Spinner />}
             Take update

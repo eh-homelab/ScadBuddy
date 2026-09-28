@@ -767,7 +767,7 @@ class Catalogue:
     def upstream_status(self, slug: str) -> UpstreamStatus:
         upstream, revision, state = self._upstream_now(slug)
         preview = None
-        if state == "update" and revision is not None:
+        if state in ("update", "dismissed") and revision is not None:
             preview = plan_merge(
                 self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
             ).preview

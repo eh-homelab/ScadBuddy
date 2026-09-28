@@ -106,3 +106,13 @@ def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path
     for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
         for method in ("put", "delete"):
             assert success_types(path, method) == {"application/json"}, (method, path)
+
+
+def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
+    """#371: a conflict, no update, and a merge that kept racing are all 409s."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+    merge = paths["/api/v1/models/{slug}/upstream/merge"]["post"]
+    conflict = merge["responses"]["409"]["description"]
+    for case in ("merge_base", "`current`", "`gone`", "kept changing", "retry"):
+        assert case in conflict, case
+        assert case in merge["description"], case
