@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -25,6 +26,7 @@ from scadbuddy.library.assets import (
     AssetQuotaError,
     AssetStore,
     AssetStoreUnavailableError,
+    asset_lock_key,
     file_assets,
     referenced_asset_ids,
     sanitise_svg,
@@ -48,6 +50,11 @@ def svg(n: int) -> bytes:
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{n + 1}" height="10">'
         f'<path d="M0 0 L{n + 1} 0 L0 10 Z"/></svg>'
     ).encode()
+
+
+def svg_id(n: int) -> str:
+    """The id `svg(n)` is stored under: the hash of what is kept."""
+    return hashlib.sha256(sanitise_svg(svg(n))).hexdigest()
 
 
 def png() -> bytes:
@@ -514,20 +521,91 @@ def test_a_use_waits_for_a_removal_in_progress_and_then_finds_nothing(
 def test_an_upload_waits_until_a_removal_has_taken_the_blob(
     store: AssetStore, pg_conninfo: str
 ) -> None:
-    """The sweep holds the store's lock from its re-check until the blob is gone, past
+    """The sweep holds the asset's lock from its re-check until the blob is gone, past
     the commit of the row's delete; an upload of the same content, from any process,
     waits for it rather than inserting a row over a blob about to be removed."""
     stored: list[AssetMeta] = []
+    key = asset_lock_key(svg_id(1))
     with psycopg.connect(pg_conninfo, autocommit=True) as sweep:
-        sweep.execute(LOCK, (ASSET_LOCK_KEY,))
+        sweep.execute(LOCK, (key,))
         uploader = threading.Thread(target=lambda: stored.append(store.put(svg(1), "a.svg")))
         uploader.start()
         uploader.join(0.5)
-        assert uploader.is_alive(), "the upload did not wait for the store's lock"
+        assert uploader.is_alive(), "the upload did not wait for the asset's lock"
         assert store.usage().count == 0
-        sweep.execute(UNLOCK, (ASSET_LOCK_KEY,))
+        sweep.execute(UNLOCK, (key,))
         uploader.join(10)
     assert len(stored) == 1 and exists(store, stored[0])
+
+
+def test_a_removal_in_progress_does_not_hold_up_an_upload_of_other_content(
+    store: AssetStore, pg_conninfo: str
+) -> None:
+    """The sweep's removal locks only its own asset, so its unlinks never queue every
+    other upload in the store behind them."""
+    stored: list[AssetMeta] = []
+    key = asset_lock_key(svg_id(1))
+    with psycopg.connect(pg_conninfo, autocommit=True) as sweep:
+        sweep.execute(LOCK, (key,))
+        uploader = threading.Thread(target=lambda: stored.append(store.put(svg(2), "b.svg")))
+        uploader.start()
+        uploader.join(10)
+        assert not uploader.is_alive(), "the upload waited for another asset's removal"
+        sweep.execute(UNLOCK, (key,))
+    assert len(stored) == 1 and exists(store, stored[0])
+
+
+def test_a_reupload_does_not_wait_for_an_upload_of_new_content(
+    store: AssetStore, pg_conninfo: str
+) -> None:
+    """Only content not yet stored needs the store's lock (its quota check); stored
+    content costs nothing, so its re-upload takes only its own asset's lock."""
+    first = store.put(svg(1), "a.svg")
+    with psycopg.connect(pg_conninfo, autocommit=True) as other:
+        other.execute(LOCK, (ASSET_LOCK_KEY,))  # a new upload mid-way through its check
+        uploader = threading.Thread(target=lambda: store.put(svg(1), "again.svg"))
+        uploader.start()
+        uploader.join(10)
+        assert not uploader.is_alive(), "the re-upload waited for the store's lock"
+        other.execute(UNLOCK, (ASSET_LOCK_KEY,))
+    assert store.get(first.id).name == "again.svg"
+
+
+def test_one_removal_that_fails_in_the_database_does_not_stop_the_sweep(
+    store: AssetStore, pg_pool: PgPool, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A database error on one candidate is logged and skipped, like a file error: the
+    rest are still removed and counted, and that asset's lock is let go."""
+    metas = sorted((store.put(svg(n), f"{n}.svg") for n in range(3)), key=lambda m: m.id)
+    failing = metas[0]  # the first the sweep tries
+    for meta in metas:
+        age(pg_pool, meta, GRACE + DAY)
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "CREATE FUNCTION refuse_delete() RETURNS trigger LANGUAGE plpgsql"
+            f" AS $$ BEGIN IF OLD.id = '{failing.id}' THEN RAISE EXCEPTION 'refused';"
+            " END IF; RETURN OLD; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER refuse BEFORE DELETE ON assets"
+            " FOR EACH ROW EXECUTE FUNCTION refuse_delete()"
+        )
+
+    assert store.sweep(set(), grace=GRACE) == [meta.id for meta in metas[1:]]
+    assert exists(store, failing)
+    assert "could not remove an unused asset" in caplog.text
+
+    # The failed removal's lock was released: another session can take it at once (a
+    # session of its own, since the pool's could be the one that holds it).
+    with psycopg.connect(pg_conninfo, autocommit=True) as other:
+        other.execute("DROP TRIGGER refuse ON assets")
+        taken = other.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+            (asset_lock_key(failing.id),),
+        ).fetchone()
+        assert taken == (True,)
+        other.execute(UNLOCK, (asset_lock_key(failing.id),))
+    assert store.sweep(set(), grace=GRACE) == [failing.id]
 
 
 def test_the_sweep_removes_a_row_whose_blob_is_gone(store: AssetStore, pg_pool: PgPool) -> None:

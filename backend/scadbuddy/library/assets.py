@@ -42,6 +42,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+import psycopg
 from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from psycopg import Connection
@@ -66,8 +67,17 @@ ASSET_ID_RE = re.compile(ASSET_ID_PATTERN)
 _BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png)$")
 #: The metadata sidecar the file-based store kept beside each blob: a leftover (#591).
 _SIDECAR_RE = re.compile(r"^[0-9a-f]{64}\.json$")
-#: The store's advisory lock, hashed as the preset store hashes its own.
+#: The store's advisory lock, hashed as the preset store hashes its own: held only
+#: by an upload of content not yet stored, for its quota check and insert.
 ASSET_LOCK_KEY = "scadbuddy-assets"
+
+
+def asset_lock_key(asset_id: str) -> str:
+    """One asset's advisory lock: an upload of that content, and the sweep's removal
+    of it, hold it. Never the same key as `ASSET_LOCK_KEY`."""
+    return f"{ASSET_LOCK_KEY}:{asset_id}"
+
+
 _LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 _UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
@@ -313,10 +323,18 @@ class AssetStore:
     does not find it, usage does not count it, and the sweep removes it once its
     mtime is older than the grace.
 
-    What must not interleave -- storing with its quota check, and the sweep's
-    re-check and removal of one asset -- holds the store's advisory lock
-    (`ASSET_LOCK_KEY`), so it holds across threads, processes and replicas alike.
-    `use` needs only its row: the sweep locks that row before it re-checks it.
+    What must not interleave holds a Postgres advisory lock, so it holds across
+    threads, processes and replicas alike, and no wider than it must:
+
+    - an upload and the sweep's re-check and removal of the SAME asset hold that
+      asset's lock (`asset_lock_key`), so a removal never delays an upload of other
+      content;
+    - an upload of content not yet stored also holds the store's lock
+      (`ASSET_LOCK_KEY`) for its quota check and insert, so two uploads cannot both
+      take the last slot. A re-upload of stored content needs no room and skips it.
+      Always taken after the asset's lock, and the sweep never takes it, so the two
+      cannot deadlock;
+    - `use` needs only its row: the sweep locks that row before it re-checks it.
     """
 
     def __init__(
@@ -443,17 +461,18 @@ class AssetStore:
             height=height,
         )
         with self._require().connection() as conn, conn.transaction():
-            conn.execute(_LOCK_XACT, (ASSET_LOCK_KEY,))
+            conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
             known = conn.execute("SELECT 1 FROM assets WHERE id = %s", (meta.id,)).fetchone()
             # Content already stored costs nothing, so a full store still takes it:
             # re-uploading a file an output uses must keep working at the cap.
             if known is None:
+                conn.execute(_LOCK_XACT, (ASSET_LOCK_KEY,))
                 self._require_room(self._counted(conn), meta.size)
             blob = self.blob_path(meta)
             # Before the row: a failed write rolls the insert back, so no row is ever
             # without its blob. The id is the content hash, so a blob already there
-            # (an orphan, or this asset's own) is these bytes; the lock keeps the
-            # sweep from removing it until this commits.
+            # (an orphan, or this asset's own) is these bytes; the asset's lock keeps
+            # the sweep from removing it until this commits.
             if not blob.is_file():
                 self.root.mkdir(parents=True, exist_ok=True)
                 _write_atomically(blob, stored)
@@ -507,11 +526,12 @@ class AssetStore:
         reference made while the sweep runs is not in it. What protects that asset
         is its last use: every path that creates a reference -- an upload, a render
         submit, a preset save -- marks the asset used first, and each removal
-        re-checks the last use with the row locked, under the store's advisory lock.
+        re-checks the last use with the row locked, under the asset's advisory lock.
         That lock is held from before the re-check until the blob is gone, which is
         after the row's delete has committed: `get` stops finding the asset before
         its bytes go, and an upload of the same content waits until they have.
-        Anything that cannot be removed is logged and skipped, like the other sweeps.
+        Anything that cannot be removed -- a file error or a database error -- is
+        logged and skipped, like the other sweeps, and the rest are still tried.
         """
         pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
@@ -531,23 +551,26 @@ class AssetStore:
         )
         removed: list[str] = []
         for asset_id in candidates:
-            with pool.connection() as conn:
-                # A session lock, not a transaction's: it must outlive the commit of
-                # the row's delete, until the blob is gone.
-                conn.execute(_LOCK_SESSION, (ASSET_LOCK_KEY,))
-                try:
-                    if self._remove(conn, asset_id, cutoff, cutoff_at):
-                        removed.append(asset_id)
-                except OSError:
-                    logger.exception("could not remove an unused asset", extra={"asset": asset_id})
-                finally:
-                    conn.execute(_UNLOCK_SESSION, (ASSET_LOCK_KEY,))
+            key = asset_lock_key(asset_id)
+            try:
+                with pool.connection() as conn:
+                    # A session lock, not a transaction's: it must outlive the commit
+                    # of the row's delete, until the blob is gone. A connection that
+                    # breaks takes the lock with it.
+                    conn.execute(_LOCK_SESSION, (key,))
+                    try:
+                        if self._remove(conn, asset_id, cutoff, cutoff_at):
+                            removed.append(asset_id)
+                    finally:
+                        conn.execute(_UNLOCK_SESSION, (key,))
+            except (OSError, psycopg.Error):
+                logger.exception("could not remove an unused asset", extra={"asset": asset_id})
         return removed
 
     def _remove(
         self, conn: Connection[DictRow], asset_id: str, cutoff: float, cutoff_at: datetime
     ) -> bool:
-        """One candidate of the sweep, under the store's lock: whether it went."""
+        """One candidate of the sweep, under its lock: whether it went."""
         with conn.transaction():
             row = conn.execute(
                 "SELECT last_used_at FROM assets WHERE id = %s FOR UPDATE", (asset_id,)

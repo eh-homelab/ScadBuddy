@@ -610,7 +610,7 @@ string.
     never refused, so re-uploading what an output uses keeps working at the cap.
     The check and the insert happen in one transaction holding the store's advisory
     lock, so two uploads -- in one process or on two replicas -- cannot both take
-    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
+    the last slot; a re-upload of stored content needs no room and skips it. Sizes are of the stored bytes, after sanitising and downscaling.
   - *Usage.* `count(*)` and `sum(size)` over the `assets` table (#591), not a
     directory scan and not a running total: the metadata is one row per asset
     (`id, name, kind, size, width, height, created_at, last_used_at`), so there is
@@ -661,12 +661,14 @@ string.
     it staged its files, and its job stays in the store until the TTL prunes it. An
     upload whose first render has not been submitted yet is protected by the grace
     alone, which is why the grace has a floor. Removal deletes the row first, so
-    `get` stops finding the asset before its bytes go. Each removal holds the
-    store's advisory lock at session scope, from before the re-check until the blob
+    `get` stops finding the asset before its bytes go. Each removal holds that
+    asset's advisory lock at session scope, from before the re-check until the blob
     is gone -- past the commit of the delete -- and an upload holds the same lock
     for its transaction, so an upload of the same content waits rather than
-    inserting a row over a blob about to be removed. The locks are Postgres's, so
-    they hold between replicas sharing the volume and the database.
+    inserting a row over a blob about to be removed, while uploads of other content
+    never wait on a removal. The locks are Postgres's, so they hold between
+    replicas sharing the volume and the database. A removal that fails, in a file
+    or in the database, is logged and skipped; the rest are still tried.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job
