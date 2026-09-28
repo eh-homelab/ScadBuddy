@@ -208,6 +208,6 @@ A **print** is one linked archive (`output_bambuddy_prints` row joined to `GET /
 - #306 spike: L1 on the pipeline route, and L6 in practice (2.1).
 - #308 spike: whether the finish photo is always `photos[0]` (2.4).
 - #309:
-  - Bambuddy's in-memory uploads (2.5): file the upstream issue, and set the default limit knowingly;
+  - Bambuddy's in-memory uploads (2.5): **awaiting Elan's decision** on whether a 1 GiB video goes through Bambuddy's in-memory library upload at all. Until then §2.5 stands as written; file the upstream issue either way;
   - whether Bambuddy's library UI previews video.
 - Auth-enabled verification: the homelab runs with auth off, so A2–A7 are verified from source only. #307's connection test should exercise them once a key with auth on is available.
