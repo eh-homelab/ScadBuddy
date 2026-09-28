@@ -165,6 +165,7 @@ FAKE_OPENSCAD = """#!/usr/bin/env python3
 import json
 import os
 import pathlib
+import shutil
 import sys
 
 args = sys.argv[1:]
@@ -217,6 +218,20 @@ if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
             }
         )
     )
+    raise SystemExit(0)
+
+if out is not None and out.endswith(".3mf"):
+    # The API tests' render (tests/api/conftest.py): `width=999` fails as a template
+    # that could not open its picture does; anything else prints FAKE_STDERR and
+    # exports the 3MF named FAKE_3MF, if any.
+    if any(arg.startswith("width=999") for arg in args):
+        print("WARNING: The file 'pic.svg' couldn't be opened", file=sys.stderr)
+        print("ERROR: something broke", file=sys.stderr)
+        raise SystemExit(1)
+    for line in settings.get("FAKE_STDERR", []):
+        print(line, file=sys.stderr)
+    if "FAKE_3MF" in settings:
+        shutil.copyfile(settings["FAKE_3MF"], out)
     raise SystemExit(0)
 
 if out is not None and out.endswith(".param"):

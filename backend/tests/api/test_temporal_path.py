@@ -1,17 +1,15 @@
-"""The app with SCADBUDDY_TEMPORAL_ADDRESS set: renders go through RenderService and an
-in-process worker on a dev server, and the routes read the projection."""
+"""The app on Temporal: renders go through RenderService and an in-process worker on
+the session's Temporal, and the routes read the projection."""
 
 from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from temporalio.client import Client
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
@@ -21,19 +19,12 @@ from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from tests.conftest import fake_3mf_openscad
-from tests.support.temporal import current_address, temporal_client
 
 pytestmark = [
     pytest.mark.requires_postgres,
     pytest.mark.requires_temporal,
     pytest.mark.requires_git,
 ]
-
-
-@pytest.fixture
-async def temporal() -> AsyncIterator[Client]:
-    async with temporal_client() as client:
-        yield client
 
 
 def _settled(client: TestClient, job_id: str, timeout: float = 60) -> dict[str, Any]:
@@ -50,18 +41,13 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
     settings: Settings,
     paths: DataPaths,
     model: str,
-    temporal: Client,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    queue = f"t-{uuid.uuid4().hex[:8]}"
+    # The session's Temporal, as every API test's app, on a build of its own.
     cfg = settings.model_copy(
         update={
             "openscad": fake_3mf_openscad(tmp_path / "bin"),
-            "temporal_address": current_address(temporal),
-            "temporal_namespace": temporal.namespace,
-            "temporal_task_queue_render": queue,
-            "temporal_worker_inprocess": True,
             "revision": f"test-{uuid.uuid4().hex[:8]}",
         }
     )
@@ -78,7 +64,7 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
         assert health["temporal"] == {
             "address": cfg.temporal_address,
             "namespace": cfg.temporal_namespace,
-            "task_queue": queue,
+            "task_queue": cfg.temporal_task_queue_render,
             "worker_inprocess": True,
         }
 
@@ -107,9 +93,11 @@ def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconci
 ) -> None:
     cfg = settings.model_copy(
         update={
-            # Nothing listens on port 1: every call fails to connect.
+            # Nothing listens on port 1: every call fails to connect. No in-process
+            # worker, whose client connects eagerly: the API's own is lazy.
             "temporal_address": "127.0.0.1:1",
             "temporal_task_queue_render": f"t-{uuid.uuid4().hex[:8]}",
+            "temporal_worker_inprocess": False,
         }
     )
     app = create_app(cfg)

@@ -7,9 +7,15 @@ import uuid
 
 import pytest
 from temporalio import workflow
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.worker import Worker
 
-from tests.support.temporal import WorkerThread, temporal_client
+from tests.support.temporal import (
+    WorkerThread,
+    current_address,
+    temporal_client,
+    terminate_open_workflows,
+)
 
 
 @workflow.defn
@@ -49,3 +55,16 @@ def test_a_worker_thread_raises_what_stopped_its_worker() -> None:
     thread = WorkerThread(make_worker)
     with pytest.raises(RuntimeError, match="could not build the worker"), thread:
         assert thread._loop is not None  # set before __enter__ returns
+
+
+@pytest.mark.requires_temporal
+async def test_terminate_open_workflows_ends_only_the_queues_running_workflows() -> None:
+    async with temporal_client() as client:
+        queue, other = (f"t-{uuid.uuid4().hex[:8]}" for _ in range(2))
+        mine = await client.start_workflow(Shout.run, "a", id=f"a-{queue}", task_queue=queue)
+        theirs = await client.start_workflow(Shout.run, "b", id=f"b-{other}", task_queue=other)
+
+        await terminate_open_workflows(current_address(client), client.namespace, queue)
+
+        assert (await mine.describe()).status == WorkflowExecutionStatus.TERMINATED
+        assert (await theirs.describe()).status == WorkflowExecutionStatus.RUNNING

@@ -9,11 +9,12 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -26,6 +27,8 @@ TEST_TEMPORAL_DEV_SERVER_ENV = "SCADBUDDY_TEST_TEMPORAL_DEV_SERVER"
 # `_clean_env` scrubs every SCADBUDDY_* variable before each test.
 TEST_TEMPORAL_ADDRESS = os.environ.get(TEST_TEMPORAL_ADDRESS_ENV) or None
 TEST_TEMPORAL_DEV_SERVER = os.environ.get(TEST_TEMPORAL_DEV_SERVER_ENV) or None
+#: One task queue per API test (see `temporal_server`), with room to spare.
+MAX_TASK_QUEUES_PER_VERSION = 100_000
 
 
 def temporal_available() -> bool:
@@ -45,6 +48,48 @@ async def temporal_client() -> AsyncIterator[Client]:
         yield env.client
     finally:
         await env.shutdown()
+
+
+@contextmanager
+def temporal_server() -> Iterator[str]:
+    """The address of a Temporal for a whole test session: SCADBUDDY_TEST_TEMPORAL_ADDRESS,
+    or a dev server started here and stopped on exit. Its namespace is `default`. The
+    dev server is a subprocess, so the loop that started it need not keep running.
+
+    Every app a test starts runs its worker on a task queue of its own, and all of
+    them register with the one deployment version: past Temporal's default of 100
+    task queues per version a new queue is refused and its renders never start, so
+    the dev server allows more. A server named by the address needs the same
+    (`matching.maxTaskQueuesInDeploymentVersion`)."""
+    if TEST_TEMPORAL_ADDRESS:
+        yield TEST_TEMPORAL_ADDRESS
+        return
+    loop = asyncio.new_event_loop()
+    env = loop.run_until_complete(
+        WorkflowEnvironment.start_local(
+            dev_server_existing_path=TEST_TEMPORAL_DEV_SERVER or shutil.which("temporal"),
+            data_converter=pydantic_data_converter,
+            dev_server_extra_args=[
+                "--dynamic-config-value",
+                f"matching.maxTaskQueuesInDeploymentVersion={MAX_TASK_QUEUES_PER_VERSION}",
+            ],
+        )
+    )
+    try:
+        yield current_address(env.client)
+    finally:
+        loop.run_until_complete(env.shutdown())
+        loop.close()
+
+
+async def terminate_open_workflows(address: str, namespace: str, task_queue: str) -> None:
+    """End every workflow still running on ``task_queue``."""
+    client = await Client.connect(address, namespace=namespace)
+    query = f"TaskQueue = '{task_queue}' AND ExecutionStatus = 'Running'"
+    async for execution in client.list_workflows(query):
+        handle = client.get_workflow_handle(execution.id, run_id=execution.run_id)
+        with suppress(RPCError):  # it closed in between
+            await handle.terminate("the test that started it ended")
 
 
 def current_address(client: Client) -> str:

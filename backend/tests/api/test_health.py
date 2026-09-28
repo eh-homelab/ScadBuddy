@@ -11,7 +11,9 @@ from scadbuddy.main import create_app
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
-def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) -> None:
+def test_healthz_reports_openscad_and_a_writable_data_dir(
+    client: TestClient, settings: Settings
+) -> None:
     body = client.get("/healthz").json()
     assert body == {
         "status": "ok",
@@ -20,10 +22,10 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) ->
         "revision": "unknown",
         "version": "dev",
         "temporal": {
-            "address": UNUSED_TEMPORAL_ADDRESS,
-            "namespace": "scadbuddy",
-            "task_queue": "render",
-            "worker_inprocess": False,
+            "address": settings.temporal_address,
+            "namespace": "default",
+            "task_queue": settings.temporal_task_queue_render,
+            "worker_inprocess": True,
         },
     }
 
