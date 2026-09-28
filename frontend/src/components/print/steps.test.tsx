@@ -9,7 +9,7 @@ const installed = [
   { size: '0.4', flow: 'high_flow' as const, count: 2 },
 ]
 
-// Addendum R9: mixed nozzle sizes are ALWAYS a server-side error, so there is one size
+// Spec 2026-09-27 §4.1: mixed nozzle sizes are ALWAYS a server-side error, so there is one size
 // radiogroup for both sides in every mode; only flow (Standard/High Flow) is per-side,
 // and only in Advanced mode.
 describe('NozzleStep', () => {

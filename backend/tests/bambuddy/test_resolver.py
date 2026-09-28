@@ -1,6 +1,6 @@
 """Spec §4 — the resolver, from hand-built catalogues and the H2C recording.
 
-Controller rulings R8/R9 (task-3-addendum.md) override the brief: Bambuddy rejects
+Spec §4.1 (after §5's live tests) overrides the original plan: Bambuddy rejects
 every ``source: "local"`` printer preset, so ``printer_preset_name`` always names
 Bambu's own preset and High Flow / mixed nozzle sizes are handled without ever
 inventing one.
@@ -121,7 +121,7 @@ def test_a_bambu_spool_resolves_to_its_size_specific_preset_by_name() -> None:
 
 
 def test_a_plate_using_only_slot_2_pads_slot_1_rather_than_compacting() -> None:
-    """task-5-fix-1: a plate using only slot 2 (plate 2 of an all_plates run, commonly)
+    """A plate using only slot 2 (plate 2 of an all_plates run, commonly)
     must still hand Bambuddy a length-2 array with the spool's preset at index 1, not a
     length-1 array that slices the wrong preset onto the wrong filament."""
     built = FilamentOptions(
@@ -323,7 +323,7 @@ def test_every_slot_erroring_leaves_no_filament_presets_to_send() -> None:
 
 
 def test_mixed_sizes_are_always_an_error() -> None:
-    """Addendum R9: no ``allow_mixed_sizes`` escape hatch — Bambuddy can't slice it."""
+    """Spec §4.1: no ``allow_mixed_sizes`` escape hatch — Bambuddy can't slice it."""
     nozzles = [NozzleChoice(size="0.2"), NozzleChoice(size="0.4")]
     resolved = resolve(options(BASIC), plan(1), PrintChoices(nozzles=nozzles), recorded(), {})
     assert [e.kind for e in resolved.errors] == ["mixed-sizes"]
@@ -342,7 +342,7 @@ def test_mixed_sizes_are_always_an_error() -> None:
 def test_hf_on_either_side_still_names_bambus_own_printer_preset(
     flows: tuple[str, str],
 ) -> None:
-    """Addendum R8: Bambuddy 400s on ScadBuddy's own printer presets, so there is no
+    """Spec §4.1: Bambuddy 400s on ScadBuddy's own printer presets, so there is no
     "ScadBuddy · ..." name for any flow combination — only Bambu's own preset name."""
     nozzles = [NozzleChoice(size="0.4", flow=f) for f in flows]  # type: ignore[arg-type]
     assert printer_preset_name(nozzles) == "Bambu Lab H2C 0.4 nozzle"

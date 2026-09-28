@@ -7,10 +7,10 @@ Presets are matched by **name and compatible printer**, never by id: the cloud t
 spells an id ``GP243`` and the standard tier spells the same preset by its name, and
 either tier may be the only one present (Bambu Cloud logged out).
 
-Controller rulings R8/R9 (task-3-addendum.md, 2026-09-27) override the original spec
-brief here: a live check found Bambuddy rejects every ``source: "local"`` printer
-preset with 400 "The selected printer is not compatible with the process preset in
-the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
+The spec's original plan of a ScadBuddy-authored printer preset was dropped (spec
+2026-09-27 §4.1, after §5's live tests): Bambuddy rejects every ``source: "local"``
+printer preset with 400 "The selected printer is not compatible with the process
+preset in the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
 nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size``, adds a
 ``hf-unsupported`` warning when High Flow was asked for, and refuses mixed sizes
 outright rather than offering an override.
@@ -107,7 +107,7 @@ def _bambu_printer(size: str) -> str:
 def printer_preset_name(nozzles: list[NozzleChoice]) -> str:
     """Bambu's own printer preset for ``nozzles[0]``'s size.
 
-    Addendum R8: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
+    Spec §4.1: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
     no ScadBuddy-authored name for High Flow or mixed sizes — every flow combination
     resolves to the same Bambu preset name, and ``resolve`` is what adds the
     ``hf-unsupported`` warning or the ``mixed-sizes`` error instead.
