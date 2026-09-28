@@ -1,7 +1,8 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import { models } from '../mocks/fixtures'
+import { MEDIA_MP4_BASE64, MEDIA_PNG_BASE64, models } from '../mocks/fixtures'
+import { setMockUploadLimit } from '../mocks/handlers'
 import { renderPage } from '../test/utils'
 import { UploadDialog } from './UploadDialog'
 
@@ -291,5 +292,103 @@ describe('UploadDialog', () => {
 
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('no .scad file')
     expect(within(dialog).getByRole('button', { name: 'Add model' })).toBeDisabled()
+  })
+
+  describe('media (#279)', () => {
+    const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+    const png = (name: string) => new File([bytes(MEDIA_PNG_BASE64)], name, { type: 'image/png' })
+    const mp4 = (name: string) => new File([bytes(MEDIA_MP4_BASE64)], name, { type: 'video/mp4' })
+    const plain = models[1] as (typeof models)[number]
+
+    it('takes several images and videos and uploads them after the model, the first as cover', async () => {
+      const create = vi.spyOn(api, 'uploadModel').mockResolvedValue(plain)
+      const sent: string[] = []
+      const last = { ...plain, name: 'with media' }
+      const media = vi.spyOn(api, 'uploadMedia').mockImplementation(async (_slug, chosen) => {
+        sent.push(chosen.name)
+        return last
+      })
+      const { dialog, user, onUploaded } = render()
+      const scad = file('bin.scad')
+      const [first, second, third] = [png('front.png'), mp4('print.mp4'), png('side.png')]
+
+      await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), scad)
+      await user.upload(within(dialog).getByLabelText('Images and videos'), [first, second])
+      await user.upload(within(dialog).getByLabelText('Images and videos'), third)
+
+      const listed = within(within(dialog).getByTestId('upload-media')).getAllByRole('listitem')
+      expect(listed.map((row) => row.textContent)).toEqual([
+        expect.stringContaining('front.png'),
+        expect.stringContaining('print.mp4'),
+        expect.stringContaining('side.png'),
+      ])
+      expect(listed[0]).toHaveTextContent('cover')
+      expect(listed[1]).not.toHaveTextContent('cover')
+
+      // One can be taken out again before anything is sent.
+      await user.click(within(listed[2]!).getByRole('button', { name: 'Remove side.png' }))
+
+      await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
+
+      await waitFor(() => expect(onUploaded).toHaveBeenCalledWith(last))
+      expect(create).toHaveBeenCalledOnce()
+      expect(sent).toEqual(['front.png', 'print.mp4'])
+      expect(media).toHaveBeenCalledWith(plain.slug, first, {}, expect.any(Function))
+      expect(create.mock.invocationCallOrder[0]).toBeLessThan(media.mock.invocationCallOrder[0]!)
+    })
+
+    it('keeps a thumbnail as the cover, with the media after it', async () => {
+      const { dialog, user } = render()
+
+      await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), [
+        file('bin.scad'),
+        file('thumbnail.png'),
+      ])
+      await user.upload(within(dialog).getByLabelText('Images and videos'), png('front.png'))
+
+      const [row] = within(within(dialog).getByTestId('upload-media')).getAllByRole('listitem')
+      expect(row).not.toHaveTextContent('cover')
+      expect(within(dialog).getByTestId('upload-media')).toHaveTextContent('after the thumbnail')
+    })
+
+    it('refuses a file over the upload limit before anything is sent', async () => {
+      setMockUploadLimit(100)
+      const create = vi.spyOn(api, 'uploadModel').mockResolvedValue(plain)
+      const media = vi.spyOn(api, 'uploadMedia').mockResolvedValue(plain)
+      const { dialog, user } = render()
+      const big = new File([new Uint8Array(101)], 'long.webm', { type: 'video/webm' })
+
+      await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), file('bin.scad'))
+      await user.upload(within(dialog).getByLabelText('Images and videos'), [big, png('ok.png')])
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'long.webm is larger than the',
+      )
+      const listed = within(within(dialog).getByTestId('upload-media')).getAllByRole('listitem')
+      expect(listed).toHaveLength(1)
+      expect(listed[0]).toHaveTextContent('ok.png')
+      expect(create).not.toHaveBeenCalled()
+      expect(media).not.toHaveBeenCalled()
+    })
+
+    it('says which media did not go up, and still opens the model it made', async () => {
+      vi.spyOn(api, 'uploadModel').mockResolvedValue(plain)
+      vi.spyOn(api, 'uploadMedia').mockRejectedValue(
+        new ApiError({ title: 'Service Unavailable', status: 503, detail: 'media needs the database' }),
+      )
+      const { dialog, user, onUploaded } = render()
+
+      await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), file('bin.scad'))
+      await user.upload(within(dialog).getByLabelText('Images and videos'), png('front.png'))
+      await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
+
+      const alert = await within(dialog).findByRole('alert')
+      expect(alert).toHaveTextContent('front.png')
+      expect(alert).toHaveTextContent('media needs the database')
+      expect(onUploaded).not.toHaveBeenCalled()
+
+      await user.click(within(dialog).getByRole('button', { name: 'Open model' }))
+      expect(onUploaded).toHaveBeenCalledWith(plain)
+    })
   })
 })
