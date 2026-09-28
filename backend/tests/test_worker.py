@@ -8,7 +8,8 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, NoReturn, cast
 
 import httpx
 import psycopg
@@ -25,13 +26,20 @@ from temporalio.worker import (
 
 from scadbuddy import worker as worker_module
 from scadbuddy.core.config import Config
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.factory import StoreBundle
+from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import _poll, _wait_drained, run_worker
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
@@ -156,6 +164,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
     assert f'revision="{build_id}"' in metrics
+    # Refreshed per scrape from this process's store (the local one: no cache to size).
+    assert samples["scadbuddy_store_render_key_fallback"] == 0
+    assert samples["scadbuddy_worker_cache_bytes"] == 0
 
 
 # ── the drain after stop ───────────────────────────────────────────────────────
@@ -294,3 +305,60 @@ async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_fa
         with contextlib.suppress(asyncio.CancelledError):
             await evicting
     assert cache.calls >= 3
+
+
+class _Source:
+    async def current(self) -> RenderStoreSettings:
+        return RenderStoreSettings(
+            store_backend="bambuddy",
+            bambuddy_url="http://bambuddy.test",
+            api_key="full",
+            key_is_fallback=True,
+            library_folder_id=7,
+        )
+
+
+async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_key(
+    tmp_path: Path,
+) -> None:
+    local = LocalBlobStore(tmp_path / "blobs")
+    cache = CachedBlobStore(
+        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+    )
+    (local.dir_for("k") / "m").write_bytes(b"12345")
+    store = StoreBundle(
+        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
+    )
+    app = worker_module._health_app(
+        Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL), Metrics(), store
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
+        metrics = (await http.get("/metrics")).text
+    samples = {
+        line.rsplit(" ", 1)[0]: float(line.rsplit(" ", 1)[1])
+        for line in metrics.splitlines()
+        if line and not line.startswith("#")
+    }
+    assert samples["scadbuddy_worker_cache_bytes"] == 5
+    assert samples["scadbuddy_store_render_key_fallback"] == 1
+
+
+def test_a_refused_store_closes_the_projection_the_worker_opened(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[JobProjection] = []
+
+    class Recording(JobProjection):
+        def open(self) -> None:
+            super().open()
+            opened.append(self)
+
+    def refuse(**_: object) -> NoReturn:
+        raise StoreNotReadyError("refused")
+
+    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    monkeypatch.setattr(worker_module, "build_store", refuse)
+    with pytest.raises(StoreNotReadyError):
+        worker_module.build_worker_deps(settings)
+    assert len(opened) == 1 and opened[0].pool.closed

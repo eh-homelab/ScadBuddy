@@ -399,19 +399,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # live in the settings pool, open only from here on.
     pool = state.settings_store.pool
     source = RenderSettingsSource(pool, state.settings)
-    current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
-    # The legacy queue renders in-process from the volume: always the local store.
-    state.store = build_store(
-        backend=current.store_backend if state.projection is not None else "local",
-        current=current,
-        config=state.config,
-        paths=state.paths,
-        pool=pool,
-        source=source,
-        history=state.history,
-        fonts=state.fonts,
-        metrics=state.metrics,
-    )
+    try:
+        current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+        # The legacy queue renders in-process from the volume: always the local store.
+        state.store = build_store(
+            backend=current.store_backend if state.projection is not None else "local",
+            current=current,
+            config=state.config,
+            paths=state.paths,
+            pool=pool,
+            source=source,
+            history=state.history,
+            fonts=state.fonts,
+            metrics=state.metrics,
+        )
+    except BaseException:
+        # A refused start (an unready store) closes the pool it opened, then propagates.
+        await asyncio.to_thread(state.settings_store.close)
+        raise
     state.blobs = state.store.blobs
     if isinstance(state.queue, RenderService):
         state.queue.snapshots = state.store.snapshots
