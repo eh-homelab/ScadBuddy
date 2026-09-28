@@ -5,7 +5,7 @@ import { createBackendClient } from '../../src/api/backend.js'
 import { type AppDeps, createApp } from '../../src/app.js'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../../src/auth/authenticate.js'
 import { InMemoryTokenStore, type TokenStore } from '../../src/auth/tokens.js'
-import { nodeClientAddress } from '../../src/mcp/http.js'
+import { originPolicy } from '../../src/http/origins.js'
 import { ALL_TOOLS } from '../../src/tools/index.js'
 import { PendingActionStore } from '../../src/tools/pending.js'
 import type { ToolServices } from '../../src/tools/registry.js'
@@ -20,7 +20,12 @@ import { MemoryCredentials } from '../support/memoryCredentials.js'
 export const BACKEND = 'http://backend.test'
 export const MCP_URL = 'http://scadbuddy.test/mcp'
 export const LOOPBACK = '127.0.0.1'
-export const LAN = '10.0.0.7'
+/** The ingress controller: inside the trusted-proxy range, so its X-Forwarded-* are believed. */
+export const INGRESS = '10.0.0.7'
+/** Some other LAN host: its X-Forwarded-* headers are ignored. */
+export const UNTRUSTED = '192.168.1.50'
+/** SCADBUDDY_PUBLIC_URL and SCADBUDDY_AGENT_TRUSTED_PROXIES as the tests deploy them. */
+export const ORIGINS = originPolicy('https://scadbuddy.test', '10.0.0.0/24')
 
 export function services(overrides: Partial<ToolServices> = {}): ToolServices {
   return {
@@ -44,7 +49,10 @@ export function baseDeps(overrides: Partial<AppDeps> = {}): AppDeps {
     kek: { ok: false, reason: 'not needed by /mcp tests' },
     credentials: new MemoryCredentials(),
     testConnection: async () => ({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
-    remoteAddress: () => undefined,
+    origins: ORIGINS,
+    // What @hono/node-server's getConnInfo reads; appFetch passes the same binding.
+    remoteAddress: (c) =>
+      (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress,
     ...overrides,
   }
 }
@@ -71,7 +79,6 @@ export function testApp(
         services: svc,
         tokens,
         authSettings: options.authSettings ?? (() => settings),
-        clientAddress: nodeClientAddress,
       },
     }),
   )
@@ -84,6 +91,8 @@ export type Via = { address?: string; headers?: Record<string, string> }
 export function appFetch(app: Hono, via: Via = {}): typeof fetch {
   return async (input, init) => {
     const request = new Request(input, init)
+    // A socket request always carries Host; a constructed Request does not.
+    request.headers.set('host', new URL(request.url).host)
     for (const [k, v] of Object.entries(via.headers ?? {})) request.headers.set(k, v)
     return app.fetch(request, { incoming: { socket: { remoteAddress: via.address ?? LOOPBACK } } })
   }

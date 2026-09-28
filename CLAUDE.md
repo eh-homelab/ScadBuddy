@@ -102,10 +102,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   the mocked e2e run.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
-  reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` and
-  `SCADBUDDY_SECRET_KEY_FILE` (no AI env vars; AI settings live in the database);
+  reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
+  variable the backend reads; the one origin allowed to write) and
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
-  `/api/v1/ai/credentials`); `src/harness/options.ts` builds every query's SDK options
+  `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
+  (credential writes and `/mcp` now; `/api/v1/ws` later) uses the one allowlist in
+  `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
+  those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
@@ -117,10 +124,16 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables. Schema changes are appended to
     `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
-    start under advisory lock "SCADAGNT", ledger `ai_migrations`, separate from the
-    backend's `scadbuddy_migrations`). Secrets are envelope-encrypted with
-    `src/secrets.ts` under the KEK in `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes,
-    base64; spec §9); comparable tokens are stored hashed instead.
+    start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
+    ledger `ai_migrations` with a sha256 per entry: an edited merged entry stops the
+    service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
+    envelope-encrypted with `src/secrets.ts` under the KEK in
+    `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
+    value to its row and to the columns that say where it is sent (for the credential:
+    `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
+    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
+    refused, because it would inherit the credential env.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

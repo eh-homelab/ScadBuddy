@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { checkTransport, isLoopback } from '../src/auth/authenticate.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { FailClosedTokenStore, hashToken, InMemoryTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { BoundedEventStore } from '../src/mcp/eventStore.js'
@@ -43,29 +42,6 @@ describe('FailClosedTokenStore (production until #255)', () => {
     const store = new FailClosedTokenStore()
     expect(await store.verify()).toBeNull()
     await expect(store.mint()).rejects.toThrow(/#255/)
-  })
-})
-
-describe('transport rule', () => {
-  const req = (headers: Record<string, string> = {}) =>
-    new Request('http://agent:8081/mcp?x=1', { headers: { host: 'scadbuddy.lan', ...headers } })
-
-  it('recognises loopback addresses, including IPv4-mapped IPv6', () => {
-    for (const a of ['127.0.0.1', '127.1.2.3', '::1', '::ffff:127.0.0.1']) expect(isLoopback(a), a).toBe(true)
-    for (const a of ['10.0.0.1', '::ffff:10.0.0.1', '', undefined]) expect(isLoopback(a), String(a)).toBe(false)
-  })
-
-  it('names the https URL on the Host the client used', async () => {
-    const res = checkTransport(req(), '10.1.1.1')
-    expect(res?.status).toBe(403)
-    expect(await res?.json()).toMatchObject({ https_url: 'https://scadbuddy.lan/mcp?x=1' })
-  })
-
-  it('trusts the first X-Forwarded-Proto value', () => {
-    expect(checkTransport(req({ 'x-forwarded-proto': 'https' }), '10.1.1.1')).toBeUndefined()
-    expect(checkTransport(req({ 'x-forwarded-proto': 'HTTPS, http' }), '10.1.1.1')).toBeUndefined()
-    expect(checkTransport(req({ 'x-forwarded-proto': 'http, https' }), '10.1.1.1')?.status).toBe(403)
-    expect(checkTransport(req(), '127.0.0.1')).toBeUndefined()
   })
 })
 

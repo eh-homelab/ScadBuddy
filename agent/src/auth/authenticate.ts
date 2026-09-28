@@ -1,3 +1,4 @@
+import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
 import { type Principal, type Tier, tiersUpTo } from './principal.js'
 import type { TokenStore } from './tokens.js'
 
@@ -14,17 +15,11 @@ export type McpAuthSettings = {
   mode: McpAuthMode
   /** The most an `anonymous` caller may do in `disabled` mode. Full access by default (spec §8.3). */
   anonymousCap: Tier
-  /**
-   * Extra `Origin` values allowed besides the endpoint's own origin, e.g. a
-   * browser-based MCP client on another host. Empty by default.
-   */
-  allowedOrigins: readonly string[]
 }
 
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
   mode: 'bearer',
   anonymousCap: 'outward',
-  allowedOrigins: [],
 }
 
 export type AuthResult = { ok: true; principal: Principal } | { ok: false; response: Response }
@@ -35,67 +30,46 @@ function problem(status: number, detail: string, headers: Record<string, string>
   return Response.json({ error: detail }, { status, headers })
 }
 
-export function isLoopback(address: string | undefined): boolean {
-  if (!address) return false
-  const bare = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
-  return bare === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)
-}
-
-/** The first value of a possibly comma-joined forwarded header, lower-cased. */
-function firstForwarded(value: string | null): string | undefined {
-  const first = value?.split(',')[0]?.trim().toLowerCase()
-  return first ? first : undefined
-}
-
-function hostOf(request: Request): string {
-  return request.headers.get('host') ?? new URL(request.url).host
-}
+// HTTPS and Origin (spec §8.4) are NOT decided here: /mcp uses the one shared
+// allowlist in src/http/origins.ts (#379), through `mcpTransportProblem` below,
+// exactly as the credential routes do (routes/guard.ts). That module trusts
+// X-Forwarded-* only from SCADBUDDY_AGENT_TRUSTED_PROXIES peers and matches
+// Origin against SCADBUDDY_PUBLIC_URL (or the loopback pair from a loopback
+// peer), never against the request's own Host, which a DNS-rebinding page
+// controls.
 
 /**
- * HTTPS in every auth mode, `disabled` included (spec §8.4, D5).
+ * Refuses a request /mcp must not serve, before any auth:
  *
- * TLS ends at the cluster ingress, which sets `X-Forwarded-Proto`. The header
- * is trusted because the agent's port is reachable only through that ingress
- * and the pod's own loopback (spec §4.2–§4.3): anyone who can reach the port
- * directly, bypassing the ingress, could forge it. A deployment that exposes
- * port 8081 some other way breaks that assumption.
- *
- * Allowed: `X-Forwarded-Proto: https`; or no forwarded header at all on a
- * loopback connection (local development and tests). Everything else,
- * including a loopback proxy that says `http`, gets 403 naming the HTTPS URL.
+ * - not HTTPS, in every auth mode including `disabled` (spec §8.4, D5):
+ *   `isSecureTransport`, i.e. a trusted proxy says https, or a loopback peer
+ *   with no proxy involved (the local-development exception as origins.ts
+ *   defines it). 403 naming the https URL.
+ * - an `Origin` that is not allowed. MCP clients that are not browsers send
+ *   none and pass; a browser page must be the allowlisted origin, so a
+ *   rebinding page (Origin equal to its own Host) is refused. 403.
  */
-export function checkTransport(request: Request, clientAddress: string | undefined): Response | undefined {
-  const forwarded = firstForwarded(request.headers.get('x-forwarded-proto'))
-  if (forwarded === 'https') return undefined
-  if (forwarded === undefined && isLoopback(clientAddress)) return undefined
-  const url = new URL(request.url)
-  const httpsUrl = `https://${hostOf(request)}${url.pathname}${url.search}`
-  return Response.json(
-    { error: `MCP is served over HTTPS only; use ${httpsUrl}`, https_url: httpsUrl },
-    { status: 403 },
-  )
-}
-
-/**
- * DNS-rebinding guard (spec §8.4). Non-browser MCP clients send no `Origin`
- * and pass; a browser's `Origin` must be this endpoint's own origin or one
- * the operator allowed.
- */
-export function checkOrigin(
-  request: Request,
-  clientAddress: string | undefined,
-  settings: McpAuthSettings,
-): Response | undefined {
-  const origin = request.headers.get('origin')
-  if (origin === null) return undefined
-  const host = hostOf(request)
-  const own = new Set([`https://${host}`])
-  // Plain HTTP is only ever accepted on loopback, so only there is http:// our origin.
-  if (isLoopback(clientAddress) && request.headers.get('x-forwarded-proto') === null) {
-    own.add(`http://${host}`)
+export function mcpTransportProblem(facts: RequestFacts, policy: OriginPolicy, url: string): Response | undefined {
+  if (!isSecureTransport(facts, policy)) {
+    const path = new URL(url)
+    const base = [...policy.publicOrigins][0] ?? `https://${facts.header('host') ?? path.host}`
+    const httpsUrl = `${base.replace(/^http:/, 'https:')}${path.pathname}${path.search}`
+    return Response.json(
+      { error: `MCP is served over HTTPS only; use ${httpsUrl}`, https_url: httpsUrl },
+      { status: 403 },
+    )
   }
-  if (own.has(origin) || settings.allowedOrigins.includes(origin)) return undefined
-  return problem(403, `Origin ${origin} is not allowed to call this endpoint`)
+  if (facts.header('origin') !== undefined) {
+    const verdict = checkOrigin(facts, policy)
+    if (!verdict.ok) {
+      return problem(
+        403,
+        `Origin ${facts.header('origin')} is not allowed to call this endpoint (only the ScadBuddy public ` +
+          'URL, SCADBUDDY_PUBLIC_URL, or a loopback origin from a loopback peer)',
+      )
+    }
+  }
+  return undefined
 }
 
 function bearerOf(request: Request): string | undefined {

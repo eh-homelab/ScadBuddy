@@ -2,16 +2,12 @@ import { randomBytes } from 'node:crypto'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import type { Context, Hono } from 'hono'
-import {
-  authenticate,
-  checkOrigin,
-  checkTransport,
-  DEFAULT_MCP_AUTH,
-  type McpAuthSettings,
-} from '../auth/authenticate.js'
+import type { Hono } from 'hono'
+import { authenticate, DEFAULT_MCP_AUTH, type McpAuthSettings, mcpTransportProblem } from '../auth/authenticate.js'
 import type { Principal } from '../auth/principal.js'
 import { FailClosedTokenStore, type TokenStore } from '../auth/tokens.js'
+import type { OriginPolicy } from '../http/origins.js'
+import { requestFacts, type RemoteAddress } from '../routes/guard.js'
 import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { BoundedEventStore } from './eventStore.js'
@@ -22,7 +18,8 @@ import { BoundedEventStore } from './eventStore.js'
 // GET opens the server→client stream (resource notifications, #264); DELETE
 // ends the session. Every request, on every method, passes the same gates in
 // this order: HTTPS → Origin → auth mode → principal; only then does the MCP
-// SDK's web-standard transport see it.
+// SDK's web-standard transport see it. HTTPS and Origin come from the one shared
+// allowlist (src/http/origins.ts), the same one the credential routes use.
 //
 // Session ids are credentials here (see `newSessionId`): nothing in this
 // module logs them, and nothing added to it may.
@@ -37,7 +34,6 @@ export type McpEndpointDeps = {
    * fail-closed: `bearer` mode with a token store that verifies nothing.
    */
   authSettings: () => McpAuthSettings | Promise<McpAuthSettings>
-  clientAddress: (c: Context) => string | undefined
   maxSessions?: number
   idleSessionMs?: number
 }
@@ -47,12 +43,6 @@ type Session = {
   server: McpServer
   principalId: string
   lastSeen: number
-}
-
-/** The socket's peer address under @hono/node-server, which passes `incoming` as the env binding. */
-export function nodeClientAddress(c: Context): string | undefined {
-  const env = c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined
-  return env?.incoming?.socket?.remoteAddress
 }
 
 /**
@@ -93,7 +83,14 @@ function jsonRpcError(status: number, code: number, message: string): Response {
   return Response.json({ jsonrpc: '2.0', error: { code, message }, id: null }, { status })
 }
 
-export function mountMcp(app: Hono, deps: McpEndpointDeps): { sessions: () => number; close: () => Promise<void> } {
+/** What /mcp shares with the rest of the app: the origin allowlist and how to read the peer. */
+export type McpHttpContext = { origins: OriginPolicy; remoteAddress: RemoteAddress }
+
+export function mountMcp(
+  app: Hono,
+  deps: McpEndpointDeps,
+  http: McpHttpContext,
+): { sessions: () => number; close: () => Promise<void> } {
   const sessions = new Map<string, Session>()
   const maxSessions = deps.maxSessions ?? 200
   const idleSessionMs = deps.idleSessionMs ?? 60 * 60_000
@@ -115,19 +112,18 @@ export function mountMcp(app: Hono, deps: McpEndpointDeps): { sessions: () => nu
     try {
       return { settings: await deps.authSettings(), tokens: deps.tokens }
     } catch {
-      return { settings: { ...DEFAULT_MCP_AUTH, mode: 'bearer', allowedOrigins: [] }, tokens: FAIL_CLOSED_TOKENS }
+      return { settings: { ...DEFAULT_MCP_AUTH, mode: 'bearer' }, tokens: FAIL_CLOSED_TOKENS }
     }
   }
 
   app.all('/mcp', async (c) => {
     const request = c.req.raw
-    const clientAddress = deps.clientAddress(c)
+    const facts = requestFacts(c, http.remoteAddress)
+    const clientAddress = facts.peer
 
-    const insecure = checkTransport(request, clientAddress)
-    if (insecure) return insecure
+    const refused = mcpTransportProblem(facts, http.origins, request.url)
+    if (refused) return refused
     const { settings, tokens } = await resolveAuth()
-    const badOrigin = checkOrigin(request, clientAddress, settings)
-    if (badOrigin) return badOrigin
     if (!['GET', 'POST', 'DELETE'].includes(request.method)) {
       return new Response(null, { status: 405, headers: { Allow: 'GET, POST, DELETE' } })
     }

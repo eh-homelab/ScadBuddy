@@ -4,9 +4,8 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
-import { nodeClientAddress } from '../src/mcp/http.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { appFetch, BACKEND, baseDeps, connect, firstText, LAN, LOOPBACK, MCP_URL, services, testApp } from './helpers/mcp.js'
+import { appFetch, BACKEND, baseDeps, connect, firstText, INGRESS, LOOPBACK, MCP_URL, services, testApp, UNTRUSTED } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
 // "Checks and tests"; spec §13): transport rules, auth per mode, the approval
@@ -127,42 +126,54 @@ describe('/mcp: tools over Streamable HTTP', () => {
   })
 })
 
-describe('/mcp: HTTPS only, in every mode (spec §8.4)', () => {
+describe('/mcp: HTTPS and Origin from the shared allowlist (src/http/origins.ts, spec §8.4)', () => {
   for (const mode of ['bearer', 'disabled'] as const) {
-    it(`refuses plain HTTP from the network with 403 naming the https URL (${mode})`, async () => {
+    it(`refuses plain HTTP via the ingress with 403 naming the https URL (${mode})`, async () => {
       const { app } = testApp({ settings: { mode } })
-      const res = await appFetch(app, { address: LAN })(MCP_URL, { method: 'POST', body: '{}' })
+      const res = await appFetch(app, { address: INGRESS })(MCP_URL, { method: 'POST', body: '{}' })
       expect(res.status).toBe(403)
       expect(await res.json()).toMatchObject({ https_url: 'https://scadbuddy.test/mcp' })
       // And the MCP client cannot connect at all.
-      await expect(connect(app, { address: LAN })).rejects.toMatchObject({ code: 403 })
+      await expect(connect(app, { address: INGRESS })).rejects.toMatchObject({ code: 403 })
     })
 
-    it(`refuses X-Forwarded-Proto: http even on loopback (${mode})`, async () => {
+    it(`ignores X-Forwarded-Proto from a peer that is not a trusted proxy (${mode})`, async () => {
       const { app } = testApp({ settings: { mode } })
-      await expect(connect(app, { address: LOOPBACK, headers: { 'x-forwarded-proto': 'http' } })).rejects.toMatchObject({ code: 403 })
+      await expect(connect(app, { address: UNTRUSTED, headers: HTTPS })).rejects.toMatchObject({ code: 403 })
     })
   }
 
-  it('accepts HTTPS terminated at the ingress (X-Forwarded-Proto: https) from the network', async () => {
+  it('accepts HTTPS terminated at a trusted proxy, with and without the public Origin', async () => {
     const { app } = testApp({ settings: { mode: 'disabled' } })
-    const client = await open(app, { address: LAN, headers: HTTPS })
-    expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)
+    const noOrigin = await open(app, { address: INGRESS, headers: HTTPS })
+    expect((await noOrigin.listTools()).tools.length).toBe(ALL_TOOLS.length)
+    const publicOrigin = await open(app, { address: INGRESS, headers: { ...HTTPS, origin: 'https://scadbuddy.test' } })
+    expect((await publicOrigin.listTools()).tools.length).toBe(ALL_TOOLS.length)
   })
 
-  it('refuses a foreign Origin (DNS rebinding) and accepts its own', async () => {
+  it('refuses a DNS-rebinding page whose Origin matches its own Host', async () => {
     const { app } = testApp({ settings: { mode: 'disabled' } })
+    // Through the ingress: Host and Origin both name the attacker's domain.
     await expect(
-      connect(app, { address: LAN, headers: { ...HTTPS, origin: 'https://evil.example' } }),
+      connect(app, { address: INGRESS, headers: { ...HTTPS, host: 'evil.test', origin: 'https://evil.test' } }),
     ).rejects.toMatchObject({ code: 403 })
-    const client = await open(app, { address: LAN, headers: { ...HTTPS, origin: 'https://scadbuddy.test' } })
-    expect((await client.listTools()).tools.length).toBeGreaterThan(0)
+    // Straight to the port from this machine: loopback peer, rebound name.
+    await expect(
+      connect(app, { address: LOOPBACK, headers: { host: 'evil.test:8081', origin: 'http://evil.test:8081' } }),
+    ).rejects.toMatchObject({ code: 403 })
+    // A foreign Origin on the right Host.
+    await expect(
+      connect(app, { address: INGRESS, headers: { ...HTTPS, origin: 'https://evil.example' } }),
+    ).rejects.toMatchObject({ code: 403 })
   })
 
-  it('accepts an Origin the operator allowed', async () => {
-    const { app } = testApp({ settings: { mode: 'disabled', allowedOrigins: ['https://tools.example'] } })
-    const client = await open(app, { address: LAN, headers: { ...HTTPS, origin: 'https://tools.example' } })
-    expect((await client.listTools()).tools.length).toBeGreaterThan(0)
+  it('keeps the loopback development exception: a local browser on localhost', async () => {
+    const { app } = testApp({ settings: { mode: 'disabled' } })
+    const client = await open(app, {
+      address: LOOPBACK,
+      headers: { host: 'localhost:8081', origin: 'http://localhost:8081' },
+    })
+    expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)
   })
 })
 
@@ -341,8 +352,7 @@ describe('/mcp: fail closed', () => {
           tools: ALL_TOOLS,
           services: services(),
           tokens: testApp().tokens,
-          authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward', allowedOrigins: [] }),
-          clientAddress: nodeClientAddress,
+          authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward' }),
         },
       }),
     )

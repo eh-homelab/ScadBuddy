@@ -1,37 +1,39 @@
 import {
   type Credential,
-  CREDENTIAL_AAD,
   type CredentialRepo,
   type CredentialUpdate,
+  openCredential,
   planPut,
   type StoredCredential,
 } from '../../src/credentials.js'
-import { type Envelope, type Kek, openSecret } from '../../src/secrets.js'
+import { type Envelope, type Kek, SEAL_V1, sealedVersion } from '../../src/secrets.js'
 
 /**
- * CredentialStore's behaviour without Postgres: the same `planPut` validation
- * and the same sealing, kept in memory. The Postgres store itself is covered by
- * test/pg.test.ts.
+ * CredentialStore's behaviour without Postgres: the same `planPut` validation,
+ * the same sealing and the same `openCredential`, kept in memory. The Postgres
+ * store itself is covered by test/pg.test.ts.
  */
 export class MemoryCredentials implements CredentialRepo {
-  row: (StoredCredential & { envelope: Envelope }) | undefined
+  row: (Omit<StoredCredential, 'legacyFormat'> & { envelope: Envelope }) | undefined
   failing = false
+  /** When set, get() waits on it (a database that hangs). */
+  hang: Promise<void> | undefined
 
-  get(): Promise<StoredCredential | undefined> {
-    if (this.failing) return Promise.reject(new Error('connection refused'))
-    if (!this.row) return Promise.resolve(undefined)
-    const { envelope: _envelope, ...rest } = this.row
-    return Promise.resolve(rest)
+  async get(): Promise<StoredCredential | undefined> {
+    if (this.hang) await this.hang
+    if (this.failing) throw new Error('connection refused')
+    if (!this.row) return undefined
+    const { envelope, ...rest } = this.row
+    return { ...rest, legacyFormat: sealedVersion(envelope.secretSealed) === SEAL_V1 }
   }
 
   reveal(kek: Kek): Promise<Credential | undefined> {
     if (!this.row) return Promise.resolve(undefined)
-    const secret = openSecret(kek, this.row.envelope, CREDENTIAL_AAD)
-    return Promise.resolve(
-      this.row.kind === 'gateway'
-        ? { kind: 'gateway', baseUrl: this.row.base_url ?? '', secret }
-        : { kind: 'anthropic_api_key', secret },
-    )
+    try {
+      return Promise.resolve(openCredential(kek, this.row))
+    } catch (err) {
+      return Promise.reject(err as Error)
+    }
   }
 
   async put(update: CredentialUpdate, kek: Kek | undefined): Promise<StoredCredential> {
@@ -46,7 +48,7 @@ export class MemoryCredentials implements CredentialRepo {
       kekId: envelope.kekId,
       envelope,
     }
-    return this.get() as Promise<StoredCredential>
+    return (await this.get()) as StoredCredential
   }
 
   delete(): Promise<boolean> {
