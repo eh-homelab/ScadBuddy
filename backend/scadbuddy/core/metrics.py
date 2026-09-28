@@ -204,6 +204,13 @@ class Metrics:
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the render queue's from the projection.
+        self.store_ops = Counter(
+            "scadbuddy_store_operations_total",
+            "Blob store calls by operation (put, get, delete) and outcome"
+            " (ok, full, corrupt, missing).",
+            ["op", "outcome"],
+            registry=r,
+        )
         self.assets_stored = Gauge(
             "scadbuddy_assets_stored",
             "Distinct files stored for `// file` parameters under data/assets/.",
