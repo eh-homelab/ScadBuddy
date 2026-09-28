@@ -56,25 +56,35 @@ export function McpAuthSection({ onSaved }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
-  const loadedMode: Mode | undefined =
-    current && current.mode !== 'oidc' ? current.mode : undefined
-  const chosenMode = mode ?? loadedMode
+  // The stored mode, which is what the radios edit. While OIDC is on it is
+  // overridden (`current.mode` is `oidc`) and applies once OIDC is turned off.
+  const storedMode = current?.configured_mode
+  const oidcActive = current?.mode === 'oidc'
+  const chosenMode = mode ?? storedMode
   const chosenCap = cap ?? current?.anonymous_cap ?? 'outward'
   const changed =
     current !== undefined &&
     chosenMode !== undefined &&
-    (chosenMode !== current.mode || chosenCap !== current.anonymous_cap)
+    (chosenMode !== current.configured_mode || chosenCap !== current.anonymous_cap)
   // Calls without a token are allowed already; this save only raises what they may do.
   const raisingCap =
-    current?.mode === 'disabled' && CAP_RANK[chosenCap] > CAP_RANK[current.anonymous_cap]
+    storedMode === 'disabled' &&
+    current !== undefined &&
+    CAP_RANK[chosenCap] > CAP_RANK[current.anonymous_cap]
 
   async function save() {
-    if (!chosenMode) return
+    if (!chosenMode || !current) return
     setSaving(true)
     setError(null)
     setSaved(false)
     try {
-      const next = await api.setMcpAuth({ mode: chosenMode, anonymous_cap: chosenCap })
+      // `expected` makes the save a compare-and-set: a tab showing an old setting
+      // gets a 409 instead of skipping the confirmation the current one needs.
+      const next = await api.setMcpAuth({
+        mode: chosenMode,
+        anonymous_cap: chosenCap,
+        expected: { mode: current.configured_mode, anonymous_cap: current.anonymous_cap },
+      })
       state.setData(next)
       setMode(undefined)
       setCap(undefined)
@@ -82,7 +92,25 @@ export function McpAuthSection({ onSaved }: Props) {
       setSaved(true)
       onSaved?.(next)
     } catch (cause) {
-      setError(describeError(cause, 'Could not save the MCP authentication setting.'))
+      if (cause instanceof ApiError && cause.status === 409) {
+        // Changed elsewhere: show what is stored now, drop the edits made over the
+        // old values, and let the operator choose again (and confirm again if needed).
+        setConfirming(false)
+        setMode(undefined)
+        setCap(undefined)
+        setError(
+          'The MCP authentication setting was changed elsewhere since this page loaded it, so nothing was saved. It now shows the current setting; choose again.',
+        )
+        try {
+          const fresh = await api.getMcpAuth()
+          state.setData(fresh)
+          onSaved?.(fresh)
+        } catch {
+          state.reload()
+        }
+      } else {
+        setError(describeError(cause, 'Could not save the MCP authentication setting.'))
+      }
     } finally {
       setSaving(false)
     }
@@ -90,8 +118,9 @@ export function McpAuthSection({ onSaved }: Props) {
 
   function submit() {
     // Anything that lets an unauthenticated caller do more asks first: turning
-    // authentication off, or raising the anonymous cap while it stays off.
-    if (chosenMode === 'disabled' && (current?.mode !== 'disabled' || raisingCap)) {
+    // authentication off, or raising the anonymous cap while it stays off. While
+    // OIDC is on it asks too: the stored choice applies once OIDC is turned off.
+    if (chosenMode === 'disabled' && (storedMode !== 'disabled' || raisingCap)) {
       setError(null)
       setConfirming(true)
       return
@@ -143,10 +172,21 @@ export function McpAuthSection({ onSaved }: Props) {
                   {CAP_LABEL[current.anonymous_cap].toLowerCase()}.
                 </p>
               )}
-              {current.mode === 'oidc' && (
-                <p className="text-[12px] text-muted" data-testid="mcp-auth-oidc-note">
-                  Sign-in is through your identity provider (OIDC), and access tokens keep working
-                  alongside it. Choosing a mode here and saving switches OIDC off.
+              {oidcActive && (
+                <p
+                  className="rounded-[6px] border border-line px-3 py-2 text-[12px] text-muted"
+                  data-testid="mcp-auth-oidc-note"
+                >
+                  OIDC sign-in is on, so it overrides the choice below: every call needs an OIDC
+                  sign-in or an access token. The choice below is stored, and applies once OIDC is
+                  turned off in &ldquo;MCP sign-in (OIDC)&rdquo;.
+                  {current.configured_mode === 'disabled' && (
+                    <span className="mt-1 block text-warn" data-testid="mcp-auth-oidc-disabled">
+                      The stored choice allows calls without a token: turning OIDC off will let
+                      anyone who can reach <code>/mcp</code> call it with{' '}
+                      {CAP_LABEL[current.anonymous_cap].toLowerCase()}.
+                    </span>
+                  )}
                 </p>
               )}
 
@@ -224,7 +264,9 @@ export function McpAuthSection({ onSaved }: Props) {
                 </Button>
                 {saved && !changed && (
                   <span role="status" className="text-[12px] text-ok">
-                    Saved. It applies from the next MCP call.
+                    {oidcActive
+                      ? 'Saved. OIDC sign-in still applies until it is turned off.'
+                      : 'Saved. It applies from the next MCP call.'}
                   </span>
                 )}
               </div>
@@ -250,11 +292,25 @@ export function McpAuthSection({ onSaved }: Props) {
               Cancel
             </Button>
             <Button variant="danger" onClick={() => void save()} disabled={saving} {...USER_ONLY}>
-              {saving ? <Spinner /> : raisingCap ? 'Raise access' : 'Turn authentication off'}
+              {saving ? (
+                <Spinner />
+              ) : raisingCap ? (
+                'Raise access'
+              ) : oidcActive ? (
+                'Allow once OIDC is off'
+              ) : (
+                'Turn authentication off'
+              )}
             </Button>
           </>
         }
       >
+        {oidcActive && (
+          <p className="mb-2 text-[13px] text-muted" data-testid="mcp-auth-confirm-oidc">
+            OIDC sign-in is on and still applies after this save: calls keep needing an OIDC
+            sign-in or an access token until OIDC is turned off. From then on:
+          </p>
+        )}
         <p className="text-[13px] text-muted">
           Anyone who can reach ScadBuddy&rsquo;s <code>/mcp</code> over HTTPS will be able to call
           its tools without a token, as an anonymous caller with{' '}

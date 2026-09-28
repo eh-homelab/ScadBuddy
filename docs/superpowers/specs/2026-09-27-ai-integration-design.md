@@ -690,8 +690,9 @@ banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettin
 Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
 (`agent/src/routes/mcpAuthMode.ts`, #251), behind the interim gate for settings writes
 (`routes/guard.ts`) until approvals cover settings writes. Both keys change in one
-transaction. `PUT` does not set `oidc`, and the UI confirms before allowing calls
-without a token.
+transaction, as a compare-and-set against the values the page showed (`409` otherwise).
+`PUT` does not set `oidc`; while OIDC is enabled `GET` reports `oidc` with the stored mode
+beside it. The UI confirms before allowing calls without a token.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.

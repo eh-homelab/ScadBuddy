@@ -40,15 +40,25 @@ export interface MintedMcpToken {
   record: McpToken
 }
 
-/** `/api/v1/ai/mcp/auth` (`agent/src/routes/mcpAuthMode.ts`): what `/mcp` applies. */
+/** The modes Settings stores; `oidc` is on while its configuration is enabled (#262). */
+export type ConfiguredMcpAuthMode = Exclude<McpAuthMode, 'oidc'>
+
+/** `/api/v1/ai/mcp/auth` (`agent/src/routes/mcpAuthMode.ts`). */
 export interface McpAuthSetting {
+  /** What `/mcp` applies: `oidc` while OIDC is enabled, whatever is stored. */
   mode: McpAuthMode
+  /** The stored mode, which applies while OIDC is off. */
+  configured_mode: ConfiguredMcpAuthMode
   /** The most an anonymous caller may do while the mode is `disabled`. */
   anonymous_cap: McpTokenTier
 }
 
-/** What Settings may save; `oidc` is switched on with its own configuration (#262). */
+/**
+ * What Settings may save. `expected` is the stored mode and cap the page showed:
+ * the service answers 409, and saves nothing, when they have changed since.
+ */
 export interface McpAuthUpdate {
-  mode: Exclude<McpAuthMode, 'oidc'>
+  mode: ConfiguredMcpAuthMode
   anonymous_cap: McpTokenTier
+  expected: { mode: ConfiguredMcpAuthMode; anonymous_cap: McpTokenTier }
 }

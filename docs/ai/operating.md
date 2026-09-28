@@ -536,9 +536,13 @@ the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
 (`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
 or raising the anonymous access while they are allowed, asks for a confirmation first.
+While OIDC is enabled the section says so: OIDC applies whatever is stored here, and the
+stored choice (still confirmed) applies once OIDC is turned off.
 That confirmation is in the UI only; the route does not require it (a server-side
-approval for settings writes is #258). `PUT` writes both keys in one transaction, logs
-`mcp auth: set to mode … (was …; from <peer>)`, and is guarded like the other Settings
+approval for settings writes is #258). `PUT` writes both keys in one transaction, only if
+they still hold what the page showed (otherwise `409`, and the page reloads them), logs
+`mcp auth: mcp_auth_mode set to … (was …; from <client> via <ingress>)` as soon as it
+commits, and is guarded like the other Settings
 writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
 switched on with its own configuration once the discovery check passes (#262). The
 database still works when the UI does not, e.g. to recover. Each value is a JSON

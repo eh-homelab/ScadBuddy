@@ -44,29 +44,66 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('stores both keys and every replica’s /mcp follows them from the next request', async () => {
       const one = replica()
       const two = replica()
-      expect(await (await one.fetch(URL_BASE)).json()).toEqual({ mode: 'bearer', anonymous_cap: 'outward' })
+      expect(await (await one.fetch(URL_BASE)).json()).toEqual({
+        mode: 'bearer',
+        configured_mode: 'bearer',
+        anonymous_cap: 'outward',
+      })
       await expect(connect(two.app)).rejects.toThrow(/bearer token is required/)
 
-      expect((await put(one.fetch, { mode: 'disabled', anonymous_cap: 'write' })).status).toBe(200)
+      const defaults = { mode: 'bearer', anonymous_cap: 'outward' }
+      expect((await put(one.fetch, { mode: 'disabled', anonymous_cap: 'write', expected: defaults })).status).toBe(200)
       const rows = await db.sql<{ key: string; value: unknown }[]>`
         SELECT key, value FROM ai_settings WHERE key LIKE 'mcp_%' ORDER BY key`
       expect(rows).toEqual([
         { key: 'mcp_anonymous_cap', value: 'write' },
         { key: 'mcp_auth_mode', value: 'disabled' },
       ])
-      expect(await (await two.fetch(URL_BASE)).json()).toEqual({ mode: 'disabled', anonymous_cap: 'write' })
+      expect(await (await two.fetch(URL_BASE)).json()).toEqual({
+        mode: 'disabled',
+        configured_mode: 'disabled',
+        anonymous_cap: 'write',
+      })
       const client = await connect(two.app)
       await client.close()
 
-      expect((await put(two.fetch, { mode: 'bearer', anonymous_cap: 'write' })).status).toBe(200)
+      const off = { mode: 'disabled', anonymous_cap: 'write' }
+      expect((await put(two.fetch, { mode: 'bearer', anonymous_cap: 'write', expected: off })).status).toBe(200)
       await expect(connect(one.app)).rejects.toThrow(/bearer token is required/)
+
+      // Replica one's page still shows `disabled`; its save is refused rather than turning auth off again.
+      const stale = await put(one.fetch, { mode: 'disabled', anonymous_cap: 'read', expected: off })
+      expect(stale.status).toBe(409)
+      expect(await settingsRow('mcp_auth_mode')).toBe('bearer')
+    })
+
+    async function settingsRow(key: string): Promise<unknown> {
+      const [row] = await db.sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${key}`
+      return row?.value
+    }
+
+    it('compare-and-set: a check that fails writes nothing, and concurrent writers are serialised', async () => {
+      const settings = new SettingsStore(db.sql)
+      expect(await settings.setMany({ mcp_auth_mode: 'disabled' }, async () => false)).toBe(false)
+      expect(await settingsRow('mcp_auth_mode')).toBeUndefined()
+
+      // Two compare-and-sets that both expect the key unset: exactly one wins.
+      const expectUnset = async (current: { get<T>(key: string): Promise<T | undefined> }) =>
+        (await current.get('mcp_auth_mode')) === undefined
+      const results = await Promise.all([
+        settings.setMany({ mcp_auth_mode: 'disabled' }, expectUnset),
+        settings.setMany({ mcp_auth_mode: 'bearer' }, expectUnset),
+      ])
+      expect(results.filter(Boolean)).toHaveLength(1)
     })
 
     it('writes the mode and the cap in one transaction', async () => {
       const settings = new SettingsStore(db.sql)
       await settings.setMany({ mcp_auth_mode: 'bearer', mcp_anonymous_cap: 'outward' })
       // A value Postgres cannot store as JSON fails the second insert; the first must roll back with it.
-      await expect(settings.setMany({ mcp_auth_mode: 'disabled', mcp_anonymous_cap: '\u0000' })).rejects.toThrow()
+      await expect(
+        settings.setMany({ mcp_auth_mode: 'disabled', mcp_anonymous_cap: '\u0000' }, async () => true),
+      ).rejects.toThrow()
       expect(await settings.get('mcp_auth_mode')).toBe('bearer')
       expect(await settings.get('mcp_anonymous_cap')).toBe('outward')
     })

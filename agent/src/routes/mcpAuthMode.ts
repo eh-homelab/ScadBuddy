@@ -3,12 +3,14 @@ import { z } from 'zod'
 import {
   type McpAuthMode,
   type McpAuthSettings,
+  mcpAuthSettings,
   SETTING_MCP_ANONYMOUS_CAP,
   SETTING_MCP_AUTH_MODE,
+  type SettingsReader,
 } from '../auth/authenticate.js'
 import { type Tier, TIERS } from '../auth/principal.js'
-import type { OriginPolicy } from '../http/origins.js'
-import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { forwardedClient, type OriginPolicy } from '../http/origins.js'
+import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
 
 // /api/v1/ai/mcp/auth (#251, spec §8.3): Settings reads and changes the `/mcp`
 // auth mode and the cap on what an anonymous caller may do. Both are
@@ -17,9 +19,18 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 // through that same reader, so it reports what /mcp applies (an unknown stored
 // value reads as the fail-closed value there, and so here).
 //
-//   GET   {mode, anonymous_cap}
-//   PUT   {mode, anonymous_cap}: both keys in one transaction, so no request
-//         sees the new mode with the old cap; answers what GET would
+//   GET   {mode, configured_mode, anonymous_cap}
+//         `mode` is what /mcp applies; `configured_mode` is what the
+//         `mcp_auth_mode` key gives (`bearer` or `disabled`). They differ while
+//         an enabled OIDC configuration (#262, `ai_settings.mcp_oidc`) makes the
+//         mode `oidc`: OIDC wins even over a stored `disabled`.
+//   PUT   {mode, anonymous_cap, expected: {mode, anonymous_cap}}: both keys in
+//         one transaction, so no request sees the new mode with the old cap.
+//         A compare-and-set: `expected` is the `configured_mode` and cap the
+//         page showed, and a stored value that no longer matches answers 409
+//         and writes nothing, so a stale Settings tab cannot turn auth off
+//         without the confirmation the current state would have asked for.
+//         Answers what GET would.
 //
 // Changing the mode is a settings write, so outward tier (spec §8.1, §8.3):
 // PUT passes guard.ts `uiRequestProblem`, as the credential and token routes
@@ -28,16 +39,20 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 // spec §8.3); outward calls still wait for a human approval in the UI (§8.2),
 // which is independent of auth. The UI asks for an explicit confirmation
 // before it sends `disabled`; this route takes the operator's word. Each
-// change is logged with the peer address.
+// change is logged as soon as it commits, with the client a trusted proxy
+// names in `X-Forwarded-For` and the socket peer.
 //
-// `oidc` is not set here: the mode may be switched to it only once a discovery
-// check against the issuer passes (spec §8.3), which comes with its
-// configuration (#262). A stored `oidc` is still reported as it is.
+// `oidc` is not set here: it is on while the OIDC configuration is enabled
+// (#262, routes/mcpAuth.ts). A stored `oidc` without an enabled configuration
+// reads as `bearer`, as /mcp applies it.
 //
 // Error bodies are `{ detail }`, like routes/credentials.ts.
 
 /** What this route writes: credentials.ts `SettingsStore` is one. */
-export type SettingsWriter = { setMany(values: Record<string, unknown>): Promise<void> }
+export type SettingsWriter = {
+  /** Writes `values` only when `check`, reading inside the same transaction, returns true. */
+  setMany(values: Record<string, unknown>, check: (current: SettingsReader) => Promise<boolean>): Promise<boolean>
+}
 
 export type McpAuthModeRouteDeps = {
   /** Undefined when there is no database (spec §9, "No database"). */
@@ -53,27 +68,46 @@ export type McpAuthModeRouteDeps = {
 }
 
 export type McpAuthView = {
+  /** What /mcp applies. */
   mode: McpAuthMode
+  /** What `mcp_auth_mode` gives; `mode` differs from it while OIDC is enabled. */
+  configured_mode: SettableMcpAuthMode
   /** The most an anonymous caller may do while the mode is `disabled`. */
   anonymous_cap: Tier
 }
 
 /** The modes this route sets. */
 export const SETTABLE_MCP_AUTH_MODES = ['bearer', 'disabled'] as const
+export type SettableMcpAuthMode = (typeof SETTABLE_MCP_AUTH_MODES)[number]
 
-const PutBody = z.strictObject({
+const Setting = z.strictObject({
   mode: z.enum(SETTABLE_MCP_AUTH_MODES),
   anonymous_cap: z.enum(TIERS),
 })
 
+const PutBody = Setting.extend({ expected: Setting })
+
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 const UNREADABLE = 'the MCP auth settings cannot be read; /mcp refuses every request until they can'
+const CHANGED =
+  'the MCP auth setting changed since this page loaded it; nothing was saved. Reload it and choose again'
+const SAVED_UNREADABLE =
+  'saved, but the MCP auth settings cannot be read back; /mcp refuses every request until they can'
 const OIDC_HERE =
   'mode: "oidc" cannot be set here; it is switched on with the OIDC configuration once its discovery check passes (#262)'
 
+function configured(settings: McpAuthSettings): SettableMcpAuthMode {
+  return settings.configuredMode ?? (settings.mode === 'disabled' ? 'disabled' : 'bearer')
+}
+
 function view(settings: McpAuthSettings): McpAuthView {
-  return { mode: settings.mode, anonymous_cap: settings.anonymousCap }
+  return { mode: settings.mode, configured_mode: configured(settings), anonymous_cap: settings.anonymousCap }
+}
+
+/** An address for a log line: anything else a header could carry becomes `?`. */
+function logSafe(address: string): string {
+  return address.replace(/[^\w.:[\]-]/g, '?').slice(0, 64)
 }
 
 function zodDetail(err: unknown): string {
@@ -132,16 +166,28 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
     } catch (err) {
       return c.json({ detail: zodDetail(err) }, 400)
     }
-    const before = await current()
-    await w.setMany({ [SETTING_MCP_AUTH_MODE]: body.mode, [SETTING_MCP_ANONYMOUS_CAP]: body.anonymous_cap })
-    const after = await current()
-    if (!after) return c.json({ detail: UNREADABLE }, 503)
-    if (before?.mode !== after.mode || before.anonymousCap !== after.anonymousCap) {
+    // The keys as the page last saw them, resolved as /mcp resolves them
+    // (without OIDC, which this route does not write), read under the lock.
+    let before: McpAuthSettings | undefined
+    const written = await w.setMany(
+      { [SETTING_MCP_AUTH_MODE]: body.mode, [SETTING_MCP_ANONYMOUS_CAP]: body.anonymous_cap },
+      async (stored) => {
+        before = await mcpAuthSettings(stored, () => {})()
+        return configured(before) === body.expected.mode && before.anonymousCap === body.expected.anonymous_cap
+      },
+    )
+    if (!written) return c.json({ detail: CHANGED }, 409)
+    if (before && (configured(before) !== body.mode || before.anonymousCap !== body.anonymous_cap)) {
+      const facts = requestFacts(c, deps.remoteAddress)
+      const client = forwardedClient(facts, deps.origins)
+      const peer = logSafe(facts.peer ?? 'unknown peer')
       log(
-        `mcp auth: set to mode ${after.mode}, anonymous cap ${after.anonymousCap}` +
-          ` (was ${before ? `${before.mode}, ${before.anonymousCap}` : 'unreadable'}; from ${deps.remoteAddress(c) ?? 'unknown peer'})`,
+        `mcp auth: mcp_auth_mode set to ${body.mode}, anonymous cap ${body.anonymous_cap}` +
+          ` (was ${configured(before)}, ${before.anonymousCap}; from ${client ? `${logSafe(client)} via ${peer}` : peer})`,
       )
     }
+    const after = await current()
+    if (!after) return c.json({ detail: SAVED_UNREADABLE }, 503)
     return c.json(view(after))
   })
 }

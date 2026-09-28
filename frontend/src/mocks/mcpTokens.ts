@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type {
+  ConfiguredMcpAuthMode,
   McpAuthMode,
   McpAuthSetting,
   McpAuthUpdate,
@@ -49,19 +50,29 @@ const state = {
   /** Newest first, as the service lists them. */
   tokens: seed(),
   authMode: 'bearer' as McpAuthMode | null,
-  /** `/api/v1/ai/mcp/auth`'s cap; its mode is `authMode`. */
+  /** `/api/v1/ai/mcp/auth`'s stored mode; `authMode` is `oidc` over it while OIDC is on. */
+  configuredMode: 'bearer' as ConfiguredMcpAuthMode,
   anonymousCap: 'outward' as McpTokenTier,
 }
 
 export function resetMcpTokens(): void {
   state.tokens = seed()
   state.authMode = 'bearer'
+  state.configuredMode = 'bearer'
   state.anonymousCap = 'outward'
 }
 
-/** For tests: the mode GET reports (spec §8.3). */
-export function setMcpAuthMode(mode: McpAuthMode | null, anonymousCap?: McpTokenTier): void {
+/**
+ * For tests: the mode GET reports (spec §8.3). With `oidc`, `configured` is the
+ * stored mode OIDC overrides (`bearer` unless given).
+ */
+export function setMcpAuthMode(
+  mode: McpAuthMode | null,
+  anonymousCap?: McpTokenTier,
+  configured?: ConfiguredMcpAuthMode,
+): void {
   state.authMode = mode
+  state.configuredMode = configured ?? (mode === 'disabled' ? 'disabled' : 'bearer')
   if (anonymousCap) state.anonymousCap = anonymousCap
 }
 
@@ -95,7 +106,21 @@ function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): stri
 const authBase = '/api/v1/ai/mcp/auth'
 
 function authView(): McpAuthSetting {
-  return { mode: state.authMode ?? 'bearer', anonymous_cap: state.anonymousCap }
+  return {
+    mode: state.authMode ?? state.configuredMode,
+    configured_mode: state.configuredMode,
+    anonymous_cap: state.anonymousCap,
+  }
+}
+
+function settingProblems(body: unknown, prefix: string): string | undefined {
+  if (body === null || typeof body !== 'object') return `${prefix || 'body'}: expected an object`
+  const { mode, anonymous_cap } = body as Record<string, unknown>
+  if (mode !== 'bearer' && mode !== 'disabled') return `${prefix}mode: must be bearer or disabled`
+  if (!TIERS.includes(anonymous_cap as McpTokenTier)) {
+    return `${prefix}anonymous_cap: must be read, write or outward`
+  }
+  return undefined
 }
 
 /** As `agent/src/routes/mcpAuthMode.ts`: the same validation and answers. */
@@ -103,13 +128,11 @@ function authProblems(body: Record<string, unknown>): string | undefined {
   if (body.mode === 'oidc') {
     return 'mode: "oidc" cannot be set here; it is switched on with the OIDC configuration once its discovery check passes (#262)'
   }
-  const extra = Object.keys(body).filter((key) => !['mode', 'anonymous_cap'].includes(key))
+  const extra = Object.keys(body).filter(
+    (key) => !['mode', 'anonymous_cap', 'expected'].includes(key),
+  )
   if (extra.length > 0) return `body: unrecognized key(s) ${extra.join(', ')}`
-  if (body.mode !== 'bearer' && body.mode !== 'disabled') return 'mode: must be bearer or disabled'
-  if (!TIERS.includes(body.anonymous_cap as McpTokenTier)) {
-    return 'anonymous_cap: must be read, write or outward'
-  }
-  return undefined
+  return settingProblems(body, '') ?? settingProblems(body.expected, 'expected.')
 }
 
 export const mcpTokenHandlers = [
@@ -128,7 +151,17 @@ export const mcpTokenHandlers = [
     const problem = authProblems(body)
     if (problem) return detail(400, problem)
     const update = body as unknown as McpAuthUpdate
-    state.authMode = update.mode
+    if (
+      update.expected.mode !== state.configuredMode ||
+      update.expected.anonymous_cap !== state.anonymousCap
+    ) {
+      return detail(
+        409,
+        'the MCP auth setting changed since this page loaded it; nothing was saved. Reload it and choose again',
+      )
+    }
+    state.configuredMode = update.mode
+    if (state.authMode !== 'oidc') state.authMode = update.mode
     state.anonymousCap = update.anonymous_cap
     return HttpResponse.json(authView())
   }),

@@ -256,16 +256,28 @@ Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
   ingress, JSON only), and `GET` passes `uiReadProblem`. The limitation stated there
   applies: this is not an approval, and anyone who can reach Settings can change the
   mode (spec §8.3, "Stated plainly").
-- It sets `bearer` or `disabled` and the cap. `oidc` is refused, since the mode may
-  become `oidc` only after a discovery check (#262).
+- It sets `bearer` or `disabled` and the cap. `oidc` is refused: it is on while the OIDC
+  configuration is enabled (#262), not a value of this key.
 - Both keys are written in one transaction, so no request sees the new mode with the
-  old cap. Each change is logged with the peer address.
-- `GET` answers through the same `mcpAuthSettings()` reader `/mcp` uses, so it shows
+  old cap. The write is a compare-and-set: the body carries the stored mode and cap the
+  page showed (`expected`), and the transaction locks `ai_settings` against other writers,
+  re-reads them and answers `409` without writing when they differ. A stale Settings tab
+  therefore cannot turn authentication off without the confirmation the current setting
+  would have asked for.
+- Each change is logged as soon as it commits, before anything is read back, with the
+  client the trusted ingress names (the last `X-Forwarded-For` value, believed only from a
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` peer) and the socket peer.
+- `GET` answers through the same `mcpAuthSettings()` reader `/mcp` uses, so `mode` is
   what `/mcp` applies (a stored unknown value shows as its fail-closed value).
+  `configured_mode` is the stored key. While OIDC is enabled, `mode` is `oidc` even when
+  `configured_mode` is `disabled`; a `PUT` of `disabled` then stores it and answers
+  `mode: "oidc"`, and Settings says OIDC still applies rather than that auth is off. A
+  stored `"oidc"` without an enabled configuration reads as `bearer`.
 - The UI asks for an explicit confirmation before it saves a change that lets
   unauthenticated callers do more: switching to `disabled`, or raising the anonymous
-  cap while `disabled` stays on. It shows a warning in the section while calls without
-  a token are allowed. **That confirmation is UI-only.** The `PUT` route does not require
+  cap while `disabled` stays on. It asks while OIDC is on too, saying the choice applies
+  once OIDC is turned off. It shows a warning in the section while calls without a token
+  are allowed, or would be once OIDC is turned off. **That confirmation is UI-only.** The `PUT` route does not require
   it, so a request that passes the interim gate changes the mode without one; a
   server-side approval for settings writes is #258.
   [operating.md](operating.md#10-mcp-auth-mode) shows how to set the keys in the database
