@@ -37,6 +37,8 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.content import BlobScope, template_title
+from scadbuddy.store.fonts import FontMirror
+from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.models import (
     Failure,
     PieceRequest,
@@ -65,6 +67,8 @@ class WorkerDeps:
     fetcher: CheckoutFetcher | None = None
     thumbnail_executor: Executor | None = None
     metrics: Metrics | None = None
+    snapshots: SnapshotStore | None = None
+    fonts_mirror: FontMirror | None = None
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -229,6 +233,10 @@ class RenderActivities:
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
+        if d.snapshots is not None and req.revision is not None:
+            await d.snapshots.materialize(req.slug, req.revision)
+        if d.fonts_mirror is not None:
+            await d.fonts_mirror.sync()
         try:
             with timed_stage(d.metrics)("source"):
                 prepared, _ = await prepare_source(
