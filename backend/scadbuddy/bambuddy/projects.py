@@ -24,6 +24,7 @@ Three details of Bambuddy's shape are load-bearing:
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 
 import psycopg
 from fastapi import status
@@ -198,6 +199,7 @@ async def attach_results(
     queue_item_ids: list[int],
     output_id: str | None = None,
     links: PrintLinkStore | None = None,
+    linkable: Collection[int] = (),
 ) -> AttachResult:
     """Attach this output's queue entries, and any archives they have produced.
 
@@ -207,8 +209,10 @@ async def attach_results(
     called once the ids are known, and attaching the same id twice is Bambuddy's
     problem to dedupe, not a reason to keep state here.
 
-    With ``output_id`` and ``links``, each archive found is also linked to the output
-    (#306), since the items are being read anyway.
+    With ``output_id`` and ``links``, the archive of each item in ``linkable`` is also
+    linked to the output (#306), since the items are being read anyway. Only those:
+    ``queue_item_ids`` can come from the caller, and an item that is not the output's
+    must never open the media proxy to its archive.
     """
     archives: list[int] = []
     for item_id in queue_item_ids:
@@ -223,7 +227,7 @@ async def attach_results(
             continue
         if item.archive_id is not None:
             archives.append(item.archive_id)
-            if output_id is not None and links is not None:
+            if output_id is not None and links is not None and item_id in linkable:
                 # A side effect of the attach, which must not fail over it.
                 try:
                     await link_item(links, output_id, item)

@@ -76,10 +76,10 @@ relative to its repository root.
 - **Primary matcher (L1–L3).** Record the item's `archive_id` wherever ScadBuddy already reads a queue item:
   - on the slice-queue route, `meta.plates[*].queue_item_id`;
   - on the pipeline route, `jobs[*].queue_entry_id` → `GET /queue/{id}` (L4);
-  - in the progress read (#89, and #430's watcher once merged) and the project attach.
+  - in the progress read (#89, and #430's watcher once merged) and the project attach. The attach takes queue item ids from its caller, so it links only those that are the output's own (the two lists above); any other id is filed under the project but never linked, or it would open the media proxy to that item's archive.
 
   `matched_by='queue_item'`.
-- **Fallback matcher (L5–L7).** Use it for a queue item that 404s before an archive was seen. Take the output's recorded slices (#462 `output_bambuddy_slices`), and store each slice's `file_hash` when it is first seen. #306 adds a nullable `file_hash text` column to `output_bambuddy_slices`, filled from `GET /library/files/{sliced_id}`. Then scan `GET /archives/?printer_id=&date_from=&date_to=` around the send and match `content_hash == file_hash`. `matched_by='content_hash'`. **Drop** the filename and #80-link matchers from #306: they are ambiguous or unverified, and L6 makes them unnecessary.
+- **Fallback matcher (L5–L7).** Use it for a queue item that 404s before an archive was seen. Take the output's recorded slices (#462 `output_bambuddy_slices`), and store each slice's `file_hash` when it is first seen. #306 adds a nullable `file_hash text` column to `output_bambuddy_slices`, filled from `GET /library/files/{sliced_id}`. Then scan `GET /archives/?printer_id=&date_from=&date_to=` around the send (from the day before the output's first upload to 14 days after its last recorded slice, on either route) and match `content_hash == file_hash`. `matched_by='content_hash'`. **Drop** the filename and #80-link matchers from #306: they are ambiguous or unverified, and L6 makes them unnecessary.
 - A reprint made inside Bambuddy adds a run (M5), not an archive, so there is nothing to link. Runs are read, never stored.
 - **The spike in #306 is still required,** on a real H2C print on both routes, and its results go into the print-flow spec as verified facts. It must confirm two things: that L1 holds for pipeline-dispatched items, and that L6's hashes are equal in practice. L6 fails if anything rewrites the sliced file between slicing and dispatch.
 

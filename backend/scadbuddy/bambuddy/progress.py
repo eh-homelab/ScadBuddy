@@ -310,7 +310,9 @@ class _Linker:
 
     async def run(self, run: PipelineRun) -> None:
         try:
-            await link_run(self.client, self.links, self.meta.id, run)
+            # A gone entry takes the same once-per-read, throttled scan by hash as a
+            # gone queue item does on the slice-and-queue route (#522 review).
+            await link_run(self.client, self.links, self.meta.id, run, gone=self.gone)
         except _LINK_ERRORS:
             logger.exception(
                 "could not link a pipeline run's archives",

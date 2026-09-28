@@ -27,6 +27,7 @@ from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.pipelines import (
     PrintRunRequest,
     PrintRunResult,
@@ -305,10 +306,14 @@ async def post_attach_project(
         or ([meta.queue_item_id] if meta.queue_item_id else [])
     )
     async with client_for(settings) as client:
+        # The body's ids are filed under the project as asked, but only the output's own
+        # items are linked to it: a caller-named item would open its archive's media.
+        linkable = await owned_queue_items(client, meta) if links.available else set()
         return await attach_results(
             client,
             project_id,
             queue_item_ids=ids,
             output_id=meta.id,
             links=links if links.available else None,
+            linkable=linkable,
         )

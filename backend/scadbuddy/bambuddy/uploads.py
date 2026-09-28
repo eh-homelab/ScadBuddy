@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from datetime import datetime
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -122,6 +123,17 @@ class BambuddyUploadStore:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
         await asyncio.to_thread(self._record_slice_hash, output_id, sliced_id, file_hash)
 
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        """When the output's first recorded copy was uploaded and its last slice was
+        recorded, or ``None`` with no slice (#306).
+
+        A print of one of its slices started no earlier than the first and, unless it
+        waited in Bambuddy's queue, not long after the last. A copy is uploaded before
+        it is sliced, and a slice is recorded at the send (or, on a pipeline run, by
+        the first progress read after it), so neither moves the window past a print.
+        """
+        return await asyncio.to_thread(self._sent_between, output_id)
+
     async def delete_outputs(self, output_ids: Iterable[str]) -> None:
         """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
         await asyncio.to_thread(self._delete_outputs, list(output_ids))
@@ -205,6 +217,19 @@ class BambuddyUploadStore:
                 " WHERE output_id = %s AND sliced_library_file_id = %s",
                 (file_hash, output_id, sliced_id),
             )
+
+    def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
+                "  WHERE output_id = %(output)s) AS first_upload,"
+                " (SELECT max(created_at) FROM output_bambuddy_slices"
+                "  WHERE output_id = %(output)s) AS last_slice",
+                {"output": output_id},
+            ).fetchone()
+        if row is None or row["first_upload"] is None or row["last_slice"] is None:
+            return None
+        return row["first_upload"], row["last_slice"]
 
     def _delete_outputs(self, ids: list[str]) -> None:
         with self._require().connection() as conn:

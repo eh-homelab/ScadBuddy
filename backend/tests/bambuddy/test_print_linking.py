@@ -19,7 +19,14 @@ import respx
 
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, link_by_hash
+from scadbuddy.bambuddy.linking import (
+    ARCHIVE_OVERLAP,
+    ARCHIVE_PAGE,
+    MAX_ARCHIVE_PAGES,
+    SCAN_AFTER,
+    SCAN_BEFORE,
+    link_by_hash,
+)
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
@@ -227,8 +234,13 @@ async def test_a_queue_item_gone_by_the_first_poll_is_found_by_hash(
 
     [link] = await links.for_output(OUTPUT)
     assert (link.archive_id, link.matched_by) == (18, "content_hash")
-    # The window starts at the output, and the hash is kept so it is read only once.
-    assert scan.calls.last.request.url.params["date_from"] == "2026-09-26"
+    # The window is the days around the output's sends, and the hash is kept so it is
+    # read only once.
+    window = await uploads.sent_between(OUTPUT)
+    assert window is not None
+    params = scan.calls.last.request.url.params
+    assert params["date_from"] == (window[0] - SCAN_BEFORE).date().isoformat()
+    assert params["date_to"] == (window[1] + SCAN_AFTER).date().isoformat()
     [copy] = await uploads.for_output(OUTPUT)
     assert copy.sliced[0].file_hash == HASH
     await link_by_hash(bambuddy, uploads, links, queued())
@@ -372,6 +384,80 @@ async def test_attaching_to_a_project_records_the_archives_it_found(
     respx.post(f"{API}/projects/7/add-queue").mock(return_value=httpx.Response(200, json={}))
     respx.post(f"{API}/projects/7/add-archives").mock(return_value=httpx.Response(200, json={}))
 
-    await attach_results(bambuddy, 7, queue_item_ids=[90], output_id=OUTPUT, links=links)
+    respx.get(f"{API}/queue/91").mock(
+        return_value=httpx.Response(200, json=queue_item(91, status="completed", archive_id=77))
+    )
+
+    await attach_results(
+        bambuddy, 7, queue_item_ids=[90, 91], output_id=OUTPUT, links=links, linkable={90}
+    )
 
     assert [link.archive_id for link in await links.for_output(OUTPUT)] == [32]
+
+
+@respx.mock
+async def test_attaching_links_nothing_the_output_does_not_own(
+    bambuddy: BambuddyClient, links: PrintLinkStore
+) -> None:
+    respx.get(f"{API}/queue/91").mock(
+        return_value=httpx.Response(200, json=queue_item(91, status="completed", archive_id=77))
+    )
+    respx.post(f"{API}/projects/7/add-queue").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{API}/projects/7/add-archives").mock(return_value=httpx.Response(200, json={}))
+
+    result = await attach_results(bambuddy, 7, queue_item_ids=[91], output_id=OUTPUT, links=links)
+
+    assert result.archive_ids == [77], "still filed under the project"
+    assert await links.for_output(OUTPUT) == []
+
+
+@respx.mock
+async def test_a_pipeline_entry_gone_before_it_was_linked_is_found_by_hash(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    await _sliced(uploads)
+    await uploads.record_slice_hash(OUTPUT, 80, HASH)
+    run = recording("pipeline-run.json")
+    run["jobs"] = [{**run["jobs"][0], "queue_entry_id": 90, "status": "completed"}]
+    respx.get(f"{API}/pipeline-runs/1").mock(return_value=httpx.Response(200, json=run))
+    respx.get(f"{API}/queue/90").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    scan = archives_page(archive_row(31, "other"), archive_row(32, HASH))
+    printed = meta(print_route="pipeline", pipeline_run_id=1)
+
+    await progress_for(bambuddy, printed, uploads=uploads, links=links)
+    await progress_for(bambuddy, printed, uploads=uploads, links=links)
+
+    [link] = await links.for_output(OUTPUT)
+    assert (link.archive_id, link.matched_by) == (32, "content_hash")
+    assert scan.call_count == 1, "throttled like the slice-and-queue route's scan"
+
+
+@respx.mock
+async def test_a_scan_that_runs_out_of_pages_stops_inside_its_window(
+    bambuddy: BambuddyClient,
+    links: PrintLinkStore,
+    uploads: BambuddyUploadStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """More archives in the window than one scan reads: it reads MAX_ARCHIVE_PAGES,
+    links what it saw, says so, and never asks past the days around the sends."""
+    await _sliced(uploads)
+    await uploads.record_slice_hash(OUTPUT, 80, HASH)
+    window = await uploads.sent_between(OUTPUT)
+    assert window is not None
+    pages = [[archive_row(1000 + page * 100 + n, "x") for n in range(100)] for page in range(11)]
+    pages[MAX_ARCHIVE_PAGES - 1][50] = archive_row(18, HASH)
+    pages[MAX_ARCHIVE_PAGES][50] = archive_row(19, HASH)
+    scan = respx.get(f"{API}/archives/").mock(
+        side_effect=[httpx.Response(200, json=rows) for rows in pages]
+    )
+
+    # An output rendered long before it was sent: the window starts at the send.
+    found = await link_by_hash(bambuddy, uploads, links, meta(created_at="2025-01-01T00:00:00Z"))
+
+    assert scan.call_count == MAX_ARCHIVE_PAGES
+    assert [link.archive_id for link in found] == [18]
+    for call in scan.calls:
+        assert call.request.url.params["date_from"] == (window[0] - SCAN_BEFORE).date().isoformat()
+        assert call.request.url.params["date_to"] == (window[1] + SCAN_AFTER).date().isoformat()
+    assert "stopped scanning archives" in caplog.text

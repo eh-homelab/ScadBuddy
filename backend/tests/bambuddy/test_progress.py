@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import httpx
 import psycopg
@@ -536,6 +537,10 @@ class FakeUploads(BambuddyUploadStore):
                 id=11, folder_id=2, target_key="H2C", sliced=[SlicedCopy(id=80, file_hash="ab")]
             )
         ]
+
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        sent = datetime(2026, 9, 27, tzinfo=UTC)
+        return sent, sent
 
 
 @pytest.fixture
