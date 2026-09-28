@@ -7,6 +7,7 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -533,6 +534,8 @@ export function SettingsPage() {
             </p>
           </div>
         </section>
+
+        <HeadlessBrowserSetting />
 
         {/* Applied at once, not part of the saved form (#251). The agent service serves
             these routes, so the section shows only where the assistant would: hidden in
