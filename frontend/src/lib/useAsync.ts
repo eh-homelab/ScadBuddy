@@ -79,7 +79,10 @@ export function useAsync<T>(
         },
         (cause: unknown) => {
           if (sequence.current !== mine) return
-          setSnapshot({ key: at, error: cause instanceof Error ? cause : new Error(String(cause)) })
+          const error = cause instanceof Error ? cause : new Error(String(cause))
+          // A failed background read keeps what is on screen: the next change reads
+          // again. Only a key with nothing to show yet shows the error.
+          setSnapshot((s) => (s.key === at && s.data !== undefined ? s : { key: at, error }))
         },
       )
     })

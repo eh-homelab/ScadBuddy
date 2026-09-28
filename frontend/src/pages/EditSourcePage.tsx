@@ -51,8 +51,8 @@ export function EditSourcePage() {
   }, [initial])
 
   // #269 — the source changed elsewhere (another tab, an agent). An untouched buffer
-  // follows it; an edited one is never overwritten: the page offers theirs, and a save
-  // of mine goes through the usual stale-write conflict (#234).
+  // follows it; an edited one is never overwritten: the page offers theirs. Saving mine
+  // replaces theirs (`PUT /source` carries no base revision), as the banner says.
   const [theirs, setTheirs] = useState<string | null>(null)
   /** The buffer as it is when a read answers, not as it was when the signal came. */
   const buffer = useRef({ source, loaded: loaded.data })
@@ -62,17 +62,22 @@ export function EditSourcePage() {
   const untouched = () => buffer.current.source === null || buffer.current.source === buffer.current.loaded
   useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
     if (signal === 'resync' || signal.kind !== 'source.changed') return
-    // Untouched, or not loaded yet: read it again through the loader, whose sequence
-    // guard drops a first read that was already in flight with the old text.
-    if (untouched()) {
+    // Not loaded yet: read it again through the loader, whose sequence guard drops a
+    // first read that was already in flight with the old text.
+    if (buffer.current.source === null) {
       loaded.refresh()
       return
     }
-    void api.getSource(slug).then((latest) => {
-      if (latest === buffer.current.source) return
-      if (untouched()) loaded.setData(latest)
-      else setTheirs(latest)
-    })
+    api.getSource(slug).then(
+      (latest) => {
+        if (latest === buffer.current.source) return
+        if (untouched()) loaded.setData(latest)
+        else setTheirs(latest)
+      },
+      () => {
+        // The buffer keeps what it shows; the next change reads again.
+      },
+    )
   })
   const takeTheirs = () => {
     if (theirs === null) return

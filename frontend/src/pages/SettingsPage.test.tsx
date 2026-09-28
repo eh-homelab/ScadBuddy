@@ -204,4 +204,20 @@ describe('SettingsPage, live (#269)', () => {
     await user.click(screen.getByRole('button', { name: 'Load the latest' }))
     await waitFor(() => expect(field).toHaveValue(OTHER))
   })
+
+  it("does not call this tab's own Test connection a change made elsewhere", async () => {
+    const { user } = renderPage(<SettingsPage />)
+    const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
+    await waitFor(() => expect(field).not.toHaveValue(''))
+    await user.clear(field)
+    await user.type(field, 'https://tested.test')
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await screen.findByRole('status')
+
+    // The test saved the form; this is that save's own event.
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
+    expect(field).toHaveValue('https://tested.test')
+  })
 })

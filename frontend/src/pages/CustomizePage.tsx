@@ -125,10 +125,23 @@ export function CustomizePage() {
   const [sourceChangedFor, setSourceChangedFor] = useState<string | null>(null)
   const sourceChanged = sourceChangedFor === slug
   const dirty = edits.values !== null
+  // Read when the answer lands: the user may have started editing while it was read.
+  const isDirty = useLatest(() => dirty)
   useSubscription(version === undefined ? `model:${slug}` : undefined, (signal) => {
     if (signal === 'resync' || signal.kind !== 'source.changed') return
-    if (dirty) setSourceChangedFor(slug)
-    else schemaState.refresh()
+    if (isDirty.current()) {
+      setSourceChangedFor(slug)
+      return
+    }
+    api.getSchema(slug).then(
+      (latest) => {
+        if (isDirty.current()) setSourceChangedFor(slug)
+        else schemaState.setData(latest)
+      },
+      () => {
+        // The parameters keep what they show; the next change reads again.
+      },
+    )
   })
   const reloadSchema = () => {
     setSourceChangedFor(null)

@@ -85,3 +85,21 @@ it('drops a refresh that was in flight when the deps changed', async () => {
   })
   expect(result.current.data).toBe('b1')
 })
+
+it('keeps the data on screen when a background read fails', async () => {
+  let fail = false
+  const { result } = renderHook(() =>
+    useAsync(() => (fail ? Promise.reject(new Error('down')) : Promise.resolve('shown')), [], ['m']),
+  )
+  await waitFor(() => expect(result.current.data).toBe('shown'))
+  fail = true
+  act(() => signals[0]?.('resync'))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(result.current).toMatchObject({ data: 'shown', error: undefined })
+})
+
+it('shows the error of a failed read when there is nothing on screen yet', async () => {
+  const { result } = renderHook(() => useAsync(() => Promise.reject(new Error('down')), [], ['m']))
+  act(() => signals[0]?.('resync'))
+  await waitFor(() => expect(result.current.error?.message).toBe('down'))
+})

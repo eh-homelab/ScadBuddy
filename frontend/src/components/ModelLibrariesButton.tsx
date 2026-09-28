@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
 import { useSubscription, type RealtimeSignal } from '../lib/realtime'
 import type { CatalogueLibrary, LibraryPinRequest, ModelLibrary, ModelSummary } from '../api/types'
@@ -76,16 +77,21 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
   // #269 — while open, pins and the catalogue follow changes made elsewhere (a clone
   // finishing, another tab or an agent pinning). Not mid-action: that answer is newer.
+  const shown = useLatest(catalogue)
   const refreshOpen = async () => {
     if (!openRef.current || running > 0) return
+    // This read supersedes the opening one when that has not answered yet, so it then
+    // owes the dialog its answer or its error.
+    const first = shown.current === null
     const started = ++generation.current
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
       if (generation.current !== started) return
       setPins(model.libraries ?? [])
       setCatalogue(libraries)
-    } catch {
-      // The dialog keeps what it shows; the next change or reopen reads again.
+    } catch (caught) {
+      // Otherwise the dialog keeps what it shows; the next change or reopen reads again.
+      if (first && generation.current === started) setError(message(caught))
     }
   }
   // `libraries` alone: a pin change emits `library.changed` there as well as on

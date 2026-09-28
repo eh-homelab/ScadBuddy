@@ -398,4 +398,11 @@ describe('EditDetailsButton, live (#269)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(within(dialog).getByLabelText('Name')).toHaveValue('Fresh')
   })
+
+  it('ignores a model update that leaves these details as they were (a pin, a source save)', async () => {
+    const { dialog } = await open()
+    emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(dialog).queryByText(/changed elsewhere since you opened them/)).not.toBeInTheDocument()
+  })
 })

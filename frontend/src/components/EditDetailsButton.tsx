@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
 import { useSubscription } from '../lib/realtime'
 import type { ModelPatch, ModelSummary } from '../api/types'
@@ -58,6 +59,18 @@ const sameTags = (a: string[], b: string[]) =>
  * change the server accepts is its own revision in the model's history, so a save
  * sends only the parts that differ from what the form opened on.
  */
+/** Whether the fields this form edits are the same in both. */
+function sameDetails(a: Baseline, b: Baseline) {
+  return (
+    a.model.name === b.model.name &&
+    (a.model.description ?? '') === (b.model.description ?? '') &&
+    (a.model.tags ?? []).join('\n') === (b.model.tags ?? []).join('\n') &&
+    a.model.has_thumbnail === b.model.has_thumbnail &&
+    a.model.thumbnail_source === b.model.thumbnail_source &&
+    a.readme === b.readme
+  )
+}
+
 export function EditDetailsButton({ slug, onSaved }: Props) {
   const [open, setOpen] = useState(false)
   const [baseline, setBaseline] = useState<Baseline | null>(null)
@@ -74,10 +87,19 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
   // #269 — the details changed elsewhere while this form is open: say so, and let the
   // user load them; never overwrite what is being typed.
   const [changedElsewhere, setChangedElsewhere] = useState(false)
+  // `model.updated` also follows pins, source saves and upstream changes, so it only
+  // counts when the details this form edits differ from the ones it opened with.
+  const opened = useLatest(baseline)
   useSubscription(open && baseline ? `model:${slug}` : undefined, (signal) => {
-    if (signal !== 'resync' && signal.kind === 'model.updated' && !saving) {
-      setChangedElsewhere(true)
-    }
+    if (signal === 'resync' || signal.kind !== 'model.updated' || saving) return
+    void (async () => {
+      const model = await api.getModel(slug)
+      const text = model.has_readme ? ((await api.getReadme(slug)) ?? '') : ''
+      const was = opened.current
+      if (was && !sameDetails(was, { model, readme: text })) setChangedElsewhere(true)
+    })().catch(() => {
+      // The form keeps what it shows; the next change reads again.
+    })
   })
 
   /** Bumped by every show(), so a slower earlier load never lands over a later one. */

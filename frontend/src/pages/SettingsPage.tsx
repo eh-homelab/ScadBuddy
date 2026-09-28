@@ -87,11 +87,6 @@ export function SettingsPage() {
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
   // follows them; an edited one (`dirty`, below) is never overwritten, and says so.
   const [changedElsewhere, setChangedElsewhere] = useState(false)
-  useSubscription('settings', (signal) => {
-    if (signal === 'resync' || saving) return
-    if (dirty) setChangedElsewhere(true)
-    else settingsState.refresh()
-  })
   const loadLatest = () => {
     setChangedElsewhere(false)
     setApiKey('')
@@ -145,6 +140,26 @@ export function SettingsPage() {
         printerId !== idValue(settings.printer_id) ||
         defaultPlate !== (settings.default_plate ?? '') ||
         unit !== settings.display_unit))
+
+  // Read when the answer lands, not when the event came: typing may have started since.
+  const isDirty = useLatest(() => dirty)
+  useSubscription('settings', (signal) => {
+    // Save and Test connection both write the settings: that event is this tab's own.
+    if (signal === 'resync' || saving || testing) return
+    if (isDirty.current()) {
+      setChangedElsewhere(true)
+      return
+    }
+    api.getSettings().then(
+      (latest) => {
+        if (isDirty.current()) setChangedElsewhere(true)
+        else settingsState.setData(latest)
+      },
+      () => {
+        // The form keeps what it shows; the next change reads again.
+      },
+    )
+  })
 
   function formValues() {
     return Object.fromEntries(Object.entries(form).map(([field, [value]]) => [field, value]))
@@ -236,7 +251,7 @@ export function SettingsPage() {
     setTest(null)
     try {
       // The server tests what it has stored, so save first or the test lags the form.
-      await api.putSettings(draft())
+      settingsState.setData(await api.putSettings(draft()))
       setApiKey('')
       setTest(await api.testSettings())
     } catch (cause) {

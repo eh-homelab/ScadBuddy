@@ -22,7 +22,8 @@ export function HistoryPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
-  // #269 — live: outputs saved or deleted elsewhere, and prints moving, show up here.
+  // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
+  // on `print:<output id>`, which this list does not follow.
   const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
