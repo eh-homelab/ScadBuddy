@@ -333,7 +333,8 @@ jobs:
           if [ ! -s "$log" ]; then
             # The action was skipped by its workflow-validation guard —
             # `Enforce merge gate` reads that case off an empty
-            # `review_execution` — or it died before Claude started.
+            # `review_execution` and passes it only when this PR edits the
+            # workflow — or it died before Claude started.
             echo "No execution log at $log — nothing to explain."
             exit 0
           fi
@@ -776,12 +777,32 @@ jobs:
           # execution_file) when this PR's workflow file differs from the copy on the
           # default branch — its guard against a PR rewriting the review workflow to
           # misuse secrets. The review genuinely could not run, so there is nothing to
-          # enforce: pass. Workflow edits are still gated by human review + branch
+          # enforce. That is a pass ONLY when this PR is the one editing the
+          # workflow: those edits are still gated by human review + branch
           # protection, and this is what lets the PR that introduces/edits this very
           # workflow go green. A normal run always sets execution_file.
+          #
+          # The guard fires just as readily for a PR that never touched the file
+          # but was branched before main last changed it — every open PR, the
+          # moment a gate fix merges. Passing those merged #410, #416, #417 and
+          # #431 (2026-09-28) on heads no review had read (#487; same hole as
+          # eh-homelab/clusters#1284). So: read the PR's own file list, and pass
+          # only when the workflow is in it; otherwise fail closed and say what
+          # to do (merge main, re-dispatch).
           if [ -z "${REVIEW_EXECUTION:-}" ]; then
-            echo "Claude review action was skipped (no execution_file; workflow-validation guard). Merge gate not enforced on this run."
-            pass "The code review action was skipped (workflow-validation guard), so the merge gate was not enforced on this run."
+            echo "Claude review action was skipped (no execution_file; workflow-validation guard)."
+            if ! changed="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')"; then
+              echo "::error::Could not list this PR's files, so the workflow-validation skip could not be attributed. Failing closed."
+              fail "The code review action was skipped (workflow-validation guard) and this PR's file list could not be read to tell whether it edits the workflow. Failing closed."
+            fi
+            if printf '%s\n' "$changed" | grep -xF '.github/workflows/claude-code-review.yml' >/dev/null; then
+              echo "This PR edits the review workflow itself. Merge gate not enforced on this run."
+              pass "The code review action was skipped (workflow-validation guard) because this PR edits the review workflow, so the merge gate was not enforced on this run."
+            fi
+            echo "::error::This PR does not edit .github/workflows/claude-code-review.yml, so the skip means its copy is behind main. Failing closed."
+            fail "The code review action was skipped (workflow-validation guard), but this PR does not edit \`.github/workflows/claude-code-review.yml\` — its copy of the workflow is simply behind \`main\`, so no review read \`${HEAD_SHA}\`. Failing closed.
+
+          Merge \`main\` into this branch (or rebase) and re-dispatch \`claude-code-review.yml\` against it; pushing the merge commit does that on its own."
           fi
 
           # ── The review must have reviewed THIS commit (#123) ────────────────
