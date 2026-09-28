@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+from temporalio.api.workflowservice.v1 import SetWorkerDeploymentCurrentVersionRequest
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -25,6 +28,7 @@ def render_worker(
     *,
     build_id: str,
     max_concurrent_activities: int,
+    graceful_shutdown_timeout: timedelta = timedelta(),
 ) -> Worker:
     """The render worker (spec §3.5): versioned by build id so a rolling deploy lets
     old workers drain the workflows they started."""
@@ -34,6 +38,7 @@ def render_worker(
         workflows=[TemplatePipeline, RenderPiece],
         activities=activities.all(),
         max_concurrent_activities=max_concurrent_activities,
+        graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=WorkerDeploymentConfig(
             version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
             use_worker_versioning=True,
@@ -42,10 +47,25 @@ def render_worker(
     )
 
 
+async def make_current(client: Client, *, namespace: str, build_id: str) -> None:
+    """Make `build_id` the deployment's current version: a versioned worker takes new
+    workflows only once its version is current."""
+    await client.workflow_service.set_worker_deployment_current_version(
+        SetWorkerDeploymentCurrentVersionRequest(
+            namespace=namespace,
+            deployment_name=DEPLOYMENT_NAME,
+            build_id=build_id,
+            ignore_missing_task_queues=True,
+            allow_no_pollers=True,
+        )
+    )
+
+
 __all__ = [
     "DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "connect",
+    "make_current",
     "pydantic_data_converter",
     "render_worker",
 ]

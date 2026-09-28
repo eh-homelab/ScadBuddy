@@ -21,7 +21,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
-from tests.api.conftest import MODEL_SLUG, wait_for_job
+from tests.api.conftest import wait_for_job
+from tests.conftest import MODEL_SLUG
 
 # The fake openscad exports `width` and `label` (initial "hi"); the annotation is
 # ScadBuddy's own overlay, so it turns `label` into a file parameter.
