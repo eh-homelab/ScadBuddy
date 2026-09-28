@@ -16,6 +16,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library import scad
 from scadbuddy.library.scad import check_source, parse_diagnostics
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
+from tests.conftest import UNUSED_DATABASE_URL
 
 StrPath = str | PathLike[str]
 
@@ -119,7 +120,13 @@ async def test_the_check_runs_no_more_openscads_at_once_than_its_cap(
 async def test_the_checks_cap_is_its_own_knob() -> None:
     """Not the render one: the queue caps itself with worker tasks, so there is no
     semaphore to share, and the pod's budget is the two added together."""
-    state = build_state(Settings(check_concurrency=3, frontend_dir=Path("/nonexistent")))
+    state = build_state(
+        Settings(
+            check_concurrency=3,
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+        )
+    )
 
     for _ in range(3):
         await asyncio.wait_for(state.checks.acquire(), timeout=0.1)

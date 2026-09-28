@@ -4,13 +4,14 @@ import type { Hono } from 'hono'
 import { createBackendClient } from '../../src/api/backend.js'
 import { type AgentApp, type AppDeps, createApp } from '../../src/app.js'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../../src/auth/authenticate.js'
-import { InMemoryTokenStore, type TokenStore } from '../../src/auth/tokens.js'
+import type { TokenStore } from '../../src/auth/tokens.js'
 import { originPolicy } from '../../src/http/origins.js'
 import type { McpEndpointDeps } from '../../src/mcp/http.js'
 import { ALL_TOOLS } from '../../src/tools/index.js'
 import { PendingActionStore } from '../../src/tools/pending.js'
 import type { ToolServices } from '../../src/tools/registry.js'
 import { MemoryCredentials } from '../support/memoryCredentials.js'
+import { InMemoryTokenStore } from '../support/memoryTokens.js'
 
 // An in-process ScadBuddy agent app and MCP SDK Streamable HTTP clients that
 // talk to it without a socket: the client's `fetch` calls `app.fetch`, passing

@@ -6,16 +6,18 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import psycopg
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
@@ -36,9 +38,23 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.media import (
+    LEGACY_ID,
+    MAX_MEDIA_ITEMS,
+    MEDIA_DIR,
+    MEDIA_UPLOAD_PREFIX,
+    VIDEO_EXTENSIONS,
+    MediaItem,
+    MediaView,
+    StagedMedia,
+    content_type_of,
+    new_media_id,
+    readable_media,
+)
+from scadbuddy.library.media_store import MediaStore
 from scadbuddy.library.presets import TemplatePreset, TemplatePresets
-from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
@@ -52,7 +68,6 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
-from scadbuddy.render.solids import WRAPPER_PREFIX
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -128,6 +143,23 @@ class SidecarNotFoundError(KeyError):
     """The model exists, but the thumbnail or README being removed does not."""
 
 
+class MediaNotFoundError(KeyError):
+    """The model exists, but has no media item (or poster) of that id."""
+
+
+class MediaOrderError(ValueError):
+    """A reorder that is not a permutation of the template's media ids."""
+
+
+class MediaUnavailableError(RuntimeError):
+    """A media write with no database to hold the list (#274): until #401 makes
+    ``SCADBUDDY_DATABASE_URL`` required, a deployment may run without one."""
+
+
+class TooManyMediaError(ValueError):
+    """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
+
+
 class ModelExistsError(ValueError):
     pass
 
@@ -168,13 +200,22 @@ class ModelMeta(BaseModel):
     #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
     #: a fetched commit, set by `pin_library`, never typed in.
     libraries: list[ModelLibrary] = Field(default_factory=list)
+    #: A built-in's images and videos (#274), in order, as its bundled model.json
+    #: ships them. A template of mine keeps its list in `template_media` instead, and
+    #: this is never written for one.
+    media: list[MediaItem] = Field(default_factory=list)
+
+    @field_validator("media", mode="before")
+    @classmethod
+    def _readable_media(cls, value: Any) -> list[MediaItem]:
+        return readable_media(value)
 
     @field_validator("libraries", mode="before")
     @classmethod
     def _readable_pins(cls, value: Any) -> Any:
-        """Only the entries that are pins. A bare name from before per-model pins,
-        or a hand-edited entry, must not stop the model listing; its render says
-        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        """Only the entries that are pins. A hand-edited entry that is not one must
+        not stop the model listing; its render says what is wrong with it
+        (`parse_declaration`), and pinning it again fixes it."""
         if not isinstance(value, list):
             return []
         readable: list[ModelLibrary] = []
@@ -186,7 +227,7 @@ class ModelMeta(BaseModel):
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
-DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries"})
+DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries", "media"})
 
 
 def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
@@ -275,6 +316,9 @@ class ModelRecord(ModelMeta):
     # Where a duplicate stands against its upstream (#157); None for a template
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
+    #: As stored, plus what the disk says of each file. A template with only a
+    #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
+    media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
 
 
 class Catalogue:
@@ -287,14 +331,28 @@ class Catalogue:
         outputs: OutputStore | None = None,
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
+        media_store: MediaStore | None = None,
+        *,
+        serve_previews: bool = True,
+        wrapper_prefix: str,
     ) -> None:
         self.paths = paths
         self.history = history
+        #: Where a template of mine's media list is; None with no database, when
+        #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
+        self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
-        #: Where the default-render preview is read from; None turns it off.
+        #: The default-render previews. Kept clean of gone and reused models even
+        #: while `serve_previews` is off, so turning previews back on never serves
+        #: an earlier model's image.
         self.previews = previews
+        #: Off, the catalogue serves no preview at all -- including ones rendered
+        #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
+        self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: A render's colour wrapper file prefix, which a duplicate leaves out.
+        self.wrapper_prefix = wrapper_prefix
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -401,16 +459,18 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
-    def thumbnail_source(self, slug: str) -> ThumbnailOrigin:
-        """Where the thumbnail comes from: the model's own, else the first generated
-        output's plate cover, else the default-render preview."""
-        if self.thumbnail_path(slug).is_file():
+    def thumbnail_source(self, slug: str, media: list[MediaView] | None = None) -> ThumbnailOrigin:
+        """Where the thumbnail comes from: the model's own cover (#274), else the
+        first generated output's plate cover, else the default-render preview.
+        ``media`` is the template's, when the caller has already listed it."""
+        listed = self.list_media(slug) if media is None else media
+        if self._cover(slug, listed) is not None:
             return ThumbnailOrigin("model")
         if self.outputs is not None:
             output_id = self.outputs.plate_cover_output(slug)
             if output_id is not None:
                 return ThumbnailOrigin("output", output_id=output_id)
-        if self.previews is not None:
+        if self.previews is not None and self.serve_previews:
             preview_id = self.previews.preview_id(slug)
             if preview_id is not None:
                 return ThumbnailOrigin("preview", preview_id=preview_id)
@@ -419,21 +479,36 @@ class Catalogue:
     def has_output_cover(self, slug: str) -> bool:
         return self.outputs is not None and self.outputs.has_plate_cover(slug)
 
-    def thumbnail(self, slug: str) -> bytes | None:
-        """The catalogue thumbnail: the model's own, else the first generated
-        output's plate cover, else the default-render preview, else None."""
+    def _cover(self, slug: str, media: list[MediaView]) -> tuple[Path, str] | None:
+        """The template's own cover image and its content type: the first item that
+        is an image or a video with a poster. A missing file is passed over, and so
+        is a video without a poster -- a card cannot show a frame of it."""
+        for item in media:
+            if item.missing:
+                continue
+            if item.kind == "image":
+                return self._media_file(slug, item.id, item.file), item.content_type
+            if item.poster is not None:
+                return self.media_dir(slug) / item.poster, content_type_of(item.poster)
+        return None
+
+    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        """The catalogue thumbnail and its content type: the template's cover, else
+        the first generated output's plate cover, else the default-render preview,
+        else None."""
         self._require(slug)
-        try:
-            return self.thumbnail_path(slug).read_bytes()
-        except FileNotFoundError:
-            pass
+        cover = self._cover(slug, self.list_media(slug))
+        if cover is not None:
+            with contextlib.suppress(FileNotFoundError):
+                return cover[0].read_bytes(), cover[1]
         if self.outputs is not None:
-            cover = self.outputs.plate_cover(slug)
-            if cover is not None:
-                return cover
-        if self.previews is None:
+            plate = self.outputs.plate_cover(slug)
+            if plate is not None:
+                return plate, "image/png"
+        if self.previews is None or not self.serve_previews:
             return None
-        return self.previews.image(slug)
+        preview = self.previews.image(slug)
+        return (preview, "image/png") if preview is not None else None
 
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
@@ -475,10 +550,16 @@ class Catalogue:
         return self._record(slug, self.version, self._has_history)
 
     def _record(
-        self, slug: str, version_of: Callable[[str], str | None], history: bool
+        self,
+        slug: str,
+        version_of: Callable[[str], str | None],
+        history: bool,
+        media_of: Callable[[str], list[MediaItem]] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
-        walk a listing makes -- and is asked for an upstream's as well as this one's."""
+        walk a listing makes -- and is asked for an upstream's as well as this one's.
+        ``media_of`` answers a template of mine's media rows from the listing's one
+        query; without it they are read for this template alone."""
         self._require(slug)
         raw = self.read_raw_meta(slug)
         if is_builtin(slug):
@@ -505,9 +586,11 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        thumbnail = self.thumbnail_source(slug)
+        media = self._views(slug, self._stored_media(slug, meta, media_of))
+        thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
-            **meta.model_dump(),
+            **meta.model_dump(exclude={"media"}),
+            media=media,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
@@ -534,10 +617,10 @@ class Catalogue:
         """The models whose live ``model.json`` pins ``name`` (at ``commit``).
 
         Read leniently and counted conservatively, because the answer decides
-        whether a checkout may be deleted: an entry that only names the library --
-        a bare name from before per-model pins, or a hand edit with no readable
-        commit -- counts at every commit, and a ``model.json`` that is not JSON
-        counts when its text mentions the name at all.
+        whether a checkout may be deleted: an entry that names the library with no
+        readable commit -- a hand edit -- counts at every commit, and a
+        ``model.json`` that is not JSON counts when its text mentions the name at
+        all.
         """
         users: list[str] = []
         for slug in self.slugs():
@@ -568,10 +651,20 @@ class Catalogue:
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
+        # And ONE media query (#274), for every template of mine on the page.
+        rows = (
+            self.media_store.items_for([slug for slug in slugs if not is_builtin(slug)])
+            if self.media_store is not None
+            else {}
+        )
+
+        def media_of(slug: str) -> list[MediaItem]:
+            return rows.get(slug, [])
+
         records: list[ModelRecord] = []
         for slug in slugs:
             try:
-                records.append(self._record(slug, versions.get, history))
+                records.append(self._record(slug, versions.get, history, media_of))
             except InvalidModelMetaError as error:
                 # One broken model.json costs its own model, never the whole page;
                 # `GET /models/{slug}` says what is wrong with it.
@@ -592,7 +685,9 @@ class Catalogue:
         directory = self._claim(slug)
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
-            self.write_raw_meta(slug, meta.model_dump())
+            # A template of mine's media list is rows (#274), never model.json.
+            self.write_raw_meta(slug, meta.model_dump(exclude={"media"}))
+            self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
             if readme is not None:
@@ -617,6 +712,8 @@ class Catalogue:
         self._require(upstream_id)
         if self.exists(slug):
             raise ModelExistsError(slug)
+        # The upstream's list, copied as rows once the files are in place (#274).
+        media = self._stored_media(upstream_id)
         # Not `self.version`, which logs a git failure and answers None: here that
         # would record no base and copy the working tree instead of the revision.
         # A failure reading it fails the duplicate, as a failed export does.
@@ -640,6 +737,9 @@ class Catalogue:
                     self.history.export(model_path(upstream_id), base, staged)
                 except RevisionNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
+                # Videos are not in the history (#274): the revision has their
+                # entries but not their files, so they come from the working tree.
+                self._copy_videos(upstream_id, staged / MEDIA_DIR)
             else:
                 try:
                     # Dotfiles are left out: a `.model-*.scad` is a source write in
@@ -649,7 +749,9 @@ class Catalogue:
                         staged,
                         # Nor a render's colour wrapper, written beside the source
                         # for the length of a render and gitignored for that reason.
-                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
+                        ignore=shutil.ignore_patterns(
+                            ".*", *([f"{self.wrapper_prefix}*"] if self.wrapper_prefix else [])
+                        ),
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
@@ -657,6 +759,8 @@ class Catalogue:
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
             meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
             meta.pop("schema", None)
+            # A built-in's bundled list becomes rows of the copy's own.
+            meta.pop("media", None)
             if is_builtin(upstream_id):
                 # A built-in never has an `origin_url` (#179): the record drops one
                 # its image's model.json carries, and the copy must not bring it
@@ -685,6 +789,9 @@ class Catalogue:
                 raise
         finally:
             _remove_tree(staging)
+        # After the files, as every media write: a row never names a file not there.
+        if self.media_store is not None:
+            self.media_store.replace(slug, media)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # Sweep any staging an earlier duplicate crashed out of, once it is old
         # enough not to be another replica's copy in flight: a single replica that crashed and
@@ -696,6 +803,16 @@ class Catalogue:
         except OSError:
             logger.exception("could not sweep duplicate staging")
         return self.record(slug)
+
+    def _copy_videos(self, upstream_id: str, target: Path) -> None:
+        """Copy the upstream's video files into ``target`` (its ``media/``)."""
+        source = self.media_dir(upstream_id)
+        if not source.is_dir():
+            return
+        for path in sorted(source.iterdir()):
+            if path.suffix.lstrip(".").lower() in VIDEO_EXTENSIONS and path.is_file():
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target / path.name)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
         self._require(slug)
@@ -715,7 +832,7 @@ class Catalogue:
         return self.record(slug)
 
     def pin_library(
-        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+        self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
     ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
         or at the end. One revision of the model; no other model moves.
@@ -769,18 +886,295 @@ class Catalogue:
 
     def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
         """Set or replace the model's own thumbnail, as one revision. A default-render
-        preview has nothing left to stand in for, so it goes."""
-        self._write_sidecar(slug, THUMBNAIL_NAME, png)
-        if self.previews is not None:
-            self.previews.drop(slug)
-        self._commit(f"Set {slug} thumbnail", slug)
+        preview has nothing left to stand in for, so it goes.
+
+        Once the template has media (#274), the thumbnail is its cover: the PNG
+        takes the place of a first item that is an image, or goes in front of a
+        first item that is a video. It gets a new id, since an id never changes
+        its contents."""
+        self._require(slug)
+        if not self._stored_media(slug):
+            self._write_sidecar(slug, THUMBNAIL_NAME, png)
+            self._drop_preview(slug)
+            self._commit(f"Set {slug} thumbnail", slug)
+            return self.record(slug)
+        item_id = new_media_id()
+        cover = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            replaced = edit.items[0] if edit.items and edit.items[0].kind == "image" else None
+            self._media_directory(slug)
+            write_atomic(self.media_dir(slug) / cover.file, png)
+            edit.items[: 1 if replaced is not None else 0] = [cover]
+            self._save_media(slug, edit, added=[cover.file])
+
+        self._commit_change(f"Set {slug} thumbnail", change, slug)
+        self._drop_preview(slug)
         return self.record(slug)
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
-        report one: the fallback takes over when the model has been generated."""
-        self._remove_sidecar(slug, THUMBNAIL_NAME)
-        self._commit(f"Remove {slug} thumbnail", slug)
+        report one: the next item's, or the fallback's when the model has been
+        generated. With media, that is the first item when it is an image."""
+        self._require(slug)
+        if not self._stored_media(slug):
+            self._remove_sidecar(slug, THUMBNAIL_NAME)
+            self._commit(f"Remove {slug} thumbnail", slug)
+            return self.record(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            if not edit.items or edit.items[0].kind != "image":
+                raise SidecarNotFoundError(THUMBNAIL_NAME)
+            del edit.items[0]
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Remove {slug} thumbnail", change, slug)
+        return self.record(slug)
+
+    # ── media (#274) ──────────────────────────────────────────────────────────
+
+    def media_dir(self, slug: str) -> Path:
+        return self.paths.model_dir(slug) / MEDIA_DIR
+
+    def _media_directory(self, slug: str) -> Path:
+        """``media/``, made if need be -- but never the model directory itself: a
+        write racing a delete fails with the delete's 404."""
+        directory = self.media_dir(slug)
+        try:
+            directory.mkdir(exist_ok=True)
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
+        return directory
+
+    def _media_file(self, slug: str, item_id: str, file: str) -> Path:
+        """Where an item's file is: ``media/<file>``, or the model's own
+        ``thumbnail.png`` for the synthesized legacy item."""
+        if item_id == LEGACY_ID and file == THUMBNAIL_NAME:
+            return self.thumbnail_path(slug)
+        return self.media_dir(slug) / file
+
+    def _stored_media(
+        self,
+        slug: str,
+        meta: ModelMeta | None = None,
+        media_of: Callable[[str], list[MediaItem]] | None = None,
+    ) -> list[MediaItem]:
+        """The list as stored: a built-in's bundled model.json ``media``, shipped
+        read-only; a template of mine's `template_media` rows, or none without a
+        database. ``meta`` is the model's and ``media_of`` a listing's rows, when
+        the caller already has them."""
+        if is_builtin(slug):
+            return (meta or self._meta(slug, self.read_raw_meta(slug))).media
+        if self.media_store is None:
+            return []
+        if media_of is not None:
+            return media_of(slug)
+        return self.media_store.items(slug)
+
+    def _views(self, slug: str, items: list[MediaItem]) -> list[MediaView]:
+        """``items`` with what the disk says of each. With none stored, the model's
+        ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
+        if not items:
+            size = _file_size(self.thumbnail_path(slug))
+            if size is None:
+                return []
+            return [
+                MediaView(
+                    id=LEGACY_ID,
+                    file=THUMBNAIL_NAME,
+                    kind="image",
+                    content_type=content_type_of(THUMBNAIL_NAME),
+                    size=size,
+                )
+            ]
+        views: list[MediaView] = []
+        for item in items:
+            size = _file_size(self._media_file(slug, item.id, item.file))
+            poster = item.poster
+            if poster is not None and _file_size(self.media_dir(slug) / poster) is None:
+                poster = None
+            views.append(
+                MediaView(
+                    **item.model_dump(exclude={"poster"}),
+                    poster=poster,
+                    missing=size is None,
+                    content_type=content_type_of(item.file),
+                    size=size,
+                )
+            )
+        return views
+
+    def list_media(self, slug: str) -> list[MediaView]:
+        """The template's images and videos, in order; the first is the cover."""
+        self._require(slug)
+        return self._views(slug, self._stored_media(slug))
+
+    def media_item(self, slug: str, item_id: str) -> tuple[MediaView, Path]:
+        """One item and its file, or :class:`MediaNotFoundError` -- for an unknown
+        id and for an entry whose file is missing alike."""
+        for item in self.list_media(slug):
+            if item.id == item_id and not item.missing:
+                return item, self._media_file(slug, item.id, item.file)
+        raise MediaNotFoundError(item_id)
+
+    def media_poster(self, slug: str, item_id: str) -> Path:
+        """The poster of one item, or :class:`MediaNotFoundError`."""
+        for item in self.list_media(slug):
+            if item.id == item_id and item.poster is not None:
+                return self.media_dir(slug) / item.poster
+        raise MediaNotFoundError(item_id)
+
+    def _clear_media_rows(self, slug: str) -> None:
+        """Rows a deleted model at ``slug`` left behind (its delete removes them
+        best-effort), so a new model there does not list its predecessor's media."""
+        if self.media_store is not None:
+            self.media_store.delete(slug)
+
+    def _require_media_store(self) -> MediaStore:
+        if self.media_store is None:
+            raise MediaUnavailableError("template media needs SCADBUDDY_DATABASE_URL")
+        return self.media_store
+
+    def _edit_media(self, slug: str) -> _MediaEdit:
+        """The stored items, to change and pass to :meth:`_save_media`. A legacy
+        ``thumbnail.png`` comes back as an ordinary item with an id of its own,
+        which the save moves into ``media/`` -- the first write converts it."""
+        stored = self._require_media_store().items(slug)
+        if stored:
+            return _MediaEdit(list(stored), stored, None)
+        if not self.thumbnail_path(slug).is_file():
+            return _MediaEdit([], [], None)
+        item_id = new_media_id()
+        legacy = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
+        return _MediaEdit([legacy], [], legacy)
+
+    def _resolve_id(self, edit: _MediaEdit, item_id: str) -> str:
+        """``thumbnail`` names the converted legacy item until the first write."""
+        if item_id == LEGACY_ID and edit.legacy is not None:
+            return edit.legacy.id
+        return item_id
+
+    def _save_media(self, slug: str, edit: _MediaEdit, added: Sequence[str] = ()) -> None:
+        """Write ``edit.items`` as the template's rows, then remove the files of every
+        item it no longer holds. The files come first: ``added`` (already in
+        ``media/``) and a converted legacy thumbnail are in place before the rows
+        name them, and are taken back out if the rows cannot be written. Under the
+        history's write lock, as every change is."""
+        store = self._require_media_store()
+        before = list(edit.before)
+        converted = edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items)
+        if edit.legacy is not None:
+            if converted:
+                directory = self._media_directory(slug)
+                os.replace(self.thumbnail_path(slug), directory / edit.legacy.file)
+            else:
+                before.append(edit.legacy)
+        try:
+            store.replace(slug, edit.items)
+        except BaseException:
+            if converted and edit.legacy is not None:
+                with contextlib.suppress(OSError):
+                    os.replace(self.media_dir(slug) / edit.legacy.file, self.thumbnail_path(slug))
+            for added_name in added:
+                (self.media_dir(slug) / added_name).unlink(missing_ok=True)
+            raise
+        kept = {name for item in edit.items for name in (item.file, item.poster) if name}
+        for item in before:
+            for name in (item.file, item.poster):
+                if name is None or name in kept:
+                    continue
+                if edit.legacy is not None and item.id == edit.legacy.id:
+                    self.thumbnail_path(slug).unlink(missing_ok=True)
+                else:
+                    (self.media_dir(slug) / name).unlink(missing_ok=True)
+
+    def add_media(
+        self,
+        slug: str,
+        upload: StagedMedia,
+        caption: str = "",
+        poster: StagedMedia | None = None,
+    ) -> ModelRecord:
+        """Move a staged upload (and its poster) into ``media/`` as the last item,
+        as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`."""
+        self._require(slug)
+        item_id = new_media_id()
+        item = MediaItem(
+            id=item_id,
+            file=f"{item_id}.{upload.extension}",
+            kind=upload.kind,
+            caption=caption,
+            poster=f"{item_id}-poster.{poster.extension}" if poster is not None else None,
+        )
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            if len(edit.items) >= MAX_MEDIA_ITEMS:
+                raise TooManyMediaError(slug)
+            directory = self._media_directory(slug)
+            added = [item.file]
+            os.replace(upload.path, directory / item.file)
+            if poster is not None and item.poster is not None:
+                os.replace(poster.path, directory / item.poster)
+                added.append(item.poster)
+            edit.items.append(item)
+            self._save_media(slug, edit, added=added)
+
+        kind = "video" if upload.kind == "video" else "image"
+        self._commit_change(f"Add {kind} {item_id} to {slug}", change, slug)
+        return self.record(slug)
+
+    def set_caption(self, slug: str, item_id: str, caption: str) -> ModelRecord:
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = self._resolve_id(edit, item_id)
+            for index, item in enumerate(edit.items):
+                if item.id == wanted:
+                    edit.items[index] = item.model_copy(update={"caption": caption})
+                    break
+            else:
+                raise MediaNotFoundError(item_id)
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Caption {item_id} in {slug}", change, slug)
+        return self.record(slug)
+
+    def reorder(self, slug: str, ids: list[str]) -> ModelRecord:
+        """Put the items in the order of ``ids``, which must name each exactly
+        once; otherwise :class:`MediaOrderError`."""
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = [self._resolve_id(edit, item_id) for item_id in ids]
+            by_id = {item.id: item for item in edit.items}
+            if len(wanted) != len(by_id) or set(wanted) != set(by_id):
+                raise MediaOrderError("the order must name every media item exactly once")
+            edit.items[:] = [by_id[item_id] for item_id in wanted]
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Reorder {slug} media", change, slug)
+        return self.record(slug)
+
+    def remove_media(self, slug: str, item_id: str) -> ModelRecord:
+        """Remove one item and its files, as one revision. An entry whose file is
+        already gone is removed all the same."""
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = self._resolve_id(edit, item_id)
+            kept = [item for item in edit.items if item.id != wanted]
+            if len(kept) == len(edit.items):
+                raise MediaNotFoundError(item_id)
+            edit.items[:] = kept
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Remove {item_id} from {slug}", change, slug)
         return self.record(slug)
 
     def read_readme(self, slug: str) -> str:
@@ -1089,6 +1483,14 @@ class Catalogue:
         self.sweep_orphans()
         # Whether or not the sweep got to its outputs: the model is gone either way.
         self._forget_cover(slug)
+        self._drop_preview(slug)
+        # Its media rows (#274). Best-effort as the rest: a create or duplicate at
+        # this slug clears any left behind (`_clear_media_rows`).
+        if self.media_store is not None:
+            try:
+                self.media_store.delete(slug)
+            except Exception:
+                logger.exception("could not remove media rows", extra={"slug": slug})
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -1107,11 +1509,13 @@ class Catalogue:
         return removed
 
     def sweep_duplicate_staging(self) -> list[str]:
-        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
+        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left,
+        and the ``cache/media-upload-*`` files an upload killed mid-stream left.
 
         Runs at boot, after each duplicate and with the periodic upload sweep.
         Another replica sharing ``/data`` may be mid-copy, so only staging older
-        than ``duplicate_staging_max_age`` goes.
+        than ``duplicate_staging_max_age`` goes (an upload in flight writes its
+        file, so its age is since its last chunk).
         One that cannot be read or removed is logged and the rest still go.
         """
         root = self.paths.cache
@@ -1119,7 +1523,11 @@ class Catalogue:
             return []
         cutoff = time.time() - self.duplicate_staging_max_age
         removed: list[str] = []
-        for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
+        entries = [
+            *root.glob(f"{DUPLICATE_STAGING_PREFIX}*"),
+            *root.glob(f"{MEDIA_UPLOAD_PREFIX}*"),
+        ]
+        for entry in sorted(entries):
             try:
                 if entry.stat().st_mtime > cutoff:
                     continue
@@ -1155,12 +1563,7 @@ class Catalogue:
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         keyed_by_file = (self.paths.schema_cache, self.paths.presets)
-        roots = (
-            self.paths.outputs,
-            self.paths.model_revisions,
-            *keyed_by_file,
-            self.paths.previews,
-        )
+        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
                 if not root.is_dir():
@@ -1168,12 +1571,7 @@ class Catalogue:
                 for entry in root.iterdir():
                     if root in (self.paths.outputs, self.paths.model_revisions):
                         candidates.append((entry.name, entry))
-                    elif (root in keyed_by_file and entry.suffix == ".json") or (
-                        root == self.paths.previews
-                        and entry.suffix in (".png", ".json")
-                        # A dotfile is an atomic write's temp file, still in flight.
-                        and not entry.name.startswith(".")
-                    ):
+                    elif root in keyed_by_file and entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
             except OSError:
                 logger.exception("could not list for orphans", extra={"path": str(root)})
@@ -1185,17 +1583,97 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            # A preview file goes under the preview lock, as every other change to one.
-            gone = (
-                remove_preview_file(path)
-                if path.parent == self.paths.previews
-                else _remove_tree(path)
-            )
-            if gone:
+            if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
         return removed
+
+    def sweep_stranded_claims(self) -> list[str]:
+        """Move to tombstones the model directories a claim left with nothing in them.
+
+        `_claim` makes a slug's directory before `create` or `duplicate` writes
+        into it; a process killed in between leaves one with no ``model.scad``,
+        which reads as missing yet refuses a retry as taken. Only one with nothing
+        tracked at HEAD either goes, and only once older than ``duplicate_staging_max_age``:
+        another replica sharing ``/data`` may be mid-claim. Runs at boot, before
+        the tombstone sweep. One that cannot be read or moved is logged and skipped.
+        """
+        root = self.paths.models
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - self.duplicate_staging_max_age
+        moved: list[str] = []
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            logger.exception("could not list for stranded claims", extra={"path": str(root)})
+            return []
+        for directory in entries:
+            slug = directory.name
+            if slug.startswith(".") or slug == BUILTIN_DIR:
+                continue
+            try:
+                if not directory.is_dir() or (directory / SOURCE_NAME).exists():
+                    continue
+                if directory.stat().st_mtime > cutoff:
+                    continue
+                # Tracked at HEAD: a model whose source is missing from disk, not a
+                # claim -- restoring it is the history's job, not this sweep's.
+                if self.history is not None and self.history.available:
+                    head = self.history.head()
+                    if head is not None and self.history.files_at(head, slug):
+                        continue
+                tombstones = self.paths.tombstones
+                tombstones.mkdir(parents=True, exist_ok=True)
+                directory.rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
+            except FileNotFoundError:
+                continue
+            except (OSError, GitError):
+                logger.exception("could not sweep a stranded claim", extra={"slug": slug})
+                continue
+            moved.append(slug)
+        return moved
+
+    def sweep_orphan_previews(self) -> list[str]:
+        """Drop the default-render preview of every model that is gone; returns their
+        ids. Apart from `sweep_orphans`, which works by path: the previews are
+        rows in the database.
+
+        A model counts as live while its directory exists, as for `sweep_orphans`,
+        and one whose liveness cannot be checked is kept.
+        """
+        if self.previews is None:
+            return []
+        try:
+            slugs = self.previews.slugs()
+        except psycopg.Error:
+            # The database, not one model: nothing to sweep this time, as
+            # `sweep_orphans` skips a root it cannot list.
+            logger.exception("could not list the previews to sweep")
+            return []
+        removed: list[str] = []
+        for slug in slugs:
+            try:
+                if self.paths.model_dir(slug).exists():
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
+                continue
+            self.previews.drop(slug)
+            removed.append(slug)
+        return removed
+
+    def _drop_preview(self, slug: str) -> None:
+        """Best effort, like the rest of a delete's or a reused slug's cleanup: one
+        left behind ranks below the model's own thumbnail, and a gone model's is
+        swept at the next boot."""
+        if self.previews is None:
+            return
+        try:
+            self.previews.drop(slug)
+        except Exception:
+            logger.exception("could not drop a preview", extra={"slug": slug})
 
     def _claim(self, slug: str) -> Path:
         """Make ``slug``'s directory, or raise ModelExistsError if anything has it.
@@ -1230,9 +1708,9 @@ class Catalogue:
             self.paths.model_presets(slug),
         ):
             _remove_tree(path)
-        # Under the preview lock, with or without a store attached: a render of the
-        # previous model finishing now must not interleave with this.
-        drop_preview(self.paths, slug)
+        # Under the model's preview lock: a render of the previous model finishing
+        # now is either dropped here or discarded by its own "still wanted?" check.
+        self._drop_preview(slug)
         self._forget_cover(slug)
 
     def _forget_cover(self, slug: str) -> None:
@@ -1404,6 +1882,25 @@ class Catalogue:
             _remove_tree(retired)
 
 
+@dataclass
+class _MediaEdit:
+    """A template's media being changed: the items, the rows as they were, and the
+    legacy thumbnail they converted, if any (see :meth:`Catalogue._edit_media`)."""
+
+    items: list[MediaItem]
+    before: list[MediaItem]
+    legacy: MediaItem | None
+
+
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when there is none."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
 def _routable(slug: str) -> bool:
     """Can a route reach ``builtin:<slug>``? A bundled directory whose name is no slug
     would be a built-in nothing can address, so it is skipped (#197)."""
@@ -1452,14 +1949,12 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     return resolved
 
 
-def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+def _declares(entries: list[Any], name: str, expected: ModelLibrary) -> bool:
     """Is ``expected`` still the entry ``entries`` has for ``name``?"""
     found = [entry for entry in entries if entry_name(entry) == name]
     if len(found) != 1:
         return False
     [entry] = found
-    if isinstance(expected, str):
-        return bool(entry == expected)
     try:
         return ModelLibrary.model_validate(entry) == expected
     except ValidationError:
