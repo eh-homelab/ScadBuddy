@@ -704,6 +704,47 @@ describe('CataloguePage list mode (#278)', () => {
     expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
   })
 
+  it('keeps Cards on Back from a model, whatever another tab remembered meanwhile', async () => {
+    // The real route topology: the catalogue and the customizer are sibling routes, so
+    // leaving for a model unmounts the catalogue and Back mounts a fresh one.
+    const user = renderPage(
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <>
+              <CataloguePage />
+              <Search />
+              <History />
+            </>
+          }
+        />
+        <Route
+          path="/m/:slug"
+          element={
+            <>
+              <p>Customizer</p>
+              <History />
+            </>
+          }
+        />
+      </Routes>,
+    ).user
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(0)
+
+    await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
+    await screen.findByText('Customizer')
+    // Another tab of this browser chooses List while this one is on the model.
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
+    expect(rows()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
   it('lets a view in the URL win over the remembered one', async () => {
     window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'cards')
     renderCatalogue('/?view=list')
@@ -881,6 +922,35 @@ describe('CataloguePage list mode (#278)', () => {
         api.mediaUrl('gridfinity-bin', posterless),
       ),
     )
+  })
+
+  it('shows what it opens on when the media has no picture, never the output thumbnail', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    // A thumbnail from an output, but media with nothing the backend would take as cover.
+    const list = models.map((model) =>
+      model.slug === 'gridfinity-bin'
+        ? { ...model, has_thumbnail: true, thumbnail_source: 'output' as const, media: [posterless] }
+        : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    const thumbnail = within(rowOf('Gridfinity Bin')).getByRole('button', {
+      name: 'View media of Gridfinity Bin',
+    })
+    const bin = list.find((model) => model.slug === 'gridfinity-bin')!
+    expect(thumbnail.querySelector(`img[src="${api.modelThumbnailUrl(bin)}"]`)).toBeNull()
+    expect(thumbnail.querySelector('img')).toBeNull()
   })
 
   it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {
