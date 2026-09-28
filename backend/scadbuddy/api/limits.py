@@ -15,7 +15,9 @@ more than the limit is ever buffered.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine, Mapping
+import re
+from collections.abc import Callable, Coroutine, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -50,6 +52,35 @@ BODY_LIMITS: Mapping[str, int] = {
 }
 
 
+#: The template media upload (#274). A video runs to a gigabyte, so this route has
+#: its own limit, `media_upload_max_bytes`, in place of the multipart cap; the route
+#: streams the body to the data volume rather than spooling it.
+MEDIA_UPLOAD_PATH = re.compile(r"^/api/v1/models/[^/]+/media$")
+
+
+def megabytes(size: int) -> str:
+    """``size`` bytes in MB (of 1024 KiB), for a message: `1 MB`, `1024 MB`."""
+    return f"{size / (1024 * 1024):g} MB"
+
+
+@dataclass(frozen=True)
+class RouteLimit:
+    """A body limit of one route's own, checked in place of its content type's.
+
+    ``limit`` is asked on every request to the route, so a limit changed in
+    Settings applies to the next upload.
+    """
+
+    method: str
+    path: re.Pattern[str]
+    limit: Callable[[], int]
+    #: What the route is, for the refusal: "a media upload".
+    what: str
+
+    def matches(self, scope: Scope) -> bool:
+        return scope.get("method") == self.method and bool(self.path.match(scope["path"]))
+
+
 class _BodyTooLargeError(Exception):
     """A streamed body passed the limit; raised out of `receive` to stop the read."""
 
@@ -61,17 +92,37 @@ class BodySizeGate:
     chunk by chunk, and reading stops at the first chunk that crosses the limit.
     """
 
-    def __init__(self, app: ASGIApp, *, limits: Mapping[str, int]) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        limits: Mapping[str, int],
+        routes: Sequence[RouteLimit] = (),
+    ) -> None:
         self.app = app
         self.limits = limits
+        self.routes = routes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
-        kind = headers.get("content-type", "").split(";")[0].strip().lower()
-        limit = self.limits.get(kind)
+        route = next((route for route in self.routes if route.matches(scope)), None)
+        limit: int | None
+        if route is not None:
+            # Whatever the content type: the route's limit is the only one it has.
+            limit = route.limit()
+            too_large = (
+                f"{route.what} is at most {megabytes(limit)} (Settings > Uploads), "
+                "and this one is larger"
+            )
+            declared_too_large = too_large
+        else:
+            kind = headers.get("content-type", "").split(";")[0].strip().lower()
+            limit = self.limits.get(kind)
+            too_large = f"the body passed {limit} bytes, which is the most this API reads"
+            declared_too_large = ""
         if limit is None:
             await self.app(scope, receive, send)
             return
@@ -82,7 +133,8 @@ class BodySizeGate:
                     scope,
                     receive,
                     send,
-                    f"the body declares {declared} bytes and this API reads at most {limit}",
+                    declared_too_large
+                    or f"the body declares {declared} bytes and this API reads at most {limit}",
                 )
                 return
             await self.app(scope, receive, send)
@@ -111,12 +163,7 @@ class BodySizeGate:
         except _BodyTooLargeError:
             if started:  # pragma: no cover - the body is read before any response
                 raise
-            await self._refuse(
-                scope,
-                receive,
-                send,
-                f"the body passed {limit} bytes, which is the most this API reads",
-            )
+            await self._refuse(scope, receive, send, too_large)
 
     @staticmethod
     async def _refuse(scope: Scope, receive: Receive, send: Send, detail: str) -> None:

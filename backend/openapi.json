@@ -1817,6 +1817,150 @@
         "title": "LoadedAt",
         "type": "object"
       },
+      "MediaCaption": {
+        "properties": {
+          "caption": {
+            "maxLength": 1000,
+            "title": "Caption",
+            "type": "string"
+          }
+        },
+        "required": [
+          "caption"
+        ],
+        "title": "MediaCaption",
+        "type": "object"
+      },
+      "MediaOrder": {
+        "description": "Every item's id, once each, in the new order.",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "MediaOrder",
+        "type": "object"
+      },
+      "MediaUpload": {
+        "description": "The multipart body of ``POST /models/{slug}/media``.",
+        "properties": {
+          "caption": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caption"
+          },
+          "file": {
+            "description": "The image or video: a PNG, JPEG or WebP image, or an MP4 or WebM video",
+            "format": "binary",
+            "title": "File",
+            "type": "string"
+          },
+          "poster": {
+            "anyOf": [
+              {
+                "format": "binary",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "A video's poster image (PNG, JPEG or WebP)",
+            "title": "Poster"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "MediaUpload",
+        "type": "object"
+      },
+      "MediaView": {
+        "description": "An item as the API reports it, with what the disk says about its file.",
+        "properties": {
+          "caption": {
+            "default": "",
+            "title": "Caption",
+            "type": "string"
+          },
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "file": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+            "title": "File",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "image",
+              "video"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "missing": {
+            "default": false,
+            "title": "Missing",
+            "type": "boolean"
+          },
+          "poster": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poster"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "id",
+          "file",
+          "kind",
+          "content_type",
+          "size"
+        ],
+        "title": "MediaView",
+        "type": "object"
+      },
       "MergePreview": {
         "properties": {
           "base": {
@@ -2135,6 +2279,13 @@
               "$ref": "#/components/schemas/ModelLibrary"
             },
             "title": "Libraries",
+            "type": "array"
+          },
+          "media": {
+            "items": {
+              "$ref": "#/components/schemas/MediaView"
+            },
+            "title": "Media",
             "type": "array"
           },
           "name": {
@@ -5446,6 +5597,18 @@
             ],
             "title": "Library Folder Id"
           },
+          "media_upload_max_bytes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Upload Max Bytes"
+          },
           "pipeline_id": {
             "anyOf": [
               {
@@ -5571,6 +5734,10 @@
             ],
             "title": "Library Folder Id"
           },
+          "media_upload_max_bytes": {
+            "title": "Media Upload Max Bytes",
+            "type": "integer"
+          },
           "pipeline_id": {
             "anyOf": [
               {
@@ -5625,6 +5792,9 @@
             "title": "Public Url"
           }
         },
+        "required": [
+          "media_upload_max_bytes"
+        ],
         "title": "SettingsView",
         "type": "object"
       },
@@ -7444,6 +7614,346 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/media": {
+      "post": {
+        "description": "Adds a PNG, JPEG or WebP image, or an MP4 or WebM video as the template's last media item, as one revision. The type comes from the bytes, not the name. A video may carry a `poster` image and any item a `caption`. The body may be as large as `media_upload_max_bytes` (Settings > Uploads); an image is at most 10 MB, since it is committed to the template's history, while a video is not. The first write turns a legacy `thumbnail.png` into an ordinary item.",
+        "operationId": "upload_media_api_v1_models__slug__media_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaUpload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The template already holds 64 items"
+          },
+          "413": {
+            "description": "Larger than Settings > Uploads, or an image over 10 MB"
+          },
+          "415": {
+            "description": "Not a PNG, JPEG or WebP image, or an MP4 or WebM video"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add an image or video",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/media/order": {
+      "put": {
+        "description": "Puts the items in the order given, which must name every item exactly once (422 otherwise). The first is the cover.",
+        "operationId": "reorder_media_api_v1_models__slug__media_order_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaOrder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reorder the media",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/media/{item_id}": {
+      "delete": {
+        "description": "Removes one item and its files, as one revision. An entry whose file is missing is removed all the same.",
+        "operationId": "delete_media_api_v1_models__slug__media__item_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a media item",
+        "tags": [
+          "media"
+        ]
+      },
+      "get": {
+        "description": "Serves one image or video of the template. Honours `Range`, so a video can seek. An item's id never changes its contents, so it is cached as `immutable` -- except `thumbnail`, the legacy item, which is `no-cache`. 404 for an unknown id and for an entry whose file is missing.",
+        "operationId": "get_media_api_v1_models__slug__media__item_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {},
+              "video/*": {}
+            },
+            "description": "Successful Response"
+          },
+          "206": {
+            "description": "The byte range asked for with `Range`"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "One media file",
+        "tags": [
+          "media"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_media_api_v1_models__slug__media__item_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaCaption"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Caption a media item",
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/media/{item_id}/poster": {
+      "get": {
+        "description": "The poster image of one video. 404 when it has none.",
+        "operationId": "get_media_poster_api_v1_models__slug__media__item_id__poster_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/*": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A video's poster",
+        "tags": [
+          "media"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/outputs": {
       "get": {
         "description": "Details, not summaries: the history page shows each output's parameter diff, and\na summary list would make it fetch every row again one at a time.",
@@ -8302,7 +8812,7 @@
         ]
       },
       "get": {
-        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
+        "description": "The model's cover -- its first media image, or the poster of its first video -- or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
         "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
         "parameters": [
           {
@@ -8336,7 +8846,9 @@
         "responses": {
           "200": {
             "content": {
-              "image/png": {}
+              "image/jpeg": {},
+              "image/png": {},
+              "image/webp": {}
             },
             "description": "Successful Response"
           },

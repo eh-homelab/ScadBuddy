@@ -17,6 +17,7 @@ from scadbuddy.api import (
     jobs,
     libraries,
     lsp,
+    media,
     metrics,
     models,
     outputs,
@@ -28,7 +29,7 @@ from scadbuddy.api import (
     versions,
 )
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
-from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
+from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -48,6 +49,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 def _api_router() -> APIRouter:
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(models.router)
+    router.include_router(media.router)
     router.include_router(upstream.router)
     router.include_router(versions.router)
     router.include_router(presets.router)
@@ -226,7 +228,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
-    app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
+    app.add_middleware(
+        BodySizeGate,
+        limits=BODY_LIMITS,
+        routes=[
+            # Read per request, so a limit changed in Settings applies at once.
+            RouteLimit(
+                "POST",
+                MEDIA_UPLOAD_PATH,
+                lambda: state.settings_store.load().media_upload_max_bytes,
+                "a media upload",
+            )
+        ],
+    )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth
     # counting. It reads no body, so wrapping the gate costs the gate nothing.
@@ -235,7 +249,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

@@ -1,0 +1,584 @@
+"""Several images and videos per template (#274): stored in ``media/`` beside the
+source, ordered by ``model.json``, served with Range support, written through their
+own upload gate."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from starlette.types import Message
+
+from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.history import GIT, git_env
+from scadbuddy.main import create_app
+from tests.api.conftest import PNG_BYTES
+
+pytestmark = pytest.mark.requires_git
+
+# A NUL, as every real PNG has, so git stores it as binary.
+PNG = PNG_BYTES + b"\x00"
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x01" * 32
+WEBP = b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 32
+MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00" + bytes(range(256)) * 4
+WEBM = b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01" + b"\x00" * 64
+BUILTIN = "builtin:keychain"
+
+
+@pytest.fixture
+def bundled(seed_dir: Path) -> Path:
+    directory = seed_dir / "keychain"
+    (directory / "media").mkdir(parents=True)
+    (directory / "model.scad").write_text("width = 10;\n", encoding="utf-8")
+    (directory / "media" / "front.png").write_bytes(PNG)
+    (directory / "model.json").write_text(
+        json.dumps(
+            {"name": "Keychain", "media": [{"id": "front", "file": "front.png", "kind": "image"}]}
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+@pytest.fixture
+def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _upload(
+    client: TestClient,
+    slug: str,
+    payload: bytes,
+    name: str = "file.bin",
+    *,
+    caption: str | None = None,
+    poster: bytes | None = None,
+) -> Any:
+    files: dict[str, tuple[str, bytes, str]] = {"file": (name, payload, "application/octet-stream")}
+    if poster is not None:
+        files["poster"] = ("poster.png", poster, "image/png")
+    data = {"caption": caption} if caption is not None else None
+    return client.post(f"/api/v1/models/{slug}/media", files=files, data=data)
+
+
+def _media(client: TestClient, slug: str) -> list[dict[str, Any]]:
+    listed: list[dict[str, Any]] = client.get(f"/api/v1/models/{slug}").json()["media"]
+    return listed
+
+
+def _tracked(paths: DataPaths) -> list[str]:
+    return subprocess.run(
+        [GIT, "ls-files"],
+        cwd=paths.models,
+        env=git_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+
+def test_a_template_without_media_lists_none(client: TestClient, model: str) -> None:
+    assert _media(client, model) == []
+
+
+def test_a_legacy_thumbnail_is_listed_as_one_image(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
+
+    assert _media(client, model) == [
+        {
+            "id": "thumbnail",
+            "file": "thumbnail.png",
+            "kind": "image",
+            "caption": "",
+            "poster": None,
+            "missing": False,
+            "content_type": "image/png",
+            "size": len(PNG),
+        }
+    ]
+    served = client.get(f"/api/v1/models/{model}/media/thumbnail")
+    assert served.status_code == 200
+    assert served.content == PNG
+
+
+@pytest.mark.parametrize(
+    ("payload", "kind", "content_type"),
+    [
+        (PNG, "image", "image/png"),
+        (JPEG, "image", "image/jpeg"),
+        (WEBP, "image", "image/webp"),
+        (MP4, "video", "video/mp4"),
+        (WEBM, "video", "video/webm"),
+    ],
+)
+def test_an_upload_is_typed_by_its_bytes(
+    client: TestClient, model: str, payload: bytes, kind: str, content_type: str
+) -> None:
+    # The name and the declared type say nothing true: only the bytes count.
+    response = _upload(client, model, payload, "misleading.txt", caption="Front")
+
+    assert response.status_code == 200, response.text
+    [item] = response.json()["media"]
+    assert item["kind"] == kind
+    assert item["content_type"] == content_type
+    assert item["caption"] == "Front"
+    assert item["size"] == len(payload)
+    assert len(item["id"]) == 12
+    served = client.get(f"/api/v1/models/{model}/media/{item['id']}")
+    assert served.status_code == 200
+    assert served.content == payload
+    assert served.headers["content-type"] == content_type
+    assert served.headers["cache-control"] == "private, max-age=31536000, immutable"
+
+
+def test_an_upload_that_is_not_media_is_refused(client: TestClient, model: str) -> None:
+    response = _upload(client, model, b"just some text, not a picture", "photo.png")
+
+    assert response.status_code == 415, response.text
+    assert _media(client, model) == []
+
+
+def test_a_range_request_is_answered_with_that_range(client: TestClient, model: str) -> None:
+    item = _upload(client, model, MP4).json()["media"][0]
+
+    response = client.get(
+        f"/api/v1/models/{model}/media/{item['id']}", headers={"Range": "bytes=0-99"}
+    )
+
+    assert response.status_code == 206
+    assert response.content == MP4[:100]
+    assert response.headers["content-range"] == f"bytes 0-99/{len(MP4)}"
+
+
+def test_a_video_carries_its_poster(client: TestClient, model: str) -> None:
+    item = _upload(client, model, WEBM, poster=JPEG).json()["media"][0]
+
+    assert item["poster"] is not None
+    poster = client.get(f"/api/v1/models/{model}/media/{item['id']}/poster")
+    assert poster.status_code == 200
+    assert poster.content == JPEG
+    assert poster.headers["content-type"] == "image/jpeg"
+
+
+def test_a_poster_must_be_an_image(client: TestClient, model: str) -> None:
+    assert _upload(client, model, WEBM, poster=MP4).status_code == 415
+    assert _media(client, model) == []
+
+
+def test_an_image_has_no_poster(client: TestClient, model: str) -> None:
+    image = _upload(client, model, PNG).json()["media"][0]
+
+    assert _upload(client, model, PNG, poster=JPEG).status_code == 422
+    assert client.get(f"/api/v1/models/{model}/media/{image['id']}/poster").status_code == 404
+
+
+def test_an_image_is_capped_because_it_is_committed(client: TestClient, model: str) -> None:
+    response = _upload(client, model, PNG + b"\x00" * (10 * 1024 * 1024))
+
+    assert response.status_code == 413, response.text
+    assert _media(client, model) == []
+
+
+def test_an_upload_that_is_not_multipart_is_refused(client: TestClient, model: str) -> None:
+    response = client.post(f"/api/v1/models/{model}/media", content=PNG)
+
+    assert response.status_code == 422, response.text
+
+
+def test_the_legacy_item_is_not_cached_as_immutable(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """``thumbnail.png`` is replaced in place by a thumbnail PUT, unlike an item."""
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
+
+    served = client.get(f"/api/v1/models/{model}/media/thumbnail")
+
+    assert served.headers["cache-control"] == "no-cache"
+
+
+def test_an_unknown_item_is_a_404(client: TestClient, model: str) -> None:
+    assert client.get(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
+    assert client.delete(f"/api/v1/models/{model}/media/abcdefabcdef").status_code == 404
+    assert (
+        client.patch(f"/api/v1/models/{model}/media/abcdefabcdef", json={"caption": "x"})
+    ).status_code == 404
+
+
+def test_a_caption_is_edited(client: TestClient, model: str) -> None:
+    item = _upload(client, model, PNG).json()["media"][0]
+
+    response = client.patch(f"/api/v1/models/{model}/media/{item['id']}", json={"caption": "Top"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["media"][0]["caption"] == "Top"
+    assert _media(client, model)[0]["caption"] == "Top"
+
+
+def test_the_order_is_set_by_a_permutation(client: TestClient, model: str) -> None:
+    ids = [_upload(client, model, payload).json()["media"][-1]["id"] for payload in (PNG, JPEG)]
+
+    response = client.put(f"/api/v1/models/{model}/media/order", json={"ids": ids[::-1]})
+
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["media"]] == ids[::-1]
+
+
+@pytest.mark.parametrize("change", ["drop", "duplicate", "unknown"])
+def test_an_order_that_is_not_a_permutation_is_refused(
+    client: TestClient, model: str, change: str
+) -> None:
+    ids = [_upload(client, model, payload).json()["media"][-1]["id"] for payload in (PNG, JPEG)]
+    wrong = {
+        "drop": ids[:1],
+        "duplicate": [ids[0], ids[0]],
+        "unknown": [ids[0], "abcdefabcdef"],
+    }[change]
+
+    response = client.put(f"/api/v1/models/{model}/media/order", json={"ids": wrong})
+
+    assert response.status_code == 422, response.text
+    assert [item["id"] for item in _media(client, model)] == ids
+
+
+def test_a_delete_removes_the_file_and_the_entry(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    item = _upload(client, model, WEBM, poster=PNG).json()["media"][0]
+    media_dir = paths.model_dir(model) / "media"
+    assert sorted(path.name for path in media_dir.iterdir()) == sorted(
+        [item["file"], item["poster"]]
+    )
+
+    response = client.delete(f"/api/v1/models/{model}/media/{item['id']}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["media"] == []
+    assert list(media_dir.iterdir()) == []
+
+
+def test_the_first_write_converts_a_legacy_thumbnail(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
+
+    media = _upload(client, model, JPEG).json()["media"]
+
+    assert [item["kind"] for item in media] == ["image", "image"]
+    assert media[0]["id"] != "thumbnail"
+    assert media[0]["file"] == f"{media[0]['id']}.png"
+    assert not (paths.model_dir(model) / "thumbnail.png").exists()
+    assert (paths.model_dir(model) / "media" / media[0]["file"]).read_bytes() == PNG
+
+
+def test_the_legacy_id_can_be_reordered_and_removed(client: TestClient, model: str) -> None:
+    thumbnail = {"file": ("t.png", PNG, "image/png")}
+    assert client.put(f"/api/v1/models/{model}/thumbnail", files=thumbnail).status_code == 200
+    added = _upload(client, model, JPEG).json()["media"]
+    converted = added[0]["id"]
+
+    reordered = client.put(
+        f"/api/v1/models/{model}/media/order", json={"ids": [added[1]["id"], converted]}
+    )
+    assert reordered.status_code == 200, reordered.text
+    assert client.delete(f"/api/v1/models/{model}/media/{converted}").status_code == 200
+    assert [item["id"] for item in _media(client, model)] == [added[1]["id"]]
+
+
+def test_a_legacy_item_is_deleted_by_its_legacy_id(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    (paths.model_dir(model) / "thumbnail.png").write_bytes(PNG)
+
+    response = client.delete(f"/api/v1/models/{model}/media/thumbnail")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["media"] == []
+    assert response.json()["has_thumbnail"] is False
+    assert not (paths.model_dir(model) / "thumbnail.png").exists()
+
+
+def test_the_cover_follows_the_order(client: TestClient, model: str) -> None:
+    first = _upload(client, model, PNG).json()["media"][0]
+    second = _upload(client, model, JPEG).json()["media"][1]
+    assert client.get(f"/api/v1/models/{model}/thumbnail").content == PNG
+
+    client.put(f"/api/v1/models/{model}/media/order", json={"ids": [second["id"], first["id"]]})
+
+    cover = client.get(f"/api/v1/models/{model}/thumbnail")
+    assert cover.content == JPEG
+    assert cover.headers["content-type"] == "image/jpeg"
+    record = client.get(f"/api/v1/models/{model}").json()
+    assert record["has_thumbnail"] is True
+    assert record["thumbnail_source"] == "model"
+
+
+def test_a_video_cover_shows_its_poster(client: TestClient, model: str) -> None:
+    _upload(client, model, MP4, poster=WEBP)
+
+    cover = client.get(f"/api/v1/models/{model}/thumbnail")
+
+    assert cover.status_code == 200
+    assert cover.content == WEBP
+    assert cover.headers["content-type"] == "image/webp"
+
+
+def test_a_video_with_no_poster_gives_way_to_the_next_image(client: TestClient, model: str) -> None:
+    _upload(client, model, MP4)
+    assert client.get(f"/api/v1/models/{model}/thumbnail").status_code == 404
+    assert client.get(f"/api/v1/models/{model}").json()["has_thumbnail"] is False
+
+    _upload(client, model, JPEG)
+
+    assert client.get(f"/api/v1/models/{model}/thumbnail").content == JPEG
+
+
+def test_setting_the_thumbnail_replaces_an_image_cover(client: TestClient, model: str) -> None:
+    _upload(client, model, JPEG)
+    video = _upload(client, model, WEBM).json()["media"][1]
+
+    response = client.put(
+        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", PNG, "image/png")}
+    )
+
+    assert response.status_code == 200, response.text
+    media = response.json()["media"]
+    assert [item["kind"] for item in media] == ["image", "video"]
+    assert media[1]["id"] == video["id"]
+    assert client.get(f"/api/v1/models/{model}/thumbnail").content == PNG
+
+    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 200
+    assert [item["id"] for item in _media(client, model)] == [video["id"]]
+    assert client.delete(f"/api/v1/models/{model}/thumbnail").status_code == 404
+
+
+def test_a_video_whose_file_is_gone_is_reported_missing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    item = _upload(client, model, MP4).json()["media"][0]
+    (paths.model_dir(model) / "media" / item["file"]).unlink()
+
+    [listed] = _media(client, model)
+
+    assert listed["id"] == item["id"]
+    assert listed["missing"] is True
+    assert listed["size"] is None
+    assert client.get(f"/api/v1/models/{model}/media/{item['id']}").status_code == 404
+    removed = client.delete(f"/api/v1/models/{model}/media/{item['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["media"] == []
+
+
+def test_images_are_committed_and_videos_are_not(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The fixture's model was written straight to disk; a first write commits it.
+    image = _upload(client, model, PNG).json()["media"][0]
+    video = _upload(client, model, MP4, poster=JPEG).json()["media"][1]
+
+    tracked = _tracked(paths)
+
+    assert f"{model}/media/{image['file']}" in tracked
+    assert f"{model}/media/{video['poster']}" in tracked
+    assert f"{model}/media/{video['file']}" not in tracked
+    assert f"{model}/model.json" in tracked
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    assert [entry["id"] for entry in meta["media"]] == [image["id"], video["id"]]
+
+
+def test_a_restore_that_loses_a_video_reports_it_missing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    video = _upload(client, model, MP4).json()["media"][0]
+    commit = client.get(f"/api/v1/models/{model}/versions").json()[0]["commit"]
+    client.delete(f"/api/v1/models/{model}/media/{video['id']}")
+
+    restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore")
+
+    assert restored.status_code == 200, restored.text
+    [listed] = _media(client, model)
+    assert listed["missing"] is True
+
+
+def test_a_built_ins_media_is_served_and_read_only(client: TestClient) -> None:
+    [item] = _media(client, BUILTIN)
+    assert item["id"] == "front"
+    assert client.get(f"/api/v1/models/{BUILTIN}/media/front").content == PNG
+
+    writes = [
+        _upload(client, BUILTIN, PNG),
+        client.patch(f"/api/v1/models/{BUILTIN}/media/front", json={"caption": "x"}),
+        client.put(f"/api/v1/models/{BUILTIN}/media/order", json={"ids": ["front"]}),
+        client.delete(f"/api/v1/models/{BUILTIN}/media/front"),
+    ]
+
+    for response in writes:
+        assert response.status_code == 403, response.text
+        assert "built-in" in response.json()["detail"]
+    assert _media(client, BUILTIN) == [item]
+
+
+def test_a_duplicate_copies_its_media_videos_included(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    image = _upload(client, model, PNG).json()["media"][0]
+    video = _upload(client, model, MP4).json()["media"][1]
+
+    response = client.post(f"/api/v1/models/{model}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+    copy = response.json()
+    assert [item["id"] for item in copy["media"]] == [image["id"], video["id"]]
+    assert not any(item["missing"] for item in copy["media"])
+    copied = paths.model_dir(copy["slug"]) / "media"
+    assert (copied / video["file"]).read_bytes() == MP4
+
+
+def test_a_duplicate_of_a_built_in_copies_its_media(client: TestClient) -> None:
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Mine"})
+
+    assert response.status_code == 201, response.text
+    [item] = response.json()["media"]
+    slug = response.json()["slug"]
+    assert client.get(f"/api/v1/models/{slug}/media/{item['id']}").content == PNG
+
+
+def test_a_hand_edited_entry_cannot_reach_outside_media(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["media"] = [
+        {"id": "escape", "file": "../model.scad", "kind": "image"},
+        {"id": "ok", "file": "ok.png", "kind": "image", "poster": "../../settings.json"},
+    ]
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+
+    listed = _media(client, model)
+
+    assert [item["id"] for item in listed] == []
+    assert client.get(f"/api/v1/models/{model}/media/escape").status_code == 404
+
+
+# ── the upload gate ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def small_limit_client(
+    data_dir: Path, seed_dir: Path, fake_openscad: str, model: str
+) -> Iterator[TestClient]:
+    settings = Settings(
+        openscad=fake_openscad,
+        data_dir=data_dir,
+        seed_models_dir=seed_dir,
+        frontend_dir=Path("/nonexistent"),
+        media_upload_max_bytes=1024 * 1024,
+    )
+    with TestClient(create_app(settings)) as test_client:
+        yield test_client
+
+
+def test_a_chunked_upload_over_the_limit_is_cut_off(
+    small_limit_client: TestClient, model: str
+) -> None:
+    """No Content-Length, so the gate counts: it stops at the chunk that crosses the
+    limit, having never read the rest. Driven at the ASGI level, since the test
+    client reads a streamed body whole before the app sees any of it."""
+    chunks = [
+        b"--b\r\nContent-Disposition: form-data; name=file; filename=v.mp4\r\n\r\n",
+        MP4,
+        *[b"\x00" * (256 * 1024)] * 64,
+        b"\r\n--b--\r\n",
+    ]
+    read = 0
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        nonlocal read
+        if read == len(chunks):
+            return {"type": "http.disconnect"}
+        read += 1
+        return {"type": "http.request", "body": chunks[read - 1], "more_body": read < len(chunks)}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    path = f"/api/v1/models/{model}/media"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"multipart/form-data; boundary=b"),
+        ],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+    small_limit_client.portal.call(small_limit_client.app, scope, receive, send)  # type: ignore[union-attr]
+
+    assert sent[0]["status"] == 413
+    body = json.loads(b"".join(m.get("body", b"") for m in sent[1:]))
+    assert "1 MB" in body["detail"]
+    assert read < len(chunks), "the gate read the whole body before refusing it"
+    assert _media(small_limit_client, model) == []
+    assert not list((small_limit_client.app.state.scadbuddy.paths.cache).glob("media-upload-*"))  # type: ignore[attr-defined]
+
+
+def test_a_declared_upload_over_the_limit_is_refused_on_its_headers(
+    small_limit_client: TestClient, model: str
+) -> None:
+    response = _upload(small_limit_client, model, MP4 + b"\x00" * (1024 * 1024))
+
+    assert response.status_code == 413, response.text
+    assert "1 MB" in response.json()["detail"]
+
+
+def test_the_media_limit_is_the_setting_not_the_multipart_cap(
+    client: TestClient, model: str
+) -> None:
+    video = MP4 + b"\x00" * (MAX_MULTIPART_BODY_BYTES + 1024)
+
+    response = _upload(client, model, video)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["media"][0]["size"] == len(video)
+
+
+def test_other_multipart_routes_keep_the_multipart_cap(
+    small_limit_client: TestClient, model: str
+) -> None:
+    """The media route's own limit does not lift or lower anything else's."""
+    oversized = PNG + b"\x00" * MAX_MULTIPART_BODY_BYTES
+
+    response = small_limit_client.put(
+        f"/api/v1/models/{model}/thumbnail", files={"file": ("t.png", oversized, "image/png")}
+    )
+
+    assert response.status_code == 413, response.text
+    assert "reads at most" in response.json()["detail"]
+
+
+def test_the_limit_set_in_the_ui_applies(client: TestClient, model: str) -> None:
+    saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 1024})
+    assert saved.status_code == 200, saved.text
+
+    response = _upload(client, model, MP4 + b"\x00" * 2048)
+
+    assert response.status_code == 413, response.text
