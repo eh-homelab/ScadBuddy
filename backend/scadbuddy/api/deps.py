@@ -7,7 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path, Request
+from fastapi import Depends, Path
+from starlette.requests import HTTPConnection
 
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.core.config import Config
@@ -89,6 +90,8 @@ class AppState:
     #: held for as long as the editor stays open rather than for one piece of work —
     #: the third term in the pod's worst case above.
     language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
+    realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -131,8 +134,15 @@ def build_state(settings: Settings) -> AppState:
     )
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
+    assets = AssetStore(
+        paths.assets,
+        max_total_bytes=config.asset_max_total_bytes,
+        max_count=config.asset_max_count,
+    )
     # The outputs feed the catalogue's fallback thumbnail (#179).
-    catalogue = Catalogue(paths, history, outputs)
+    catalogue = Catalogue(
+        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+    )
     history.on_commit = announce_commits(events, catalogue)
     return AppState(
         settings=settings,
@@ -149,11 +159,7 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        assets=AssetStore(
-            paths.assets,
-            max_total_bytes=config.asset_max_total_bytes,
-            max_count=config.asset_max_count,
-        ),
+        assets=assets,
         queue=RenderQueue(
             config,
             paths,
@@ -162,6 +168,7 @@ def build_state(settings: Settings) -> AppState:
             metrics=metrics,
             events=events,
             checkouts=checkouts,
+            assets=assets,
         ),
         metrics=metrics,
         events=events,
@@ -169,6 +176,7 @@ def build_state(settings: Settings) -> AppState:
         checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
+        realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
     )
 
 
@@ -193,8 +201,9 @@ async def probe_openscad_version(config: Config) -> str | None:
     return first[0].strip() if first else None
 
 
-def get_state(request: Request) -> AppState:
-    state: AppState = getattr(request.app.state, STATE_ATTR)
+def get_state(connection: HTTPConnection) -> AppState:
+    """For a request or a WebSocket alike: both are an ``HTTPConnection``."""
+    state: AppState = getattr(connection.app.state, STATE_ATTR)
     return state
 
 

@@ -41,7 +41,8 @@ Security
   the backend has no auth today (spec §4.3).
 - Topics are authorised as their REST routes are: everything the UI can GET, it may
   follow.
-- Per-connection caps on topics and on inbound frame rate.
+- Per-connection caps on topics and on inbound frame rate, and a cap on open sockets
+  (``SCADBUDDY_REALTIME_SOCKETS``): each one is a standing bus subscription.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ from urllib.parse import urlsplit
 import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from scadbuddy.api.deps import JOB_ID_PATTERN, STATE_ATTR, AppState
+from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
     Event,
     FontInstalled,
@@ -90,10 +91,13 @@ MAX_TOPICS = 64
 #: Inbound frames: a burst of RATE_BURST, refilled at RATE_PER_SECOND.
 RATE_BURST = 40
 RATE_PER_SECOND = 20.0
-#: The largest inbound frame read; subscribe frames are small.
+#: The largest inbound frame this route acts on; subscribe frames are small. The
+#: server refuses anything over ``--ws-max-size`` (the Dockerfile's CMD, 8 MiB, shared
+#: with the LSP bridge's whole-source messages) before it reaches here.
 MAX_FRAME_CHARS = 16_384
 
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+#: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings"})
 
@@ -227,22 +231,28 @@ async def _ping(send: Send) -> None:
 async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
-        raw = await websocket.receive_text()
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
         if not limit.take():
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="too many frames")
             return
+        raw = message.get("text")
+        if raw is None:
+            await send({"type": "error", "message": "expected a text frame"})
+            continue
         if len(raw) > MAX_FRAME_CHARS:
             await send({"type": "error", "message": "frame too large"})
             continue
         try:
-            message = json.loads(raw)
+            frame = json.loads(raw)
         except ValueError:
             await send({"type": "error", "message": "not JSON"})
             continue
-        kind = message.get("type") if isinstance(message, dict) else None
+        kind = frame.get("type") if isinstance(frame, dict) else None
         if kind == "pong":
             continue
-        requested = message.get("topics") if isinstance(message, dict) else None
+        requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):
             await send({"type": "error", "message": "expected subscribe or unsubscribe"})
             continue
@@ -253,24 +263,47 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
         if kind == "unsubscribe":
             topics.difference_update(requested)
             continue
-        if len(topics | set(requested)) > MAX_TOPICS:
-            await send({"type": "error", "message": f"at most {MAX_TOPICS} topics"})
-            continue
-        topics.update(requested)
-        await send({"type": "subscribed", "topics": requested})
+        # What fits is followed and the rest refused, so a client that resubscribes
+        # everything in one frame after a reconnect never loses all of it to the cap.
+        accepted: list[str] = []
+        refused: list[str] = []
+        for topic in dict.fromkeys(requested):
+            if topic in topics or len(topics) < MAX_TOPICS:
+                topics.add(topic)
+                accepted.append(topic)
+            else:
+                refused.append(topic)
+        if accepted:
+            await send({"type": "subscribed", "topics": accepted})
+        if refused:
+            await send(
+                {
+                    "type": "error",
+                    "message": f"at most {MAX_TOPICS} topics; not following {refused[:5]}",
+                }
+            )
 
 
 @router.websocket("/ws")
-async def realtime(websocket: WebSocket) -> None:
-    state: AppState = getattr(websocket.app.state, STATE_ATTR)
+async def realtime(websocket: WebSocket, state: StateDep) -> None:
     origin = websocket.headers.get("origin")
     public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
     if not origin_allowed(origin, public_url):
         logger.warning("refused a realtime socket from origin %r", origin)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await websocket.accept()
+    # No await between the check and the acquire, so nothing can take the permit in
+    # between (the same pattern as `api/lsp.py`). Refused sockets reconnect with
+    # back-off, and the UI polls meanwhile.
+    if state.realtime_sockets.locked():
+        await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+        return
+    async with state.realtime_sockets:
+        await websocket.accept()
+        await _serve(websocket, state)
 
+
+async def _serve(websocket: WebSocket, state: AppState) -> None:
     lock = asyncio.Lock()
 
     async def send(frame: dict[str, Any]) -> None:

@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Response, UploadFile, status
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,7 +35,7 @@ from scadbuddy.library.outputs import (
     download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
-from scadbuddy.render.geometry import GeometryAnalysis
+from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
@@ -262,7 +262,7 @@ def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
 )
 def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
     """What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
-    always one plate, which the picker does not ask about."""
+    one plate unless the template asks for more (#289)."""
     require_output(outputs, output_id)
     return [
         OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None)
@@ -297,17 +297,25 @@ def get_output_plate_thumbnail(
     response_model=GeometryAnalysis,
     summary="Mesh geometry analysis",
 )
-def get_output_geometry(output_id: OutputIdPath, outputs: OutputsDep) -> GeometryAnalysis:
-    """Printability measurements of the output's closed per-colour solids (#284):
-    open and non-manifold edges with their locations, bounding box, bed contact,
-    height-to-base ratio, overhang area by angle, and estimates of the thinnest
-    wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
-    the preview. Computed on first ask and cached beside the output."""
+def get_output_geometry(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    plate: Annotated[int, Query(ge=1, description="The plate to measure (1-based)")] = 1,
+) -> GeometryAnalysis:
+    """Printability measurements of the closed per-colour solids on one plate of the
+    output (#284): open and non-manifold edges with their locations, bounding box,
+    bed contact, height-to-base ratio, overhang area by angle, and estimates of the
+    thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
+    as in the preview. A 3MF with more than one plate (#289) is measured a plate at
+    a time; ``plates`` in the result says how many there are. Computed on first ask
+    and cached beside the output."""
     require_output(outputs, output_id)
     try:
-        return outputs.geometry(output_id)
+        return outputs.geometry(output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
+    except NoSuchPlateError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r}: {error}") from None
     except (ValueError, zipfile.BadZipFile) as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

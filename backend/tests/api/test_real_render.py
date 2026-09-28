@@ -254,3 +254,68 @@ def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None
         "write",
         "job.done",
     ]
+
+
+# #289: the plate convention (spec §6.4) against the real binary: `$plate` is set per
+# plate through -D, reaches the solid wrapper's include, and `echo(plates = N)` is read.
+TWO_PLATES = """\
+// Lid on a plate of its own
+split = true;
+/* [Hidden] */
+$plate = 0;
+echo(plates = split ? 2 : 1);
+function on_plate(n) = $plate == 0 || $plate == n;
+if (on_plate(1)) {
+  color("#FF0000") cube([20, 20, 2]);
+  color("#00FF00") translate([5, 5, 2]) cube([10, 10, 3]);
+}
+if (on_plate(2))
+  color("#0000FF") translate($plate == 2 ? [0, 0, 0] : [30, 0, 0]) cube([22, 22, 1]);
+"""
+
+
+def test_a_template_that_asks_for_two_plates_renders_a_two_plate_3mf(
+    client: TestClient,
+) -> None:
+    created = client.post("/api/v1/models", json={"name": "Two Plates", "source": TWO_PLATES})
+    assert created.status_code == 201, created.text
+    schema = client.get("/api/v1/models/two-plates/schema").json()
+    # `$plate` is not a customizer parameter.
+    assert [parameter["name"] for parameter in schema["parameters"]] == ["split"]
+
+    accepted = client.post("/api/v1/models/two-plates/render", json={"params": {}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+
+    assert job["status"] == "done", job["error"]
+    assert job["warnings"] == []
+    assert job["colors"] == ["#FF0000", "#00FF00", "#0000FF"]
+    assert [part["watertight"] for part in job["parts"]] == [True, True, True]
+    # The preview is the everything-at-once render; each plate is its own.
+    assert job["bbox_mm"]["size"] == [52.0, 22.0, 5.0]
+    assert [
+        (plate["index"], plate["colors"], plate["bbox_mm"]["size"]) for plate in job["plates"]
+    ] == [
+        (1, ["#FF0000", "#00FF00"], [20.0, 20.0, 5.0]),
+        (2, ["#0000FF"], [22.0, 22.0, 1.0]),
+    ]
+
+    output = client.post(
+        "/api/v1/models/two-plates/outputs", json={"job_id": job["id"], "name": "Both"}
+    ).json()
+    plates = client.get(f"/api/v1/outputs/{output['id']}/plates").json()
+    assert plates == [
+        {"index": 1, "has_thumbnail": True},
+        {"index": 2, "has_thumbnail": True},
+    ]
+
+
+def test_a_template_that_asks_for_one_plate_renders_as_before(client: TestClient) -> None:
+    created = client.post("/api/v1/models", json={"name": "One Plate", "source": TWO_PLATES})
+    assert created.status_code == 201, created.text
+
+    accepted = client.post("/api/v1/models/one-plate/render", json={"params": {"split": False}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+
+    assert job["status"] == "done", job["error"]
+    assert job["plates"] == []
+    assert job["colors"] == ["#FF0000", "#00FF00", "#0000FF"]

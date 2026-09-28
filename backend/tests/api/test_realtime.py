@@ -27,6 +27,9 @@ from scadbuddy.core.events import (
     SettingsChanged,
     Subscription,
 )
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
+from scadbuddy.main import create_app
 
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
@@ -104,6 +107,8 @@ def test_a_real_mutation_is_delivered(client: TestClient) -> None:
         {"type": "subscribe", "topics": ["job:not-an-id"]},
         {"type": "subscribe", "topics": ["model:../etc"]},
         {"type": "subscribe", "topics": ["everything"]},
+        # The slug's characters are fine; its length is past MAX_MODEL_ID_LENGTH.
+        {"type": "subscribe", "topics": [f"model:{'a' * (MAX_MODEL_ID_LENGTH + 1)}"]},
         {"type": "subscribe", "topics": "models"},
         {"type": "shout"},
         [1, 2],
@@ -113,6 +118,13 @@ def test_a_bad_frame_is_answered_and_the_socket_stays_open(client: TestClient, f
     with client.websocket_connect(WS) as ws:
         ws.send_json(frame)
         assert ws.receive_json()["type"] == "error"
+        subscribe(ws, "models")
+
+
+def test_a_binary_frame_is_answered_and_the_socket_stays_open(client: TestClient) -> None:
+    with client.websocket_connect(WS) as ws:
+        ws.send_bytes(b'{"type": "subscribe", "topics": ["models"]}')
+        assert ws.receive_json() == {"type": "error", "message": "expected a text frame"}
         subscribe(ws, "models")
 
 
@@ -127,7 +139,50 @@ def test_topics_are_capped(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     with client.websocket_connect(WS) as ws:
         subscribe(ws, "models", "fonts")
         ws.send_json({"type": "subscribe", "topics": ["settings"]})
-        assert ws.receive_json() == {"type": "error", "message": "at most 2 topics"}
+        assert ws.receive_json() == {
+            "type": "error",
+            "message": "at most 2 topics; not following ['settings']",
+        }
+
+
+def test_a_subscribe_past_the_cap_follows_the_topics_that_fit(
+    client: TestClient, bus: EventBus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that resubscribes everything in one frame after a reconnect keeps what
+    fits, rather than losing every topic to the one frame's refusal."""
+    monkeypatch.setattr(realtime, "MAX_TOPICS", 2)
+    with client.websocket_connect(WS) as ws:
+        ws.send_json({"type": "subscribe", "topics": ["models", "fonts", "settings"]})
+        assert ws.receive_json() == {"type": "subscribed", "topics": ["models", "fonts"]}
+        assert ws.receive_json()["type"] == "error"
+        bus.publish(FontInstalled(family="DejaVu Sans"))
+        assert ws.receive_json()["kind"] == "font.installed"
+
+
+def test_a_topic_already_followed_does_not_count_twice(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(realtime, "MAX_TOPICS", 2)
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "models", "fonts")
+        subscribe(ws, "models", "fonts")
+
+
+def test_sockets_past_the_cap_are_refused_until_one_closes(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(settings.model_copy(update={"realtime_sockets": 1}))
+    with TestClient(app) as client:
+        with client.websocket_connect(WS) as first:
+            subscribe(first, "models")
+            with (
+                pytest.raises(WebSocketDisconnect) as refused,
+                client.websocket_connect(WS),
+            ):
+                pass
+            assert refused.value.code == 1013
+        with client.websocket_connect(WS) as again:
+            subscribe(again, "models")
 
 
 def test_a_flood_of_frames_closes_the_socket(
