@@ -29,6 +29,7 @@ const AssistantPanel = lazy(async () => ({
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
+  { to: '/library', label: 'Library', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
