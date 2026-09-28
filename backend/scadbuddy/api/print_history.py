@@ -21,8 +21,8 @@ from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, status
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Query, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     ArchiveCacheDep,
@@ -42,6 +42,7 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRun,
     PrinterMedia,
+    QueueItemCreate,
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.print_links import LinkedPrint
@@ -70,6 +71,8 @@ DELETED_STATUS = "deleted_in_bambuddy"
 UNKNOWN_STATUS = "unknown"
 #: Bambuddy's archives page. It has no per-archive route (``App.tsx`` at 14da007).
 ARCHIVES_PAGE = "/archives"
+#: Bambuddy's print queue page, where "Print again" lands.
+QUEUE_PAGE = "/queue"
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
 #: How many archive reads one list request has in flight at once.
@@ -631,3 +634,87 @@ async def get_print(
         printer_media=on_printer,
         links=PrintLinks(bambuddy_url=bambuddy_url, customize_url=f"/m/{meta.slug}"),
     )
+
+
+class PrintAgain(_Response):
+    queue_item_id: int
+    printer_id: int
+    #: Bambuddy's queue page.
+    bambuddy_url: str
+
+
+@router.post(
+    "/{archive_id}/reprint",
+    response_model=PrintAgain,
+    status_code=status.HTTP_201_CREATED,
+    summary="Print again: queue the archive on its printer",
+    description=(
+        "Adds the archive to Bambuddy's print queue (`POST /queue/` with `archive_id`; "
+        "Bambuddy's own reprint route is gone), on the printer and plate it printed "
+        "on, with Bambuddy's default options. The key needs Bambuddy's queue scope. "
+        "409 when Bambuddy no longer has the archive or no printer is known for it."
+    ),
+)
+async def reprint(
+    archive_id: ArchiveIdPath,
+    links: PrintLinksDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
+) -> PrintAgain:
+    link = await _require_print(links, archive_id)
+    async with client_for(store.load()) as client:
+        archive = await cache.archive(client, archive_id)
+        if archive is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"archive {archive_id} was deleted in Bambuddy, so it cannot be printed again",
+            )
+        printer_id = archive.printer_id if archive.printer_id is not None else link.printer_id
+        if printer_id is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"no printer is known for archive {archive_id}; queue it from Bambuddy",
+            )
+        plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
+        item = await client.enqueue(
+            QueueItemCreate(archive_id=archive_id, printer_id=printer_id, plate_id=plate_id)
+        )
+        # The archive gains a run once the item prints; read it afresh then.
+        cache.forget(client, archive_id)
+        return PrintAgain(
+            queue_item_id=item.id,
+            printer_id=printer_id,
+            bambuddy_url=client.config.web_url(QUEUE_PAGE),
+        )
+
+
+class TimelapsePull(BaseModel):
+    #: A ``remote_files[].name`` of the detail's ``printer_media`` (a bare file name).
+    filename: str = Field(min_length=1, max_length=255, pattern=r"^[^/\\]+$")
+
+
+@router.post(
+    "/{archive_id}/timelapse/pull",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Pull a timelapse off the printer onto the print",
+    description=(
+        "Downloads `filename` from the printer and attaches it to the archive as its "
+        "timelapse (Bambuddy's `timelapse/select`, which fetches it over FTP). Only on "
+        "an explicit request. The name is one of the detail's "
+        "`printer_media.remote_files` (read with `printer_media=1`); Bambuddy answers "
+        "404 for a name the printer does not have. The key needs Manage Archives."
+    ),
+)
+async def pull_timelapse(
+    archive_id: ArchiveIdPath,
+    body: TimelapsePull,
+    links: PrintLinksDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
+) -> Response:
+    await _require_print(links, archive_id)
+    async with client_for(store.load()) as client:
+        await client.select_timelapse(archive_id, body.filename)
+        cache.forget(client, archive_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -53,6 +53,51 @@ export const printHistoryTools: Tool[] = [
         ),
       ),
   }),
+
+  // ── outward (#311): the print detail page's "Print again" and "Pull timelapse" ──
+  defineTool({
+    name: 'print_again',
+    description:
+      "Queue a print again on Bambuddy: the same sliced file, on the printer and plate it printed on, with Bambuddy's " +
+      'default options. Refused when the archive was deleted in Bambuddy or has no known printer.',
+    input: z.object({ archive_id: archiveId }),
+    risk: 'outward',
+    bambuddyScope: ['Read Status', 'Manage Queue'],
+    routes: ['POST /api/v1/prints/{archive_id}/reprint'],
+    summarize: ({ archive_id }) => `Queue print ${archive_id} again on its printer`,
+    handler: async ({ archive_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/prints/{archive_id}/reprint', { params: { path: { archive_id } } }),
+          `print ${archive_id} again`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'pull_print_timelapse',
+    description:
+      "Download a timelapse still on the printer and attach it to the print. `filename` is a `remote_files[].name` " +
+      'of kind `timelapse` from get_print with `printer_media: true`. It is fetched over FTP from the printer.',
+    input: z.object({
+      archive_id: archiveId,
+      filename: z.string().min(1).max(255).regex(/^[^/\\]+$/, 'must be a bare file name from printer_media'),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Archives'],
+    routes: ['POST /api/v1/prints/{archive_id}/timelapse/pull'],
+    summarize: ({ archive_id, filename }) => `Pull timelapse ${filename} from the printer onto print ${archive_id}`,
+    handler: async ({ archive_id, filename }, { backend }) => {
+      await ok(
+        backend.POST('/api/v1/prints/{archive_id}/timelapse/pull', {
+          params: { path: { archive_id } },
+          body: { filename },
+        }),
+        `pull timelapse ${filename} onto print ${archive_id}`,
+      )
+      return json({ attached: filename })
+    },
+  }),
 ]
 
 // Print media (issue #307): a Bambuddy archive's images, timelapse and files,

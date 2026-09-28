@@ -85,6 +85,13 @@ class ArchiveCache:
 
         return await self._get(client, "timelapse_thumbnails", archive_id, load)
 
+    def forget(self, client: BambuddyClient, archive_id: int) -> None:
+        """Drop everything kept for the archive, after ScadBuddy changed it."""
+        for key in [
+            k for k in self._entries if k[0] == client.config.base_url and k[2] == archive_id
+        ]:
+            del self._entries[key]
+
     async def _get(
         self,
         client: BambuddyClient,
