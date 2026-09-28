@@ -1,10 +1,14 @@
 import { serve } from '@hono/node-server'
+import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { loadConfig } from './config.js'
+import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
+import { testConnection } from './harness/testConnection.js'
+import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -23,12 +27,40 @@ try {
   process.exit(1)
 }
 
-const database = config.databaseUrl ? connectDatabase(config.databaseUrl) : undefined
+// Read once at start: rotating the key means restarting the pod (spec §9).
+// A missing or malformed file is not fatal; /healthz and Settings say why.
+const kek = await loadKek(config.secretKeyFile)
+if (!kek.ok) console.error(`secret key: ${kek.reason}; saving Claude credentials is disabled`)
+
+const database = config.databaseUrl
+  ? connectDatabase(config.databaseUrl, {
+      onMigrationError: (err) => console.error('database migrations failed:', (err as Error).message),
+    })
+  : undefined
+// Migrate in the background: a database that is down at start-up is retried
+// by the next /healthz or API call instead of stopping the pod.
+void database?.ready()
+const credentials = database ? new CredentialStore(database.sql) : undefined
+const settings = database ? new SettingsStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
+const paths = { stateDir: DEFAULT_STATE_DIR }
 
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
+  kek,
+  credentials,
+  testConnection: async (credential) => {
+    const model = await settings?.get<string>('model')
+    return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
+  },
+  remoteAddress: (c) => {
+    try {
+      return getConnInfo(c).remote.address
+    } catch {
+      return undefined
+    }
+  },
 })
 
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {
