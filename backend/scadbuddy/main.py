@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from scadbuddy import __version__
 from scadbuddy.api import (
+    analyzers,
     assets,
     fonts,
     health,
@@ -35,6 +36,7 @@ from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
@@ -60,6 +62,7 @@ def _api_router() -> APIRouter:
     router.include_router(assets.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
+    router.include_router(analyzers.router)
     router.include_router(prints.router)
     router.include_router(settings.router)
     router.include_router(fonts.router)
@@ -92,6 +95,16 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
         return schema
 
     app.openapi = openapi  # type: ignore[method-assign]
+
+
+async def _close_quietly(state: AppState) -> None:
+    """Close the queue and the bus after a failed start, logging (not raising) what
+    fails, so the start's own error is the one that propagates."""
+    for close in (state.events.aclose, state.queue.aclose):
+        try:
+            await close()
+        except Exception:
+            logger.exception("could not release what a failed start opened")
 
 
 def sweep_assets(state: AppState) -> list[str]:
@@ -252,6 +265,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    # After the queue, whose store migrated the database: the bus writes the event
+    # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
+    # was published before now (the built-in sync's commits) waited.
+    if isinstance(state.events, PgNotifyEventBus):
+        try:
+            await state.events.start()
+        except BaseException:
+            # Before the `try` below, so its `finally` never runs: release the
+            # queue that did start (workers, reaper, listener, pool) here, as
+            # `RenderQueue.start` releases its store when it fails.
+            await _close_quietly(state)
+            raise
+
     # Everything from here holds the queue's resources (the Postgres pool, its
     # workers), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes the queue as a shutdown does, rather than
@@ -294,6 +320,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await sweeper
         await state.queue.aclose()
+        if state.decisions is not None:
+            await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
 
 

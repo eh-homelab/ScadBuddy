@@ -18,3 +18,10 @@ trim_trailing_whitespace = false
 
 [Makefile]
 indent_style = tab
+
+[agent/src/db/migrations/*.sql]
+# The agent records each migration file's SHA-256 and refuses to start when an
+# applied one changes (agent/src/db/migrations.ts), so no whitespace is ever
+# rewritten under them. The first two hold their pre-#491 SQL byte for byte.
+trim_trailing_whitespace = false
+insert_final_newline = false
