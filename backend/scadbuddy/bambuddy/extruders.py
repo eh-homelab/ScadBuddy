@@ -10,11 +10,17 @@ ScadBuddy can't hold a filament to one extruder. Bambu Studio ignores a Manual
 ``model_settings.config`` crashes it (measured 2026-09-28 through Bambuddy's slicer).
 So the run refuses, before upload, what would pause the printer:
 
-* a size neither mounted nozzle has;
-* more than one filament on the plates printed when only one side has the chosen size
-  and the other reports another, since the slicer would spread them onto it;
+* a size neither mounted nozzle has and the rack holds no spare of;
+* more than one filament on the plates printed when only one side can have the chosen
+  size and the other reports another, since the slicer would spread them onto it;
 * without the Filament Track Switch, a spool whose AMS is wired to the side with
-  another size.
+  another size, when no spare could replace it.
+
+A side counts as having a size when its mounted nozzle is that size, or when the H2C's
+hotend rack holds a spare of it: the printer swaps the rack hotend matching the sliced
+size onto the extruder at print start (spool-first spec §6; queue item 108 paused with
+no spare 0.2 in the rack). Rack ids 0 and 1 are the mounted pair, mirroring
+``nozzles``, so spares are the other ids (measured 2026-09-27/28).
 
 With the switch (``fila_switch.installed``) any AMS reaches either nozzle, so a
 spool's side is only where it rests between prints.
@@ -39,7 +45,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning
-from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
+from scadbuddy.bambuddy.models import NozzleInfo, NozzleRackSlot, PrinterStatus, SpoolAssignment
 
 RIGHT = 0
 LEFT = 1
@@ -106,6 +112,22 @@ def two_nozzles(status: PrinterStatus | None) -> bool:
     return LEFT in status.ams_extruder_map.values() or track_switch(status)
 
 
+def rack_spares(status: PrinterStatus | None) -> list[NozzleRackSlot]:
+    """The hotends in the H2C's rack besides the mounted pair (rack ids 0 and 1 mirror
+    ``nozzles``), which the printer swaps on for a sliced size neither mounted one has.
+    Empty on a printer without a rack, or one that reports none."""
+    if status is None:
+        return []
+    return [
+        slot for slot in status.nozzle_rack if slot.id not in (RIGHT, LEFT) and slot.nozzle_diameter
+    ]
+
+
+def spare_count(status: PrinterStatus | None, size: str) -> int:
+    """How many spare hotends of ``size`` the rack holds: each can go on one side."""
+    return sum(1 for slot in rack_spares(status) if slot.nozzle_diameter == size)
+
+
 @dataclass(frozen=True)
 class SlotSide:
     """Where one slot's chosen spool is on the run's printer, and the side it feeds.
@@ -159,7 +181,12 @@ def _where(side: SlotSide) -> str:
 
 
 def _spool_errors(sides: Sequence[SlotSide], size: str, status: PrinterStatus | None) -> list[str]:
-    """Without the switch: each spool whose side has another nozzle size fitted."""
+    """Without the switch: each spool whose side has another nozzle size fitted. With a
+    spare of ``size`` in the rack the printer can swap it onto that side, so nothing is
+    refused here; whether every side the print needs can be made to fit is decided by
+    the caller."""
+    if spare_count(status, size):
+        return []
     errors: list[str] = []
     for side in sides:
         if side.extruder is None:
@@ -199,9 +226,14 @@ def plan_extruders(
 
     ``used_slots`` are the filaments (1-based) the plate or plates being printed use.
 
-    * Neither side has ``size``: refused. Nozzles the printer doesn't report: a
-      warning, since nothing can be checked.
-    * Without the switch, a spool on the side with another size: refused.
+    A side *has* ``size`` when its mounted nozzle is that size, or when the rack holds a
+    spare of it for the printer to swap on (each spare serves one side).
+
+    * Neither side has ``size``: refused. A single-nozzle printer whose one nozzle is
+      another size: refused too, since nothing is unknown about it. Nozzles the printer
+      doesn't report: a warning, since nothing can be checked.
+    * Without the switch, a spool on the side with another size: refused, unless a
+      spare could replace it.
     * One side has ``size``: more than one filament is refused, because the slicer
       spreads them across both extruders — what paused queue item 108. One filament
       prints with a warning, since the slicer, not ScadBuddy, picks its extruder.
@@ -214,8 +246,17 @@ def plan_extruders(
     fitted = {extruder: fitted_size(status, extruder) for extruder in (RIGHT, LEFT)}
     matching = [extruder for extruder in (RIGHT, LEFT) if fitted[extruder] == size]
     right, left = fitted[RIGHT], fitted[LEFT]
+    # The sides a spare from the rack can go on: reported, and of another size. The
+    # sides the chosen spools feed come first, so a lone spare serves the side that
+    # needs it rather than the right by default.
+    resting_on = {side.extruder for side in own if side.extruder is not None}
+    swappable = sorted(
+        (extruder for extruder in (RIGHT, LEFT) if fitted[extruder] not in (None, size)),
+        key=lambda extruder: (extruder not in resting_on, extruder),
+    )[: spare_count(status, size)]
+    fits = [extruder for extruder in (RIGHT, LEFT) if extruder in matching or extruder in swappable]
 
-    if not matching:
+    if not fits:
         if right is not None and left is not None:
             sizes = " or ".join(dict.fromkeys((right, left)))
             return ExtruderPlan(
@@ -225,6 +266,15 @@ def plan_extruders(
                 ]
             )
         known_side = RIGHT if right is not None else LEFT if left is not None else None
+        if known_side == RIGHT and not two_nozzles(status):
+            # A single-nozzle printer: its one nozzle is known and wrong, and there is
+            # no other side to be unsure about (review of #538).
+            return ExtruderPlan(
+                errors=[
+                    f"The nozzle is {right} mm, not {size} mm. Choose {right}, or fit a "
+                    f"{size} mm nozzle."
+                ]
+            )
         if known_side is not None:
             known = right if known_side == RIGHT else left
             other_side = LEFT if known_side == RIGHT else RIGHT
@@ -253,11 +303,18 @@ def plan_extruders(
         )
 
     errors = [] if track_switch(status) else _spool_errors(own, size, status)
-    if errors or len(matching) == 2:
+    if errors or len(fits) == 2:
         return ExtruderPlan(errors=errors)
 
-    only = matching[0]
+    only = fits[0]
     other = LEFT if only == RIGHT else RIGHT
+    # How that one side has ``size``: mounted, or a spare the printer would swap on.
+    has = (
+        f"The {_side_word(only)} nozzle is {size} mm"
+        if only in matching
+        else f"Neither mounted nozzle is {size} mm, and the rack holds one spare {size} mm "
+        f"hotend, which can go on one side"
+    )
     if fitted[other] is None:
         if only == RIGHT and not two_nozzles(status):
             return ExtruderPlan()
@@ -266,41 +323,52 @@ def plan_extruders(
                 FilamentWarning(
                     kind="side-unknown",
                     message=(
-                        f"The {_side_word(only)} nozzle is {size} mm, but the printer didn't "
-                        f"report the {_side_word(other)} one, so nothing checks that the "
-                        f"slicer's extruders match them."
+                        f"{has}, but the printer didn't report the {_side_word(other)} one, "
+                        f"so nothing checks that the slicer's extruders match them."
                     ),
                 )
             ]
         )
     if len(used_slots) > 1:
+        have = f"a {right} mm nozzle on the right and {left} mm on the left"
+        if only in matching:
+            spread = (
+                f"The slicer spreads a multi-color print across both, and ScadBuddy can't "
+                f"keep it on the {_side_word(only)}, so the {fitted[other]} mm side would "
+                f"pause it at the first layer."
+            )
+        else:
+            have += f", and one spare {size} mm hotend in the rack"
+            spread = (
+                "The slicer spreads a multi-color print across both, and ScadBuddy can't "
+                "keep it on one side, so the other would pause it at the first layer."
+            )
         return ExtruderPlan(
             errors=[
-                f"This printer has a {right} mm nozzle on the right and {left} mm on the "
-                f"left. The slicer spreads a multi-color print across both, and ScadBuddy "
-                f"can't keep it on the {_side_word(only)}, so the {fitted[other]} mm side "
-                f"would pause it at the first layer. Fit a {size} mm nozzle on both sides, "
+                f"This printer has {have}. {spread} Fit a {size} mm nozzle on both sides, "
                 f"or print in one color."
             ]
         )
-    return ExtruderPlan(
-        warnings=[
-            FilamentWarning(
-                kind="side-unknown",
-                message=(
-                    f"Only the {_side_word(only)} nozzle is {size} mm, and the slicer picks "
-                    f"the extruder. If it picks the {_side_word(other)}, the printer pauses "
-                    f"at the first layer."
-                ),
-            )
-        ]
+    picks = (
+        f"Only the {_side_word(only)} nozzle is {size} mm, and the slicer picks the "
+        f"extruder. If it picks the {_side_word(other)}, the printer pauses at the first "
+        f"layer."
+        if only in matching
+        else f"{has}. The slicer picks the extruder, and the printer swaps the spare onto "
+        f"it; a spool wired to the other side can't feed it, and the printer pauses at "
+        f"the first layer."
     )
+    return ExtruderPlan(warnings=[FilamentWarning(kind="side-unknown", message=picks)])
 
 
 def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> FilamentOptions:
-    """``options`` with each spool loaded in its printer labelled with its side, and
-    whether that side is only where it rests (the switch is fitted)."""
+    """``options`` with each spool loaded in its printer labelled with its side, whether
+    that side is only where it rests (the switch is fitted), and the rack's spares."""
     options.track_switch = track_switch(status)
+    options.rack = [
+        NozzleInfo(nozzle_type=slot.nozzle_type, nozzle_diameter=slot.nozzle_diameter)
+        for slot in rack_spares(status)
+    ]
     for option in options.spools:
         loaded = option.loaded
         if loaded is None or loaded.printer_id != options.printer_id:

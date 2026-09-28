@@ -201,8 +201,19 @@ crashes the slicer (SIGSEGV) whatever its values. So the run refuses, before upl
 prints the mounted nozzles would pause. Extruders are physical: 0 is the right (main), 1
 the left, and `status.nozzles` is indexed the same way.
 
-- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …").
-- **One side fitted with it** (the nozzles differ): more than one filament is a 422,
+- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …"). A
+  single-nozzle printer whose one nozzle is another size is refused the same way ("The
+  nozzle is 0.4 mm, not 0.2 mm. …"): nothing about it is unknown.
+- **A side counts as fitted with the size when the rack holds a spare of it** (§6: the
+  printer swaps the rack hotend matching the sliced size onto the extruder; queue item
+  108's rack held no spare 0.2). Rack ids 0 and 1 are the mounted pair, mirroring
+  `nozzles`, so the spares are the other ids; each serves one side. So with both sides
+  0.4 and one 0.2 in the rack (the 2026-09-27 rack), a one-color 0.2 print runs and a
+  two-color one is refused naming the rack; with a 0.2 mounted on the right and another
+  in the rack, a two-color 0.2 print runs. The filament step carries the spares as
+  `rack`, so the dialog mirrors it. Not measured: that the swap happens at print start
+  rather than the printer pausing; if it pauses, drop the rack from `plan_extruders`.
+- **One side fitted with it** (the nozzles differ, or one spare serves one side): more than one filament is a 422,
   since the slicer spreads them across both. One filament prints, with a warning that
   the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
   plates being printed (the parts' extruders in the local 3MF's `model_settings.config`),
@@ -220,7 +231,8 @@ the left, and `status.nozzles` is indexed the same way.
   anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
   a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
   0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
-  never pre-selects it.
+  never pre-selects it — unless the rack holds a spare of the size, which the printer
+  can swap onto that side.
 - Nozzles the printer doesn't report refuse nothing and warn. Nor does an unreadable
   `/inventory/assignments`: every spool's side is then unknown. With no status it isn't
   read.

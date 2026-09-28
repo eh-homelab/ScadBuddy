@@ -16,15 +16,24 @@ import pytest
 from scadbuddy.bambuddy.extruders import (
     LEFT,
     RIGHT,
+    ExtruderPlan,
     SlotSide,
     extruder_of,
     plan_extruders,
+    rack_spares,
     side_of,
     slot_sides,
+    spare_count,
     track_switch,
 )
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import NozzleInfo, PrinterStatus, SlotChoice, SpoolAssignment
+from scadbuddy.bambuddy.models import (
+    NozzleInfo,
+    NozzleRackSlot,
+    PrinterStatus,
+    SlotChoice,
+    SpoolAssignment,
+)
 from tests.bambuddy.conftest import recording
 
 
@@ -162,6 +171,21 @@ def fts(**changes: Any) -> PrinterStatus:
     return PrinterStatus.model_validate(body)
 
 
+def no_spares(status: PrinterStatus) -> PrinterStatus:
+    """The same printer with only the mounted pair in its rack (rack ids 0 and 1): the
+    recorded rack holds spare 0.4 hotends, which would fit a 0.2 side for 0.4."""
+    rack = [slot for slot in status.nozzle_rack if slot.id in (RIGHT, LEFT)]
+    return status.model_copy(update={"nozzle_rack": rack})
+
+
+def rack(*sizes: str) -> list[NozzleRackSlot]:
+    """A rack of spares: one slot per size, at the ids the H2C gives spares (16+)."""
+    return [
+        NozzleRackSlot(id=16 + index, nozzle_type="HS00", nozzle_diameter=size)
+        for index, size in enumerate(sizes)
+    ]
+
+
 def test_the_recorded_printer_has_the_switch() -> None:
     assert track_switch(fts_status())
     assert not track_switch(mapped_status())
@@ -186,7 +210,8 @@ def test_with_the_switch_a_left_resting_spool_prints_in_one_color_on_the_right()
 def test_differing_nozzles_refuse_a_multi_color_print(size: str, only: str, other: str) -> None:
     """Queue item 108: the slicer spread two colors across both nozzles, and a pin in the
     3MF is ignored, so nothing but the refusal keeps that print off the printer."""
-    result = plan_extruders([RIGHT_02, LEFT_02], fts_status(), size=size, used_slots={1, 2})
+    status = no_spares(fts_status())
+    result = plan_extruders([RIGHT_02, LEFT_02], status, size=size, used_slots={1, 2})
     assert result.errors == [
         "This printer has a 0.2 mm nozzle on the right and 0.4 mm on the left. The slicer "
         f"spreads a multi-color print across both, and ScadBuddy can't keep it on the {only}, "
@@ -285,6 +310,22 @@ def test_a_known_mismatched_side_with_the_other_unreported_is_warned_not_refused
     )
 
 
+@pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])
+def test_a_single_nozzle_printer_with_the_wrong_size_mounted_is_refused(
+    nozzles: list[dict[str, str]],
+) -> None:
+    """Review of #538: an X1C's one nozzle is known and wrong, and there is no left side
+    to be unsure about, so this is the documented refusal, not a warning."""
+    status = mapped_status(
+        nozzles=nozzles, ams_extruder_map={"0": 0}, fila_switch=None, nozzle_rack=[]
+    )
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
+    assert result.errors == [
+        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
+    ]
+    assert result.warnings == []
+
+
 def test_an_unreported_left_on_a_printer_wired_to_it_is_warned_about() -> None:
     """Nothing but ``ams_extruder_map`` says the left exists."""
     status = mapped_status(nozzles=SINGLE, fila_switch=None)
@@ -314,7 +355,8 @@ def test_without_the_switch_the_ht_and_external_holder_are_named() -> None:
     external, ht = SlotSide(1, 3, 255, 0, LEFT), SlotSide(1, 4, 128, 0, RIGHT)
     [error] = plan_extruders([external], mapped_status(), size="0.2", used_slots={1}).errors
     assert error.startswith("Slot 1's spool (the external spool holder, left)")
-    [error] = plan_extruders([ht], mapped_status(), size="0.4", used_slots={1}).errors
+    status = no_spares(mapped_status())
+    [error] = plan_extruders([ht], status, size="0.4", used_slots={1}).errors
     assert error.startswith("Slot 1's spool (AMS HT, right)")
 
 
@@ -324,3 +366,84 @@ def test_without_the_switch_a_spool_of_unknown_side_is_not_refused() -> None:
     assert result == type(result)()
     result = plan_extruders([RIGHT_02, NO_SIDE], status, size="0.2", used_slots={1, 2})
     assert result == type(result)()
+
+
+# --- the H2C's hotend rack: a spare of the sliced size is swapped onto a side -----------
+
+
+def test_the_recorded_rack_lists_its_spares_without_the_mounted_pair() -> None:
+    """Rack ids 0 and 1 mirror ``nozzles`` (measured 2026-09-27/28); the rest are spares."""
+    spares = rack_spares(fts_status())
+    assert [slot.id for slot in spares] == [17, 18, 19, 20, 21]
+    assert {slot.nozzle_diameter for slot in spares} == {"0.4"}
+    assert (spare_count(fts_status(), "0.4"), spare_count(fts_status(), "0.2")) == (5, 0)
+    assert rack_spares(None) == [] and spare_count(no_spares(fts_status()), "0.4") == 0
+
+
+def test_a_spare_of_the_size_in_the_rack_fits_the_other_side() -> None:
+    """Local review of #538: right 0.2, left 0.4 and a second 0.2 in the rack. The printer
+    swaps it onto the left, so a two-color 0.2 print is not refused, even without the
+    switch, where the left spool's AMS is wired to the side that gets the spare."""
+    for status in (fts_status(), mapped_status()):
+        status = status.model_copy(update={"nozzle_rack": rack("0.2")})
+        result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.2", used_slots={1, 2})
+        assert result == ExtruderPlan()
+
+
+def both_04(*spares: str) -> PrinterStatus:
+    """Both mounted 0.4 and ``spares`` in the rack — the spec's 2026-09-27 rack with a
+    0.2 HS00 at id 16, once the mounted 0.2 was swapped for a 0.4."""
+    return fts().model_copy(
+        update={
+            "nozzles": [NozzleInfo(nozzle_type="HS00", nozzle_diameter="0.4")] * 2,
+            "nozzle_rack": rack(*spares),
+        }
+    )
+
+
+def test_a_size_only_the_rack_has_is_not_refused() -> None:
+    """A one-color 0.2 print ran before #469 on that rack and still does; the warning
+    names the rack rather than a mounted nozzle."""
+    result = plan_extruders([LEFT_02], both_04("0.2"), size="0.2", used_slots={1})
+    assert result.errors == []
+    [warning] = result.warnings
+    assert warning.kind == "side-unknown"
+    assert warning.message.startswith(
+        "Neither mounted nozzle is 0.2 mm, and the rack holds one spare 0.2 mm hotend, "
+        "which can go on one side. The slicer picks the extruder"
+    )
+    assert plan_extruders([LEFT_02], both_04(), size="0.2", used_slots={1}).errors == [
+        "Neither nozzle is 0.2 mm: the right has 0.4 mm and the left 0.4 mm. Choose 0.4, "
+        "or fit a 0.2 mm nozzle."
+    ]
+
+
+def test_one_spare_serves_one_side_so_two_colors_are_refused_naming_the_rack() -> None:
+    result = plan_extruders([RIGHT_02, LEFT_02], both_04("0.2"), size="0.2", used_slots={1, 2})
+    assert result.errors == [
+        "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one "
+        "spare 0.2 mm hotend in the rack. The slicer spreads a multi-color print across "
+        "both, and ScadBuddy can't keep it on one side, so the other would pause it at the "
+        "first layer. Fit a 0.2 mm nozzle on both sides, or print in one color."
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        both_04("0.2", "0.2"),
+        mapped_status(nozzle_rack=[]).model_copy(update={"nozzle_rack": rack("0.2")}),
+    ],
+)
+def test_a_spare_for_every_side_that_needs_one_prints_any_colors(status: PrinterStatus) -> None:
+    """Two spares for two 0.4 sides, or one for the one 0.4 side beside a mounted 0.2."""
+    result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.2", used_slots={1, 2})
+    assert result == ExtruderPlan()
+
+
+def test_a_mounted_hotend_listed_in_the_rack_is_not_a_spare() -> None:
+    """Rack ids 0 and 1 are the mounted pair: a 0.4 there does not fit the 0.2 side."""
+    status = no_spares(fts_status())
+    assert [slot.nozzle_diameter for slot in status.nozzle_rack] == ["0.2", "0.4"]
+    result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.4", used_slots={1, 2})
+    assert len(result.errors) == 1

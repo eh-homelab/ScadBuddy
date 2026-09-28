@@ -169,6 +169,10 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
     #: printer: a class target nobody has narrowed yet has no hardware to read.
     nozzles: list[NozzleInfo] = Field(default_factory=list)
+    #: The spare hotends in the chosen printer's rack, besides the mounted pair (#469):
+    #: the printer swaps one of the sliced size onto a side whose nozzle differs, so a
+    #: size a spare has fits that side too. Empty on a printer without a rack.
+    rack: list[NozzleInfo] = Field(default_factory=list)
     #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False

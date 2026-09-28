@@ -225,7 +225,9 @@ export function FilamentPicker({
           warning, not a refusal (#469). */}
       {nozzleSize && bothKnown && fits.length === 1 && slots.length > 1 && (
         <p className="mt-1 text-[12px] text-warn" data-testid="one-fitting-nozzle">
-          Only the {fits[0] === 1 ? 'left' : 'right'} nozzle is {nozzleSize} mm, and the slicer
+          {mounted[fits[0]!]?.nozzle_diameter === nozzleSize
+            ? `Only the ${fits[0] === 1 ? 'left' : 'right'} nozzle is ${nozzleSize} mm, and the slicer`
+            : `Neither nozzle is ${nozzleSize} mm and the rack holds one spare, enough for one side, and the slicer`}{' '}
           spreads a multi-color print across both, so this can&apos;t print. Fit a {nozzleSize} mm
           nozzle on both sides, or print in one color.
         </p>
