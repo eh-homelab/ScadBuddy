@@ -239,7 +239,10 @@ def test_dismissing_hides_the_update_until_the_upstream_moves_again(
     assert _listed(client)["upstream_state"] == "dismissed"
     status = _upstream(client)
     assert status["state"] == "dismissed"
-    assert status["preview"] is None
+    # #235: still offered for review, as the merge a `POST …/merge` would still make.
+    assert status["revision"] == first
+    assert status["preview"]["clean"] is True
+    assert status["preview"]["merged"] == SOURCE.replace("width = 40;", "width = 50;")
     assert _messages(client, MINE)[0] == f"Dismiss {BUILTIN} update in {MINE}"
     assert _source(client) == SOURCE
 
@@ -480,8 +483,11 @@ def test_a_merge_the_template_keeps_moving_under_is_refused(
     edits = [SOURCE.replace('layout = "row";', f'layout = "{n}";') for n in range(MERGE_ATTEMPTS)]
     _edit_after_planning(monkeypatch, catalogue, list(edits))
 
-    with pytest.raises(UpstreamStateError):
+    with pytest.raises(UpstreamStateError) as refused:
         catalogue.merge_upstream("copy")
+
+    # #371: told apart from "no update to merge" (`current`/`gone`) by its state.
+    assert refused.value.state == "update"
 
     assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edits[-1]
     upstream = catalogue.record("copy").upstream
