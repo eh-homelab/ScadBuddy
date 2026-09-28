@@ -282,7 +282,7 @@ describe('SettingsPage', () => {
     expect(screen.queryByTestId('asset-usage')).toBeNull()
     expect(
       screen.getByText(
-        'Where is the store this process uses; it moves to the Blob store choice above at its next restart, so the two can differ until then.',
+        'The Where row is the store this process uses; it moves to the Blob store choice above at its next restart, so the two can differ until then.',
       ),
     ).toBeInTheDocument()
   })

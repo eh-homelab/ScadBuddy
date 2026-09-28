@@ -242,3 +242,71 @@ every request a `GET`):
 `GET /archives/35/timelapse` and `/photos/{name}` with `Range: bytes=100-199` answered
 `206` with `Content-Range: bytes 100-199/<size>` and `Accept-Ranges: bytes`: Bambuddy's
 `FileResponse` serves ranges itself, so the proxy passes the header through.
+
+## Blob store (#426): not yet measured against a live instance
+
+Phase 3 moves every file a render reads into Bambuddy's library (spec
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §6.3). The facts that
+design rests on are measured by a manual script, **which has not yet been run against a
+live Bambuddy**: it needs a key, and none was available where phase 3 was written. The
+operator runs it once at deploy time and pastes its output here, replacing this
+paragraph, under a heading "Blob store (#426), measured <date> against <version>".
+Until then nothing below is a measurement, and the Bambuddy backend's tests are shaped
+from the recorded `openapi/` schemas, not from these responses.
+
+### How to run it
+
+With a key created in Bambuddy's **Settings → API keys** with *Manage Library* only, and
+the inbox folder id from ScadBuddy's Settings (**Library folder**):
+
+```bash
+cd backend
+SCADBUDDY_VERIFY_BAMBUDDY_URL=https://bambuddy.internal.nullreference.io \
+SCADBUDDY_VERIFY_BAMBUDDY_KEY=… SCADBUDDY_VERIFY_INBOX=… \
+SCADBUDDY_VERIFY_RECORD_DIR=tests/bambuddy/recordings \
+uv run python -m scadbuddy.store.verify_bambuddy
+```
+
+It writes, and on exit deletes, files in `ScadBuddy verify/Work` under the inbox,
+creating both folders when they are missing. The folders stay: ScadBuddy never deletes
+folders. It prints a Markdown table on stdout and `{"bambuddy": …, "files_cleaned": N}`
+on stderr, and exits 0.
+
+### What it checks (`backend/scadbuddy/store/verify_bambuddy.py`)
+
+| Row it prints | What it does | What the answer decides |
+|---|---|---|
+| `<media> upload, download by id` (SVG, PNG, zip) | Uploads a small file of each kind a store object can be, downloads it by id and compares the bytes | Whether Bambuddy stores an asset, a snapshot or a piece zip unchanged |
+| `` `file_hash` of <name> `` | Reads the file back (`GET /library/files/{id}`) and compares `file_hash` with the sha256 of the bytes | If it is a sha256, `ContentStore._store` could use it instead of its own dedupe query |
+| `re-upload of identical bytes` | Uploads the zip's bytes again under another name | Whether Bambuddy dedupes (`duplicate_of` set, no new id) or keeps a second file |
+| `upload 8 / 32 / 128 / 512 MiB` | Uploads random bytes of each size, stopping at the first refusal | The largest piece or snapshot a single upload can carry |
+| `40 uploads of 64 KiB, sequential` | Times 40 small uploads | The per-upload cost a render's fan-out pays |
+| `upload into a folder that does not exist` | Uploads into folder id 2³¹−1 | The status `BambuddyContentBackend.upload` treats as "the Work folder vanished" (it assumes 404) |
+
+With `SCADBUDDY_VERIFY_RECORD_DIR` set, it also writes each file's `GET /library/files/{id}`
+body as `store-file-verify.svg.json`, `store-file-verify.png.json` and
+`store-file-verify.zip.json`; list them in the measured section's table.
+
+If the last row reads `accepted (!)`, that upload is not among the files the script
+deletes: remove `x.zip` from Bambuddy's library by hand.
+
+### Checked by hand after the script
+
+Record each result in the same section:
+
+- **A `Work/` folder with hundreds of files** (§6.3). Run the script's 40-upload loop
+  12 times, so about 500 files land in `ScadBuddy verify/Work`. Open Bambuddy's library
+  UI on that folder and on the inbox, and note the load time and whether the tree stays
+  usable. Delete the files from the UI afterwards.
+- **The most plates per 3MF that Bambu Studio opens** (§6.3). Write `dollhouse-kit`
+  pieces onto 6, 12, 24 and 48 plates with the multi-plate writer
+  (`backend/scadbuddy/render/bambu3mf.py`), open each in Bambu Studio, and record the
+  largest that opens.
+- **Follow-ups the answers trigger:**
+  - If `file_hash` is a sha256, or a re-upload answers with `duplicate_of` and no new
+    file, note that `ContentStore._store` could skip its own dedupe query.
+  - If the missing-folder upload is not a 404, change the `error.status != 404` check in
+    `BambuddyContentBackend.upload`, and its test's response, to the measured status.
+  - If any call answers 403 with the Manage-Library-only key, the scope declared for it in
+    `backend/scadbuddy/bambuddy/client.py` is wrong. Fix it there and in
+    `backend/scadbuddy/bambuddy/errors.py`'s docstring.
