@@ -13,11 +13,14 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **The agent service has no authentication.** Its credential writes are *gated*, but
   not authenticated (see [Origin gate](#dns-rebinding-defence)). The limitation is
   stated in the header of [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts).
-- **`/mcp` and the tool registry** are on `main` (#368, [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts),
-  [`agent/src/tools/`](../../agent/src/tools/)), authenticated by bearer tokens (see
-  [MCP bearer tokens](#mcp-bearer-tokens)). **Approvals are not built** (open PR #471).
-  The other tool paths are the harness's in-process MCP servers and the browser bridge
-  in the user's own tab ([browser-bridge.md](browser-bridge.md)).
+- **`/mcp`, the tool registry and approvals are on `main`** (#251's registry in
+  [`agent/src/tools/`](../../agent/src/tools/) and
+  [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts); #258's approval store in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
+  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)). The
+  other tool paths are the harness's in-process MCP servers (none registered in
+  `main.ts`) and the browser bridge in the user's own tab
+  ([browser-bridge.md](browser-bridge.md)).
 
 ## MCP bearer tokens
 
@@ -80,9 +83,11 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   checks, [headless-browser.md](headless-browser.md)). Then an unknown tool (`tierOf`
   returns `undefined`) is treated as `outward`. `read` and `write` are allowed.
   `outward` gets `needs_approval`.
-- **Approvals are not built** (#258, open PR #471). Until then `needs_approval` is
-  answered with a **deny**, whose message tells the model to explain rather than retry.
-  An outward tool therefore never runs unattended.
+- **Approvals** (#258): in a session, `needs_approval` parks the call until a human
+  decides it in the UI (`approvalGate`, [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  with no gate (outside a session) it is answered with a **deny**, whose message tells
+  the model to explain rather than retry. An outward tool therefore never runs
+  unattended. External MCP clients use prepare/confirm instead (below).
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -114,6 +119,49 @@ outside the gateway path").
 **Runaway limits.** Each query gets `maxTurns` (25) and `maxBudgetUsd` (1 USD), plus an
 abort signal (`run.ts`). Sessions spend one budget across all their turns, and any
 watcher can interrupt (PR #377 body, "Budget and turns", "Interrupt").
+
+## MCP prepare/confirm on the approval store
+
+Spec §8.2 gives external MCP clients "a two-step `prepare` (returns a pending action
+id and a human-readable summary) then `confirm`, where the confirm completes only after
+the UI approval". As built:
+
+- **Prepare.** `runTool` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts))
+  does not run a gated outward tool. `ApprovalActions.prepare`
+  ([`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts)) records a pending
+  row in `ai_approvals` through `ApprovalService.create()`, with no session and no turn.
+  The row holds the MCP principal (`requested_by`), the tool, the HMAC-SHA256 input hash
+  under the KEK-derived key (`approvalHashKey`) and the scrubbed input summary. It never
+  holds the full input. The row id is the `pending_action_id`.
+- **Bounds.** A caller keeps at most 50 pending actions; a 51st cancels that caller's
+  oldest. At 10,000 pending sessionless rows, a new prepare is refused and nobody's row
+  is evicted. These are the in-memory store's bounds from #368, applied to the table.
+  `ApprovalService.createPrepared` checks and applies both bounds in the insert's own
+  transaction, under one `pg_advisory_xact_lock`, so concurrent prepares cannot
+  overshoot them (covered by a concurrent-burst test in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Anonymous callers.** In `disabled` mode the principal id is
+  `anonymous:<Mcp-Session-Id>`, and the session id is that client's capability
+  (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
+  of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
+  session id itself.
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
+  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+  the browser user. `authorize` refuses a principal deciding its own request even with
+  an approval grant, so an MCP client cannot approve what it prepared (covered in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
+  takes the `pending_action_id` and the same `arguments` again, because the table has
+  only the hash. It answers `pending_approval` while the row is undecided. It runs the
+  tool only when `ApprovalService.consumePrepared` marks the row used. That is one
+  `UPDATE` requiring: no session, the same `requested_by`, the same input hash,
+  `decision = 'approved'`, not consumed, not revoked, and `usable_until > now()`. Two
+  confirms cannot both win. A replay, another principal, a changed input, a denial or an
+  expiry is refused and nothing is sent. The approval is used up before the tool runs,
+  so a call that then fails is not retried on the same approval.
+- **No database.** `main.ts` falls back to the in-memory `PendingActionStore`
+  ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)). Nothing can approve
+  its actions, so its `confirm_action` always refuses.
 
 ## Envelope encryption and AAD binding
 

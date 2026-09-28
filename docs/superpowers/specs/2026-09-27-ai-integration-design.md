@@ -645,7 +645,16 @@ including `disabled`. Where it is enforced:
   `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
-  approval.
+  approval. The prepare is a pending row in `ai_approvals` with no session. It records
+  the MCP principal, the tool, the input hash and the scrubbed summary, and its id is the
+  pending action id. The UI decides it like any other approval, and self-approval is
+  refused. `confirm_action` takes the id and the same arguments, because only the hash
+  is stored. It answers "pending" until a decision. It runs the call only when a single
+  `UPDATE` marks the row used, and that `UPDATE` requires the row to be approved,
+  unused, not voided and within its usable window, with the same principal and the same
+  input hash. So the call runs at most once, and a replay, another principal or a
+  changed input is refused. The code is `agent/src/approvals/mcp.ts` and
+  `agent/src/tools/approvals.ts`.
 - **Headless browser (#349):** the backend refuses outward routes on requests that carry
   the agent-actor marker unless an approved outward action authorises them (§5.3): a
   grant that only an approved `mcp__scadbuddy_browser__authorize_request` call writes,

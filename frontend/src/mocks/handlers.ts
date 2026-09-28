@@ -281,6 +281,11 @@ export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
 }
 
+/** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
+export function setMockMedia(slug: string, media: MediaView[]): void {
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
 }
