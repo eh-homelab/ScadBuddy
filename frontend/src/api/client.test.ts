@@ -1,6 +1,8 @@
+import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
-import { ApiError, api } from './client'
+import { server } from '../mocks/server'
+import { ApiError, BAMBUDDY_UNAVAILABLE, api, mayHaveRun } from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -118,19 +120,25 @@ describe('uploadMedia (#274)', () => {
     expect((error as ApiError).detail).toContain('at most 1024 MB')
   })
 
-  it('rejects with the status text when the answer is not a problem', async () => {
+  it('rejects with what the status means when the answer is not a problem', async () => {
     const { pending, xhr } = upload()
     xhr.status = 502
     xhr.statusText = 'Bad Gateway'
     xhr.responseText = '<html>'
     xhr.onload?.()
-    await expect(pending).rejects.toMatchObject({ status: 502, detail: 'Bad Gateway' })
+    await expect(pending).rejects.toMatchObject({
+      status: 502,
+      detail: 'The server is not answering right now (HTTP 502).',
+      problem: { title: 'Bad Gateway' },
+    })
   })
 
   it('rejects when the connection fails', async () => {
     const { pending, xhr } = upload()
     xhr.onerror?.()
     await expect(pending).rejects.toThrow('The upload failed')
+    // Like a dropped fetch: no answer arrived, so the upload may have landed.
+    expect(mayHaveRun(await pending.catch((caught: unknown) => caught))).toBe(true)
   })
 })
 
@@ -147,5 +155,184 @@ describe('media writes against the mock API (#274)', () => {
 
     const deleted = await api.deleteMedia(copy.slug, third!)
     expect(deleted.media?.map((item) => item.id)).toEqual([fourth, second, first])
+  })
+})
+
+describe('failures the server did not describe (#470)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  /** A proxy in front of the backend answers with its own page, and HTTP/2 has no status text. */
+  function proxy(status: number, body = '<html><body>upstream request timeout</body></html>') {
+    server.use(
+      http.get(
+        '/api/v1/models',
+        () => new HttpResponse(body, { status, headers: { 'Content-Type': 'text/html' } }),
+      ),
+    )
+  }
+
+  async function failure(): Promise<ApiError> {
+    const caught = await api.listModels().catch((cause: unknown) => cause)
+    expect(caught).toBeInstanceOf(ApiError)
+    return caught as ApiError
+  }
+
+  it.each([
+    [504, 'The server took too long to answer (HTTP 504).'],
+    [524, 'The server took too long to answer (HTTP 524).'],
+    [502, 'The server is not answering right now (HTTP 502).'],
+    [503, 'The server is not answering right now (HTTP 503).'],
+    [413, 'That is too large for the server to accept (HTTP 413).'],
+    [500, 'The server hit an error it did not describe (HTTP 500).'],
+    [404, 'The server refused the request without saying why (HTTP 404).'],
+  ])('says what a non-JSON %i means, and keeps the status', async (status, detail) => {
+    proxy(status)
+    const error = await failure()
+    expect(error.status).toBe(status)
+    expect(error.detail).toBe(detail)
+    expect(error.message).toBe(detail)
+    expect(error.problem.title).not.toMatch(/^$|Request failed/)
+  })
+
+  it('treats JSON that is not a problem like a proxy page', async () => {
+    proxy(504, '{"message":"timeout"}')
+    expect((await failure()).detail).toBe('The server took too long to answer (HTTP 504).')
+  })
+
+  it('keeps a problem the backend wrote as it is', async () => {
+    server.use(
+      http.get('/api/v1/models', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Bad Gateway',
+            status: 502,
+            detail: 'Bambuddy did not answer in time.',
+          },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const error = await failure()
+    expect(error.detail).toBe('Bambuddy did not answer in time.')
+    expect(error.problem.title).toBe('Bad Gateway')
+    // Not the backend's "Bambuddy did not answer" type, so nothing says it may have run.
+    expect(mayHaveRun(error)).toBe(false)
+  })
+
+  it.each([
+    [504, 'could not reach Bambuddy to queue the print: ReadTimeout', true],
+    [502, 'could not reach Bambuddy to queue the print: RemoteProtocolError', true],
+    [409, 'Bambuddy refused the API key', false],
+    // map_response's fallback: Bambuddy answered, so its "no" is not a maybe...
+    [502, 'Bambuddy answered 500 when asked to queue the print', false, 500],
+    [502, 'Bambuddy answered 400 when asked to queue the print', false, 400],
+    // ...unless the answer is a proxy's in front of Bambuddy that gave up waiting.
+    [502, 'Bambuddy answered 504 when asked to queue the print', true, 504],
+    [502, 'Bambuddy answered 524 when asked to queue the print', true, 524],
+  ])(
+    'counts the backend’s bambuddy-unavailable %i as maybe having run: %s',
+    async (status, detail, expected, bambuddy_status?: number) => {
+      server.use(
+        http.get('/api/v1/models', () =>
+          HttpResponse.json(
+            {
+              type: BAMBUDDY_UNAVAILABLE,
+              title: 'Bad Gateway',
+              status,
+              detail,
+              ...(bambuddy_status === undefined ? {} : { bambuddy_status }),
+            },
+            { status, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const error = await failure()
+      expect(error.detail).toBe(detail)
+      expect(mayHaveRun(error)).toBe(expected)
+    },
+  )
+
+  it('keeps a detail-only body', async () => {
+    server.use(
+      http.get('/api/v1/models', () => HttpResponse.json({ detail: 'Not Found' }, { status: 404 })),
+    )
+    expect((await failure()).detail).toBe('Not Found')
+  })
+
+  it('says the server could not be reached when the connection fails', async () => {
+    server.use(http.get('/api/v1/models', () => HttpResponse.error()))
+    const error = await failure()
+    expect(error.status).toBe(0)
+    expect(error.detail).toBe(
+      'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+    )
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('says the browser is offline when it is', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
+    server.use(http.get('/api/v1/models', () => HttpResponse.error()))
+    const error = await failure()
+    expect(error.status).toBe(0)
+    expect(error.detail).toBe('This browser is offline, so ScadBuddy could not reach its server.')
+    expect(mayHaveRun(error)).toBe(false)
+  })
+
+  it('does not call it offline when the browser went offline only while waiting', async () => {
+    let online = true
+    vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => online)
+    server.use(
+      http.get('/api/v1/models', () => {
+        online = false
+        return HttpResponse.error()
+      }),
+    )
+    const error = await failure()
+    expect(error.problem.type).not.toBe('urn:scadbuddy:offline')
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('passes an abort through as it is', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const caught = await api
+      .checkSource('cube(1);', undefined, controller.signal)
+      .catch((cause: unknown) => cause)
+    expect(caught).not.toBeInstanceOf(ApiError)
+    expect((caught as Error).name).toBe('AbortError')
+  })
+
+  it.each([
+    [502, true],
+    [504, true],
+    [524, true],
+    [503, false],
+    [413, false],
+    [500, false],
+  ])('counts a non-JSON %i as maybe having run: %s', async (status, expected) => {
+    proxy(status)
+    expect(mayHaveRun(await failure())).toBe(expected)
+  })
+
+  it('does not count an error the backend described, or one that is not an ApiError', () => {
+    expect(mayHaveRun(new Error('boom'))).toBe(false)
+    expect(mayHaveRun(new ApiError(504, 'Bambuddy did not answer in time.'))).toBe(false)
+  })
+
+  it('says what a non-JSON upload failure means', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXhr)
+    const pending = api.uploadMedia(BUILTIN_SLUG, new File([new Uint8Array([1])], 'clip.mp4'))
+    const xhr = FakeXhr.last!
+    xhr.status = 413
+    xhr.responseText = '<html>'
+    xhr.onload?.()
+    await expect(pending).rejects.toMatchObject({
+      status: 413,
+      detail: 'That is too large for the server to accept (HTTP 413).',
+    })
   })
 })
