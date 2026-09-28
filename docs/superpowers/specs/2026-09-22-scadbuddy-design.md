@@ -415,8 +415,27 @@ when the source changes.
 
 Left: tabs per group, widgets, "Reset to defaults". Right: 3D preview
 (react-three-fiber, orbit controls, per-colour materials, build-plate grid,
-bounding-box dimensions in mm). Bottom bar: **Generate**, then **Download 3MF**
-and **Send to Bambuddy**.
+bounding-box dimensions in mm, a full-screen toggle). Bottom bar: **Generate**,
+then **Download 3MF** and **Send to Bambuddy**.
+
+Full screen takes the whole workspace. The viewer and its overlays (plate, bounding
+box, render state, a failed render's log) fill the screen; the parameter panel becomes
+a flyout over the scene, opened from **Parameters** (a full-width sheet on a narrow
+screen), with the overlays moving clear of it; the bottom bar waits outside. The panel
+and the canvas are never remounted, so the camera and the chosen tab survive. It goes
+through the Fullscreen API, but a cross-origin frame may only use that API when its
+`<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`), and Bambuddy's is
+only known to set its sandbox flags (§1), so wherever the API is refused the workspace
+covers the window instead — when embedded, the frame. Escape leaves either, but not
+alike. In the stand-in a dialog opened from the flyout takes the key first. In the
+API's full screen the key is the browser's, which always leaves and which no page can
+stop; whether that Escape also reaches an open dialog is the browser's call.
+Automated Chromium never hands Escape to the browser (headless, or headed but driven
+over CDP, as measured for this), so that path is checked by hand. While full screen
+lasts, the rest of the page is inert: it is covered or unpainted, and Tab must not
+reach a control nobody can see. Full screen hides the assistant panel with the rest of
+the page, so the assistant's shortcut leaves full screen and shows the panel rather
+than toggling it out of sight.
 
 The preview is not a separate cheap render — it **is** the render. Every
 parameter change (debounced 400 ms) submits a render job; the job produces the
