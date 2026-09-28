@@ -48,15 +48,12 @@ RPC_TIMEOUT = timedelta(seconds=5)
 #: The largest `Job` a submit sends as a workflow input. Temporal refuses a payload
 #: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
 MAX_WORKFLOW_INPUT_BYTES = 1024 * 1024
-#: Start errors that no retry can fix: the input itself (INVALID_ARGUMENT, e.g. over
-#: the payload limit), or a namespace that does not exist (NOT_FOUND).
-UNSTARTABLE = frozenset(
-    {
-        RPCStatusCode.INVALID_ARGUMENT,
-        RPCStatusCode.FAILED_PRECONDITION,
-        RPCStatusCode.NOT_FOUND,
-    }
-)
+#: Start errors that no retry can fix. INVALID_ARGUMENT is the input itself: a
+#: workflow argument over the payload limit gets it (verified with 3 MiB on the dev
+#: server). NOT_FOUND is a configuration error, a namespace or task queue that does
+#: not exist, which no retry fixes. Not FAILED_PRECONDITION: Temporal answers that for
+#: a namespace that is not active (yet), which passes, so the reconciler retries it.
+UNSTARTABLE = frozenset({RPCStatusCode.INVALID_ARGUMENT, RPCStatusCode.NOT_FOUND})
 
 
 def _unstartable(error: Exception) -> bool:

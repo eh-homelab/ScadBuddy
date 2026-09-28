@@ -89,7 +89,15 @@ def test_a_piece_request_with_another_requests_key_is_refused() -> None:
 
 @pytest.mark.parametrize(
     ("slug", "revision"),
-    [("../escape", None), ("Demo", None), ("demo", "not-a-commit"), ("demo", "../HEAD")],
+    [
+        ("../escape", None),
+        ("Demo", None),
+        ("demo", "not-a-commit"),
+        ("demo", "../HEAD"),
+        # `$` also matches before a final newline; the anchors must not let one through.
+        ("demo\n", None),
+        ("demo", "a" * 40 + "\n"),
+    ],
 )
 def test_a_piece_request_refuses_a_slug_or_revision_the_api_would(
     slug: str, revision: str | None
