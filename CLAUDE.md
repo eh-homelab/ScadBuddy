@@ -112,7 +112,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
   parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
-  (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
+  (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets

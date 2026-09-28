@@ -2,7 +2,7 @@ import type { CopyProgress, PrintProgress } from '../api/types'
 import { Spinner } from './ui/Spinner'
 
 /**
- * Where a print got to (#89), for whichever of Bambuddy's two routes ran.
+ * Where a print got to (#89): the slice, then the queue entries it produced.
  *
  * The panel is deliberately a reader: every judgement it could make has already been
  * made by the backend, and remaking any of them here would be wrong in a way that is
@@ -43,16 +43,6 @@ function queuedCount(progress: PrintProgress): number {
 }
 
 function headline(progress: PrintProgress): string {
-  if (progress.route === 'pipeline') {
-    // Counted from the entries rather than from `copies_completed`: on this route the
-    // run is accepted before the queue entries exist, so "queued" means a copy has an
-    // entry id — which is exactly the thing the poll is waiting for.
-    const queued = queuedCount(progress)
-    const run = progress.pipeline_run_id ?? '?'
-    return `Run #${run} — ${queued} of ${progress.copies} ${
-      progress.copies === 1 ? 'copy' : 'copies'
-    } queued`
-  }
   // The slice-and-queue route has no run: the queue item is the whole print, and until
   // a plate has sliced it does not exist yet. An all-plates print is still slicing until
   // one of its plates has an entry (#295).
