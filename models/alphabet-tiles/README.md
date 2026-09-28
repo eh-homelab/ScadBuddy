@@ -52,7 +52,9 @@ unchanged on MakerWorld and in ScadBuddy.
 The border and its inset may take at most 60 % of the room inside the tile, so
 every tile keeps room for its letter. On a small tile a wide or far-inset
 border is narrowed first (down to 1 mm), then moved out towards the edge. The
-log says so with `NOTE: border set to`, giving the width and inset used.
+log says so with `NOTE: border set to`, giving the width and inset used. A
+border inset smaller than the edge rounding is moved in clear of it, and the
+log says `NOTE: border moved in`.
 
 ### Magnets
 
@@ -113,7 +115,7 @@ the top 0.6 mm.
 ./verify.sh
 ```
 
-Renders the defaults and fourteen variations in `scadbuddy-verify:local`:
+Renders the defaults and fifteen variations in `scadbuddy-verify:local`:
 
 - every shape with a border and the awkward glyphs `WQg69&`;
 - both magnet sizes and both mounts;
@@ -123,6 +125,7 @@ Renders the defaults and fourteen variations in `scadbuddy-verify:local`:
   12 mm to fit the bed;
 - the smallest, thinnest tile with the deepest inlay and the biggest magnet;
 - a thin tile with no magnet whose edge rounding and inlay raise the thickness;
+- a border inset less than the edge rounding, so the border moves in;
 - sharp square tiles with spaces in the text;
 - text that is all spaces;
 - a serif face;

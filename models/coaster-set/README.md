@@ -26,8 +26,9 @@ H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. If
 `NOTE: only N coasters of M fit on the plate`; print the rest as a second
 plate. The holder, when on, takes the last cell of the grid, and every cell is
 then sized for the holder. When even one coaster and the holder do not fit
-side by side that way (a 150 mm coaster: two 157 mm cells are more than the
-plate), the one coaster sits above the holder instead, with the gap cut to fit
+side by side that way (a 150 mm coaster with `holder_clearance` 3: two
+161 mm cells are more than the plate either way; at the default 1 mm clearance
+they still fit), the one coaster sits above the holder instead, with the gap cut to fit
 if it has to be (`NOTE: gap reduced`).
 
 A Text pattern with empty `text`, or a Monogram with blank `letters`, gives

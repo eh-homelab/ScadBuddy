@@ -93,6 +93,8 @@ CASES = [
     ("all-spaces", dict(text="   ")),
     # No magnet: the edge rounding and the deep inlay raise the thickness.
     ("thin-edge-raised", dict(thickness=3, edge_round=2, letter_depth=2)),
+    # Room to spare, but a 2 mm edge rounding keeps a 0.5 mm-inset border off it.
+    ("border-clear-of-edge", dict(border=True, edge_round=2, border_inset=0.5)),
     # The smallest tiles with the widest, furthest-in border: the border is
     # narrowed and moved out so every tile still gets its letter.
     ("small-max-border", dict(tile_size=20, border=True, border_width=5, border_inset=5,
@@ -263,8 +265,12 @@ for name, ov in CASES:
     # Every value the model changes is reported, and nothing else is.
     for note, want in (("NOTE: thickness raised", T > p["thickness"]),
                        ("NOTE: gap reduced", gap < p["gap"]),
-                       ("NOTE: border set to", p["border"] and (I["bw"] < p["border_width"]
-                                                             or not near(I["inset"], p["border_inset"], 1e-6)))):
+                       # Squeezed: narrower than asked, or further out than asked.
+                       ("NOTE: border set to", p["border"] and (I["bw"] < p["border_width"] - 1e-6
+                                                             or I["inset"] < p["border_inset"] - 1e-6)),
+                       # Only pushed in, by the edge rounding: wider than asked, same width.
+                       ("NOTE: border moved in", p["border"] and I["bw"] >= p["border_width"] - 1e-6
+                        and I["inset"] > p["border_inset"] + 1e-6)):
         check((note in I["log"]) == want, "%s %s" % ("logs" if want else "no", note))
     if T > p["thickness"]:
         why = "mm magnet" if needs >= p["edge_round"] + inlay + 1 else "for the edge rounding and inlay"
