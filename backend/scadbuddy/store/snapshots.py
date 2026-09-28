@@ -4,6 +4,10 @@ The API makes it (it has git); a worker unpacks it into the same revision-export
 directory `prepare_source` reads, so a populated export is found and git is never
 needed on the worker. A snapshot is a cache of git: nothing references it, it is swept
 after the grace once no render touches it, and `ensure` makes it again on demand.
+
+`pack_dir` leaves out dot-named files and symlinks, so a template whose tree holds
+either renders on a worker without them: such a template renders differently there
+than on the API's volume.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from scadbuddy.store.content import (
     ContentStore,
     template_title,
 )
+from scadbuddy.store.locks import KeyLocks
 
 
 def snapshot_key(slug: str, revision: str) -> str:
@@ -34,11 +39,18 @@ class SnapshotUnavailableError(RuntimeError):
 
 class SnapshotStore:
     def __init__(
-        self, content: ContentStore, paths: DataPaths, history: ModelHistory | None
+        self,
+        content: ContentStore,
+        paths: DataPaths,
+        history: ModelHistory | None,
+        *,
+        locks: KeyLocks | None = None,
     ) -> None:
         self.content = content
         self.paths = paths
         self.history = history
+        #: Shared with the worker's `FontMirror` (Task 8 passes one `KeyLocks`).
+        self.locks = locks or KeyLocks()
 
     async def pin(self, slug: str, revision: str | None) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
@@ -77,16 +89,22 @@ class SnapshotStore:
         if directory.is_dir():
             return True
         key = snapshot_key(slug, revision)
-        stat = await asyncio.to_thread(self.content.index.get, key)
-        if stat is None:
-            return False
-        try:
-            data = await self.content.read(stat.ref)
-        except (BlobMissingError, BlobCorruptError):
-            # Gone or altered in the backend: forget it, so the next `ensure` (the
-            # API's `pin`, which has git) stores it again.
-            await self.content.forget(key)
-            return False
-        await asyncio.to_thread(unpack_dir, data, directory)
+        # One unpack per key in this process: a second one, arriving after the first
+        # finished, would swap the export out from under a render reading it.
+        async with self.locks.hold(key):
+            if directory.is_dir():
+                return True
+            stat = await asyncio.to_thread(self.content.index.get, key)
+            # This backend's row only: `read` downloads from this backend.
+            if stat is None or stat.ref.backend != self.content.name:
+                return False
+            try:
+                data = await self.content.read(stat.ref)
+            except (BlobMissingError, BlobCorruptError):
+                # Gone or altered in the backend: forget it, so the next `ensure` (the
+                # API's `pin`, which has git) stores it again.
+                await self.content.forget(key)
+                return False
+            await asyncio.to_thread(unpack_dir, data, directory)
         await self.content.touch(key)
         return True

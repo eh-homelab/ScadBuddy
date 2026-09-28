@@ -38,8 +38,8 @@ from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
-from scadbuddy.store.fonts import FontMirror
-from scadbuddy.store.snapshots import SnapshotStore
+from scadbuddy.store.fonts import FontMirror, wanted_families
+from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     Failure,
     PieceRequest,
@@ -232,21 +232,39 @@ class RenderActivities:
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
         if d.snapshots is not None and req.revision is not None:
-            await d.snapshots.materialize(req.slug, req.revision)
-        if d.fonts_mirror is not None:
-            await d.fonts_mirror.sync()
+            found = await _heartbeating(
+                asyncio.create_task(d.snapshots.materialize(req.slug, req.revision))
+            )
+            if not found and (d.history is None or not d.history.available):
+                # Nothing to export it from here, and no retry will find it: fail the
+                # piece now. The next submit's `pin` (on the API, with git) stores it.
+                raise ApplicationError(
+                    f"the template's source at {req.revision} is no longer in the store;"
+                    " render again",
+                    type=SnapshotUnavailableError.__name__,
+                    non_retryable=True,
+                )
         try:
             with timed_stage(d.metrics)("source"):
-                prepared, _ = await prepare_source(
-                    req.slug,
-                    req.revision,
-                    config=d.config,
-                    paths=d.paths,
-                    history=d.history,
-                    fetcher=d.fetcher,
+                prepared, _ = await _heartbeating(
+                    asyncio.create_task(
+                        prepare_source(
+                            req.slug,
+                            req.revision,
+                            config=d.config,
+                            paths=d.paths,
+                            history=d.history,
+                            fetcher=d.fetcher,
+                        )
+                    )
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
+        if d.fonts_mirror is not None:
+            # Only the families this template could name: a fresh worker does not
+            # download the whole font library for its first piece.
+            families = await asyncio.to_thread(wanted_families, prepared.scad.parent, req.params)
+            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         return PrepareResult(
             version=prepared.version,
             scad=str(prepared.scad),
