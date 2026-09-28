@@ -48,6 +48,11 @@ DEFAULT_RENDER_MAX_ATTEMPTS = 2
 DEFAULT_RENDER_QUEUE_DEPTH_SLO = 16
 DEFAULT_RENDER_LATENCY_SLO = 60.0
 DEFAULT_DATABASE_POOL_SIZE = 10
+# The event log (Postgres only) is for Last-Event-ID replay after a short disconnect,
+# not an audit trail: a day of events, and never more than this many rows. 0 is no
+# limit on that dimension.
+DEFAULT_EVENT_LOG_RETENTION_SECONDS = 86400.0
+DEFAULT_EVENT_LOG_RETENTION_ROWS = 100_000
 # The editor's parse check does not go through the render queue, so it carries its own
 # budget rather than borrowing the render one: the pod's worst case is the two added
 # together, and that is a number worth declaring rather than discovering. One is
