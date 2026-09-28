@@ -23,9 +23,9 @@ import json
 import logging
 import threading
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -42,6 +42,7 @@ from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugEr
 from scadbuddy.render.schema import ParamValue
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 #: A preset name is a label in a picker, not prose.
 MAX_PRESET_NAME = 80
@@ -346,11 +347,17 @@ class PresetStore:
                 return preset
         raise PresetNotFoundError(preset_id)
 
-    def saved_name_among(self, model_id: str, names: Iterable[str]) -> str | None:
-        """The first of ``names`` a saved preset of the template already has, ignoring
-        case: the other direction of :meth:`_require_free`, for a template's own list."""
-        saved = [preset.name for preset in self._read(model_id).presets]
-        return next((n for n in names if any(_same_name(n, other) for other in saved)), None)
+    def with_names_free(self, model_id: str, names: Iterable[str], write: Callable[[], T]) -> T:
+        """Run ``write`` -- a change to the template's own presets -- once none of
+        ``names`` is a saved preset's, ignoring case: the other direction of
+        :meth:`_require_free`. Under the store's lock, as a save is, so a save and the
+        template's list can never each pass their check before the other lands."""
+        with self._lock:
+            saved = [preset.name for preset in self._read(model_id).presets]
+            for name in names:
+                if any(_same_name(name, other) for other in saved):
+                    raise PresetExistsError(name)
+            return write()
 
     def _require_free(self, model_id: str, stored: _StoredPresets, name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""

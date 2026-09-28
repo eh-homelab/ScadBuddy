@@ -21,6 +21,7 @@ from scadbuddy.library.presets import (
     MAX_PRESET_TAG,
     MAX_PRESET_TAGS,
     MAX_PRESETS,
+    PresetStore,
 )
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 
@@ -427,6 +428,17 @@ def test_a_template_preset_cannot_take_a_saved_one_s_name(
     assert response.status_code == 409, response.text
     assert response.json()["name"] == "mum"
     assert "presets" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+
+
+def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
+    paths: DataPaths,
+) -> None:
+    store = PresetStore(paths)
+    held: list[bool] = []
+    # Held from the check to the write, so a save cannot land between them.
+    assert store.with_names_free("m", ["A"], lambda: held.append(store._lock.locked())) is None
+    assert held == [True]
+    assert not store._lock.locked()
 
 
 @pytest.mark.requires_git

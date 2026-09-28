@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -71,7 +72,7 @@ from scadbuddy.library.libraries import (
     parse_declaration,
     search_path,
 )
-from scadbuddy.library.presets import InvalidPresetsFileError, with_keys
+from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -814,25 +815,30 @@ async def patch_model(
             config=config,
             assets=assets,
         )
-        # A name is one preset's in the picker: saving refuses a template's name, so the
-        # template's list refuses a saved one's.
-        try:
-            clash = presets.saved_name_among(slug, (p.name for p in patch.presets))
-        except InvalidPresetsFileError as error:
-            raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-        if clash is not None:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                f"{slug!r} already has a saved preset named {clash!r}",
-                name=clash,
-            )
         patch.presets = with_keys(patch.presets)
+    update = partial(catalogue.update, slug, patch)
     try:
         # `to_thread`: a git commit, from an `async def` handler. See `_create`.
-        record = await asyncio.to_thread(catalogue.update, slug, patch)
+        if patch.presets is None:
+            record = await asyncio.to_thread(update)
+        else:
+            # A name is one preset's in the picker: saving refuses a template's name, so
+            # the template's list refuses a saved one's -- checked and written under the
+            # preset store's lock, as a save is.
+            names = [preset.name for preset in patch.presets]
+            record = await asyncio.to_thread(presets.with_names_free, slug, names, update)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except PresetExistsError as error:
+        (name,) = error.args
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} already has a saved preset named {name!r}",
+            name=name,
+        ) from None
+    except InvalidPresetsFileError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
