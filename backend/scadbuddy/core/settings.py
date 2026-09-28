@@ -244,6 +244,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " credential."
         ),
         "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "allowed_origins": (
+            "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
+            " decides who can reach the server, so it belongs to the deployment."
+        ),
         "seed_models_dir": "Image layout, fixed when the image is built.",
         "seed_libraries_dir": "Image layout, fixed when the image is built.",
         "frontend_dir": "Image layout, fixed when the image is built.",
