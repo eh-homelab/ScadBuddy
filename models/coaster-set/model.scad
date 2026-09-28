@@ -437,6 +437,8 @@ assert(!STACKED || s_gap >= 0, str("a ", size, " mm coaster and its holder do no
 if (STACKED && s_gap < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
 
+// BEST is undef when STACKED; every use below sits in the false branch of a
+// STACKED ternary, which OpenSCAD evaluates lazily, so undef is never indexed.
 BEST = LAYOUT[1];
 COLS = STACKED ? 1 : BEST[0];
 ROWS = STACKED ? 1 : ceil(N / COLS);         // rows of coasters; the holder is extra

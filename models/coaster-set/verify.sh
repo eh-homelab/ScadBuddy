@@ -212,6 +212,8 @@ def components(T):
             a = parent[a]
         return a
 
+    # Joining v0-v1 and v1-v2 already puts all three corners in one set;
+    # a v2-v0 union would always be a no-op.
     for t in T:
         for a, b in ((t[0], t[1]), (t[1], t[2])):
             ra, rb = find(a), find(b)
@@ -237,6 +239,34 @@ def is_box(b, w, h, top):
 # Cases that pin how many coasters fit. A holder used to size every grid cell
 # for itself (#411): 95 mm coasters fitted 5 with it, 70 mm ones 8.
 EXPECT_FIT = {"holder-95-eight": 7, "holder-70-twelve": 12, "holder-biggest-stacked": 1}
+
+# Where each holder case's holder goes, and the coaster grid (columns, rows)
+# around it. Every holder case must be listed, so a tie between modes that
+# resolves differently after an edit (twelve-small-holder: 3 columns with the
+# holder beside and 4 with it below are equally square) cannot pass silently.
+EXPECT_HOLDER = {
+    "monograms-holder-alternate": ("below", 2, 2),
+    "holder-round-6": ("below", 3, 2),
+    "twelve-small-holder": ("beside", 3, 4),
+    "holder-95-eight": ("row end", 3, 3),
+    "holder-70-twelve": ("below", 4, 3),
+    "holder-biggest-stacked": ("stacked", 1, 1),
+}
+
+
+def holder_mode(hb, cs):
+    """Where the holder box hb sits relative to the coaster boxes cs."""
+    if all(hb[3] < c[2] for c in cs):
+        return "stacked" if len(cs) == 1 else "below"
+    if all(hb[0] > c[1] for c in cs):
+        return "beside"
+    # Row end: the holder shares the last row, right of that row's coasters,
+    # and every other coaster is in a row above it.
+    same_row = [c for c in cs if c[2] < hb[3] and hb[2] < c[3]]
+    if (same_row and all(hb[0] > c[1] for c in same_row)
+            and all(c in same_row or c[2] >= hb[3] for c in cs)):
+        return "row end"
+    return "elsewhere"
 
 
 def area(shape, size, cr, o):
@@ -319,6 +349,21 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, n == EXPECT_FIT[name], "%d coaster(s) on the plate (want %d)" % (n, EXPECT_FIT[name]))
     m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+), (\d+), ([-\d.e]+), ([-\d.e]+)", log)
     check(name, m is not None and int(m.group(1)) == n, "the model reports the %d coaster(s) it placed" % n)
+    # Columns and rows of coasters, counted from the pieces' centres (the
+    # holder is not a row or column of its own), against what the model reports.
+    gcols = len({round((c[0] + c[1]) / 2, 1) for c in coasters})
+    grows = len({round((c[2] + c[3]) / 2, 1) for c in coasters})
+    check(name, m is not None and (int(m.group(2)), int(m.group(3))) == (gcols, grows),
+          "coasters in %d column(s) x %d row(s), as the model reports" % (gcols, grows))
+    if hold:
+        h = re.search(r'ECHO: HOLDER = "([a-z ]+)"', log)
+        want = EXPECT_HOLDER.get(name)
+        check(name, want is not None, "the holder case pins its layout in EXPECT_HOLDER")
+        if want and len(holders) == 1:
+            got = holder_mode(holders[0], coasters)
+            check(name, h is not None and h.group(1) == want[0] and got == want[0],
+                  "holder %s (model says %s, the pieces show %s)" % (want[0], h and h.group(1), got))
+            check(name, (gcols, grows) == want[1:], "grid %d x %d (want %d x %d)" % ((gcols, grows) + want[1:]))
     if p["underside"] == "recess" and p["recess_depth"] > recess_max + 1e-9:
         check(name, "NOTE: recess reduced" in log and (recess > 0 or "no recess cut" in log),
               "the log says the recess was reduced to %.2f mm" % recess)
