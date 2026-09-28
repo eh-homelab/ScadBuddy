@@ -9,13 +9,18 @@ import os
 import threading
 import time
 import zipfile
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
 import trimesh
 from PIL import Image
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import PoolClosed, PoolTimeout
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import assets as assets_module
@@ -569,6 +574,35 @@ def test_a_reupload_does_not_wait_for_an_upload_of_new_content(
         assert not uploader.is_alive(), "the re-upload waited for the store's lock"
         other.execute(UNLOCK, (ASSET_LOCK_KEY,))
     assert store.get(first.id).name == "again.svg"
+
+
+@pytest.mark.parametrize("error", [PoolTimeout, PoolClosed, psycopg.OperationalError])
+def test_a_pool_that_cannot_give_one_removal_a_connection_does_not_stop_the_sweep(
+    paths: DataPaths,
+    pg_pool: PgPool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: type[psycopg.Error],
+) -> None:
+    """The pool's own failures -- exhausted, closed -- are skipped per candidate like
+    any other database error, not raised out of the pass."""
+    store = AssetStore(paths.assets, pg_pool)
+    metas = sorted((store.put(svg(n), f"{n}.svg") for n in range(3)), key=lambda m: m.id)
+    for meta in metas:
+        age(pg_pool, meta, GRACE + DAY)
+    real = pg_pool.connection
+    calls: list[int] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> AbstractContextManager[Connection[DictRow]]:
+        calls.append(1)
+        if len(calls) == 2:  # the first candidate's (the first call lists the rows)
+            raise error("no connection for you")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pg_pool, "connection", flaky)
+    assert store.sweep(set(), grace=GRACE) == [meta.id for meta in metas[1:]]
+    assert exists(store, metas[0])
+    assert "could not remove an unused asset" in caplog.text
 
 
 def test_one_removal_that_fails_in_the_database_does_not_stop_the_sweep(

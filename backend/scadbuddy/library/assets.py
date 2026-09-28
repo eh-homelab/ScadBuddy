@@ -563,6 +563,8 @@ class AssetStore:
                             removed.append(asset_id)
                     finally:
                         conn.execute(_UNLOCK_SESSION, (key,))
+            # psycopg.Error covers the pool's own failures too: PoolTimeout and
+            # PoolClosed are psycopg.OperationalError subclasses.
             except (OSError, psycopg.Error):
                 logger.exception("could not remove an unused asset", extra={"asset": asset_id})
         return removed
