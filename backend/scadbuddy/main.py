@@ -31,6 +31,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.jobs import RenderQueue, prune_revision_exports
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.projection import LEGACY_INTERRUPTED_ERROR
 from scadbuddy.render.render_cache import prune_render_cache
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import sweep_blobs
@@ -291,6 +292,15 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
         await _prepare_catalogue(state)
         state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
         service.client = state.temporal
+        # A flip from the legacy queue: what it was running, nothing will finish.
+        interrupted = await asyncio.to_thread(
+            projection.fail_legacy_running, LEGACY_INTERRUPTED_ERROR
+        )
+        if interrupted:
+            logger.warning(
+                "failed the renders the legacy queue was running",
+                extra={"job_ids": [job.id for job in interrupted]},
+            )
         await asyncio.to_thread(projection.prune, config.job_ttl)
         await asyncio.to_thread(prune_revision_exports, state.paths, config.job_ttl)
         await asyncio.to_thread(prune_render_cache, state.paths, config.job_ttl)

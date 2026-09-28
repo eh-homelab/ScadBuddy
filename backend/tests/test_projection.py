@@ -16,8 +16,12 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import SUPERSEDED_ERROR, QueueFullError, render_key
-from scadbuddy.render.pg_store import PostgresJobStore
-from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection
+from scadbuddy.render.pg_store import TEMPORAL_INTERRUPTED_ERROR, PostgresJobStore
+from scadbuddy.render.projection import (
+    CANCELLED_ERROR,
+    LEGACY_INTERRUPTED_ERROR,
+    JobProjection,
+)
 from scadbuddy.render.schema import ParamValue
 
 pytestmark = pytest.mark.requires_postgres
@@ -410,3 +414,53 @@ def test_a_legacy_read_reports_the_claim_count(
         assert store.read(first.id).claims == 2
     finally:
         store.close()
+
+# ── flipping SCADBUDDY_TEMPORAL_ADDRESS across a restart (final review I4) ──────
+
+
+def test_temporal_boot_fails_the_legacy_queues_running_rows_only(
+    announcing: JobProjection, pg_conninfo: str, paths: DataPaths
+) -> None:
+    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    legacy.open()
+    try:
+        running, waiting = _job(n=1), _job(n=2)
+        legacy.submit(running, render_key("demo", running.params, None))
+        claimed = legacy.claim()
+        assert claimed is not None and claimed.id == running.id
+        legacy.submit(waiting, render_key("demo", waiting.params, None))
+    finally:
+        legacy.close()
+
+    failed = announcing.fail_legacy_running(LEGACY_INTERRUPTED_ERROR)
+
+    assert [job.id for job in failed] == [running.id]
+    stored = announcing.read(running.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_INTERRUPTED_ERROR)
+    assert stored.finished_at is not None
+    # A legacy pending row is the reconciler's to start.
+    assert announcing.read(waiting.id).state == "pending"
+    assert "job.failed" in _kinds(pg_conninfo)
+
+
+def test_legacy_boot_adopts_temporal_pending_rows_and_fails_running_ones(
+    projection: JobProjection, pg_conninfo: str, paths: DataPaths
+) -> None:
+    running, waiting = _job(n=3), _job(n=4)
+    projection.submit(running, render_key("demo", running.params, None))
+    assert projection.mark_started(running.id) is not None
+    projection.submit(waiting, render_key("demo", waiting.params, None))
+
+    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    legacy.open()
+    try:
+        abandoned = legacy.abandon_orphans()
+        claimed = legacy.claim()
+    finally:
+        legacy.close()
+
+    assert [job.id for job in abandoned] == [running.id]
+    stored = projection.read(running.id)
+    assert (stored.state, stored.error) == ("failed", TEMPORAL_INTERRUPTED_ERROR)
+    # The pending one is the legacy queue's now: its claim takes it.
+    assert claimed is not None and claimed.id == waiting.id
