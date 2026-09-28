@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from collections.abc import Iterator
@@ -16,7 +17,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.lsp import frame, read_message
+from scadbuddy.library import lsp
+from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
 
 from .conftest import MODEL_SLUG, set_fake_env
@@ -69,6 +71,9 @@ while True:
         # Stops reading but keeps its stdout open: the next write to it breaks the pipe.
         os.close(0)
         send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+        time.sleep(60)
+    if method == "hang":
+        # Alive, but never answers again: a wedged server.
         time.sleep(60)
     if method == "emit":
         # Writes raw bytes as its whole output, then stops writing without exiting.
@@ -228,6 +233,40 @@ def test_a_client_that_names_no_root_is_given_the_server_one(
     assert json.loads(result["seen"])["rootUri"] == paths.model_dir(model).as_uri() + "/"
 
 
+def test_a_client_that_names_no_root_is_shown_no_server_path(
+    client: TestClient, model: str
+) -> None:
+    """Without a client root the server's paths still go out rewritten (#194)."""
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        result = _initialize(session, root=None)["result"]
+
+    assert result["location"]["uri"] == DEFAULT_CLIENT_ROOT + "helper.scad"
+    assert result["elsewhere"] == "file:///usr/share/openscad/libraries/MCAD/units.scad"
+
+
+def test_messages_before_initialize_are_rewritten(client: TestClient, model: str) -> None:
+    """A server that talks before `initialize` names no container path either (#194);
+    the client's own root, once named, takes over."""
+    definition = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/definition",
+        "params": {"textDocument": {"uri": DEFAULT_CLIENT_ROOT + "model.scad"}},
+    }
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        session.send_json(definition)
+        early = session.receive_json()["result"]
+        _initialize(session)
+        session.send_json({**definition, "id": 3})
+        late = session.receive_json()["result"]
+
+    assert early["location"]["uri"] == DEFAULT_CLIENT_ROOT + "helper.scad"
+    assert json.loads(early["seen"])["textDocument"]["uri"].endswith(
+        f"/data/models/{model}/model.scad"
+    )
+    assert late["location"]["uri"] == CLIENT_ROOT + "helper.scad"
+
+
 def test_closing_the_editor_stops_the_server(
     client: TestClient, model: str, pid_file: Path
 ) -> None:
@@ -348,6 +387,49 @@ def test_sessions_past_the_cap_are_refused(settings: Settings, model: str) -> No
         with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect(route):
             pass
         assert refused.value.code == 1013
+
+
+def test_a_wedged_server_is_killed_and_its_slot_freed(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that stops answering would hold its permit for as long as the editor
+    stays open (#201); an unanswered request ends the session instead."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client:
+        # The app's start reconfigures logging, dropping the handler caplog put there.
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(route) as session:
+            _initialize(session)
+            pid = int(pid_file.read_text())
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                session.receive_json()
+
+        assert closed.value.code == 1011
+        assert _wait_until(lambda: _gone(pid))
+        assert "left a request unanswered" in caplog.text
+        with client.websocket_connect(route) as again:
+            assert "result" in _initialize(again)
+
+
+def test_an_idle_session_is_not_ended(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an unanswered request counts: an editor left open with nothing to ask
+    keeps its server."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.2)
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        session.send_json({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        time.sleep(0.6)
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "shutdown"})
+        assert session.receive_json()["id"] == 2
 
 
 async def test_a_message_is_read_by_its_declared_length() -> None:
