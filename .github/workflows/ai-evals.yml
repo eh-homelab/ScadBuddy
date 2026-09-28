@@ -40,7 +40,11 @@ jobs:
   evals:
     name: Live AI evals
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The scenarios run one at a time, each up to vitest's 6 minutes
+    # (vitest.evals.config.ts, live.eval.ts): 4 scenarios are 24 minutes before
+    # checkout and install. Keep headroom so a slow model fails a scenario, not
+    # the job.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: agent

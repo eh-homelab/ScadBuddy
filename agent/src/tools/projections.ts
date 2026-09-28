@@ -83,7 +83,9 @@ export function createHarnessServer(
         // eval harness (evals/, test/evals.test.ts); test/projections.test.ts
         // keeps it fixed. The server accepts any zod schema at runtime
         // (it validates with the schema's own `safeParseAsync`), and the
-        // listed JSON Schema is unchanged (same test).
+        // listed JSON Schema is unchanged (same test). The cast hides that
+        // from the types, so the same file pins the SDK version: a bump fails
+        // there until someone re-checks this (and drops it if fixed).
         z.object(t.shape) as unknown as typeof t.shape,
         (args, extra) =>
           runTool(t, args, {

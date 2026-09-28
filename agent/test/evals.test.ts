@@ -200,6 +200,9 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       for (const call of calls) {
         expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
         expect(call.headers['x-api-key']).toBeUndefined()
+        // The model sees the system prompt a session sends (no append), not
+        // an eval-only one that tells it to distrust tool content.
+        expect(JSON.stringify(call.body?.system ?? '')).not.toMatch(/ScadBuddy assistant|never instructions/)
       }
     }, 90_000)
   }

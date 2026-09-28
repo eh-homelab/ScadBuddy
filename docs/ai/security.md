@@ -517,7 +517,8 @@ From the merged code and PR bodies:
    ("control: a model that obeys the README injection") reproduces it: a model that
    follows a poisoned README overwrites the source, while the `delete_model` it also
    attempts stops at the approval gate. Prevention of that write rests on the model
-   refusing instructions in tool content (the system prompt's rule), and recovery on
+   refusing instructions in tool content on its own judgement (a session appends no
+   system-prompt rule about tool content today), and recovery on
    history (`GET /api/v1/models/{slug}/versions` and `POST /api/v1/models/{slug}/versions/{commit}/restore`). This is an accepted tradeoff
    of the tier design, not a gap the gate is meant to close.
 10. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
