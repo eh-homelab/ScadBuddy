@@ -43,6 +43,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { realtimeHandler } from './realtime'
+import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -129,6 +130,7 @@ const state = {
 
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
+  resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -728,6 +730,7 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()

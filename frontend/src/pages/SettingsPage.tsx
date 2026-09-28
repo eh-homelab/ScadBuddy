@@ -6,6 +6,8 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import { useAiAvailability } from '../agent/chat/availability'
+import { McpOidcSettings } from '../components/McpOidcSettings'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { useAsync } from '../lib/useAsync'
@@ -40,6 +42,8 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
 
 export function SettingsPage() {
   const settingsState = useAsync(() => api.getSettings(), [])
+  // The agent-service sections render only where the agent is (#256, #261).
+  const ai = useAiAvailability()
 
   const [url, setUrl] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
@@ -489,6 +493,18 @@ export function SettingsPage() {
             </p>
           </div>
         </section>
+
+        {ai.available && (
+          <section className="mt-4 rounded-[6px] border border-line bg-surface">
+            <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+              MCP sign-in (OIDC)
+            </h2>
+            <div className="p-4">
+              {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+              <McpOidcSettings />
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">

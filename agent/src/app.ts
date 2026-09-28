@@ -5,6 +5,7 @@ import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
+import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
@@ -40,6 +41,11 @@ export type AppDeps = {
    * credential routes, so there is one allowlist (src/http/origins.ts).
    */
   mcp?: McpEndpointDeps | undefined
+  /**
+   * The OIDC settings routes for /mcp (#262, routes/mcpAuth.ts). Left out,
+   * there are none. `repo` is undefined exactly when `database` is.
+   */
+  mcpOidc?: Pick<McpAuthRouteDeps, 'repo' | 'provider' | 'publicUrl'> | undefined
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -155,6 +161,15 @@ export function createApp(deps: AppDeps): AgentApp {
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
   })
+
+  if (deps.mcpOidc) {
+    registerMcpAuthRoutes(app, {
+      ...deps.mcpOidc,
+      ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  }
 
   if (deps.mcp) {
     const database = deps.database
