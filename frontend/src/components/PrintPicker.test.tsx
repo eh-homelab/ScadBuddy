@@ -65,6 +65,12 @@ describe('PrintPicker', () => {
     expect(screen.queryByText(/pipeline/i)).toBeNull()
   })
 
+  it('marks Print user-only, since it queues a physical print', async () => {
+    renderPicker()
+    await screen.findByRole('group', { name: /nozzles/i })
+    expect(screen.getByTestId('run-print')).toHaveAttribute('data-agent-user-only')
+  })
+
   it('sends the choices and the spool plan in one run request', async () => {
     const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
     renderPicker()
