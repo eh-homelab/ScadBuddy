@@ -1,7 +1,7 @@
 """The blob store (spec 2026-09-27 §6). Phase 1 ships the interface directory-shaped
 over the data volume: a blob is the directory a piece rendered into, referenced by the
-jobs (and later outputs) that need it, swept when nothing does. Phase 3 (#426) adds the
-Bambuddy backend and the byte-stream calls."""
+jobs (and later outputs) that need it, swept when nothing does. Phase 3 (#426) adds
+`fetch`/`publish`, which `store/cache.py` implements over a remote `ContentStore`."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,25 @@ class BlobStore(Protocol):
     def remove(self, key: str) -> None: ...
     def keys(self) -> list[str]: ...
     def touched_at(self, key: str) -> float: ...
+
+    async def fetch(self, key: str) -> bool:
+        """Make ``dir_for(key)`` hold the stored blob; False when there is none."""
+        ...
+
+    async def publish(self, key: str, *, scope: BlobScope) -> None:
+        """Store ``dir_for(key)`` as it now is, for any other process to fetch; refused
+        if the store moved on since this directory was fetched."""
+        ...
+
+    async def indexed_sha(self, key: str) -> str | None:
+        """The sha the store holds for ``key`` now; None when it holds nothing."""
+        ...
+
+    async def publish_fresh(self, key: str, *, scope: BlobScope, expected: str | None) -> None:
+        """`publish` for a directory built from nothing (`render_main`): the swap is
+        against ``expected``, read with `indexed_sha` when the activity started, not
+        against a marker the directory never had."""
+        ...
 
 
 def sweep_blobs(

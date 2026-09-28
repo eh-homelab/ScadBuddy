@@ -36,6 +36,7 @@ from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.workflows.models import (
     Failure,
     PieceRequest,
@@ -122,6 +123,11 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
     )
 
 
+def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
+    """Where the piece's blob goes: its template's folder, named by `model.json`."""
+    return BlobScope(slug=req.slug, title=template_title(Path(prepared.scad).parent, req.slug))
+
+
 def _write_piece(work: Path, piece: PieceResult) -> None:
     staging = work / f".{PIECE_NAME}.{uuid.uuid4().hex}"
     staging.write_text(piece.model_dump_json(), encoding="utf-8")
@@ -192,13 +198,11 @@ class RenderActivities:
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
-        """The piece as a finished render left it, so it is never rendered in place again.
-        Only for a piece with a revision: without one the key stands for a live source
-        that can change under it (as `keep_render` refused it). The marker is written
-        atomically but not fsynced, so a power loss can leave it naming a file the
-        crash emptied."""
+        """The piece as a finished render left it, so it is never rendered in place again."""
         blobs = self.deps.blobs
-        if req.revision is None or not blobs.exists(req.piece_key):
+        # Phase 1's guard (85b83de0) stays: without a revision the key stands for a
+        # live source that can change under it.
+        if req.revision is None or not await blobs.fetch(req.piece_key):
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
@@ -227,6 +231,9 @@ class RenderActivities:
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
         d = self.deps
+        # It renders into a directory it never fetched: the compare-and-swap baseline is
+        # what the index holds now, not a marker.
+        baseline = await d.blobs.indexed_sha(req.piece_key)
         work = asyncio.create_task(
             render_main(
                 _prepared(prepared),
@@ -243,6 +250,11 @@ class RenderActivities:
             output = await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+            )
+        )
         return _main_result(output)
 
     @activity.defn(name="render_solids")
@@ -250,6 +262,8 @@ class RenderActivities:
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> None:
         d = self.deps
+        # The main 3MF may have been rendered on another worker.
+        await d.blobs.fetch(req.piece_key)
         work = asyncio.create_task(
             render_solids_stage(
                 _prepared(prepared),
@@ -267,12 +281,18 @@ class RenderActivities:
             await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        # `publish`, not `publish_fresh`: this stage fetched, so its marker is the
+        # baseline and a zombie attempt is refused.
+        await _heartbeating(
+            asyncio.create_task(d.blobs.publish(req.piece_key, scope=_scope(req, prepared)))
+        )
 
     @activity.defn(name="finish_piece")
     async def finish_piece(
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> PieceResult:
         d = self.deps
+        await d.blobs.fetch(req.piece_key)
         source = _prepared(prepared)
         work = d.blobs.dir_for(req.piece_key)
         try:
@@ -299,6 +319,9 @@ class RenderActivities:
         piece = PieceResult(result=result, log_tail=main.log_tail)
         # Last, and atomically: from here on the piece is answered by `cached_piece`.
         await asyncio.to_thread(_write_piece, work, piece)
+        await _heartbeating(
+            asyncio.create_task(d.blobs.publish(req.piece_key, scope=_scope(req, prepared)))
+        )
         return piece
 
     @activity.defn(name="render_preview_png")
