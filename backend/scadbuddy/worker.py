@@ -32,6 +32,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -56,6 +57,14 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
+    # The image's libraries (#169), as the API's boot seeds them: a worker on an
+    # emptyDir would otherwise clone BOSL2 from the network for its first render.
+    seed_libraries_dir = settings.resolve_seed_libraries_dir()
+    if seed_libraries_dir is not None:
+        try:
+            seed_libraries(paths, seed_libraries_dir)
+        except OSError:
+            logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
