@@ -319,7 +319,6 @@ merged code.
 |---|---|
 | Whether `canUseTool` can wait on an asynchronous human decision, or a `PreToolUse` hook must deny and the session resume after approval | #255, #258 |
 | Bambuddy 1.2.5.5 routes for print archive outcomes and stats | #251 |
-| Whether the #241 Postgres needs anything for `LISTEN/NOTIFY` across replicas | #264 |
 | Bambu Studio's "Open in Bambu Studio" hand-off | #284 |
 | Keys accepted by `filament_overrides` on `PrintQueueItemCreate` | #284 |
 | Whether `/local-presets/` can create a derived process preset | #284 |
@@ -333,6 +332,11 @@ merged code.
 | Whether `outputDir` confines every write | #349 |
 | How the backend matches the agent-actor marker to an approved outward action | #349 |
 | Chromium on the agent image: install, non-root, read-only root, size | #349 |
+
+The `LISTEN/NOTIFY` across replicas item is answered by #264 (spec §3.2): connect to
+the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
+([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
+see [mcp-resources.md](mcp-resources.md#the-event-source).
 
 The headless browser (spec §5.3, merged as a spec in #363) stays off until its rows are
 verified (spec §8.2).

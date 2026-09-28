@@ -8,12 +8,14 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
@@ -93,6 +95,12 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
+
+// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
+// of its own, retried in the background, feeding MCP resource subscriptions.
+const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+events?.start()
+const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
@@ -150,6 +158,7 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
+    resources,
     services: {
       backend,
       // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
@@ -186,7 +195,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void shutdown({
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
-      closeSessions: () => app.close(),
+      closeSessions: async () => {
+        await app.close()
+        resources.close()
+        await events?.close()
+      },
       closeServer: async () => {
         await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
         await pluginForwarder.close()
