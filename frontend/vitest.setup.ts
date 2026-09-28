@@ -3,12 +3,14 @@ import { afterAll, afterEach, beforeAll } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
+import { resetRealtime } from './src/lib/realtime'
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   server.resetHandlers()
   resetMockState()
   resetDisplayUnit()
+  resetRealtime()
 })
 afterAll(() => server.close())
 
