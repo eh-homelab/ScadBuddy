@@ -118,5 +118,16 @@ def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconci
         assert client.get("/healthz").status_code == 200
         accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 3}})
         assert accepted.status_code == 202, accepted.text
-        job = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}").json()
+        first = accepted.json()["job_id"]
+        job = client.get(f"/api/v1/jobs/{first}").json()
         assert job["status"] == "pending"
+
+        # The preview's next submit supersedes the first: its workflow cannot be
+        # cancelled either, and that is no reason to refuse the new render.
+        again = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 4}, "supersedes": first},
+        )
+        assert again.status_code == 202, again.text
+        assert client.get(f"/api/v1/jobs/{first}").json()["status"] == "cancelled"
+        assert client.get(f"/api/v1/jobs/{again.json()['job_id']}").json()["status"] == "pending"

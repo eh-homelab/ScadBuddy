@@ -317,6 +317,15 @@ class RenderService:
         except RPCError:
             # Never started (the reconciler had not got to it) or already closed.
             logger.debug("no workflow to cancel", extra={"job_id": job.id})
+        except RuntimeError:
+            # The lazy client could not connect: Temporal is down. The row is already
+            # cancelled, and a workflow that starts later sees that at its first
+            # `project`, so the submit that superseded it still succeeds.
+            logger.warning(
+                "could not reach Temporal to cancel a superseded render's workflow",
+                exc_info=True,
+                extra={"job_id": job.id},
+            )
 
     async def _reconcile_forever(self) -> None:
         loop = asyncio.get_running_loop()
