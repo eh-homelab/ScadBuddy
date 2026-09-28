@@ -501,6 +501,17 @@ function problem(status: number, title: string, detail?: string, extensions: obj
 
 
 /**
+ * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
+ * in core/problems.py answers every one with the same detail and puts the reason in
+ * `errors`, so a caller reads the field's message there, never in `detail`.
+ */
+function shapeRefusal(msg: string) {
+  return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
+    errors: [{ loc: ['body', 'presets'], msg }],
+  })
+}
+
+/**
  * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
  * bytes -- not its name or type -- and at most `MAX_THUMBNAIL_BYTES`. The 422 the
  * backend answers, or null when the upload passes.
@@ -703,22 +714,37 @@ function refuseBuiltin(slug: string) {
 /** `library/presets.py`'s limits: the longest name, and the most presets a template keeps. */
 export const MAX_PRESET_NAME = 80
 export const MAX_PRESETS = 200
+/** `library/slugs.py`'s `SLUG_PATTERN` and `MAX_SLUG_LENGTH`: what a template preset's `id` may be. */
+export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+export const MAX_PRESET_ID = 100
+/** `library/presets.py`'s bounds on a preset's description and tags. */
+export const MAX_PRESET_DESCRIPTION = 2000
+export const MAX_PRESET_TAGS = 20
+export const MAX_PRESET_TAG = 40
 
-/** Why a preset save is refused, as the server words it, or undefined. */
-function presetRefusal(
-  slug: string,
-  name: string,
-  params: Record<string, ParamValue>,
-  own: string | null,
-) {
-  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
-  if (name.length > MAX_PRESET_NAME) {
-    return problem(
-      422,
-      'Unprocessable Content',
-      `a preset name is at most ${MAX_PRESET_NAME} characters`,
-    )
-  }
+/**
+ * `template_preset_keys` in `library/presets.py`: a preset's explicit id, else its name
+ * as a slug with `-2`, `-3` on a clash, else `preset-<n>` when the name has no slug
+ * characters. An explicit id is never reused by a derived key.
+ */
+function templatePresetKeys(presets: { id?: string | null; name: string }[]): string[] {
+  const taken = new Set(presets.flatMap((preset) => (preset.id ? [preset.id] : [])))
+  return presets.map((preset, index) => {
+    if (preset.id) return preset.id
+    const base = slugify(preset.name) || `preset-${index + 1}`
+    let key = base
+    for (let suffix = 2; taken.has(key); suffix++) key = `${base}-${suffix}`
+    taken.add(key)
+    return key
+  })
+}
+
+/**
+ * Why a preset's values are refused, as `require_valid_preset_params` words it, or
+ * undefined: an unknown parameter, then each value's type as `build_defines` checks
+ * it, then a dropdown value that is not one of its options.
+ */
+function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   const byName = new Map((state.schemas[slug]?.parameters ?? []).map((p) => [p.name, p]))
   const unknown = Object.keys(params).filter((key) => !byName.has(key))
   if (unknown.length > 0) {
@@ -754,6 +780,26 @@ function presetRefusal(
       )
     }
   }
+  return undefined
+}
+
+/** Why a preset save is refused, as the server words it, or undefined. */
+function presetRefusal(
+  slug: string,
+  name: string,
+  params: Record<string, ParamValue>,
+  own: string | null,
+) {
+  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  if (name.length > MAX_PRESET_NAME) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `a preset name is at most ${MAX_PRESET_NAME} characters`,
+    )
+  }
+  const refused = valueRefusal(slug, params)
+  if (refused) return refused
   // After the values, as the server checks them: they are validated in the route,
   // and only then does the store count the presets and compare the names.
   const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
@@ -1219,9 +1265,93 @@ export const handlers = [
 
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const { presets: defined, ...patch } = (await request.json()) as ModelPatch
+    // #326: the template's own presets, replaced whole, checked in the server's order.
+    // First the body's shape -- each preset's name and id, then the list's length and
+    // uniqueness -- which is FastAPI parsing it into `ModelPatch` before the route runs,
+    // so it is refused (422) even for a built-in or a model that is not there -- with
+    // the generic detail every `RequestValidationError` gets, the reason in `errors`.
+    const cleaned: NonNullable<typeof defined> = []
+    if (defined) {
+      for (const preset of defined) {
+        // The raw length first, as pydantic checks `max_length` before `_clean_name`
+        // collapses the whitespace.
+        if (preset.name.length > MAX_PRESET_NAME) {
+          return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
+        }
+        const name = preset.name.trim().replace(/\s+/g, ' ')
+        if (!name) return shapeRefusal('a preset needs a name')
+        if (
+          preset.id !== undefined &&
+          preset.id !== null &&
+          (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID)
+        ) {
+          return shapeRefusal(`'${preset.id}' is not a preset id`)
+        }
+        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
+          return shapeRefusal(
+            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
+          )
+        }
+        const tags = preset.tags ?? []
+        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
+          return shapeRefusal(
+            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+          )
+        }
+        cleaned.push({ ...preset, name })
+      }
+      if (cleaned.length > MAX_PRESETS) {
+        return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
+      }
+      const names = new Set<string>()
+      const ids = new Set<string>()
+      for (const preset of cleaned) {
+        const folded = preset.name.toLowerCase()
+        if (names.has(folded)) {
+          return shapeRefusal(`two presets are named '${preset.name}'`)
+        }
+        names.add(folded)
+        if (preset.id) {
+          if (ids.has(preset.id)) {
+            return shapeRefusal(`two presets have the id '${preset.id}'`)
+          }
+          ids.add(preset.id)
+        }
+      }
+    }
+    // Then the route: a built-in is read-only, and a missing model is a 404, before the
+    // values are checked against its schema by `require_valid_preset_params`.
     const refused = refuseBuiltin(slug)
     if (refused) return refused
-    const patch = (await request.json()) as ModelPatch
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (defined) {
+      for (const preset of cleaned) {
+        const refused = valueRefusal(slug, preset.params ?? {})
+        if (refused) return refused
+      }
+      // A name is one preset's in the picker: none of the template's is a saved one's.
+      const saved = (state.presets[slug] ?? []).filter((preset) => preset.origin === 'mine')
+      const clash = cleaned.find((preset) =>
+        saved.some((other) => other.name.toLowerCase() === preset.name.toLowerCase()),
+      )
+      if (clash) {
+        return problem(
+          409,
+          'Conflict',
+          `'${slug}' already has a saved preset named '${clash.name}'`,
+          { name: clash.name },
+        )
+      }
+      const keys = templatePresetKeys(cleaned)
+      const shipped: ParamPreset[] = cleaned.map((preset, index) => ({
+        id: `template-${keys[index]}`,
+        name: preset.name,
+        origin: 'template',
+        params: preset.params ?? {},
+      }))
+      state.presets[slug] = [...shipped, ...saved]
+    }
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
     ) as Partial<ModelSummary>

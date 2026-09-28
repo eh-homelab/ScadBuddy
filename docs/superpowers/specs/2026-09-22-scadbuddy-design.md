@@ -352,7 +352,7 @@ on the volume sees the same thing.
   `*/media/*.webm` and the same under `_builtin/`.
 - **The media list is Postgres, not history (#274).** The order, captions and
   posters of a template of mine are rows of `template_media` (backend migration
-  5), not `model.json`, so they are not versioned: a restore brings back an
+  `20260928T0718Z_template_media.sql`), not `model.json`, so they are not versioned: a restore brings back an
   image's file but not its row. A file with no row is ignored (an orphan sweep is
   a follow-up), and a row whose file is gone -- a video removed by hand, say -- is
   reported `missing: true`, which the cover skips. A write puts the file in place
@@ -703,8 +703,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
   heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
   heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
-  jobs survive a restart. Migrations are append-only and applied at startup under
-  an advisory lock. A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
+  jobs survive a restart. Migrations are one file each in
+  `backend/scadbuddy/migrations/`, never edited once merged, and applied at startup
+  in timestamp order under an advisory lock (#491). A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
   the transaction that queues it; each process keeps one `LISTEN` connection
   (reconnected with capped, jittered back-off) that wakes its idle workers, so a job
   queued on one replica starts at once on an idle other. While it is connected,
@@ -769,7 +770,7 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   the warn colour, so they do not read as the template's. A failed render shows
   them above its log. A failed job has no result, so its warnings (#408) live on
   the job record beside `diagnostics` (the job file, or the `render_jobs.warnings`
-  column, migration 3): the files the run could not open (`OpenSCAD could not
+  column, `20260928T0600Z_render_warnings.sql`): the files the run could not open (`OpenSCAD could not
   open pic.svg`, without "rendered without it") and any unreadable colour
   parameter. A template that draws only a missing picture exits 1 with "Current
   top level object is empty.", so this is often the only explanation there is.

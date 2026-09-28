@@ -12,11 +12,13 @@
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
+    "pretypecheck": "pnpm gen:api",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
+    "pretest": "pnpm gen:api",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "gen:api": "openapi-typescript ../backend/openapi.json -o src/api/schema.d.ts"
+    "gen:api": "node scripts/gen-api.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
