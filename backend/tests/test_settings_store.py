@@ -242,13 +242,16 @@ def test_the_render_key_is_seeded_stored_and_cleared_like_the_full_key(
 
 
 def test_render_workers_fall_back_to_the_full_key_and_say_so(store: SettingsStore) -> None:
+    assert store.load().render_bambuddy_key() == (None, False)  # no key is not a fallback
     store.save(SettingsPatch(bambuddy_api_key="full"))
     assert store.load().render_bambuddy_key() == ("full", True)
     store.save(SettingsPatch(bambuddy_render_api_key="narrow"))
     assert store.load().render_bambuddy_key() == ("narrow", False)
 
 
-def test_a_render_worker_reads_only_its_fields(store: SettingsStore, settings: Settings) -> None:
+def test_a_render_worker_gets_the_narrow_key_the_url_and_the_inbox(
+    store: SettingsStore, settings: Settings
+) -> None:
     store.save(
         SettingsPatch(
             bambuddy_url="https://b.test",
@@ -265,6 +268,27 @@ def test_a_render_worker_reads_only_its_fields(store: SettingsStore, settings: S
         key_is_fallback=False,
         library_folder_id=7,
     )
+
+
+def test_a_render_key_cleared_in_settings_beats_the_env_on_workers(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        bambuddy_api_key="full",
+        bambuddy_render_api_key="from-env",
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        before = load_render_store_settings(store.pool, seeded)
+        assert (before.api_key, before.key_is_fallback) == ("from-env", False)
+        store.save(SettingsPatch(bambuddy_render_api_key=""))
+        after = load_render_store_settings(store.pool, seeded)
+        assert (after.api_key, after.key_is_fallback) == ("full", True)
+    finally:
+        store.close()
 
 
 def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore) -> None:

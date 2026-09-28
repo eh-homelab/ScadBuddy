@@ -170,10 +170,12 @@ class StoredSettings(BambuddyIds):
         return "local" if value is None else value
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback."""
+        """The key render workers use, and whether it is the full key by fallback. With
+        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
+        ``render_key_fallback``."""
         if self.bambuddy_render_api_key:
             return self.bambuddy_render_api_key, False
-        return self.bambuddy_api_key, True
+        return self.bambuddy_api_key, self.bambuddy_api_key is not None
 
 
 class SettingsPatch(BaseModel):
@@ -411,7 +413,7 @@ class RenderStoreSettings(BaseModel):
     bambuddy_url: str | None = None
     api_key: str | None = None
     #: True when `api_key` is the full key because no render key is stored.
-    key_is_fallback: bool = True
+    key_is_fallback: bool = False
     library_folder_id: int | None = None
 
 
@@ -427,6 +429,7 @@ def load_render_store_settings(
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS
     }
     for row in rows:
+        # A JSON null is a field cleared in Settings: it beats the environment's seed.
         values[row["name"]] = row["value"]
     stored = StoredSettings.model_validate(values)
     key, fallback = stored.render_bambuddy_key()
