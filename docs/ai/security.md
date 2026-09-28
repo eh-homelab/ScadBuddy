@@ -24,7 +24,7 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
 (hashed)" live in the database). The implementation is `PostgresTokenStore` in
 [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
-(migration 3 in [`agent/src/db/migrations.ts`](../../agent/src/db/migrations.ts)).
+([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
 
 - **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
   makes a leaked token recognisable to secret scanners.

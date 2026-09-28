@@ -1,13 +1,21 @@
 import { randomBytes } from 'node:crypto'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import postgres from 'postgres'
 import {
+  LEGACY_VERSIONS,
+  loadMigrations,
   migrate,
+  MIGRATION_ID,
   MIGRATION_LOCK,
   MigrationChecksumError,
   migrationChecksum,
+  MigrationLedgerError,
   MIGRATIONS,
 } from '../src/db/migrations.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
@@ -31,19 +39,25 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('migrations', () => {
-      it('apply once, in order, and record their story', async () => {
-        expect(await migrate(db.sql)).toEqual(MIGRATIONS.map((_, i) => i + 1))
+      it('apply once, in timestamp order, recorded by file id', async () => {
+        const ids = MIGRATIONS.map((m) => m.id)
+        expect(ids).toEqual([...ids].sort())
+        expect(await migrate(db.sql)).toEqual(ids)
         expect(await migrate(db.sql)).toEqual([])
-        const rows = await db.sql<{ version: number; story: string }[]>`
-          SELECT version, story FROM ai_migrations ORDER BY version`
-        expect(rows.map((r) => [r.version, r.story])).toEqual(MIGRATIONS.map((m, i) => [i + 1, m.story]))
+        const rows = await db.sql<{ id: string; version: number | null; story: string | null }[]>`
+          SELECT id, version, story FROM ai_migrations ORDER BY applied_at, id`
+        expect(rows.map((r) => r.id)).toEqual(ids)
+        // The pre-#491 files keep their position, so an older image still reads the ledger.
+        expect(rows.slice(0, LEGACY_VERSIONS.length).map((r) => [r.id, r.version, r.story])).toEqual(
+          LEGACY_VERSIONS.map((legacy, i) => [legacy.id, i + 1, legacy.story]),
+        )
       })
 
       it('two pods starting together apply each migration exactly once', async () => {
         const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
         try {
           const [a, b] = await Promise.all([migrate(db.sql), migrate(other.sql)])
-          expect([...a, ...b].sort()).toEqual(MIGRATIONS.map((_, i) => i + 1))
+          expect([...a, ...b].sort()).toEqual(MIGRATIONS.map((m) => m.id))
         } finally {
           await other.close()
         }
@@ -51,44 +65,153 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       it('apply a later migration on top of an existing schema', async () => {
         await migrate(db.sql)
-        const next = [...MIGRATIONS, { story: 'test', sql: 'CREATE TABLE ai_example (id int PRIMARY KEY)' }]
-        expect(await migrate(db.sql, next)).toEqual([MIGRATIONS.length + 1])
+        const next = [...MIGRATIONS, { id: '29990101T0000Z_example', sql: 'CREATE TABLE ai_example (id int PRIMARY KEY)' }]
+        expect(await migrate(db.sql, next)).toEqual(['29990101T0000Z_example'])
         expect(await db.sql`SELECT * FROM ai_example`).toHaveLength(0)
+      })
+
+      it('apply a file with an OLDER timestamp that arrives after newer ones ran (a late-merged branch)', async () => {
+        const newer = { id: '29990102T0000Z_newer', sql: 'CREATE TABLE ai_newer (id int PRIMARY KEY)' }
+        const older = {
+          id: '29990101T0000Z_older',
+          sql: 'CREATE TABLE ai_older (id int PRIMARY KEY); INSERT INTO ai_newer VALUES (1)',
+        }
+        expect(await migrate(db.sql, [...MIGRATIONS, newer])).toEqual([...MIGRATIONS.map((m) => m.id), newer.id])
+        expect(await migrate(db.sql, [...MIGRATIONS, newer, older])).toEqual([older.id])
+        expect(await db.sql`SELECT * FROM ai_newer`).toHaveLength(1)
+        // Several unapplied files go in timestamp order, whatever order they were passed in.
+        const [c, d] = [
+          { id: '29990104T0000Z_d', sql: 'INSERT INTO ai_c VALUES (1)' },
+          { id: '29990103T0000Z_c', sql: 'CREATE TABLE ai_c (id int)' },
+        ]
+        expect(await migrate(db.sql, [...MIGRATIONS, newer, older, c!, d!])).toEqual([d!.id, c!.id])
+      })
+
+      it('leave a ledger row for a file this build does not have alone', async () => {
+        await migrate(db.sql, [...MIGRATIONS, { id: '29990101T0000Z_future', sql: 'SELECT 1' }])
+        expect(await migrate(db.sql)).toEqual([])
+        expect(await db.sql`SELECT 1 FROM ai_migrations WHERE id = '29990101T0000Z_future'`).toHaveLength(1)
       })
 
       it('are what ready() runs, memoised', async () => {
         expect(await db.ready()).toBe(true)
         expect(await db.ready()).toBe(true)
-        expect(await db.sql`SELECT version FROM ai_migrations`).toHaveLength(MIGRATIONS.length)
+        expect(await db.sql`SELECT id FROM ai_migrations`).toHaveLength(MIGRATIONS.length)
       })
 
-      it('record a checksum and refuse an applied entry whose SQL changed (finding 10)', async () => {
+      it('record a checksum and refuse an applied file whose SQL changed (finding 10)', async () => {
         await migrate(db.sql)
-        const rows = await db.sql<{ version: number; checksum: string }[]>`
-          SELECT version, checksum FROM ai_migrations ORDER BY version`
+        const rows = await db.sql<{ checksum: string }[]>`SELECT checksum FROM ai_migrations ORDER BY id`
         expect(rows.map((r) => r.checksum)).toEqual(MIGRATIONS.map(migrationChecksum))
 
+        const first = MIGRATIONS[0]!.id
         const edited = MIGRATIONS.map((m, i) => (i === 0 ? { ...m, sql: `${m.sql}\n-- edited` } : m))
         await expect(migrate(db.sql, edited)).rejects.toThrow(MigrationChecksumError)
-        await expect(migrate(db.sql, edited)).rejects.toThrow(/ai migration 1 \(#255\) was applied with different SQL/)
+        await expect(migrate(db.sql, edited)).rejects.toThrow(`ai migration ${first} was applied with different SQL`)
         // The original still passes.
         expect(await migrate(db.sql)).toEqual([])
       })
 
-      it('adopt rows applied before the checksum column existed, then check them', async () => {
-        // The ledger exactly as #354 created it: no checksum column.
-        await db.sql.begin(async (tx) => {
-          await tx`CREATE TABLE ai_migrations (
-                     version integer PRIMARY KEY, story text NOT NULL,
-                     applied_at timestamptz NOT NULL DEFAULT now())`
-          await tx.unsafe(MIGRATIONS[0]!.sql)
-          await tx`INSERT INTO ai_migrations (version, story) VALUES (1, '#255')`
+      describe('from the positional ledger (before #491)', () => {
+        /** The ledger as #354 created it, optionally with #354's later checksum column. */
+        async function positionalLedger(versions: number[], { checksums = true } = {}) {
+          await db.sql.begin(async (tx) => {
+            await tx`CREATE TABLE ai_migrations (
+                       version integer PRIMARY KEY, story text NOT NULL,
+                       applied_at timestamptz NOT NULL DEFAULT now())`
+            if (checksums) await tx`ALTER TABLE ai_migrations ADD COLUMN checksum text`
+            for (const version of versions) {
+              const legacy = LEGACY_VERSIONS[version - 1]
+              const migration = MIGRATIONS.find((m) => m.id === legacy?.id)
+              if (migration) await tx.unsafe(migration.sql)
+              if (checksums) {
+                await tx`INSERT INTO ai_migrations (version, story, checksum)
+                         VALUES (${version}, ${legacy?.story ?? 'branch'}, ${migration ? migrationChecksum(migration) : 'x'})`
+              } else {
+                await tx`INSERT INTO ai_migrations (version, story) VALUES (${version}, ${legacy?.story ?? 'branch'})`
+              }
+            }
+          })
+        }
+
+        it('the legacy files are the old list, in order, byte for byte', () => {
+          expect(MIGRATIONS.slice(0, LEGACY_VERSIONS.length).map((m) => m.id)).toEqual(LEGACY_VERSIONS.map((l) => l.id))
+          // The checksums #354 recorded in every deployed ledger.
+          expect(MIGRATIONS.slice(0, 2).map(migrationChecksum)).toEqual([
+            '6e2ec704499aed89d132836b34717b1a7ccfafb7a4a1654340ee1b7fc477b613',
+            '117ed74ea5125fe163247bd88e3e99c0e75e085d22ec7b220fa99fd4e84bce80',
+          ])
         })
-        expect(await migrate(db.sql)).toEqual(MIGRATIONS.slice(1).map((_, i) => i + 2))
-        const [row] = await db.sql<{ checksum: string | null }[]>`SELECT checksum FROM ai_migrations WHERE version = 1`
-        expect(row?.checksum).toBe(migrationChecksum(MIGRATIONS[0]!))
-        const edited = MIGRATIONS.map((m, i) => (i === 0 ? { ...m, sql: m.sql.replace('text', 'varchar') } : m))
-        await expect(migrate(db.sql, edited)).rejects.toThrow(MigrationChecksumError)
+
+        it('rewrites positional rows to file ids without re-running them', async () => {
+          await positionalLedger(LEGACY_VERSIONS.map((_, i) => i + 1))
+          const later = MIGRATIONS.slice(LEGACY_VERSIONS.length).map((m) => m.id)
+          expect(await migrate(db.sql)).toEqual(later)
+          expect(await migrate(db.sql)).toEqual([])
+          const rows = await db.sql<{ id: string; version: number | null; checksum: string }[]>`
+            SELECT id, version, checksum FROM ai_migrations WHERE version IS NOT NULL ORDER BY version`
+          expect(rows.map((r) => [r.id, r.version, r.checksum])).toEqual(
+            MIGRATIONS.slice(0, LEGACY_VERSIONS.length).map((m, i) => [m.id, i + 1, migrationChecksum(m)]),
+          )
+          // What an image from before #491 reads still answers as it expects.
+          const positional = await db.sql<{ version: number }[]>`
+            SELECT version, checksum FROM ai_migrations WHERE version IS NOT NULL ORDER BY version`
+          expect(positional.map((r) => r.version)).toEqual(LEGACY_VERSIONS.map((_, i) => i + 1))
+        })
+
+        it('converts once when two pods start together', async () => {
+          await positionalLedger([1, 2])
+          const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+          try {
+            const [a, b] = await Promise.all([migrate(db.sql), migrate(other.sql)])
+            expect([...a, ...b].sort()).toEqual(MIGRATIONS.slice(2).map((m) => m.id))
+          } finally {
+            await other.close()
+          }
+          expect(await db.sql`SELECT id FROM ai_migrations`).toHaveLength(MIGRATIONS.length)
+        })
+
+        it('applies what the positional ledger had not run, and adopts rows without a checksum', async () => {
+          // #354's ledger before the checksum column, with only entry 1 applied.
+          await positionalLedger([1], { checksums: false })
+          expect(await migrate(db.sql)).toEqual(MIGRATIONS.slice(1).map((m) => m.id))
+          const [row] = await db.sql<{ id: string; version: number; story: string; checksum: string | null }[]>`
+            SELECT id, version, story, checksum FROM ai_migrations WHERE version = 2`
+          expect(row).toMatchObject({ id: LEGACY_VERSIONS[1]!.id, story: '#300' })
+          const [first] = await db.sql<{ checksum: string | null }[]>`
+            SELECT checksum FROM ai_migrations WHERE id = ${LEGACY_VERSIONS[0]!.id}`
+          expect(first?.checksum).toBe(migrationChecksum(MIGRATIONS[0]!))
+          const edited = MIGRATIONS.map((m, i) => (i === 0 ? { ...m, sql: m.sql.replace('text', 'varchar') } : m))
+          await expect(migrate(db.sql, edited)).rejects.toThrow(MigrationChecksumError)
+        })
+
+        it('refuses a positional row main never had, and changes nothing', async () => {
+          await positionalLedger([1, 2, 3])
+          await expect(migrate(db.sql)).rejects.toThrow(MigrationLedgerError)
+          await expect(migrate(db.sql)).rejects.toThrow(/positional version\(s\) 3, but main only ever had 2/)
+          const columns = await db.sql<{ column_name: string }[]>`
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'ai_migrations'`
+          expect(columns.map((c) => c.column_name)).not.toContain('id')
+        })
+      })
+
+      it('load files in timestamp order and refuse a misnamed one', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'ai-migrations-'))
+        try {
+          writeFileSync(join(dir, '20260102T0000Z_b.sql'), 'SELECT 2')
+          writeFileSync(join(dir, '20260101T2359Z_a.sql'), 'SELECT 1')
+          const url = pathToFileURL(`${dir}/`)
+          expect(loadMigrations(url)).toEqual([
+            { id: '20260101T2359Z_a', sql: 'SELECT 1' },
+            { id: '20260102T0000Z_b', sql: 'SELECT 2' },
+          ])
+          writeFileSync(join(dir, '2026-01-03_c.sql'), 'SELECT 3')
+          expect(() => loadMigrations(url)).toThrow(/is not a migration/)
+        } finally {
+          rmSync(dir, { recursive: true })
+        }
+        for (const m of MIGRATIONS) expect(m.id).toMatch(MIGRATION_ID)
       })
 
       it('give up on a held advisory lock after lock_timeout, and ready() retries (finding 3)', async () => {

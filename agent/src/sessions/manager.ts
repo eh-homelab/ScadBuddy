@@ -238,7 +238,7 @@ export function titleFrom(prompt: string): string {
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
  * creator filter is served by the ai_sessions_owner and ai_sessions_creator
- * indexes (db/migrations.ts entry 2).
+ * indexes (db/migrations/20260928T0107Z_sessions.sql).
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
   const where: string[] = []

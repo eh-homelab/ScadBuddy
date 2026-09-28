@@ -2,5 +2,22 @@
   "name": "Gridfinity Bin",
   "description": "A self-contained Gridfinity bin that drops into standard 42 mm baseplates: stacking lip, optional magnet and screw holes, dividers, a label tab with an inlaid label, a finger scoop, and an ultralight hollow-foot floor. The bin prints on extruder 1; the label, when there is one, on extruder 2.",
   "tags": ["gridfinity", "storage", "bin", "organiser", "two-colour"],
-  "source": "inspired by MakerWorld Parametric Gridfinity Generator and Printables Gridfinity Rebuilt / Ultra Light Bins"
+  "source": "inspired by MakerWorld Parametric Gridfinity Generator and Printables Gridfinity Rebuilt / Ultra Light Bins",
+  "presets": [
+    {
+      "id": "labelled-1x1",
+      "name": "Labelled 1x1",
+      "params": { "units_x": 1, "units_y": 1, "label_tab": "full", "label_text": "M3" }
+    },
+    {
+      "id": "parts-tray-2x2-4-cells",
+      "name": "Parts tray 2x2, 4 cells",
+      "params": { "units_x": 2, "units_y": 2, "height_units": 3, "divisions_x": 2, "divisions_y": 2 }
+    },
+    {
+      "id": "tall-1x2-no-tab",
+      "name": "Tall 1x2, no tab",
+      "params": { "units_x": 1, "units_y": 2, "height_units": 6, "label_tab": "none" }
+    }
+  ]
 }
