@@ -5,6 +5,7 @@ that directory; a per-colour-objects 3MF Part arrives with phase 5's manifests."
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import shutil
@@ -12,8 +13,12 @@ import uuid
 import zipfile
 from pathlib import Path
 
-#: The sha256 of the blob a cached directory was last published as or fetched from.
+#: The sha256 of the blob a cached directory holds exactly: written only by `unpack_dir`
+#: and by a successful publish, and removed before a stage writes into the directory.
 MARKER = ".blob-sha256"
+#: How many times a swap is retried when another unpack of the same directory lands
+#: between moving the old one aside and moving the new one in.
+_SWAP_ATTEMPTS = 8
 _EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -34,8 +39,10 @@ def pack_dir(directory: Path) -> bytes:
 
 
 def unpack_dir(data: bytes, directory: Path, *, sha256: str | None = None) -> None:
-    """Replace ``directory`` with the archive's content, atomically; refuse any entry
-    that would land outside it."""
+    """Replace ``directory`` with the archive's content; refuse any entry that would land
+    outside it. The old directory is moved aside (a dot-name) before the new one moves
+    in and is removed after, so two unpacks of one directory never fail each other and
+    a reader never finds a half-removed tree."""
     directory.parent.mkdir(parents=True, exist_ok=True)
     staging = directory.with_name(f".{directory.name}.{uuid.uuid4().hex}")
     staging.mkdir()
@@ -55,12 +62,33 @@ def unpack_dir(data: bytes, directory: Path, *, sha256: str | None = None) -> No
                 target.write_bytes(archive.read(info))
         if sha256 is not None:
             (staging / MARKER).write_text(sha256, encoding="ascii")
-        if directory.exists():
-            shutil.rmtree(directory)
-        os.replace(staging, directory)
+        _swap_in(staging, directory)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def _swap_in(staging: Path, directory: Path) -> None:
+    aside: list[Path] = []
+    try:
+        for _ in range(_SWAP_ATTEMPTS):
+            old = directory.with_name(f".{directory.name}.old.{uuid.uuid4().hex}")
+            try:
+                os.rename(directory, old)
+                aside.append(old)
+            except FileNotFoundError:
+                pass  # nothing there, or another unpack moved it aside first
+            try:
+                os.replace(staging, directory)
+                return
+            except OSError as error:
+                # Another unpack's directory moved in meanwhile: move it aside too.
+                if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
+        raise OSError(errno.EBUSY, f"could not swap in {directory} after {_SWAP_ATTEMPTS} tries")
+    finally:
+        for old in aside:
+            shutil.rmtree(old, ignore_errors=True)
 
 
 def read_marker(directory: Path) -> str | None:
@@ -68,6 +96,11 @@ def read_marker(directory: Path) -> str | None:
         return (directory / MARKER).read_text(encoding="ascii").strip() or None
     except OSError:
         return None
+
+
+def clear_marker(directory: Path) -> None:
+    """The directory no longer holds exactly a published blob: a stage writes into it."""
+    (directory / MARKER).unlink(missing_ok=True)
 
 
 def write_marker(directory: Path, sha256: str) -> None:
