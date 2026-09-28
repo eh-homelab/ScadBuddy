@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { ApprovalActions } from '../src/approvals/mcp.js'
 import { ApprovalService } from '../src/approvals/service.js'
 import { AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
 import { TurnAuditor } from '../src/audit/turn.js'
@@ -13,7 +14,7 @@ import type { ApprovalVerdict } from '../src/harness/permissions.js'
 import { ResourceHub } from '../src/resources/hub.js'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event } from '../src/sessions/protocol.js'
-import { BACKEND, connect, testApp } from './helpers/mcp.js'
+import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
 
@@ -272,6 +273,59 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     ])
     // Approval rows are the decider's own; they carry no approved_by.
     expect((await audit.list({ kind: 'approval' })).entries.every((r) => r.approved_by === null)).toBe(true)
+  })
+
+  it('records confirm_action by what it did: refused while pending, the executed tool with its approval and approver', async () => {
+    const output = '0123456789abcdef0123456789abcdef'
+    const sent: unknown[] = []
+    backend.use(
+      http.post(`${BACKEND}/api/v1/outputs/:id/send`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({ status: 'sent', filename: 'x.3mf' })
+      }),
+    )
+    const approvals = new ApprovalService({ sql: db.sql, events: new EventLog(db.sql), hashKey: HASH_KEY, audit })
+    const t = testApp({
+      services: services({ pending: new ApprovalActions(approvals) }),
+      deps: { audit, approvals, database: { ping: async () => true, ready: () => db.ready() } },
+      mcp: { audit },
+    })
+    const { token } = await t.tokens.mint({ name: 'agent', tier: 'outward' })
+    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}` } })
+    const confirm = (id: string, args: Record<string, unknown> = { output_id: output }) =>
+      client.callTool({ name: 'confirm_action', arguments: { pending_action_id: id, arguments: args } })
+
+    const prepared = firstText(await client.callTool({ name: 'send_to_bambuddy', arguments: { output_id: output } })) as {
+      pending_action_id: string
+    }
+    const id = prepared.pending_action_id
+    expect((await confirm(id)).isError).toBeFalsy() // pending: nothing ran
+    await approvals.decide(browser, id, true)
+    expect((await confirm(id, { output_id: 'ffffffffffffffffffffffffffffffff' })).isError).toBe(true) // not the approved input
+    expect((await confirm(id)).isError).toBeFalsy() // ran
+    expect((await confirm(id)).isError).toBe(true) // used up
+    expect(sent).toHaveLength(1)
+    await client.close()
+
+    const rows = (await audit.list({ kind: 'tool_call' })).entries.reverse()
+    expect(rows.map((r) => [r.action, r.tier, r.outcome, r.approval_id, r.approved_by])).toEqual([
+      ['send_to_bambuddy', 'outward', 'refused', null, null],
+      ['confirm_action', 'outward', 'refused', null, null],
+      ['confirm_action', 'outward', 'refused', null, null],
+      ['send_to_bambuddy', 'outward', 'ok', id, browser],
+      ['confirm_action', 'outward', 'refused', null, null],
+    ])
+    expect(rows[1]?.detail).toContain('waiting for approval')
+    expect(rows[2]?.detail).toContain('not the ones')
+    expect(rows[3]?.detail).toContain('confirm_action')
+    expect(rows[4]?.detail).toContain('already confirmed')
+    // The executed call's hash is the approval's: the parsed input, defaults applied.
+    const approval = await approvals.get(id, browser)
+    expect(rows[0]?.input_hash).toBe(approval.inputHash)
+    expect(rows[3]?.input_hash).toBe(approval.inputHash)
+    expect(rows[3]?.input_summary).toBe(approval.inputSummary)
+    // Filtering on the tool finds the prepare and the run, not confirm_action's bookkeeping.
+    expect((await audit.list({ action: 'send_to_bambuddy' })).entries.map((r) => r.outcome)).toEqual(['ok', 'refused'])
   })
 
   it('records /mcp resource reads, refusals and subscriptions', async () => {

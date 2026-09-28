@@ -64,6 +64,25 @@ export type ToolContext = ToolServices & {
    * only from a harness query.
    */
   gate?: 'harness'
+  /**
+   * What the handler itself knows about how the call went, for the audit row
+   * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
+   * it ran, and that a claim answered pending or was refused. Set by
+   * `runToolWithOutcome`; a handler that never calls it is judged by its
+   * result alone.
+   */
+  report?: (report: RunReport) => void
+}
+
+/** A handler's own account of its run (ToolContext.report), merged into its ToolRun. */
+export type RunReport = {
+  /** Overrides the outcome derived from the result (a pending claim answers a plain result, but nothing ran). */
+  outcome?: ToolOutcome
+  detail?: string
+  /** The approval the call ran on (ai_approvals id), so the row names who approved it. */
+  approvalId?: string
+  /** The tool that actually ran, with its parsed input, when it is not the tool called (confirm_action). */
+  ran?: { tool: string; input: Record<string, unknown> }
 }
 
 export type ToolSpec<S extends z.ZodRawShape> = {
@@ -172,6 +191,9 @@ export class ToolError extends Error {
 export const ERROR_DETAIL_SOURCE =
   "the backend's error detail, which can relay Bambuddy's or another upstream's own message"
 
+/** Where an unexpected error's message comes from, for the envelope around it. */
+export const UNEXPECTED_ERROR_SOURCE = 'the error raised while the tool ran, whose message can quote upstream responses'
+
 /** A ToolError's message as the model may see it: the summary bare, the upstream reason wrapped. */
 export function toolErrorText(err: ToolError, tool: string): string {
   return err.untrusted === undefined
@@ -191,6 +213,10 @@ export type ToolRun = {
   outcome: ToolOutcome
   /** Why, when it did not succeed: the refusal or error message. */
   detail?: string
+  /** The approval an executed outward call ran on (RunReport). */
+  approvalId?: string
+  /** The tool that actually ran and its parsed input, when not the tool called (RunReport). */
+  ran?: { tool: string; input: Record<string, unknown> }
 }
 
 function refused(message: string): ToolRun {
@@ -227,6 +253,26 @@ function failedWith(tool: Tool, summary: string, reason: string, source: string)
  * unexpected error's message) is.
  */
 export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolContext): Promise<ToolRun> {
+  // What the handler reports about its own run (confirm_action) is kept
+  // whether the run then answered or threw: an approval it consumed is on the
+  // row either way.
+  let reported: RunReport = {}
+  const run = await runJudgedByResult(tool, args, {
+    ...ctx,
+    report: (r) => {
+      reported = r
+    },
+  })
+  return {
+    ...run,
+    ...(reported.outcome ? { outcome: reported.outcome } : {}),
+    ...(reported.detail ? { detail: reported.detail } : {}),
+    ...(reported.approvalId ? { approvalId: reported.approvalId } : {}),
+    ...(reported.ran ? { ran: reported.ran } : {}),
+  }
+}
+
+async function runJudgedByResult(tool: Tool, args: unknown, ctx: ToolContext): Promise<ToolRun> {
   if (!hasTier(ctx.principal, tool.risk)) {
     return refused(
       `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
@@ -264,12 +310,7 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     if (err instanceof ToolError || err instanceof PendingStoreFullError) return failed(err.message)
     if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
     // An unexpected error's message can quote anything (a response body, a path).
-    return failedWith(
-      tool,
-      `${tool.name} failed`,
-      err instanceof Error ? err.message : String(err),
-      'the error raised while the tool ran, whose message can quote upstream responses',
-    )
+    return failedWith(tool, `${tool.name} failed`, err instanceof Error ? err.message : String(err), UNEXPECTED_ERROR_SOURCE)
   }
 }
 

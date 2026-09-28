@@ -1,9 +1,9 @@
-import { createServer } from 'node:http'
+import { createServer, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { PluginForwarder, pluginSource, rewriteMessages, rewriteSseEvent } from '../src/plugins/forwarder.js'
+import { PluginForwarder, pluginSource, rewriteMessages, rewriteSseEvent, SseBlocks } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { isPreamble, UNTRUSTED_KEY, unwrapUntrusted } from '../src/safety/untrusted.js'
 import { startFakeMcp } from './support/fakeMcp.js'
@@ -87,10 +87,49 @@ describe('plugin tool results through the forwarder', () => {
 
   it('rewrites a result that arrives as an SSE event', () => {
     const block = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'hi' }] } })}`
-    const out = rewriteSseEvent(block, rewrites(), route)
+    const out = rewriteSseEvent(block, rewrites(), route)!
     expect(out.startsWith('event: message\ndata: ')).toBe(true)
     const message = JSON.parse(out.split('\ndata: ')[1]!) as { result: { content: { text: string }[] } }
     expect(unwrapUntrusted(message.result.content[0]!.text)).toBe('hi')
+  })
+
+  it('withholds an SSE event whose data is not JSON while a call is in flight, and lets it through when none is', () => {
+    const smuggled = `data: ${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: INJECTED }] } })}\r\rdata: x`
+    // Read as one block with LF-only splitting, its data is not JSON: it must not pass unchanged.
+    expect(rewriteSseEvent(smuggled, rewrites(), route)).toBeUndefined()
+    expect(rewriteSseEvent('data: not json', rewrites(), route)).toBeUndefined()
+    expect(rewriteSseEvent('data: not json', { lists: new Set(), calls: new Map() }, route)).toBe('data: not json')
+    // Comments and keep-alives carry no data and pass.
+    expect(rewriteSseEvent(': ping', rewrites(), route)).toBe(': ping')
+  })
+
+  it('reads a block by the SSE rules: a line ends at CRLF, CR or LF', () => {
+    const block = `event: message\rdata: ${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'hi' }] } })}\r\n`
+    const out = rewriteSseEvent(block, rewrites(), route)!
+    const message = JSON.parse(out.split('\ndata: ')[1]!) as { result: { content: { text: string }[] } }
+    expect(unwrapUntrusted(message.result.content[0]!.text)).toBe('hi')
+  })
+})
+
+describe('SseBlocks', () => {
+  it('ends an event at a blank line whatever the line endings, as eventsource-parser does', () => {
+    const blocks = new SseBlocks()
+    expect(blocks.feed('data: a\n\ndata: b\r\n\r\ndata: c\r\rdata: d\n\r\n')).toEqual(['data: a', 'data: b', 'data: c', 'data: d'])
+    // Bare CR inside a block: still one block, normalised to LF. The trailing
+    // CR waits for the next chunk (it could be half a CRLF), then ends it.
+    expect(blocks.feed('event: m\rdata: e\r\r')).toEqual([])
+    expect(blocks.feed('x')).toEqual(['event: m\ndata: e'])
+  })
+
+  it('holds a trailing CR until the next chunk says whether it was half a CRLF', () => {
+    const blocks = new SseBlocks()
+    expect(blocks.feed('data: a\r')).toEqual([])
+    expect(blocks.feed('\n\r\n')).toEqual(['data: a'])
+    expect(blocks.feed('data: b\r')).toEqual([])
+    expect(blocks.feed('\rdata: c\n\n')).toEqual(['data: b', 'data: c'])
+    expect(blocks.feed('data: d\r')).toEqual([])
+    expect(blocks.feed('')).toEqual([])
+    expect(blocks.feed('\n\n')).toEqual(['data: d'])
   })
 })
 
@@ -172,6 +211,108 @@ describe('plugin replies the rewrite cannot mark', () => {
       expect(err?.message).not.toContain('SYSTEM')
     } finally {
       await transport.close()
+      registration.release()
+      await upstream.close()
+    }
+  })
+
+  it('a tools/call reply with bare CR line endings is read as the SSE parser reads it: wrapped, and the junk after it withheld', async () => {
+    // Split on LF only, this would be one block whose data is not JSON, passed
+    // on as it came; the SSE parser reads `\r\r` as a blank line and dispatches
+    // the unwrapped result before it.
+    const reply = JSON.stringify({ jsonrpc: '2.0', id: 3, result: { content: [{ type: 'text', text: INJECTED }] } })
+    const upstream = await rawPlugin(200, 'text/event-stream', `data: ${reply}\r\rdata: x\n\n`)
+    const registration = forwarder.register(plugin(upstream.url), '127.0.0.1')
+    const transport = new StreamableHTTPClientTransport(new URL(registration.url))
+    const messages: { result?: { content: { text: string }[] }; error?: { message: string } }[] = []
+    try {
+      transport.onmessage = (m) => messages.push(m as (typeof messages)[number])
+      await transport.start()
+      await transport.send(toolCall)
+      await until(() => messages.length >= 2)
+      const [result, junk] = messages
+      expect(JSON.parse(result!.result!.content[0]!.text)).toEqual({
+        [UNTRUSTED_KEY]: { tool: 'mcp__mem__recall', source: pluginSource({ name: 'mem' }), content: INJECTED },
+      })
+      // `data: x` is not JSON: withheld, and the call it might have answered told so.
+      expect(junk).toMatchObject({ id: 3, error: { code: -32603, message: expect.stringContaining('ScadBuddy') } })
+      expect(messages.map((m) => m.result?.content[0]?.text ?? m.error?.message)).not.toContain(INJECTED)
+    } finally {
+      await transport.close()
+      registration.release()
+      await upstream.close()
+    }
+  })
+})
+
+/** Waits for `check`, at most `timeoutMs`. */
+async function until(check: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('timed out')
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+describe('a tools/call reply on another stream', () => {
+  // A stateful plugin that answers a tools/call on the standalone GET stream,
+  // not on the POST that carried it (the MCP client matches by id alone).
+  const crossStreamPlugin = async (reply: (id: unknown) => unknown) => {
+    let get: ServerResponse | undefined
+    let waiting: ((res: ServerResponse) => void) | undefined
+    const getStream = () =>
+      get ? Promise.resolve(get) : new Promise<ServerResponse>((resolve) => { waiting = resolve })
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = []
+      req.on('data', (c: Buffer) => chunks.push(c))
+      req.on('end', () => {
+        if (req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'mcp-session-id': 's1' })
+          res.write(': open\n\n')
+          get = res
+          waiting?.(res)
+          return
+        }
+        const message = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: unknown; method?: string }
+        if (message.method === 'initialize') {
+          res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's1' })
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'x', version: '0' } } }))
+          return
+        }
+        if (message.method === 'tools/call') {
+          // The POST's own stream stays open and silent; the reply goes on the GET stream.
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'mcp-session-id': 's1' })
+          res.write(': quiet\n\n')
+          void getStream().then((stream) => stream.write(`data: ${JSON.stringify(reply(message.id))}\n\n`))
+          return
+        }
+        res.writeHead(202).end()
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    return {
+      url: `http://127.0.0.1:${port}/mcp`,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections()
+          server.close(() => resolve())
+        }),
+    }
+  }
+
+  it('is wrapped like one on its own stream', async () => {
+    const upstream = await crossStreamPlugin((id) => ({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: INJECTED }] } }))
+    const registration = forwarder.register(plugin(upstream.url), '127.0.0.1')
+    const client = new Client({ name: 't', version: '0' })
+    try {
+      await client.connect(new StreamableHTTPClientTransport(new URL(registration.url)))
+      const result = (await client.callTool({ name: 'recall', arguments: { query: 'q' } })) as { content: { text: string }[] }
+      expect(JSON.parse(result.content[0]!.text)).toEqual({
+        [UNTRUSTED_KEY]: { tool: 'mcp__mem__recall', source: pluginSource({ name: 'mem' }), content: INJECTED },
+      })
+    } finally {
+      await client.close()
       registration.release()
       await upstream.close()
     }
