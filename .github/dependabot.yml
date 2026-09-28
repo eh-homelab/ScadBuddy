@@ -207,9 +207,9 @@ updates:
 
   # Docker: the Dockerfile's FROM lines. Three of the four are bumpable
   # (node, ghcr.io/astral-sh/uv, hadolint's own image is not here); the fourth,
-  # openscad/openscad:dev, is a rolling tag Dependabot cannot version — it is
-  # pinned by the OPENSCAD_VERSION assertion in the Dockerfile instead, which
-  # fails the build when the nightly moves under it.
+  # openscad/openscad, is a dated nightly pinned by tag and digest. It is
+  # ignored: a bump means re-verifying §3 of the design spec and moving
+  # OPENSCAD_VERSION with it, which Dependabot cannot do.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -230,3 +230,4 @@ updates:
       # installed from npm there. #55 (24 -> 25) broke main on 2026-09-23.
       - dependency-name: "node"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "openscad/openscad"

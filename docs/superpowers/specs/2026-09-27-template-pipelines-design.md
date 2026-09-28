@@ -110,7 +110,7 @@ Non-goals
 
 `render_jobs` stays, and stays the thing the API reads. It stops being a queue.
 
-The table today is `pg_store.py`'s `MIGRATIONS`: `id`, `slug`, `params`,
+The table today, as `backend/scadbuddy/migrations/` builds it: `id`, `slug`, `params`,
 `model_version`, `state` (`pending` | `running` | `done` | `failed`), `created_at`,
 `started_at`, `finished_at`, `log_tail`, `error`, `result`, `render_key`, `claims`,
 `attempts`, `heartbeat_at`, `diagnostics`, `diagnostics_dropped`. The `Job` model
