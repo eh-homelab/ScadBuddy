@@ -647,6 +647,24 @@ class Catalogue:
                     break
         return users
 
+    def library_pins(self, name: str) -> list[tuple[str, ModelLibrary | None]]:
+        """Each of :meth:`library_users` with the pin its live ``model.json`` records
+        for ``name`` -- ``None`` where that entry cannot be read as one (a hand edit,
+        or a ``model.json`` that is not JSON), so every model a removal would name
+        is listed here too."""
+        pins: list[tuple[str, ModelLibrary | None]] = []
+        for slug in self.library_users(name):
+            pin: ModelLibrary | None = None
+            with contextlib.suppress(InvalidModelMetaError, OSError):
+                entries = self.read_raw_meta(slug).get("libraries")
+                for entry in entries if isinstance(entries, list) else []:
+                    if entry_name(entry) == name:
+                        with contextlib.suppress(ValidationError):
+                            pin = ModelLibrary.model_validate(entry)
+                        break
+            pins.append((slug, pin))
+        return pins
+
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one."""
