@@ -224,6 +224,18 @@ describe('EditSourcePage', () => {
     resolve.mockRestore()
   })
 
+  it('opens a dismissed update\'s conflicted merge marked up too (#235)', async () => {
+    await duplicateWithUpdate({ conflict: true })
+    await api.dismissUpstream(COPY)
+    renderEdit(COPY, '?merge')
+
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    expect((editor as HTMLTextAreaElement).value).toContain('<<<<<<< ')
+    expect(screen.getByTestId('merge-banner')).toHaveTextContent(
+      `Resolving the update from ${UPSTREAM}`,
+    )
+  })
+
   it('opens the source as it is when there is no update left to resolve (#160)', async () => {
     const replace = vi.spyOn(api, 'replaceSource')
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')

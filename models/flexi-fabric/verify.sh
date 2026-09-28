@@ -33,7 +33,7 @@ if docker image inspect "$FONTS_IMAGE" >/dev/null 2>&1; then
 fi
 echo "==> rendering with $IMAGE"
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 # Values of a dropdown annotation: `name = "x"; // [a:Label, b, ...]` -> a b ...
 options() {

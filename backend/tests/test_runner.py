@@ -8,6 +8,7 @@ import pytest
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.fontconfig import conf_path, write_conf
+from scadbuddy.render.diagnostics import MAX_DIAGNOSTICS
 from scadbuddy.render.runner import (
     OpenSCADError,
     RenderTimeoutError,
@@ -17,6 +18,7 @@ from scadbuddy.render.runner import (
     export_schema,
     format_scad_value,
     missing_file,
+    plate_count,
     quote_string,
     render_3mf,
     run_openscad,
@@ -169,6 +171,31 @@ async def test_no_fontconfig_file_is_set_before_one_exists(
     assert "FONTCONFIG_FILE=<unset>" in seen
 
 
+ECHO_SECRET = """#!/bin/sh
+echo "SECRET=${SCADBUDDY_TEST_SECRET:-<unset>}"
+echo "HOME=${HOME:-<unset>}"
+"""
+
+
+async def test_the_render_does_not_inherit_the_backends_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#281: whatever openscad runs can read its own environment, so it gets an
+    allowlist of the parent's, not a copy."""
+    monkeypatch.setenv("SCADBUDDY_TEST_SECRET", "hunter2")
+    monkeypatch.setenv("HOME", "/home/scadbuddy")
+    binary = tmp_path / "echo-openscad"
+    binary.write_text(ECHO_SECRET, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    seen = "\n".join((await run_openscad([], cwd=tmp_path, config=config)).log_tail)
+
+    assert "SECRET=<unset>" in seen
+    assert "hunter2" not in seen
+    assert "HOME=/home/scadbuddy" in seen
+
+
 ECHO_OPENSCADPATH = """#!/bin/sh
 echo "OPENSCADPATH=${OPENSCADPATH:-<unset>}"
 """
@@ -254,6 +281,117 @@ async def test_a_run_reports_every_file_it_could_not_open(tmp_path: Path) -> Non
     assert not any("line 2" in line for line in output.log_tail)
 
 
+# ── #281: free-text values that would steer import()/surface() off the model ──
+
+TEXT_PARAMETER = Parameter(name="label", type="string", initial="/default/is/the/templates")
+STRING_SELECT = Parameter(
+    name="shape",
+    type="select",
+    initial="a",
+    options=[Option(name="up", value="../up"), Option(name="a", value="a")],
+)
+
+
+@pytest.mark.parametrize(
+    "value", ["", "Hello", "Wait...", "3/4 inch", "a/b.svg", "..hidden", "x..y", "AC/DC"]
+)
+def test_ordinary_text_passes(value: str) -> None:
+    assert format_scad_value(TEXT_PARAMETER, value) == quote_string(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["/etc/passwd", "/proc/self/environ", "..", "../model.scad", "a/../../b", "sub/.."],
+)
+def test_a_path_out_of_the_model_directory_is_refused(value: str) -> None:
+    with pytest.raises(ValueError, match="looks like a file path"):
+        format_scad_value(TEXT_PARAMETER, value)
+
+
+@pytest.mark.parametrize("kind", ["font", "color"])
+def test_every_free_text_type_is_guarded(kind: str) -> None:
+    parameter = Parameter(name="p", type=kind, initial="")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="looks like a file path"):
+        format_scad_value(parameter, "/etc/passwd")
+
+
+def test_a_string_select_is_guarded_off_its_options() -> None:
+    with pytest.raises(ValueError, match="looks like a file path"):
+        format_scad_value(STRING_SELECT, "/etc/passwd")
+
+
+def test_the_templates_own_values_pass() -> None:
+    """The initial and the options are the template's, like a file parameter's default."""
+    assert format_scad_value(TEXT_PARAMETER, "/default/is/the/templates")
+    assert format_scad_value(STRING_SELECT, "../up") == quote_string("../up")
+
+
+def test_build_defines_refuses_a_path_so_the_route_422s() -> None:
+    with pytest.raises(ValueError, match="looks like a file path"):
+        build_defines(_schema(TEXT_PARAMETER), {"label": "/proc/self/environ"})
+
+
+DIAGNOSTIC_OPENSCAD = """#!/bin/sh
+echo "WARNING: Ignoring unknown variable 'wdith' in file $(pwd -P)/model.scad, line 4"
+i=0
+while [ $i -lt 80 ]; do echo "ECHO: $i"; i=$((i+1)); done
+echo "ERROR: Assertion 'false' failed in file model.scad, line 9"
+exit "${FAKE_EXIT:-0}"
+"""
+
+
+async def test_a_run_parses_every_diagnostic_from_the_whole_log(tmp_path: Path) -> None:
+    """#252: read off the whole log like the missing files, not just the tail."""
+    binary = tmp_path / "diagnostic-openscad"
+    binary.write_text(DIAGNOSTIC_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path.resolve(), config=config)
+
+    assert [(d.severity, d.file, d.line) for d in output.diagnostics] == [
+        ("warning", "model.scad", 4),
+        ("error", "model.scad", 9),
+    ]
+    assert not any("wdith" in line for line in output.log_tail)
+
+
+async def test_a_failed_run_carries_its_diagnostics(tmp_path: Path) -> None:
+    binary = tmp_path / "diagnostic-openscad"
+    # The exit status is baked in: openscad gets an allowlisted environment (#281),
+    # so a FAKE_EXIT set on this process would never reach the script.
+    binary.write_text(DIAGNOSTIC_OPENSCAD.replace('"${FAKE_EXIT:-0}"', "1"), encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert [d.message for d in raised.value.diagnostics] == [
+        "Ignoring unknown variable 'wdith'",
+        "Assertion 'false' failed",
+    ]
+    assert raised.value.diagnostics_dropped == 0
+
+
+FLOODING_OPENSCAD = """#!/bin/sh
+i=0
+while [ $i -lt 205 ]; do echo "WARNING: number $i in file model.scad, line 1"; i=$((i+1)); done
+"""
+
+
+async def test_a_run_says_how_many_diagnostics_it_left_out(tmp_path: Path) -> None:
+    binary = tmp_path / "flooding-openscad"
+    binary.write_text(FLOODING_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert len(output.diagnostics) == MAX_DIAGNOSTICS
+    assert output.diagnostics_dropped == 205 - MAX_DIAGNOSTICS
+
+
 def test_template_note_reads_note_and_warning_echoes() -> None:
     assert template_note('ECHO: "NOTE: letter_size reduced from 25 to 10.9 mm"') == (
         "letter_size reduced from 25 to 10.9 mm"
@@ -314,3 +452,43 @@ async def test_a_real_render_reports_the_notes_it_echoed(tmp_path: Path) -> None
         ["-o", str(tmp_path / "out.stl"), scad.name], cwd=tmp_path, config=load_config()
     )
     assert output.notes == ('overlay_file "x.svg" ignored', "plaque too thin")
+
+
+# ── #289: a template states its plate count with `echo(plates = N)` ───────────
+
+
+def test_plate_count_reads_only_the_plates_echo() -> None:
+    assert plate_count("ECHO: plates = 2") == 2
+    assert plate_count("ECHO: plates = 1") == 1
+    assert plate_count('ECHO: "plates = 2"') is None
+    assert plate_count("ECHO: plates = 2, lid = true") is None
+    assert plate_count("ECHO: my_plates = 3") is None
+
+
+PLATES_OPENSCAD = """#!/bin/sh
+echo "ECHO: plates = 1"
+echo "ECHO: plates = 3"
+i=0
+while [ $i -lt 80 ]; do echo "filler $i"; i=$((i+1)); done
+"""
+
+
+async def test_a_run_reports_the_last_plate_count_even_out_of_the_tail(tmp_path: Path) -> None:
+    binary = tmp_path / "plates-openscad"
+    binary.write_text(PLATES_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert output.plates == 3
+    assert not any("plates" in line for line in output.log_tail)
+
+
+async def test_a_run_that_echoes_no_plate_count_reports_none(tmp_path: Path) -> None:
+    binary = tmp_path / "quiet-openscad"
+    binary.write_text("#!/bin/sh\necho 'ECHO: \"MAZE\", 4'\n", encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    assert (await run_openscad([], cwd=tmp_path, config=config)).plates is None

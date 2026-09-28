@@ -50,6 +50,16 @@ def test_a_parameter_of_the_wrong_type_is_rejected(client: TestClient, model: st
     assert "expects a number" in response.json()["detail"]
 
 
+def test_a_text_parameter_holding_a_path_is_rejected(client: TestClient, model: str) -> None:
+    """#281: a template may hand any string to import()/surface(), so a value that
+    would reach outside the model's directory never reaches openscad."""
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"params": {"label": "/proc/self/environ"}}
+    )
+    assert response.status_code == 422
+    assert "looks like a file path" in response.json()["detail"]
+
+
 def test_rendering_an_unknown_model_is_a_404(client: TestClient) -> None:
     assert client.post("/api/v1/models/missing/render", json={}).status_code == 404
 

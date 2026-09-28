@@ -179,6 +179,55 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(await api.getSource(COPY)).not.toBe(theirs)
   })
 
+  it('keeps a dismissed update reachable, and takes it (#235)', async () => {
+    await duplicateWithUpdate()
+    await api.dismissUpstream(COPY)
+    const { user, onChanged } = await renderButton()
+
+    expect(screen.queryByRole('button', { name: 'Update available' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Update dismissed — review' }))
+    const dialog = screen.getByRole('dialog', { name: 'Dismissed update' })
+    expect(dialog).toHaveTextContent('you can still take it')
+    expect(await within(dialog).findByTestId('diff')).toHaveTextContent('+text_size = 16;')
+    expect(within(dialog).getByTestId('merge-result')).toHaveTextContent('text_size = 16;')
+    // Already dismissed: it can be taken or left, not dismissed again.
+    expect(within(dialog).queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith('merge'))
+    expect((await api.getModel(COPY)).upstream_state).toBe('current')
+    expect(await api.getSource(COPY)).toBe(theirs)
+  })
+
+  it('closes a dismissed update without writing anything (#235)', async () => {
+    await duplicateWithUpdate()
+    await api.dismissUpstream(COPY)
+    const { user, onChanged } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update dismissed — review' }))
+    const dialog = screen.getByRole('dialog', { name: 'Dismissed update' })
+    await within(dialog).findByTestId('merge-result')
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(onChanged).not.toHaveBeenCalled()
+    expect((await api.getModel(COPY)).upstream_state).toBe('dismissed')
+  })
+
+  it('opens a conflicted dismissed update in the editor (#235)', async () => {
+    await duplicateWithUpdate({ conflict: true })
+    await api.dismissUpstream(COPY)
+    const { user } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update dismissed — review' }))
+    const dialog = screen.getByRole('dialog')
+    await within(dialog).findByTestId('merge-verdict')
+    await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
+
+    expect(await screen.findByTestId('where')).toHaveTextContent(`/m/${COPY}/source?merge`)
+  })
+
   it('offers Detach for an upstream that is gone', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
     await api.deleteModel(UPSTREAM, true)

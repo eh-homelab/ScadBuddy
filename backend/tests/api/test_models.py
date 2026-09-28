@@ -21,7 +21,7 @@ from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.render.jobs import Job, JobStore
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
-from tests.api.conftest import PNG_BYTES
+from tests.api.conftest import PNG_BYTES, set_fake_env
 
 SOURCE = "width = 10;\ncube(width);\n"
 
@@ -372,7 +372,7 @@ def test_a_failed_tombstone_removal_is_logged_and_retried(
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
     with patch("scadbuddy.library.catalogue.shutil.rmtree", side_effect=OSError("busy")):
         assert client.delete(f"/api/v1/models/{model}").status_code == 204
-    assert "could not remove a deleted model's files" in caplog.text
+    assert "could not remove a path" in caplog.text
     assert [entry.name.split(".")[0] for entry in paths.tombstones.iterdir()] == [model]
 
     assert catalogue.sweep_tombstones() != []
@@ -816,11 +816,11 @@ def test_a_json_body_missing_its_source_is_rejected_like_any_other_body(
 
 
 def test_replacing_the_source_runs_openscad_once(
-    client: TestClient, model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, model: str, tmp_path: Path
 ) -> None:
     """Deriving the schema IS the check, so a save must not pay for two subprocesses."""
     log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
 
     replacement = 'width = 3;\nlabel = "x";\n'
     put = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
@@ -833,10 +833,10 @@ def test_replacing_the_source_runs_openscad_once(
 
 
 def test_a_pasted_model_opens_without_deriving_its_schema_again(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, tmp_path: Path
 ) -> None:
     log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
 
     created = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
     assert created.status_code == 201
@@ -935,12 +935,12 @@ def test_an_unusable_export_is_refused_at_save_time_without_force(client: TestCl
 
 
 def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
-    client: TestClient, model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, model: str, tmp_path: Path
 ) -> None:
     """The check runs one OpenSCAD at a time, so a body nobody could have typed is a
     way to hold that permit — it has to be refused on shape, before it is spent."""
     log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
     huge = "x" * (MAX_SOURCE_CHARS + 1)
 
     checked = client.post("/api/v1/models/check", json={"source": huge})
