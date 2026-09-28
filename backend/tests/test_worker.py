@@ -12,7 +12,18 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
+from temporalio import workflow
+from temporalio.client import Client
+from temporalio.common import VersioningBehavior
+from temporalio.worker import (
+    UnsandboxedWorkflowRunner,
+    Worker,
+    WorkerDeploymentConfig,
+    WorkerDeploymentVersion,
+)
 
+from scadbuddy import worker as worker_module
+from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
@@ -20,10 +31,12 @@ from scadbuddy.render.job_models import Job
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from scadbuddy.worker import _wait_drained, run_worker
+from scadbuddy.worker import _poll, _wait_drained, run_worker
+from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad
+from tests.conftest import UNUSED_DATABASE_URL, fake_3mf_openscad
 from tests.support.temporal import temporal_client
 
 
@@ -150,3 +163,86 @@ async def test_the_drain_gives_up_at_its_bound() -> None:
 
     assert not await asyncio.wait_for(_wait_drained(drained, timeout=0.1, poll=0.01), 5)
     assert calls > 1
+
+
+@workflow.defn(name="BlocksUntilReleased")
+class _BlocksUntilReleased:
+    def __init__(self) -> None:
+        self.released = False
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self.released)
+
+    @workflow.signal
+    def release(self) -> None:
+        self.released = True
+
+
+async def _until_drained_is(
+    expected: bool, client: Client, build_id: str, timeout: float = 30
+) -> None:
+    """Visibility lags the run by a moment: wait for the count to catch up."""
+
+    async def poll() -> None:
+        while await drained(client, namespace=client.namespace, build_id=build_id) != expected:
+            await asyncio.sleep(0.2)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+@pytest.mark.requires_temporal
+async def test_drained_sees_a_running_pinned_workflow() -> None:
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    async with (
+        temporal_client() as client,
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[_BlocksUntilReleased],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        ),
+    ):
+        await make_current(client, namespace=client.namespace, build_id=build_id)
+        handle = await client.start_workflow(
+            _BlocksUntilReleased.run, id=f"blocks-{uuid.uuid4().hex}", task_queue=queue
+        )
+        await _until_drained_is(False, client, build_id)
+
+        await handle.signal(_BlocksUntilReleased.release)
+        await asyncio.wait_for(handle.result(), 30)
+        await _until_drained_is(True, client, build_id)
+
+
+@pytest.mark.requires_temporal
+async def test_the_in_process_worker_stops_without_draining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad="openscad", data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
