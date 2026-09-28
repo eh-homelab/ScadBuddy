@@ -32,7 +32,16 @@ relative to its repository root.
 | L4 | A pipeline run's jobs carry `queue_entry_id`, not an archive id. The pipeline route reaches its archive through the queue item. | `backend/app/schemas/pipeline_run.py:107-114` |
 | L5 | `ArchiveResponse` does **not** expose `library_file_id`, even though the model has it. It does expose `content_hash`. So `library_file_id` cannot be used as a matcher through the API. | `backend/app/schemas/archive.py:52-60`; `backend/app/models/archive.py:14-20`, `:29` |
 | L6 | The archive's `content_hash` is the SHA-256 of a byte-for-byte copy of the dispatched file. A sliced library file's `file_hash` is the SHA-256 of the same bytes. So `archive.content_hash == sliced.file_hash` identifies the print of that slice. `GET /library/files/{id}` returns `file_hash`. | `archive.py:33-48`, `:1054-1061`, `:1317`; `library.py:4610`; `backend/app/schemas/library.py:151` |
-| L7 | `GET /archives/` filters only by `printer_id`, `project_id`, `date_from`, `date_to`, `limit` and `offset`. There is no hash filter, so the fallback matcher scans a printer's archives within a date window. | `archives.py:395-402` |
+| L7 | `GET /archives/` filters only by `printer_id`, `project_id`, `date_from`, `date_to`, `limit` and `offset`. There is no hash filter, so the fallback matcher scans a printer's archives within a date window. The dates filter on `created_at`, which is when the print was dispatched. | `archives.py:395-402`; `backend/app/services/archive.py:1579-1585` |
+
+**Measured on the live Bambuddy 1.2.5.6, 2026-09-28, with GETs only (#306 spike):**
+
+| # | Fact | Evidence (queue item / library file / archive) |
+|---|---|---|
+| L8 | A dispatched library-file queue item carries its archive, and it keeps it after the print. ScadBuddy's slice-queue sends: 34/80/18 (cancelled mid-print), 90/92/32 (completed), 108/123/40 (cancelled mid-print). Others: 7/20/5, 28/66/17, 29/66/23, 31/66/16. Of 103 items listed, 18 were completed. Some still had `archive_id` after their `library_file_id` went null (for example 99 → archive 35). | `GET /queue/`, `GET /queue/{id}` |
+| L9 | `archive.content_hash == library_file.file_hash` for all 8 pairs above. **One sliced file can have several archives:** lib 66 printed three times, giving archives 16, 17 and 23 with one hash. So the hash finds "the prints of this slice". A ScadBuddy slice is unique to its output (its source 3MF carries the output id), so each of them is a print of that output. | `GET /library/files/{id}`, `GET /archives/{id}` |
+| L10 | An item queued *from* an archive also carries `archive_id` before it runs: that is its source (95 pending → archive 33). ScadBuddy never queues from an archive, so on its items `archive_id` is always the dispatch's. One archive can have more than one item (27 and 31 → 16). **Not measured live:** the pipeline route. The only pipeline run (pipeline 7, run 2) was cancelled before dispatch, and its jobs' entries 37–86 have no archive. They are ordinary library-file items (lib 86, the sliced file), so the same dispatch code (L1) applies. | `GET /slicer-pipelines/7/runs` |
+| L11 | The finish photo is named `finish_<timestamp>_<hex>.jpg`; every photo in the live archives is one. | `backend/app/main.py:5346`; `GET /archives/?limit=100` |
 
 ### Media and files
 
@@ -205,9 +214,9 @@ A **print** is one linked archive (`output_bambuddy_prints` row joined to `GET /
 
 ## 4. Open items carried into the children
 
-- #306 spike: L1 on the pipeline route, and L6 in practice (2.1).
-- #308 spike: whether the finish photo is always `photos[0]` (2.4).
+- #306 spike: done (L8–L10). L6 holds in practice. L1 on the pipeline route is confirmed from source only; recheck it on the first pipeline print that dispatches.
+- #308: the finish photo is the `finish_` one (L11), not necessarily `photos[0]`.
 - #309:
-  - Bambuddy's in-memory uploads (2.5): **awaiting Elan's decision** on whether a 1 GiB video goes through Bambuddy's in-memory library upload at all. Until then §2.5 stands as written; file the upstream issue either way;
+  - **Decided (Elan, 2026-09-28):** videos go to Bambuddy's `Media/` folder with the 1 GiB per-file limit, as §2.5 says. Because Bambuddy reads each upload whole into memory (M3, M7), **the Bambuddy pod needs about 1 GiB of free memory for each upload in flight**. Tracked upstream in #503;
   - whether Bambuddy's library UI previews video.
 - Auth-enabled verification: the homelab runs with auth off, so A2–A7 are verified from source only. #307's connection test should exercise them once a key with auth on is available.

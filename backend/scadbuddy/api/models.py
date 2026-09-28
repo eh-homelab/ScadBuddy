@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
     PresetsDep,
     QueueDep,
     SlugPath,
+    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
@@ -907,21 +908,24 @@ async def delete_model(
     queue: QueueDep,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
     output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
-    # Its outputs went with it; so do their Bambuddy upload records (#455). Bambuddy's
-    # own files are left alone, as a single output's delete leaves them unless asked.
-    # Best effort, like the rest of the cleanup after a delete: the model is gone.
+    # Its outputs went with it; so do their Bambuddy upload records (#455) and print
+    # links (#306). Bambuddy's own files and archives are left alone, as a single
+    # output's delete leaves them unless asked. Best effort, like the rest of the
+    # cleanup after a delete: the model is gone.
     if output_ids:
         try:
             await uploads.delete_outputs(output_ids)
+            await links.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception(
-                "could not forget a deleted model's upload records", extra={"slug": slug}
+                "could not forget a deleted model's Bambuddy records", extra={"slug": slug}
             )
     emit(events, ModelEvent(kind="model.deleted", slug=slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)

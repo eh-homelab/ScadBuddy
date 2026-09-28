@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
     QueueDep,
     SettingsStoreDep,
     SlugPath,
+    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
@@ -217,6 +218,7 @@ async def delete_output(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     events: EventsDep,
     store: SettingsStoreDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
@@ -237,6 +239,7 @@ async def delete_output(
     outputs.delete(output_id)
     # After the files: a failed delete keeps the output, and so must keep its records.
     await uploads.delete_outputs([output_id])
+    await links.delete_outputs([output_id])
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

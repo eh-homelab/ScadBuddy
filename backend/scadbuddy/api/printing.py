@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
     PrintProgressDep,
     SettingsStoreDep,
     SlugPath,
+    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.outputs import require_output
@@ -212,6 +213,7 @@ async def get_progress(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
 ) -> PrintProgress | None:
@@ -228,7 +230,7 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        progress = await progress_for(client, meta, uploads=uploads)
+        progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     return progress
 
@@ -269,6 +271,7 @@ async def post_attach_project(
     output_id: OutputIdPath,
     body: ProjectAttach,
     outputs: OutputsDep,
+    links: PrintLinksDep,
     store: SettingsStoreDep,
 ) -> AttachResult:
     """``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
@@ -291,4 +294,6 @@ async def post_attach_project(
         or ([meta.queue_item_id] if meta.queue_item_id else [])
     )
     async with client_for(settings) as client:
-        return await attach_results(client, project_id, queue_item_ids=ids)
+        return await attach_results(
+            client, project_id, queue_item_ids=ids, output_id=meta.id, links=links
+        )

@@ -4,6 +4,11 @@ Every byte comes through ScadBuddy's server, so Bambuddy's API key never reaches
 browser and nothing depends on Bambuddy being reachable from it (the iframe). A video
 seek is a ``Range`` request: it is passed through, and Bambuddy's ``FileResponse``
 answers it with a ``206`` and only those bytes, streamed back without buffering.
+
+Strictly read-only: ``GET`` and ``HEAD`` only. Of the browser's request only ``Range``
+and ``If-Range`` go to Bambuddy; of Bambuddy's answer only the media headers come back
+(`FORWARDED_HEADERS`), so neither its key nor its address reaches the browser. And only
+for an archive one of ScadBuddy's outputs printed (#306).
 """
 
 from __future__ import annotations
@@ -12,11 +17,12 @@ from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Path, Request
+from fastapi import APIRouter, Depends, Path, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 
 #: What the proxy answers: Bambuddy's bytes, whole (200) or a range of them (206).
@@ -26,12 +32,6 @@ MEDIA_RESPONSES: dict[int | str, dict[str, Any]] = {
     416: {"description": "The range is past the end; `Content-Range` gives the length"},
 }
 
-router = APIRouter(
-    prefix="/prints/{archive_id}",
-    tags=["prints"],
-    default_response_class=StreamingResponse,
-    responses=MEDIA_RESPONSES,
-)
 
 #: What the browser may see of Bambuddy's answer. Not its cookies, server or anything
 #: else: only what a media element and a download need.
@@ -51,25 +51,38 @@ PHOTO_NAME = r"^[A-Za-z0-9_-]+\.(jpg|jpeg|png|webp)$"
 
 ArchiveIdPath = Annotated[int, Path(ge=1)]
 
-
-def require_linked_archive(archive_id: int) -> None:
-    """Refuse an archive no ScadBuddy output printed, so the proxy is not a window onto
-    all of Bambuddy's history (#305 plan §2.3).
-
-    A no-op until #306 records the output → archive links: until then ScadBuddy has no
-    list to check against, and it already exposes Bambuddy's sends to whoever reaches
-    it. #306 replaces the body with the Postgres lookup.
-    """
-    del archive_id
+#: A media route answers these; nothing here writes.
+READ_METHODS = ["GET", "HEAD"]
 
 
-async def _proxy(
-    store: SettingsStore, request: Request, path: str, *, what: str
-) -> StreamingResponse:
+async def require_linked_archive(archive_id: ArchiveIdPath, links: PrintLinksDep) -> None:
+    """Refuse an archive no ScadBuddy output printed, with a 404, so the proxy is not
+    a window onto all of Bambuddy's history (#305 plan §2.3). The check is
+    ``output_bambuddy_prints`` (#306): an archive is linked once a progress read or a
+    project attach has seen it."""
+    if await links.output_for(archive_id) is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            f"archive {archive_id} is not a print of any ScadBuddy output",
+        )
+
+
+router = APIRouter(
+    prefix="/prints/{archive_id}",
+    tags=["prints"],
+    default_response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    dependencies=[Depends(require_linked_archive)],
+)
+
+
+async def _proxy(store: SettingsStore, request: Request, path: str, *, what: str) -> Response:
     """Stream ``path`` from Bambuddy, with the browser's ``Range`` passed through.
 
     The client and the upstream response stay open until the body has been sent, so
-    both live on an exit stack that the body's own generator closes.
+    both live on an exit stack that the body's own generator closes. A ``HEAD`` gets
+    the same status and headers with no body: Bambuddy's media routes answer only
+    ``GET``, so the upstream request is a ``GET`` whose body is never read.
     """
     stack = AsyncExitStack()
     try:
@@ -86,6 +99,13 @@ async def _proxy(
         await stack.aclose()
         raise
 
+    headers = {
+        name: upstream.headers[name] for name in FORWARDED_HEADERS if name in upstream.headers
+    }
+    if request.method == "HEAD":
+        await stack.aclose()
+        return Response(status_code=upstream.status_code, headers=headers)
+
     async def body() -> AsyncIterator[bytes]:
         try:
             async for chunk in upstream.aiter_raw():
@@ -93,53 +113,50 @@ async def _proxy(
         finally:
             await stack.aclose()
 
-    headers = {
-        name: upstream.headers[name] for name in FORWARDED_HEADERS if name in upstream.headers
-    }
     return StreamingResponse(body(), status_code=upstream.status_code, headers=headers)
 
 
-@router.get("/timelapse", summary="The print's timelapse video (Range supported)")
+@router.api_route(
+    "/timelapse", methods=READ_METHODS, summary="The print's timelapse video (Range supported)"
+)
 async def get_timelapse(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store, request, f"/archives/{archive_id}/timelapse", what="play the timelapse"
     )
 
 
-@router.get("/photos/{filename}", summary="A photo of the print")
+@router.api_route("/photos/{filename}", methods=READ_METHODS, summary="A photo of the print")
 async def get_photo(
     archive_id: ArchiveIdPath,
     filename: Annotated[str, Path(pattern=PHOTO_NAME)],
     request: Request,
     store: SettingsStoreDep,
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store, request, f"/archives/{archive_id}/photos/{filename}", what="show the photo"
     )
 
 
-@router.get("/thumbnail", summary="The print's thumbnail")
+@router.api_route("/thumbnail", methods=READ_METHODS, summary="The print's thumbnail")
 async def get_thumbnail(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store, request, f"/archives/{archive_id}/thumbnail", what="show the thumbnail"
     )
 
 
-@router.get("/plates/{index}/thumbnail", summary="One plate's image from the slicer")
+@router.api_route(
+    "/plates/{index}/thumbnail", methods=READ_METHODS, summary="One plate's image from the slicer"
+)
 async def get_plate_thumbnail(
     archive_id: ArchiveIdPath,
     index: Annotated[int, Path(ge=1)],
     request: Request,
     store: SettingsStoreDep,
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store,
         request,
@@ -148,21 +165,23 @@ async def get_plate_thumbnail(
     )
 
 
-@router.get("/files/sliced", summary="The sliced file that was printed")
+@router.api_route(
+    "/files/sliced", methods=READ_METHODS, summary="The sliced file that was printed"
+)
 async def get_sliced_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store, request, f"/archives/{archive_id}/download", what="download the sliced file"
     )
 
 
-@router.get("/files/source", summary="The slicer project 3MF, when there is one")
+@router.api_route(
+    "/files/source", methods=READ_METHODS, summary="The slicer project 3MF, when there is one"
+)
 async def get_source_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
-) -> StreamingResponse:
-    require_linked_archive(archive_id)
+) -> Response:
     return await _proxy(
         store, request, f"/archives/{archive_id}/source", what="download the source 3MF"
     )

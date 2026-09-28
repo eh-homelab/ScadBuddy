@@ -29,7 +29,9 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -188,7 +190,12 @@ class AttachResult(BaseModel):
 
 
 async def attach_results(
-    client: BambuddyClient, project_id: int, *, queue_item_ids: list[int]
+    client: BambuddyClient,
+    project_id: int,
+    *,
+    queue_item_ids: list[int],
+    output_id: str | None = None,
+    links: PrintLinkStore | None = None,
 ) -> AttachResult:
     """Attach this output's queue entries, and any archives they have produced.
 
@@ -197,6 +204,9 @@ async def attach_results(
     run time would attach nothing on one route and only half on the other. This is
     called once the ids are known, and attaching the same id twice is Bambuddy's
     problem to dedupe, not a reason to keep state here.
+
+    With ``output_id`` and ``links``, each archive found is also linked to the output
+    (#306), since the items are being read anyway.
     """
     archives: list[int] = []
     for item_id in queue_item_ids:
@@ -205,12 +215,14 @@ async def attach_results(
         except ApiError as error:
             if error.status != 404:
                 raise
-            # Bambuddy drops a dispatched entry from the queue; its archive is then
-            # already on the project by Bambuddy's own accounting.
+            # Deleted in Bambuddy (a queue item otherwise outlives its print); there is
+            # nothing left to attach it by.
             logger.info("a queue entry was gone before it could be attached", extra={"id": item_id})
             continue
         if item.archive_id is not None:
             archives.append(item.archive_id)
+            if output_id is not None and links is not None:
+                await link_item(links, output_id, item)
 
     if queue_item_ids:
         await client.add_queue_items_to_project(project_id, queue_item_ids)
