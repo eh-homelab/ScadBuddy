@@ -160,9 +160,12 @@ on shutdown.
     stored is never refused.
   - `SCADBUDDY_ASSET_SWEEP_GRACE` (default 604800 s, a week; at least 3600): a
     file that no saved output, preset or render job references is removed once
-    nothing has uploaded or used it for this long.
+    nothing has uploaded or used it for this long. The same grace applies to the
+    blob store's pieces and snapshots (see "Blob store and render workers").
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
-    after the one at startup; 0 turns it off.
+    after the one at startup; 0 turns it off. The same interval drives the blob
+    store's sweep and every process's piece-cache eviction, so 0 turns those off
+    too.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
@@ -364,10 +367,33 @@ workers restart.
      workers.
 
   The workers then need no shared volume:
-  - give each one an `emptyDir` at `/data`, which holds its piece cache, bounded by
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` and evicted least recently used every
-    `SCADBUDDY_ASSET_SWEEP_INTERVAL`;
-  - scale the Deployment freely.
+  - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
+    and the snapshots, fonts and uploads it fetched.
+  - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. A worker
+    trims its cache to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first)
+    **only** on that interval, and nothing trims it between passes. On a worker the
+    variable drives nothing else; `0` turns eviction off, and the cache then grows
+    until the volume is full.
+  - Size the `emptyDir`'s `sizeLimit` for one interval's writes on top of the caps.
+    Past it, the kubelet evicts the pod mid-render, with no drain.
+
+    | Part | Default bound |
+    |---|---|
+    | the cache after a trim, `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
+    | one interval's new pieces: render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
+    | uploads fetched, at most `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
+    | snapshots (`cache/`) and fonts (`fonts/`); not capped, so measure with `du -sh /data/cache /data/fonts` on a running worker | ~1 GiB |
+    | **sum; `sizeLimit` with slack** | **≈ 13.1 GiB; `14Gi`** |
+
+    Use your own render timings and piece sizes for the second row; a longer interval
+    scales it linearly.
+  - Scale the Deployment freely.
+
+  **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
+  A piece or snapshot that no job, output or preset references is deleted from the
+  store (on `bambuddy`, from Bambuddy's library) once nothing has used it for
+  `SCADBUDDY_ASSET_SWEEP_GRACE` (a week by default). The API's own upload sweep uses the
+  same grace.
 
   `/healthz` on the API and on each worker (port 9090) carries a `store` object:
   - `multi_worker: true` says more than one replica is safe;
@@ -387,7 +413,7 @@ workers restart.
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
-| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL`, not on write. |
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and the Settings page's **Store** section show the
