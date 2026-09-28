@@ -124,6 +124,33 @@ describe('redact', () => {
 })
 
 describe('settings tools pass every answer through redact (#322)', () => {
+  it('get_settings shows where each key setting comes from, never a key', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/settings`, () =>
+        HttpResponse.json({
+          has_api_key: true,
+          bambuddy_api_key: 's3cret',
+          sources: { bambuddy_api_key: 'stored', google_fonts_api_key: 'env', render_timeout: 'default' },
+          applies: { bambuddy_api_key: 'live', google_fonts_api_key: 'live' },
+        }),
+      ),
+    )
+    const body = firstText(await runTool(tool('get_settings'), {}, ctx()))
+    expect(body).toEqual({
+      has_api_key: true,
+      bambuddy_api_key: '[redacted]',
+      sources: { bambuddy_api_key: 'stored', google_fonts_api_key: 'env', render_timeout: 'default' },
+      applies: { bambuddy_api_key: 'live', google_fonts_api_key: 'live' },
+    })
+    expect(JSON.stringify(body)).not.toContain('s3cret')
+  })
+
+  it('still redacts a value under a key-named entry in sources that is not a label', () => {
+    expect(redact({ sources: { bambuddy_api_key: 'sk-live-0123456789abcdef' } })).toEqual({
+      sources: { bambuddy_api_key: '[redacted]' },
+    })
+  })
+
   it.each([
     ['get_bambuddy_status', '/api/v1/settings/bambuddy'],
     ['get_remembered_choices', '/api/v1/settings/remembered'],

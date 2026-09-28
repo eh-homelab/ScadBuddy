@@ -10,22 +10,29 @@ import { defineTool, json, type Tool } from './registry.js'
 // Routes: backend/scadbuddy/api/settings.py.
 
 const SECRET_KEY = /key|secret|token|password|credential/i
+/** `SettingsView`'s per-field maps: keyed by field name, valued by a label. */
+const LABEL_MAPS = new Set(['sources', 'applies'])
+/** A source or applies label (`env`, `stored`, `live`, …), never secret-shaped. */
+const LABEL = /^[a-z]{1,16}$/
 
 /**
  * The backend's `SettingsView` already leaves the API key out ("What the
  * browser may see. The API key itself never appears here", openapi.json).
  * This is a second guard, so a secret field added later cannot reach an agent
  * by accident: any key that looks like one is replaced, except the booleans
- * that only say whether a secret is set.
+ * that only say whether a secret is set. In `sources` and `applies` the keys
+ * are field names (`bambuddy_api_key`) and the values labels, so there a value
+ * is kept when it is a label and replaced otherwise.
  */
-export function redact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redact)
+export function redact(value: unknown, labels = false): unknown {
+  if (Array.isArray(value)) return value.map((v) => redact(v))
   if (value && typeof value === 'object') {
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [
-        k,
-        SECRET_KEY.test(k) && !k.startsWith('has_') && v !== null && typeof v !== 'boolean' ? '[redacted]' : redact(v),
-      ]),
+      Object.entries(value).map(([k, v]) => {
+        if (labels && typeof v === 'string' && LABEL.test(v)) return [k, v]
+        if (SECRET_KEY.test(k) && !k.startsWith('has_') && v !== null && typeof v !== 'boolean') return [k, '[redacted]']
+        return [k, redact(v, LABEL_MAPS.has(k))]
+      }),
     )
   }
   return value
