@@ -7,6 +7,7 @@ network is never involved.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import threading
@@ -19,6 +20,7 @@ import pytest
 from scadbuddy.api.deps import build_state
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import url_import
 from scadbuddy.library.catalogue import Catalogue, LibraryNotDeclaredError, ModelMeta
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
@@ -31,6 +33,7 @@ from scadbuddy.library.libraries import (
     LibraryNotFoundError,
     LibraryNotInstalledError,
     LibraryPin,
+    LibraryResolverUnavailableError,
     LibraryStore,
     LibraryTooLargeError,
     Lock,
@@ -43,6 +46,7 @@ from scadbuddy.library.libraries import (
     read_lock,
     search_path,
 )
+from scadbuddy.library.url_import import ResolverUnavailableError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import PUBLIC_ADDRESS, UNUSED_DATABASE_URL, make_library_upstream
@@ -299,6 +303,55 @@ def test_a_url_whose_host_is_not_public_is_refused_without_running_git(
     with pytest.raises(LibraryError, match="public"):
         https_only.resolve("mylib", url="https://git.internal.example/o/r.git", ref="v1")
 
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure", ["timeout", "busy"])
+def test_a_lookup_that_does_not_finish_is_not_read_as_a_private_host(
+    paths: DataPaths,
+    history: ModelHistory,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """#205: the resolver timing out, or every one of its threads busy with model
+    imports, says nothing about the host -- so "try again", not the SSRF refusal."""
+
+    async def unfinished(host: str, port: int) -> list[str]:
+        if failure == "busy":
+            raise ResolverUnavailableError(f"could not resolve {host}: every thread is busy")
+        await asyncio.sleep(5)
+        return [PUBLIC_ADDRESS]
+
+    monkeypatch.setattr(url_import, "resolve_host", unfinished)
+    monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 0.05)
+    https_only = LibraryStore(paths, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryResolverUnavailableError) as caught:
+        https_only.resolve("mylib", url="https://git.example/o/r.git", ref="v1")
+
+    assert str(caught.value) == "could not resolve git.example just now; try again"
+    assert "public" not in str(caught.value)
+    assert calls == []
+
+
+def test_a_private_host_is_still_refused_when_the_lookup_is_slow_but_finishes(
+    paths: DataPaths,
+    history: ModelHistory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def slow(host: str, port: int) -> list[str]:
+        await asyncio.sleep(0.01)
+        return ["10.0.0.7"]
+
+    monkeypatch.setattr(url_import, "resolve_host", slow)
+    https_only = LibraryStore(paths, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryError, match="public") as caught:
+        https_only.resolve("mylib", url="https://git.internal.example/o/r.git", ref="v1")
+
+    assert not isinstance(caught.value, LibraryResolverUnavailableError)
     assert calls == []
 
 
