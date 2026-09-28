@@ -571,8 +571,12 @@ class Catalogue:
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # And any an earlier duplicate crashed out of, once it is old enough not to
         # be another replica's copy in flight: a single replica that crashed and
-        # restarted inside the hour clears it here rather than never.
-        self.sweep_duplicate_staging()
+        # restarted inside the hour clears it here rather than never. Best-effort:
+        # the duplicate is committed, so a failure here is logged, not reported.
+        try:
+            self.sweep_duplicate_staging()
+        except OSError:
+            logger.exception("could not sweep duplicate staging")
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:

@@ -366,6 +366,42 @@ def test_a_duplicate_sweeps_staging_an_earlier_one_crashed_out_of(
     assert _no_staging_left(paths)
 
 
+def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy is committed; tidying up after it is best-effort."""
+
+    def sweep(self: Catalogue) -> list[str]:
+        raise PermissionError("cache unreadable")
+
+    monkeypatch.setattr(Catalogue, "sweep_duplicate_staging", sweep)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+
+
+def test_a_staging_the_sweep_cannot_read_does_not_keep_the_rest(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue = Catalogue(paths)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    for name in ("a", "b"):
+        staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
+        staged.mkdir(parents=True)
+        os.utime(staged, (old, old))
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if self.name == f"{DUPLICATE_STAGING_PREFIX}a":
+            raise PermissionError("unreadable")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    assert catalogue.sweep_duplicate_staging() == [f"{DUPLICATE_STAGING_PREFIX}b"]
+
+
 def test_the_boot_leaves_a_fresh_duplicate_staging_alone(app: FastAPI, paths: DataPaths) -> None:
     """Another replica sharing /data may be mid-copy into it."""
     staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}live" / "copy"
