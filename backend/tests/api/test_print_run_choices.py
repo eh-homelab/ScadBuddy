@@ -11,7 +11,9 @@ that owns the route's behaviour.
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from typing import Any
 
 import httpx
@@ -29,7 +31,14 @@ from tests.api.test_print_filaments import (
     queue_route,
     slice_routes,
 )
-from tests.api.test_send import BASE, _uploaded_nozzle, configure, make_output, upload_route
+from tests.api.test_send import (
+    BASE,
+    _uploaded_3mf,
+    _uploaded_nozzle,
+    configure,
+    make_output,
+    upload_route,
+)
 from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 
@@ -562,6 +571,40 @@ def test_the_chosen_nozzle_is_stated_in_the_upload_and_a_change_re_uploads(
 
     assert upload.call_count == 2, "the 0.4 run reused a file stating the 0.2 nozzle"
     assert _uploaded_nozzle(upload) == ["0.4"]
+
+
+def _uploaded_colours(route: respx.Route) -> list[str]:
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(route))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    colours: list[str] = settings["filament_colour"]
+    return colours
+
+
+@respx.mock
+def test_the_upload_is_in_the_chosen_spools_colours_and_a_swap_re_uploads(
+    client: TestClient, model: str
+) -> None:
+    """#476: the slicer keeps the file's cover image, so the file has to be in the spools'
+    colours, not the model's, or the queue shows a print that will not come out."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+    # The test model has one filament, printed from slot 1's spool: spool 9 is 688197FF
+    # (inventory-spools.json), where the model's own colour is #FF0000.
+    assert _uploaded_colours(upload) == ["#688197"]
+
+    swapped = run_request(
+        filament_plan={"slots": [{"slot_id": 1, "spool_id": 5}, {"slot_id": 2, "spool_id": 9}]}
+    )
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=swapped)
+
+    assert upload.call_count == 2, "the swapped run reused a file in the other colours"
+    assert _uploaded_colours(upload) == ["#0047BB"]
 
 
 # --- final review 1: a slot only a later plate uses ------------------------------------

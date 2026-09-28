@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -36,6 +36,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, nozzle_diameter_of, plate_for
+from scadbuddy.render.recolour import recolour_3mf
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,9 @@ class Target:
     #: ``None`` — no pipeline, no printer preset, or a name that states no nozzle —
     #: keeps the placeholder.
     nozzle_diameter: str | None = None
+    #: One colour per filament, from the spools the run chose (#476). ``None`` — the
+    #: send bar, which chooses no spools — keeps the model's own colours.
+    colours: tuple[str, ...] | None = None
 
     @property
     def key(self) -> str:
@@ -122,9 +126,13 @@ class Target:
         Without a nozzle this is the plate's own key, so a file recorded before #126 is
         still reused for the same plate.
         """
-        if self.nozzle_diameter is None:
-            return self.plate.key
-        return f"{self.plate.key}@{self.nozzle_diameter}"
+        key = self.plate.key
+        if self.nozzle_diameter is not None:
+            key = f"{key}@{self.nozzle_diameter}"
+        if self.colours is not None:
+            # A file recoloured for other spools must not be reused for these.
+            key = f"{key}~{','.join(self.colours)}"
+        return key
 
 
 async def _target_model_and_preset(
@@ -205,18 +213,24 @@ async def target_for(
     pipeline_id: int | None = None,
     printer_id: int | None = None,
     nozzle_diameter: str | None = None,
+    colours: Sequence[str] | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
     With an explicit ``printer_id`` and ``nozzle_diameter`` — the spool-first run, which
     has chosen both (spec 2026-09-27 §4) — no pipeline is read: the model comes from the
     printer list and the nozzle is the one chosen. Otherwise, as the send bar and the
-    eligibility check need, from the pipeline in play.
+    eligibility check need, from the pipeline in play. ``colours`` are the chosen spools'
+    (#476), and only the spool-first run has any.
     """
     if printer_id is not None and nozzle_diameter is not None:
         printer = next((row for row in await client.printers() if row.id == printer_id), None)
         model = printer.model if printer is not None else None
-        return Target(_plate_for_model(model), nozzle_diameter)
+        return Target(
+            _plate_for_model(model),
+            nozzle_diameter,
+            tuple(colours) if colours is not None else None,
+        )
     model, printer_preset = await _target_model_and_preset(
         client, settings, slug, pipeline_id=pipeline_id
     )
@@ -241,9 +255,11 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     prime tower a multi-colour print needs — where every extruder can reach them.
     """
     try:
-        return replate_3mf(payload, target.plate, nozzle_diameter=target.nozzle_diameter)
+        payload = replate_3mf(payload, target.plate, nozzle_diameter=target.nozzle_diameter)
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
+    # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
+    return recolour_3mf(payload, target.colours) if target.colours is not None else payload
 
 
 async def upload_output(
