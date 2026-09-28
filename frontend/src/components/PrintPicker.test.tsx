@@ -465,7 +465,7 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
   })
 
   it('reads Settings for the queue link only once a run is unanswered', async () => {
-    const { urls } = watch('GET', '/api/v1/settings')
+    const { urls } = watch('GET', '/settings', '/api/v1/')
     runAnswers(() => new HttpResponse('timeout', { status: 504 }))
     const { user } = renderPicker()
     await loaded()
