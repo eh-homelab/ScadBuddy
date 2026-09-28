@@ -43,6 +43,7 @@ from scadbuddy.library.libraries import (
     ModelLibrary,
 )
 from scadbuddy.main import sweep_library_checkouts
+from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream
 from tests.test_library_processes import _age
 
@@ -136,7 +137,6 @@ def test_two_models_render_one_library_at_two_refs(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, commits = upstream
     create_model(lib_client)
@@ -144,7 +144,7 @@ def test_two_models_render_one_library_at_two_refs(
     pin(lib_client, "BOSL2")
     pin(lib_client, "BOSL2", "gadget", ref="v2")
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert lib_client.get("/api/v1/models/gadget/schema").status_code == 200
@@ -411,7 +411,6 @@ def test_an_imported_model_takes_pins_like_any_other(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#153's URL import goes through the same create path, so its model takes a
     pin and renders with exactly that library, keeping where it came from."""
@@ -421,7 +420,7 @@ def test_an_imported_model_takes_pins_like_any_other(
     imported = lib_client.post("/api/v1/models/import", json={"url": raw})
     assert imported.status_code == 201, imported.text
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     record = pin(lib_client, "BOSL2")
 
@@ -437,13 +436,12 @@ def test_the_editor_check_sees_the_models_libraries(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, commits = upstream
     create_model(lib_client)
     pin(lib_client, "BOSL2")
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
     saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
@@ -626,13 +624,11 @@ def _schema_runs(log: Path) -> int:
     return len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
 
 
-def test_a_new_pin_re_derives_the_schema(
-    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_new_pin_re_derives_the_schema(lib_client: TestClient, tmp_path: Path) -> None:
     """Same source, other library code: the cached schema is keyed on the pins too."""
     create_model(lib_client)
     log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
     # The create's own check derived it, so this one is served from the cache.
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert _schema_runs(log) == 0
@@ -738,7 +734,6 @@ def test_a_dropped_model_json_carries_its_pins_and_is_checked_with_them(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url, commits = upstream
     # Fetched onto this volume by another model's pin.
@@ -746,7 +741,7 @@ def test_a_dropped_model_json_carries_its_pins_and_is_checked_with_them(
     pin(lib_client, "BOSL2", "gadget")
     pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned, pinned]})
 

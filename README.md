@@ -75,17 +75,31 @@ for the project picker).
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
+  `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
   can overshoot by roughly one poll interval's worth of transfer, 0.2 to 2 s, plus
   one walk of the clone, which takes longer the more files it has, before it is
-  stopped).
+  stopped); `SCADBUDDY_DUPLICATE_STAGING_MAX_AGE` (default 3600 s, at least 1: how
+  old a duplicate's staging copy under `/data/cache` must be before it is treated
+  as a crashed copy and removed, at startup, after a duplicate and with the
+  periodic upload sweep; keep it well above the longest copy, since replicas
+  sharing `/data` may be mid-copy).
   Each concurrent render or check is its own `openscad` process, and each open
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
   editor still works, without completion and hover.
+  A render's closed parts take one more `openscad` run per colour, and
+  `SCADBUDDY_SOLID_CONCURRENCY` of those run at once per render. Left at 0 it is
+  the CPUs the container may use (a cgroup v1 or v2 CPU limit counts), less
+  `SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, between
+  1 and 8, so renders and checks together stay at one process per CPU. If no
+  cgroup CPU controller is readable, a warning is logged at the first render and it
+  sizes for every CPU it can see; set it by hand there. It reads no memory limit:
+  size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
+  Each of them gets the whole `SCADBUDDY_RENDER_TIMEOUT` from when it starts.
 - **Uploaded files** (the SVGs and PNGs for `// file` parameters, in
   `/data/assets`):
   - `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1000000000) and
@@ -97,6 +111,9 @@ for the project picker).
     nothing has uploaded or used it for this long.
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
     after the one at startup; 0 turns it off.
+  - The same periodic sweep also clears old duplicate staging
+    (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
+    next duplicate.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Render queue.** By default every render request is accepted;

@@ -20,6 +20,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
@@ -235,7 +236,9 @@ async def test_the_model_hash_is_taken_off_the_event_loop(paths: DataPaths) -> N
         raise OpenSCADError("far enough", [])
 
     with mock.patch.object(jobs, "source_version", record), pytest.raises(OpenSCADError):
-        await jobs.render_job(_job("h"), config=CONFIG, paths=paths)
+        await jobs.render_job(
+            _job("h"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert ran_on and threading.main_thread().name not in ran_on
 
@@ -429,7 +432,12 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
             ],
         )
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -443,7 +451,9 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("j"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("j"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert [(p.extruder, p.colour) for p in result.parts] == [(1, "#0047BB"), (2, "#FF1493")]
     assert result.colors == ["#0047BB", "#FF1493"]
@@ -469,7 +479,12 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -484,7 +499,9 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     with zipfile.ZipFile(paths.root / result.model_3mf) as archive:
         root = archive.read("3D/3dmodel.model").decode()
@@ -534,7 +551,12 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -553,7 +575,9 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     stored = AssetStore(paths.assets).blob_path(asset).read_bytes()
     assert seen["main"] == seen["solids"]
@@ -582,7 +606,12 @@ async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None
         mock.patch.object(jobs, "cached_schema", cached_schema),
         pytest.raises(OpenSCADError),
     ):
-        await jobs.render_job(_job("f", params={"overlay": asset.id}), config=CONFIG, paths=paths)
+        await jobs.render_job(
+            _job("f", params={"overlay": asset.id}),
+            config=CONFIG,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+        )
 
     assert [p.name for p in model_dir.iterdir()] == ["model.scad"]
 
@@ -596,7 +625,12 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=("pic.svg",), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=("pic.svg",),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -610,7 +644,9 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("m"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]
 
@@ -630,7 +666,12 @@ async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> 
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(WARNING,), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(WARNING,),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -644,7 +685,9 @@ async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> 
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("d"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("d"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.diagnostics == [WARNING]
 
@@ -729,7 +772,12 @@ async def test_a_render_holds_the_checkouts_it_resolved(paths: DataPaths) -> Non
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -744,7 +792,9 @@ async def test_a_render_holds_the_checkouts_it_resolved(paths: DataPaths) -> Non
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        await jobs.render_job(_job("l"), config=CONFIG, paths=paths, checkouts=gate)
+        await jobs.render_job(
+            _job("l"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets), checkouts=gate
+        )
 
     assert seen == [["l"], ["l"]]
     assert gate.leased(checkout) == []
@@ -764,7 +814,13 @@ async def test_a_render_that_waited_out_a_removal_fails_cleanly(paths: DataPaths
     with mock.patch.object(jobs, "cached_schema", cached_schema):
         async with gate.removing():
             task = asyncio.create_task(
-                jobs.render_job(_job("w"), config=CONFIG, paths=paths, checkouts=gate)
+                jobs.render_job(
+                    _job("w"),
+                    config=CONFIG,
+                    paths=paths,
+                    assets=AssetStore(paths.assets),
+                    checkouts=gate,
+                )
             )
             await asyncio.sleep(0.2)
             shutil.rmtree(checkout)
@@ -791,7 +847,12 @@ async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> No
         await release[attempt].wait()
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
         return mock.Mock(
-            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -802,7 +863,13 @@ async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> No
 
     def attempt(number: int) -> asyncio.Task[tuple[JobResult, list[str]]]:
         return asyncio.create_task(
-            jobs.render_job(_job("r").claimed(number), config=CONFIG, paths=paths, checkouts=gate)
+            jobs.render_job(
+                _job("r").claimed(number),
+                config=CONFIG,
+                paths=paths,
+                assets=AssetStore(paths.assets),
+                checkouts=gate,
+            )
         )
 
     with (
@@ -843,7 +910,13 @@ async def test_a_cancelled_render_releases_its_lease(paths: DataPaths) -> None:
         mock.patch.object(jobs, "cached_schema", cached_schema),
     ):
         task = asyncio.create_task(
-            jobs.render_job(_job("c"), config=CONFIG, paths=paths, checkouts=gate)
+            jobs.render_job(
+                _job("c"),
+                config=CONFIG,
+                paths=paths,
+                assets=AssetStore(paths.assets),
+                checkouts=gate,
+            )
         )
         await asyncio.wait_for(started.wait(), 5)
         assert gate.leased(checkout) == ["c"]
@@ -868,6 +941,7 @@ async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -
             notes=("letter_size reduced",),
             diagnostics=(),
             diagnostics_dropped=0,
+            plates=None,
         )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
@@ -881,6 +955,150 @@ async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("m"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.notes == ["letter_size reduced"]
+
+
+# ── #289: a template that asks for more than one plate ────────────────────────
+
+TRAY = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))
+WALL = ("Color 2", "#FF149300", trimesh.creation.box(extents=(2, 2, 6)))
+LID = ("Color 3", "#FFFFFF00", trimesh.creation.box(extents=(12, 12, 1)))
+
+
+def _plate_of(extra_defines: object) -> int:
+    """The `$plate` a render was asked for, 0 when none."""
+    defines = list(extra_defines) if isinstance(extra_defines, list | tuple) else []
+    for define in defines:
+        if isinstance(define, str) and define.startswith("$plate="):
+            return int(define.removeprefix("$plate="))
+    return 0
+
+
+def _plated_render(
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]], plates: int | None
+) -> tuple[object, list[int]]:
+    """A stand-in `render_3mf` drawing ``drawn[$plate]``, and the plates it was asked for."""
+    asked: list[int] = []
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        plate = _plate_of(kwargs.get("extra_defines"))
+        asked.append(plate)
+        write_openscad_3mf(out, drawn[plate])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=plates,
+        )
+
+    return render, asked
+
+
+async def _render_plated(
+    paths: DataPaths,
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    solids: object | None = None,
+) -> tuple[JobResult, list[int]]:
+    paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    render, asked = _plated_render(drawn, plates)
+    schema = _colour_schema(
+        ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
+    )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    async def no_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", solids or no_solids),
+    ):
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+    return result, asked
+
+
+async def test_each_plate_is_its_own_render_and_the_3mf_holds_them_all(
+    paths: DataPaths,
+) -> None:
+    solid_defines: list[object] = []
+
+    async def solids(*args: object, **kwargs: object) -> SolidRender:
+        solid_defines.append(kwargs.get("extra_defines"))
+        return SolidRender()
+
+    result, asked = await _render_plated(
+        paths, {0: [TRAY, WALL, LID], 1: [TRAY, WALL], 2: [LID]}, plates=2, solids=solids
+    )
+
+    # The everything render, then one per plate; the wrapper renders get `$plate` too.
+    assert asked == [0, 1, 2]
+    assert [_plate_of(defines) for defines in solid_defines] == [1, 2]
+    assert result.colors == ["#0047BB", "#FF1493", "#FFFFFF"]
+    assert [(p.extruder, p.colour) for p in result.parts] == [
+        (1, "#0047BB"),
+        (2, "#FF1493"),
+        (3, "#FFFFFF"),
+    ]
+    assert [(p.index, p.colors) for p in result.plates] == [
+        (1, ["#0047BB", "#FF1493"]),
+        (2, ["#FFFFFF"]),
+    ]
+    assert result.plates[1].bbox_mm.size == pytest.approx((12.0, 12.0, 1.0))
+    assert result.warnings == []
+
+    model = paths.root / result.model_3mf
+    assert [plate.index for plate in plates_of(model)] == [1, 2]
+    with zipfile.ZipFile(model) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+        config = archive.read("Metadata/model_settings.config").decode()
+    assert settings["filament_colour"] == ["#0047BB", "#FF1493", "#FFFFFF"]
+    # The lid is extruder 3 on plate 2, not extruder 1 of a plate of its own.
+    assert 'value="Color 3"/>\n   <metadata key="extruder" value="3"/>' in config
+
+
+async def test_one_plate_or_no_count_is_the_ordinary_render(paths: DataPaths) -> None:
+    for plates in (None, 1, 0):
+        result, asked = await _render_plated(paths, {0: [TRAY, WALL]}, plates=plates)
+        assert asked == [0]
+        assert result.plates == []
+        assert [plate.index for plate in plates_of(paths.root / result.model_3mf)] == [1]
+
+
+async def test_a_colour_only_a_plate_draws_is_appended_with_a_warning(paths: DataPaths) -> None:
+    result, _ = await _render_plated(paths, {0: [TRAY, WALL], 1: [TRAY, WALL], 2: [LID]}, plates=2)
+    assert result.colors == ["#0047BB", "#FF1493", "#FFFFFF"]
+    assert result.warnings == [
+        "plate 2: #FFFFFF is not in the all-plates render; it gets extruder 3"
+    ]
+
+
+async def test_a_colour_no_plate_draws_gives_up_its_extruder(paths: DataPaths) -> None:
+    result, _ = await _render_plated(paths, {0: [TRAY, WALL, LID], 1: [TRAY], 2: [LID]}, plates=2)
+    assert result.colors == ["#0047BB", "#FFFFFF"]
+    assert [(p.index, p.colors) for p in result.plates] == [(1, ["#0047BB"]), (2, ["#FFFFFF"])]
+    assert result.warnings == ["#FF1493 is drawn only with every plate at once; it is on no plate"]
+
+
+async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
+    with pytest.raises(OpenSCADError, match="asks for 17 plates"):
+        await _render_plated(paths, {0: [TRAY]}, plates=jobs.MAX_PLATES + 1)
+
+
+async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
+    with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
+        await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
@@ -61,10 +62,10 @@ SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
 #: A duplicate's staging folder under ``cache/`` (#156, #212).
 DUPLICATE_STAGING_PREFIX = "duplicate-"
-#: Seconds before the boot sweep treats a duplicate's staging as abandoned. A copy
-#: takes seconds, so anything this old is a crash, not another replica's live copy
-#: on a shared ``/data``.
-DUPLICATE_STAGING_MAX_AGE = 3600
+#: Seconds before a sweep treats a duplicate's staging as abandoned. A copy takes
+#: seconds, so anything this old is a crash, not another replica's live copy on a
+#: shared ``/data``. The default; ``SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`` sets it.
+DUPLICATE_STAGING_MAX_AGE = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 
 #: How many times a merge is worked out again when the template or its upstream
 #: moves between planning and writing it, before it is refused.
@@ -93,7 +94,7 @@ def _remove_tree(path: Path) -> bool:
         return False
     except OSError:
         if _still_there(path):
-            logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
+            logger.exception("could not remove a path", extra={"path": str(path)})
             return False
     return True
 
@@ -111,7 +112,11 @@ class _StaleMergeError(Exception):
 
 
 class ModelNotFoundError(KeyError):
-    pass
+    def __init__(self, slug: str) -> None:
+        super().__init__(slug)
+        #: The model that is missing, which need not be the one a caller asked
+        #: for: a duplicate can lose its upstream or its new copy (#215).
+        self.slug = slug
 
 
 class SidecarNotFoundError(KeyError):
@@ -251,11 +256,13 @@ class Catalogue:
         paths: DataPaths,
         history: ModelHistory | None = None,
         outputs: OutputStore | None = None,
+        duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
     ) -> None:
         self.paths = paths
         self.history = history
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
+        self.duplicate_staging_max_age = duplicate_staging_max_age
 
     def _commit(self, message: str, *slugs: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
@@ -608,8 +615,8 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
-        # And any an earlier duplicate crashed out of, once it is old enough not to
-        # be another replica's copy in flight: a single replica that crashed and
+        # Sweep any staging an earlier duplicate crashed out of, once it is old
+        # enough not to be another replica's copy in flight: a single replica that crashed and
         # restarted inside the hour clears it here rather than never. Best-effort:
         # the duplicate is committed, so a failure here is logged, not reported.
         try:
@@ -765,8 +772,7 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._replace_source(slug, source)
-            self._commit(message or f"Edit {slug} source", slug)
+            self._write_edit(slug, source, message or f"Edit {slug} source")
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -779,6 +785,35 @@ class Catalogue:
 
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
+
+    def _write_edit(self, slug: str, source: str, message: str) -> None:
+        """A plain edit: written under the history's write lock, with its commit (#370),
+        so it cannot land between another write's check and its write -- a merge's
+        ``still_applies``, say -- nor be overwritten by one before it is committed.
+
+        Failures as :meth:`_commit`: a failed commit after the write is logged, not
+        raised. When the lock itself cannot be had, the edit is written without it
+        and only its revision is lost, as it always was.
+        """
+        if self.history is None or not self.history.available:
+            self._replace_source(slug, source)
+            return
+        started = written = False
+
+        def write() -> None:
+            nonlocal started, written
+            started = True
+            self._replace_source(slug, source)
+            written = True
+
+        try:
+            self.history.commit(message, slug, prepare=write)
+        except (GitError, OSError):
+            if started and not written:
+                raise
+            if not started:
+                self._replace_source(slug, source)
+            logger.exception("could not record a revision", extra={"revision_message": message})
 
     def _replace_source(self, slug: str, source: str) -> None:
         """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
@@ -833,7 +868,7 @@ class Catalogue:
     def upstream_status(self, slug: str) -> UpstreamStatus:
         upstream, revision, state = self._upstream_now(slug)
         preview = None
-        if state == "update" and revision is not None:
+        if state in ("update", "dismissed") and revision is not None:
             preview = plan_merge(
                 self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
             ).preview
@@ -987,14 +1022,15 @@ class Catalogue:
     def sweep_duplicate_staging(self) -> list[str]:
         """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
 
-        Runs at boot and after each duplicate. Another replica sharing ``/data`` may
-        be mid-copy, so only staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        Runs at boot, after each duplicate and with the periodic upload sweep.
+        Another replica sharing ``/data`` may be mid-copy, so only staging older
+        than ``duplicate_staging_max_age`` goes.
         One that cannot be read or removed is logged and the rest still go.
         """
         root = self.paths.cache
         if not root.is_dir():
             return []
-        cutoff = time.time() - DUPLICATE_STAGING_MAX_AGE
+        cutoff = time.time() - self.duplicate_staging_max_age
         removed: list[str] = []
         for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
             try:

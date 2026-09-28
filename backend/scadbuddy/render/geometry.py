@@ -15,6 +15,14 @@ What it reads
     a warning, :func:`split_colours` reads it back, and such a part is reported
     with ``source="split"`` and no edge check (``edges_checked=False``).
 
+Plates
+    A template can put its parts on more than one plate (#289, design spec §6.4).
+    Each plate is measured on its own: its parts are the ones its build item is
+    made of, and it has its own bounding box, bed and wall estimate. Plates share
+    one set of model coordinates -- a template draws each plate at the origin --
+    so measuring them together would superimpose geometry that is never on one
+    bed. A one-plate 3MF is plate 1.
+
 Frame
     Everything is in the model's own OpenSCAD coordinates (millimetres, Z up), the
     same frame as the preview GLB before its Y-up turn, so a location can be
@@ -81,7 +89,12 @@ import numpy.typing as npt
 import trimesh
 from pydantic import BaseModel, Field
 
-from scadbuddy.render.bambu3mf import CORE_NS, PROJECT_SETTINGS_NAME
+from scadbuddy.render.bambu3mf import (
+    CORE_NS,
+    MODEL_SETTINGS_NAME,
+    PROJECT_SETTINGS_NAME,
+    laid_out_plates,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import UNCOLOURED_WARNING
 from scadbuddy.render.solids import SPLIT_FALLBACK
@@ -89,7 +102,7 @@ from scadbuddy.render.split import ColourPart, normalise_colour
 
 #: Bumped whenever a measurement changes meaning, so a cached analysis written by
 #: an older version is computed again rather than served.
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 2
 
 #: Overhang buckets, in degrees below horizontal.
 OVERHANG_ANGLES = (45, 60, 75)
@@ -184,6 +197,10 @@ class GeometryAnalysis(BaseModel):
     """What :func:`analyze_geometry` measured. See the module docstring for methods."""
 
     version: int = ANALYSIS_VERSION
+    #: The plate measured, and how many the 3MF has. Each plate is measured on its
+    #: own; see the module docstring.
+    plate: int = 1
+    plates: int = 1
     parts: list[PartGeometry]
     bbox: BoundingBox
     #: Z of the build plate in model coordinates: the lowest vertex.
@@ -227,6 +244,15 @@ def split_colours(warnings: Sequence[str], colours: Sequence[str]) -> set[str]:
     }
 
 
+class NoSuchPlateError(LookupError):
+    """The 3MF has no plate with the index asked for."""
+
+    def __init__(self, plate: int, plates: int) -> None:
+        super().__init__(f"there is no plate {plate}; the 3MF has {plates}")
+        self.plate = plate
+        self.plates = plates
+
+
 class Unreadable3MFError(ValueError):
     """The 3MF cannot be read: not a zip, a corrupt entry, or malformed XML/JSON.
 
@@ -236,30 +262,63 @@ class Unreadable3MFError(ValueError):
     """
 
 
-def parts_from_3mf(path: Path) -> list[ColourPart]:
-    """The per-extruder parts of a ScadBuddy 3MF, in extruder order.
+def parts_from_3mf(path: Path, plate: int = 1) -> list[ColourPart]:
+    """The parts on one plate of a ScadBuddy 3MF, in extruder order.
 
-    Read from ``3D/Objects/object_<n>.model`` as `bambu3mf.write_bambu_3mf` wrote
-    them -- the meshes in model coordinates, without the build item's placement.
-    Raises :class:`Unreadable3MFError` when the file is damaged.
+    Read from the ``3D/Objects/object_<n>.model`` files `bambu3mf.write_plates_3mf`
+    wrote for that plate -- the meshes in model coordinates, without the build
+    item's placement. Each part's ``material_index`` is its extruder, which on a
+    later plate is not its position. Raises :class:`NoSuchPlateError` when there is
+    no such plate and :class:`Unreadable3MFError` when the file is damaged.
     """
+    return _plate_parts(path, plate)[0]
+
+
+def _plate_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
+    """The plate's parts and how many plates the 3MF has."""
     try:
-        return _read_parts(path)
+        return _read_parts(path, plate)
     except (zipfile.BadZipFile, ET.ParseError, zlib.error, EOFError, ValueError) as error:
         raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
 
 
-def _read_parts(path: Path) -> list[ColourPart]:
+def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
+        laid_out = laid_out_plates(archive)
+        chosen = next((each for each in laid_out if each.index == plate), None)
+        if chosen is None:
+            raise NoSuchPlateError(plate, len(laid_out))
+        if len(laid_out) == 1:
+            # Every object file, in number order: also the reading of a 3MF written
+            # before plates were numbered.
+            count = 0
+            while f"3D/Objects/object_{count + 1}.model" in names:
+                count += 1
+            indices = list(range(1, count + 1))
+        else:
+            indices = [
+                int(name.removeprefix("3D/Objects/object_").removesuffix(".model"))
+                for name in chosen.object_files
+            ]
         colours: list[str] = []
         if PROJECT_SETTINGS_NAME in names:
             settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
             colours = [str(value) for value in settings.get("filament_colour") or []]
-        index = 1
-        while (entry := f"3D/Objects/object_{index}.model") in names:
-            root = ET.fromstring(archive.read(entry))
+        # Object N is extruder N in a one-plate file; a multi-plate one numbers its
+        # objects across plates (spec §6.4), so each part's extruder is read from
+        # the part list rather than assumed.
+        extruders: dict[int, int] = {}
+        if MODEL_SETTINGS_NAME in names:
+            listing = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+            for part_node in listing.iter("part"):
+                metadata = {m.get("key"): m.get("value") for m in part_node.findall("metadata")}
+                part_id, extruder = part_node.get("id") or "", metadata.get("extruder") or ""
+                if part_id.isdigit() and extruder.isdigit():
+                    extruders[int(part_id)] = int(extruder)
+        for index in indices:
+            root = ET.fromstring(archive.read(f"3D/Objects/object_{index}.model"))
             obj = root.find(f".//{{{CORE_NS}}}object")
             vertices_node = root.find(f".//{{{CORE_NS}}}vertices")
             triangles_node = root.find(f".//{{{CORE_NS}}}triangles")
@@ -278,17 +337,17 @@ def _read_parts(path: Path) -> list[ColourPart]:
                 dtype=np.int64,
             ).reshape(-1, 3)
             name = (obj.get("name") if obj is not None else None) or f"Color {index}"
-            colour = normalise_colour(colours[index - 1] if index <= len(colours) else None)
+            number = extruders.get(index, index)
+            colour = normalise_colour(colours[number - 1] if 1 <= number <= len(colours) else None)
             parts.append(
                 ColourPart(
-                    material_index=index,
+                    material_index=number,
                     name=name,
                     colour=colour,
                     mesh=trimesh.Trimesh(vertices=vertices, faces=faces, process=False),
                 )
             )
-            index += 1
-    return parts
+    return parts, len(laid_out)
 
 
 def _welded(mesh: trimesh.Trimesh) -> tuple[FloatArray, IntArray]:
@@ -419,13 +478,20 @@ def _islands(vertex_count: int, faces: IntArray) -> IntArray:
 
 
 def analyze_geometry(
-    parts: Sequence[ColourPart], *, split: Collection[str] = ()
+    parts: Sequence[ColourPart],
+    *,
+    split: Collection[str] = (),
+    extruders: Sequence[int] | None = None,
 ) -> GeometryAnalysis:
     """Measure ``parts`` (one mesh per extruder, in extruder order).
 
     ``split`` names the colours whose mesh is the preview split rather than a closed
-    solid; their edges are not checked. See the module docstring for each method.
+    solid; their edges are not checked. ``extruders`` numbers the parts when they
+    are not extruders 1, 2, ... in order, as on a later plate. See the module
+    docstring for each method.
     """
+    if extruders is not None and len(extruders) != len(parts):
+        raise ValueError("one extruder per part")
     if not parts:
         raise ValueError("there is no geometry to analyse")
 
@@ -452,7 +518,8 @@ def analyze_geometry(
     feature: FeatureEstimate | None = None
     islands = 0
 
-    for number, (part, (vertices, faces)) in enumerate(zip(parts, welded, strict=True), start=1):
+    numbers = list(extruders) if extruders is not None else range(1, len(parts) + 1)
+    for number, part, (vertices, faces) in zip(numbers, parts, welded, strict=True):
         source: PartSource = "split" if part.colour in split else "solid"
         if len(faces) == 0:
             # Still one entry per extruder, so `parts` lines up with the output's
@@ -617,8 +684,13 @@ def analyze_geometry(
     )
 
 
-def analyze_3mf(path: Path, *, warnings: Sequence[str] = ()) -> GeometryAnalysis:
-    """:func:`analyze_geometry` over a ScadBuddy 3MF, with the render's warnings
-    saying which parts are split fallbacks."""
-    parts = parts_from_3mf(path)
-    return analyze_geometry(parts, split=split_colours(warnings, [part.colour for part in parts]))
+def analyze_3mf(path: Path, *, warnings: Sequence[str] = (), plate: int = 1) -> GeometryAnalysis:
+    """:func:`analyze_geometry` over one plate of a ScadBuddy 3MF, with the render's
+    warnings saying which parts are split fallbacks."""
+    parts, plates = _plate_parts(path, plate)
+    analysis = analyze_geometry(
+        parts,
+        split=split_colours(warnings, [part.colour for part in parts]),
+        extruders=[part.material_index for part in parts],
+    )
+    return analysis.model_copy(update={"plate": plate, "plates": plates})

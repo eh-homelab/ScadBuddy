@@ -221,9 +221,12 @@ def test_a_merge_base_is_refused_where_it_cannot_apply(
     assert "not a duplicate" in not_a_duplicate.json()["detail"]
 
 
-def test_dismissing_hides_the_update_until_the_upstream_moves_again(
+def test_dismissing_marks_the_update_dismissed_until_the_upstream_moves_again(
     client: TestClient, settings: Settings, bundled: Path
 ) -> None:
+    """Dismissing only moves the listing's state off ``update`` (so no badge): the
+    update itself stays previewed and mergeable, and the next upstream move brings
+    ``update`` back."""
     _duplicate(client)
     refused = client.post(f"/api/v1/models/{MINE}/upstream/dismiss")
     assert refused.status_code == 409, refused.text
@@ -239,7 +242,10 @@ def test_dismissing_hides_the_update_until_the_upstream_moves_again(
     assert _listed(client)["upstream_state"] == "dismissed"
     status = _upstream(client)
     assert status["state"] == "dismissed"
-    assert status["preview"] is None
+    # #235: still offered for review, as the merge a `POST …/merge` would still make.
+    assert status["revision"] == first
+    assert status["preview"]["clean"] is True
+    assert status["preview"]["merged"] == SOURCE.replace("width = 40;", "width = 50;")
     assert _messages(client, MINE)[0] == f"Dismiss {BUILTIN} update in {MINE}"
     assert _source(client) == SOURCE
 
@@ -480,12 +486,62 @@ def test_a_merge_the_template_keeps_moving_under_is_refused(
     edits = [SOURCE.replace('layout = "row";', f'layout = "{n}";') for n in range(MERGE_ATTEMPTS)]
     _edit_after_planning(monkeypatch, catalogue, list(edits))
 
-    with pytest.raises(UpstreamStateError):
+    with pytest.raises(UpstreamStateError) as refused:
         catalogue.merge_upstream("copy")
+
+    # #371: told apart from "no update to merge" (`current`/`gone`) by its state.
+    assert refused.value.state == "update"
 
     assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edits[-1]
     upstream = catalogue.record("copy").upstream
     assert upstream is not None and upstream.base == base
+
+
+def test_an_edit_racing_a_merges_write_waits_for_it(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#370: a plain edit arriving after a merge's staleness check but before its
+    write must not land in between, where the merge would overwrite it."""
+    catalogue = _racing(paths)
+    history = catalogue.history
+    assert history is not None
+    edited = SOURCE.replace("hole = 3;", "hole = 5;")
+    replace = Catalogue._replace_source
+    edit_written = threading.Event()
+
+    def watched_replace(self: Catalogue, slug: str, source: str) -> None:
+        replace(self, slug, source)
+        if source == edited:
+            edit_written.set()
+
+    monkeypatch.setattr(Catalogue, "_replace_source", watched_replace)
+    still_applies = MergePlan.still_applies
+    edit = threading.Thread(target=lambda: catalogue.write_source("copy", edited))
+
+    # The merge holds the write lock from here to its commit. An edit written
+    # without it lands now, and the merge's write then clobbers it; one written
+    # under it cannot land before the merge's commit, so this wait times out.
+    def check_then_edit(self: MergePlan, directory: Path) -> bool:
+        applies = still_applies(self, directory)
+        edit.start()
+        edit_written.wait(timeout=1)
+        return applies
+
+    monkeypatch.setattr(MergePlan, "still_applies", check_then_edit)
+
+    try:
+        _, plan = catalogue.merge_upstream("copy")
+    finally:
+        if edit.is_alive():
+            edit.join()
+
+    assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edited
+    assert history.show("HEAD", "copy/model.scad").decode() == edited
+    assert [revision.message for revision in history.log("copy")][:2] == [
+        "Edit copy source",
+        "Merge keychain into copy",
+    ]
+    assert plan.preview.merged != edited
 
 
 # ── #179's details through an upstream merge ─────────────────────────────────

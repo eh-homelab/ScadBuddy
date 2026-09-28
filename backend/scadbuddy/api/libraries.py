@@ -31,6 +31,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     SlugPath,
 )
+from scadbuddy.api.library_pins import resolve_pin
 from scadbuddy.api.models import require_mine, require_model_exists
 from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
@@ -52,8 +53,6 @@ from scadbuddy.library.libraries import (
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
-    LibraryFetchError,
-    LibraryNotFoundError,
     LibraryNotInstalledError,
     LibraryStore,
     ModelLibrary,
@@ -167,9 +166,7 @@ async def _pin(
     try:
         # Held from the clone to the record, so no removal lands in between.
         async with checkouts.pinning():
-            # A clone is a network fetch; off the loop, and a bounded number at a time.
-            async with installs:
-                pin = await asyncio.to_thread(libraries.resolve, name, url=url, ref=ref)
+            pin = await resolve_pin(name, url=url, ref=ref, libraries=libraries, installs=installs)
             record = await asyncio.to_thread(
                 partial(catalogue.pin_library, slug, pin, replacing=replacing)
             )
@@ -179,15 +176,6 @@ async def _pin(
             f"{slug!r}'s {name!r} was changed or removed while this re-pin ran; "
             "nothing was recorded",
         ) from None
-    except LibraryNotFoundError:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND,
-            f"{name!r} is not in the catalogue; give a url to pin it from",
-        ) from None
-    except LibraryFetchError as error:
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, str(error)) from None
-    except LibraryError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None

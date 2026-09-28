@@ -201,7 +201,7 @@ export interface paths {
         put?: never;
         /**
          * Add a model
-         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
+         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically. The JSON and multipart bodies may name curated `libraries`: each is pinned at the catalogue's ref, as `PUT /models/{slug}/libraries/{name}` would, recorded in the model's first revision and on the parse check's library path.
          */
         post: operations["create_model_api_v1_models_post"];
         delete?: never;
@@ -621,7 +621,7 @@ export interface paths {
         };
         /**
          * A duplicate's upstream: state and merge preview
-         * @description `state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.
+         * @description `state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed; still mergeable) or `gone` (the upstream no longer exists). On `update` and `dismissed`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.
          */
         get: operations["get_upstream_api_v1_models__slug__upstream_get"];
         put?: never;
@@ -683,7 +683,7 @@ export interface paths {
         put?: never;
         /**
          * Merge the upstream's current revision
-         * @description Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.
+         * @description Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. A dismissed update merges the same way. 409 is one of three cases, told apart by the problem's fields: a conflict carries `merged` and `merge_base`; no update to merge carries `state` `current` or `gone`; and a template or upstream that kept changing across every attempt to write the merge carries `state` `update` or `dismissed` and is worth retrying.
          */
         post: operations["merge_upstream_api_v1_models__slug__upstream_merge_post"];
         delete?: never;
@@ -828,11 +828,13 @@ export interface paths {
         };
         /**
          * Mesh geometry analysis
-         * @description Printability measurements of the output's closed per-colour solids (#284):
-         *     open and non-manifold edges with their locations, bounding box, bed contact,
-         *     height-to-base ratio, overhang area by angle, and estimates of the thinnest
-         *     wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
-         *     the preview. Computed on first ask and cached beside the output.
+         * @description Printability measurements of the closed per-colour solids on one plate of the
+         *     output (#284): open and non-manifold edges with their locations, bounding box,
+         *     bed contact, height-to-base ratio, overhang area by angle, and estimates of the
+         *     thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
+         *     as in the preview. A 3MF with more than one plate (#289) is measured a plate at
+         *     a time; ``plates`` in the result says how many there are. Computed on first ask
+         *     and cached beside the output.
          */
         get: operations["get_output_geometry_api_v1_outputs__output_id__geometry_get"];
         put?: never;
@@ -870,7 +872,7 @@ export interface paths {
         /**
          * The 3MF's plates
          * @description What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
-         *     always one plate, which the picker does not ask about.
+         *     one plate unless the template asks for more (#289).
          */
         get: operations["get_output_plates_api_v1_outputs__output_id__plates_get"];
         put?: never;
@@ -1533,6 +1535,11 @@ export interface components {
              */
             file?: string | null;
             /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, one per field; a pin the model.json carries wins
+             */
+            libraries?: string[] | null;
+            /**
              * Meta
              * @description Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
              */
@@ -1985,11 +1992,21 @@ export interface components {
             overhangs: components["schemas"]["OverhangBucket"][];
             /** Parts */
             parts: components["schemas"]["PartGeometry"][];
+            /**
+             * Plate
+             * @default 1
+             */
+            plate: number;
+            /**
+             * Plates
+             * @default 1
+             */
+            plates: number;
             smallest_feature?: components["schemas"]["FeatureEstimate"] | null;
             thinnest_wall?: components["schemas"]["WallEstimate"] | null;
             /**
              * Version
-             * @default 1
+             * @default 2
              */
             version: number;
         };
@@ -2082,6 +2099,8 @@ export interface components {
             };
             /** Parts */
             parts?: components["schemas"]["PartInfo"][] | null;
+            /** Plates */
+            plates?: components["schemas"]["PlateInfo"][] | null;
             /** Preview Url */
             preview_url?: string | null;
             /** Slug */
@@ -2572,6 +2591,11 @@ export interface components {
              */
             force: boolean;
             /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, in the model's first revision and before the parse check
+             */
+            libraries?: string[];
+            /**
              * Name
              * @description Display name; its slug is derived from it
              */
@@ -2870,6 +2894,18 @@ export interface components {
             plate: components["schemas"]["PlateView"];
             /** Problem */
             problem?: string | null;
+        };
+        /**
+         * PlateInfo
+         * @description One plate of a multi-plate render (spec §6.4): what the customizer checks
+         *     against the printer, plate by plate.
+         */
+        PlateInfo: {
+            bbox_mm: components["schemas"]["BoundingBox"];
+            /** Colors */
+            colors: string[];
+            /** Index */
+            index: number;
         };
         /**
          * PlateSend
@@ -3599,7 +3635,7 @@ export interface components {
         };
         /** UpstreamStatus */
         UpstreamStatus: {
-            /** @description The merge a `POST …/upstream/merge` would make; on update only */
+            /** @description The merge a `POST …/upstream/merge` would make; on update or dismissed */
             preview?: components["schemas"]["MergePreview"] | null;
             /**
              * Revision
@@ -5197,6 +5233,13 @@ export interface operations {
                     "application/json": components["schemas"]["UpstreamMerge"];
                 };
             };
+            /** @description The merge conflicts (`merged`, `merge_base`, `conflicts`: resolve it in the editor), there is no update to merge (`state` is `current` or `gone`), or the template or its upstream kept changing while the merge was worked out (`state` is `update` or `dismissed`: retry) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -5464,7 +5507,10 @@ export interface operations {
     };
     get_output_geometry_api_v1_outputs__output_id__geometry_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The plate to measure (1-based) */
+                plate?: number;
+            };
             header?: never;
             path: {
                 output_id: string;

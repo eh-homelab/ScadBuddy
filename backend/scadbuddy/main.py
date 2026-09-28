@@ -155,10 +155,20 @@ async def _sweep_assets_logged(state: AppState) -> None:
         logger.exception("could not sweep unused uploads")
 
 
+async def _sweep_duplicate_staging_logged(state: AppState) -> None:
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
+    except OSError:
+        logger.exception("could not sweep duplicate staging folders")
+
+
 async def _asset_sweeper(state: AppState) -> None:
     while True:
         await asyncio.sleep(state.config.asset_sweep_interval)
         await _sweep_assets_logged(state)
+        # The periodic housekeeping pass: a crashed duplicate's staging otherwise
+        # waits for the next boot or duplicate (#397).
+        await _sweep_duplicate_staging_logged(state)
 
 
 @asynccontextmanager
@@ -187,10 +197,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("could not sweep tombstones")
     # A duplicate the process died in the middle of left its staging copy. Nothing
     # is duplicating yet: no request has been served.
-    try:
-        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
-    except OSError:
-        logger.exception("could not sweep duplicate staging folders")
+    await _sweep_duplicate_staging_logged(state)
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
@@ -213,6 +220,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await sweep_library_checkouts(state)
     except (OSError, GitError):
         logger.exception("could not sweep library checkouts")
+    # The upload store's running total, recounted once (#390): uploads and sweeps
+    # keep it from here, but a file added or removed while the process was down is
+    # only counted by a scan.
+    try:
+        await asyncio.to_thread(state.assets.rebuild_usage)
+    except OSError:
+        logger.exception("could not recount the upload store")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
