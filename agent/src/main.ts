@@ -119,6 +119,12 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
+// `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
+// `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
+// (routes/mcpAuthMode.ts), so both report the same thing. A read that throws
+// makes /mcp fail closed (mcp/http.ts).
+const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo)
 // The registry's services (#251), shared by /mcp and every session's
 // in-process tools. `pending` is swapped for the ai_approvals store below once
 // the sessions (and so the approval service) exist.
@@ -214,6 +220,7 @@ const app = createApp({
   packageInstaller,
   settings,
   tokens: database ? tokens : undefined,
+  aiSettings: settings,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -235,11 +242,7 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
-    // Read per request (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
-    // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode`
-    // and `mcp_anonymous_cap` keys. A read that throws makes /mcp fail closed
-    // (mcp/http.ts).
-    authSettings: mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo),
+    authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
   },
