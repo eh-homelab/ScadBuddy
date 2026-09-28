@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import psycopg
 import pytest
 import pytest_asyncio
 import trimesh
@@ -528,6 +529,46 @@ def _file_schema() -> CustomizerSchema:
             Parameter(name="base_color", type="color", initial="#0047BB"),
         ]
     )
+
+
+async def test_staging_looks_the_upload_up_off_the_event_loop(
+    paths: DataPaths, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """Marking an upload used is a database round trip (#591) that waits on a row the
+    sweep has locked; the render must wait in a thread, not stall the whole loop."""
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
+    held = psycopg.connect(pg_conninfo)  # a transaction: the sweep's re-check, row locked
+    held.execute("SELECT 1 FROM assets WHERE id = %s FOR UPDATE", (asset.id,))
+    release = threading.Timer(1.0, held.commit)
+    release.start()
+
+    async def stage() -> dict[str, ParamValue]:
+        async with jobs.staged_assets(
+            _file_schema(), {"overlay": asset.id}, model_dir, store
+        ) as params:
+            return params
+
+    try:
+        staging = asyncio.create_task(stage())
+        loop = asyncio.get_running_loop()
+        gaps: list[float] = []
+        last = loop.time()
+        while not staging.done():
+            await asyncio.sleep(0.05)
+            gaps.append(loop.time() - last)
+            last = loop.time()
+        params = await staging
+    finally:
+        release.join()
+        held.close()
+    assert isinstance(params["overlay"], str)
+    assert params["overlay"].startswith(STAGED_ASSET_PREFIX)
+    # The row lock was held for a second; the loop never stopped for it.
+    assert sum(gaps) >= 0.9
+    assert max(gaps) < 0.5, f"the event loop stalled for {max(gaps):.2f}s"
 
 
 async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
