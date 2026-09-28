@@ -3,7 +3,7 @@
 Phase 1's `BlobStore` is directory-shaped: a piece renders into `dir_for(key)`. This is
 §6.2's byte-stream interface, named `ContentStore` because `BlobStore` is taken:
 `put/get/stat/delete/list` over a backend, plus the Postgres index that makes a fetch
-by id, the caps and the usage O(1). `store/cache.py` puts the directory shape back on
+by id, the caps and the usage one query each. `store/cache.py` puts the directory shape back on
 top for processes that share no volume. `put` takes bytes, not a stream: every caller
 holds the blob in memory already (a packed directory, a sanitised upload).
 """
@@ -124,7 +124,10 @@ class ContentStore:
         )
 
     async def _release(self, ref: BlobRef) -> None:
-        """Remove the object unless an index row still names it."""
+        """Remove the object unless an index row still names it. Refuses a ref on another
+        backend (a row left by a `store_backend` switch): its id means nothing here."""
+        if ref.backend != self.name:
+            raise ValueError(f"a {ref.backend} object is not this {self.name} store's to remove")
         if not await asyncio.to_thread(self.index.shares_backend_id, ref.backend, ref.backend_id):
             await self.backend.remove(ref.backend_id)
             self._count("delete", "ok")
@@ -141,11 +144,22 @@ class ContentStore:
     ) -> BlobRef:
         ref = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
-        previous = await asyncio.to_thread(self.index.get, key)
-        await asyncio.to_thread(self.index.put, key, ref, slug=scope.slug, meta=meta or {})
-        if previous is not None and previous.ref.backend_id != ref.backend_id:
-            await self._release(previous.ref)
+        previous = await asyncio.to_thread(
+            self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+        )
+        if previous is not None and previous.backend_id != ref.backend_id:
+            await self._release_replaced(key, previous)
         return ref
+
+    async def _release_replaced(self, key: str, previous: BlobRef) -> None:
+        if previous.backend != self.name:
+            # The key moved to this backend; the old object is the other one's to sweep.
+            logger.warning(
+                "left a replaced blob on another backend",
+                extra={"key": key, "backend": previous.backend},
+            )
+            return
+        await self._release(previous)
 
     async def replace(
         self,
@@ -169,10 +183,12 @@ class ContentStore:
             await self._release(ref)
             return None
         if previous is not None and previous.ref.backend_id != ref.backend_id:
-            await self._release(previous.ref)
+            await self._release_replaced(key, previous.ref)
         return ref
 
     async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
+        """The object's bytes, sha-checked at the end. On `BlobMissingError` the index
+        row is kept; a caller that gets it should `forget` the key."""
         digest = hashlib.sha256()
         try:
             async for chunk in self.backend.download(ref.backend_id):
@@ -191,7 +207,7 @@ class ContentStore:
 
     async def stat(self, key: str) -> BlobStat | None:
         stat = await asyncio.to_thread(self.index.get, key)
-        if stat is None:
+        if stat is None or stat.ref.backend != self.name:
             return None
         if not await self.backend.exists(stat.ref.backend_id):
             await self.forget(key)
@@ -200,6 +216,11 @@ class ContentStore:
 
     async def forget(self, key: str) -> None:
         await asyncio.to_thread(self.index.delete, key)
+
+    async def touch(self, key: str) -> None:
+        """Mark ``key`` wanted now. A claimant calls it before `refs.add` (see
+        `sweep_content`)."""
+        await asyncio.to_thread(self.index.touch, key)
 
     async def delete(self, key: str) -> None:
         stat = await asyncio.to_thread(self.index.delete, key)
@@ -214,18 +235,23 @@ class ContentStore:
         return True
 
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
-        for stat in await asyncio.to_thread(self.index.stats, None, scope.slug):
+        for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):
             yield stat
 
 
 async def sweep_content(
     content: ContentStore, refs: BlobRefs, *, grace: float, now: float | None = None
 ) -> list[str]:
-    """Remove every swept-kind blob nothing references and nothing touched for ``grace``."""
+    """Remove every swept-kind blob of this store's backend that nothing references and
+    nothing touched for ``grace``.
+
+    A claimant calls `ContentStore.touch` (which bumps `touched_at`) before `refs.add`,
+    so a blob claimed between this sweep's `referenced()` snapshot and its loop is still
+    within the grace window and survives (`delete_if_stale` re-checks it atomically)."""
     cutoff = datetime.fromtimestamp((time.time() if now is None else now) - grace, UTC)
     kept = await asyncio.to_thread(refs.referenced)
     removed: list[str] = []
-    for stat in await asyncio.to_thread(content.index.stats, SWEPT_KINDS):
+    for stat in await asyncio.to_thread(content.index.stats, SWEPT_KINDS, backend=content.name):
         if stat.key in kept or stat.touched_at > cutoff:
             continue
         try:

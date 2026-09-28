@@ -53,25 +53,36 @@ class BlobIndex:
             ).fetchone()
         return _stat(row).ref if row is not None else None
 
-    def put(self, key: str, ref: BlobRef, *, slug: str | None, meta: dict[str, Any]) -> None:
+    def put(
+        self, key: str, ref: BlobRef, *, slug: str | None, meta: dict[str, Any]
+    ) -> BlobRef | None:
+        """Point ``key`` at ``ref`` and return what it named before, read under the
+        row's lock in the same transaction, so two racing puts each release exactly the
+        object the other one replaced. A key another put created meanwhile is retried
+        as an update: a single upsert would not see that row's object."""
+        values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size, slug, meta)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO UPDATE SET"
-                " sha256 = EXCLUDED.sha256, kind = EXCLUDED.kind, backend = EXCLUDED.backend,"
-                " backend_id = EXCLUDED.backend_id, size = EXCLUDED.size, slug = EXCLUDED.slug,"
-                " meta = EXCLUDED.meta, touched_at = now()",
-                (
-                    key,
-                    ref.sha256,
-                    ref.kind,
-                    ref.backend,
-                    ref.backend_id,
-                    ref.size,
-                    slug,
-                    Jsonb(meta),
-                ),
-            )
+            while True:
+                with conn.transaction():
+                    row = conn.execute(
+                        f"SELECT {_COLUMNS} FROM store_blobs WHERE key = %s FOR UPDATE", (key,)
+                    ).fetchone()
+                    if row is not None:
+                        conn.execute(
+                            "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
+                            " backend_id = %s, size = %s, slug = %s, meta = %s,"
+                            " touched_at = now() WHERE key = %s",
+                            (*values, key),
+                        )
+                        return _stat(row).ref
+                    inserted = conn.execute(
+                        "INSERT INTO store_blobs"
+                        " (sha256, kind, backend, backend_id, size, slug, meta, key)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
+                        (*values, key),
+                    )
+                    if inserted.rowcount == 1:
+                        return None
 
     def swap(
         self,
@@ -131,13 +142,21 @@ class BlobIndex:
             ).fetchone()
         return bool(row and row["shared"])
 
-    def stats(self, kinds: Sequence[str] | None, slug: str | None = None) -> list[BlobStat]:
+    def stats(
+        self,
+        kinds: Sequence[str] | None,
+        slug: str | None = None,
+        *,
+        backend: str | None = None,
+    ) -> list[BlobStat]:
+        """Rows by kind, template and backend; None matches any."""
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM store_blobs"
                 " WHERE (%s::text[] IS NULL OR kind = ANY(%s::text[]))"
-                " AND (%s::text IS NULL OR slug = %s) ORDER BY key",
-                (list(kinds) if kinds is not None else None,) * 2 + (slug, slug),
+                " AND (%s::text IS NULL OR slug = %s)"
+                " AND (%s::text IS NULL OR backend = %s) ORDER BY key",
+                (list(kinds) if kinds is not None else None,) * 2 + (slug, slug, backend, backend),
             ).fetchall()
         return [_stat(row) for row in rows]
 
