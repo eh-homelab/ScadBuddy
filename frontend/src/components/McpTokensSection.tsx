@@ -1,7 +1,7 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
-import type { McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
+import type { McpAuthMode, McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
@@ -94,7 +94,15 @@ function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpT
   )
 }
 
-export function McpTokensSection() {
+interface Props {
+  /**
+   * The mode just saved in "MCP authentication" (McpAuthSection), which is newer than
+   * the one this list was loaded with.
+   */
+  authMode?: McpAuthMode | undefined
+}
+
+export function McpTokensSection({ authMode: savedMode }: Props = {}) {
   const listState = useAsync(() => api.listMcpTokens(), [])
   const [name, setName] = useState('')
   const [tier, setTier] = useState<McpTokenTier>('read')
@@ -109,7 +117,7 @@ export function McpTokensSection() {
   const tokenRef = useRef<HTMLElement>(null)
 
   const list = listState.data
-  const authMode = list?.auth_mode ?? null
+  const authMode = savedMode ?? list?.auth_mode ?? null
 
   async function create(event: FormEvent) {
     event.preventDefault()
