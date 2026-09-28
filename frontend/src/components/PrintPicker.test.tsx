@@ -1,5 +1,6 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
+import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
@@ -515,6 +516,106 @@ describe('PrintPicker · Remembered choices', () => {
     expect(screen.getByRole('radio', { name: 'Left High Flow' })).toBeChecked()
   })
 
+  it('reopens in Advanced on a remembered High Flow with no named process', async () => {
+    await putChoices({
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.4', flow: 'high_flow' },
+        { size: '0.4', flow: 'standard' },
+      ],
+      tier: 'standard',
+      process_name: null,
+    })
+    renderPicker()
+    await loaded()
+
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: 'Left High Flow' })).toBeChecked()
+    // No named process: Advanced shows the remembered tier's own.
+    expect(screen.getByLabelText('Process')).toHaveValue('0.20mm Standard @BBL H2C')
+  })
+
+  it('keeps a remembered size and quality sent with no printer and no spool plan', async () => {
+    // The backend forgets only an all-default body; the mock once forgot this one too.
+    await putChoices({
+      printer_id: null,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+      tier: 'fine',
+      process_name: null,
+    })
+    renderPicker()
+    await loaded()
+
+    expect(screen.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Fine/ })).toBeChecked()
+  })
+
+  it('re-seeds from memory when the same mounted dialog is closed and reopened', async () => {
+    await putChoices({
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+      tier: 'fine',
+      process_name: null,
+    })
+    // ActionBar's shape: one PrintPicker stays mounted and `open` toggles.
+    const target = { ...output, library_file_id: undefined, pipeline_run_id: undefined }
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Reopen
+          </button>
+          <PrintPicker
+            open={open}
+            slug="name-keychain"
+            output={target}
+            onClose={() => setOpen(false)}
+            onRan={vi.fn()}
+          />
+        </>
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await loaded()
+    expect(screen.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
+
+    // Move off everything remembered, then cancel.
+    await user.click(screen.getByRole('radio', { name: /0\.4 mm/ }))
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
+
+    // What the model remembers changed while the dialog was closed.
+    await putChoices({
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.6', flow: 'standard' },
+        { size: '0.6', flow: 'standard' },
+      ],
+      tier: 'draft',
+      process_name: null,
+    })
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+
+    await waitFor(() => expect(screen.getByRole('radio', { name: /0\.6 mm/ })).toBeChecked())
+    expect(screen.getByRole('radio', { name: /Draft/ })).toBeChecked()
+    expect(screen.getByLabelText('Printer')).toHaveValue('1')
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
+  })
+
   it('opens on 0.4 mm and Standard when nothing is remembered', async () => {
     renderPicker()
     await loaded()
@@ -597,6 +698,82 @@ describe('PrintPicker · Remembered choices', () => {
     expect(await screen.findByTestId('queued-items')).toBeInTheDocument()
     expect(onRan).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('PrintPicker · Superseded reads', () => {
+  /** A response held back until `release` is called, so reads can answer out of order. */
+  function held() {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return { gate, release }
+  }
+
+  it('keeps the latest printer when an earlier printer read answers last', async () => {
+    const printers = [
+      ...(choicesView.printers ?? []),
+      { id: 3, name: '3DP-00C-003', model: 'H2C', is_active: true, nozzle_count: 2 },
+    ]
+    const slow = held()
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ request }) => {
+        const asked = Number(new URL(request.url).searchParams.get('printer_id') ?? '1')
+        if (asked === 2) await slow.gate
+        return HttpResponse.json({ ...choicesView, printers, printer_id: asked })
+      }),
+    )
+    const reads = vi.spyOn(api, 'getChoices')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await user.selectOptions(screen.getByLabelText('Printer'), '3')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('3'))
+    expect(reads.mock.calls.map(([, printerId]) => printerId)).toEqual([null, 2, 3])
+
+    slow.release()
+    await act(async () => {
+      await reads.mock.results[1]!.value
+    })
+    expect(screen.getByLabelText('Printer')).toHaveValue('3')
+  })
+
+  it("keeps the latest plate's slots when an earlier plate's read answers last", async () => {
+    const plateTwo = {
+      ...choicesView.filaments,
+      slots: (choicesView.filaments.slots ?? []).filter((slot) => slot.slot_id === 1),
+      suggested: (choicesView.filaments.suggested ?? []).filter((c) => c.slot_id === 1),
+    }
+    const slow = held()
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', async () => {
+        await slow.gate
+        return HttpResponse.json(plateTwo)
+      }),
+    )
+    const reads = vi.spyOn(api, 'getFilaments')
+    const { user } = renderPicker()
+    await loaded()
+
+    const plates = await screen.findByTestId('plate-choice')
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(reads).toHaveBeenCalledTimes(1))
+    // Back to plate 1, whose slots are in the choices read already, before plate 2 answers.
+    await user.click(within(plates).getByRole('radio', { name: /Plate 1/ }))
+
+    slow.release()
+    await act(async () => {
+      await reads.mock.results[0]!.value
+    })
+    expect(screen.getByTestId('filament-slot-2')).toBeInTheDocument()
   })
 })
 

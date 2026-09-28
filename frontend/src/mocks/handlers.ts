@@ -59,6 +59,26 @@ interface MockJob extends Job {
   polls: number
 }
 
+/** `ModelPrintChoices()` on the backend: every field at its default. */
+const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+  printer_id: null,
+  filament_plan: [],
+  nozzles: [],
+  tier: null,
+  process_name: null,
+}
+
+/** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
+function isNoModelChoices(choices: ModelPrintChoices): boolean {
+  return (
+    choices.printer_id == null &&
+    !choices.filament_plan?.length &&
+    !choices.nozzles?.length &&
+    choices.tier == null &&
+    choices.process_name == null
+  )
+}
+
 const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
@@ -1510,7 +1530,7 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     const slug = output.slug
-    const remembered = state.modelChoices[slug] ?? { printer_id: null, filament_plan: [] }
+    const remembered = state.modelChoices[slug] ?? NO_MODEL_CHOICES
     const asked = new URL(request.url).searchParams.get('printer_id')
     const printerId =
       asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
@@ -1540,10 +1560,11 @@ export const handlers = [
   http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const body = (await request.json()) as ModelPrintChoices
-    const empty = { printer_id: null, filament_plan: [] }
-    if (body.printer_id == null && !body.filament_plan?.length) delete state.modelChoices[slug]
-    else state.modelChoices[slug] = { ...empty, ...body }
-    return HttpResponse.json(state.modelChoices[slug] ?? empty)
+    // Forget only an all-default body, as the backend does: a remembered nozzle, tier or
+    // process with no printer and no plan is still kept.
+    if (isNoModelChoices(body)) delete state.modelChoices[slug]
+    else state.modelChoices[slug] = { ...NO_MODEL_CHOICES, ...body }
+    return HttpResponse.json(state.modelChoices[slug] ?? NO_MODEL_CHOICES)
   }),
 
   /**
