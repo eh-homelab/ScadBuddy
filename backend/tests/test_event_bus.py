@@ -186,6 +186,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "job.pending",
         "job.running",
         "job.done",
+        "job.progress",
         "job.failed",
         "job.superseded",
         "model.created",

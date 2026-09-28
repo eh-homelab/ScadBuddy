@@ -58,6 +58,8 @@ from typing import Annotated, Literal, Protocol, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from scadbuddy.core.metrics import RenderStage
+
 logger = logging.getLogger(__name__)
 
 #: The channel a Postgres backend NOTIFYs and LISTENs on (spec §7).
@@ -97,6 +99,16 @@ class JobEvent(BaseEvent):
     kind: JobKind
     job_id: str
     slug: str
+
+
+class JobProgress(BaseEvent):
+    """A running render started one of its steps (#267): the same steps
+    ``scadbuddy_render_stage_seconds`` times (``core/metrics.py`` ``RenderStage``)."""
+
+    kind: Literal["job.progress"] = "job.progress"
+    job_id: str
+    slug: str
+    stage: RenderStage
 
 
 class ModelEvent(BaseEvent):
@@ -213,6 +225,7 @@ class BusResync(BaseEvent):
 
 Event = Annotated[
     JobEvent
+    | JobProgress
     | ModelEvent
     | SourceChanged
     | VersionCommitted

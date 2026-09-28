@@ -67,6 +67,7 @@ from scadbuddy.core.events import (
     Event,
     FontInstalled,
     JobEvent,
+    JobProgress,
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
@@ -130,7 +131,7 @@ def valid_topic(topic: object) -> bool:
 def topics_of(event: Event) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
-        case JobEvent():
+        case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
             return ["models", f"model:{event.slug}"]
