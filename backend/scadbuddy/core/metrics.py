@@ -30,8 +30,9 @@ __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "Re
 RenderOutcome = Literal["done", "failed", "expired", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a job store call that failed was doing: a worker claiming or recording a
-#: job, a heartbeat, the lease reaper, or the per-scrape read of the queue gauges.
-StoreOperation = Literal["work", "heartbeat", "reap", "read"]
+#: job, a heartbeat, the lease reaper, the per-scrape read of the queue gauges, or
+#: (Temporal) starting a submitted job's workflow.
+StoreOperation = Literal["work", "heartbeat", "reap", "read", "start_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]

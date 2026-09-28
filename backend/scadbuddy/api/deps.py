@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
 from fastapi import Depends, Path, status
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 from starlette.requests import HTTPConnection
+from temporalio.client import Client
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.client import client_for
@@ -26,6 +30,7 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
@@ -39,11 +44,21 @@ from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.backend import RenderBackend
 from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.pg_store import PostgresJobStore
-from scadbuddy.render.previews import TIMEOUT_FACTOR, PreviewScheduler, render_preview
+from scadbuddy.render.previews import (
+    TIMEOUT_FACTOR,
+    PreviewRender,
+    PreviewScheduler,
+    render_preview,
+)
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.submit import RenderService
+from scadbuddy.store import BlobRefs
+from scadbuddy.store.local import LocalBlobStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +84,9 @@ class AppState:
     libraries: LibraryStore
     #: Uploads for `// file` parameters, with their caps (#296).
     assets: AssetStore
-    queue: RenderQueue
+    #: The legacy `RenderQueue`, or `RenderService` on Temporal when
+    #: SCADBUDDY_TEMPORAL_ADDRESS is set: exactly one of them per deployment.
+    queue: RenderBackend
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
     previews: PreviewScheduler | None
@@ -110,6 +127,12 @@ class AppState:
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
+    #: The Temporal path's (all None on the legacy one): the `render_jobs` projection,
+    #: the blob store and its references, and the client the lifespan connects.
+    projection: JobProjection | None = field(default=None)
+    blobs: LocalBlobStore | None = field(default=None)
+    refs: BlobRefs | None = field(default=None)
+    temporal: Client | None = field(default=None)
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
@@ -145,17 +168,27 @@ def build_state(settings: Settings) -> AppState:
     # Nothing connects here: the job pool opens in `RenderQueue.open_store` and the
     # event bus's in `PgNotifyEventBus.start`, both from the lifespan. The previews
     # share the job pool, and there are none without a database (#454, #401).
-    store: JobBackend
+    store: JobBackend | None = None
     events: EventBus
     preview_store: PreviewStore | None = None
+    projection: JobProjection | None = None
+    pool: ConnectionPool[Connection[DictRow]] | None = None
     if settings.database_url:
-        pg_store = PostgresJobStore(
-            settings.database_url, paths, pool_size=settings.database_pool_size
-        )
-        # One LISTEN connection per process: the bus shares the render queue's.
+        listener: PgListener
+        if settings.temporal_address:
+            # Renders on Temporal: the projection is the job store, and the legacy
+            # queue is never built, so nothing in this process claims a row.
+            projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
+            listener, pool = projection.pg_listener, projection.pool
+        else:
+            pg_store = PostgresJobStore(
+                settings.database_url, paths, pool_size=settings.database_pool_size
+            )
+            store, listener, pool = pg_store, pg_store.pg_listener, pg_store.pool
+        # One LISTEN connection per process: the bus shares the job store's.
         pg_events = PgNotifyEventBus(
             settings.database_url,
-            listener=pg_store.pg_listener,
+            listener=listener,
             metrics=metrics,
             retention=EventLogRetention(
                 seconds=settings.event_log_retention_seconds,
@@ -163,9 +196,12 @@ def build_state(settings: Settings) -> AppState:
             ),
         )
         # Job events commit with the job change that they describe.
-        pg_store.events = pg_events
-        store, events = pg_store, pg_events
-        preview_store = PreviewStore(pg_store.connection)
+        if projection is not None:
+            projection.events = pg_events
+        else:
+            pg_store.events = pg_events
+        events = pg_events
+        preview_store = PreviewStore(pool.connection)
     else:
         # No database: the UI keeps working, events reach this process only.
         store, events = JobStore(paths), InProcessEventBus()
@@ -173,7 +209,7 @@ def build_state(settings: Settings) -> AppState:
         PostgresDecisionStore(settings.database_url) if settings.database_url else None
     )
     outputs = OutputStore(paths)
-    uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
+    uploads = BambuddyUploadStore(pool)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -201,37 +237,59 @@ def build_state(settings: Settings) -> AppState:
         presets=presets,
         wrapper_prefix=WRAPPER_PREFIX,
         serve_previews=settings.preview_renders,
-        media_store=(
-            PostgresMediaStore(store.pool) if isinstance(store, PostgresJobStore) else None
-        ),
+        media_store=PostgresMediaStore(pool) if pool is not None else None,
     )
     history.on_commit = announce_commits(events, catalogue)
-    queue = RenderQueue(
-        config,
-        paths,
-        store=store,
-        history=history,
-        metrics=metrics,
-        events=events,
-        checkouts=checkouts,
-        fetcher=fetcher,
-        assets=assets,
-    )
+    queue: RenderBackend
+    runner: PreviewRender
+    blobs: LocalBlobStore | None = None
+    refs: BlobRefs | None = None
+    if projection is not None:
+        blobs = LocalBlobStore(paths.blobs)
+        refs = BlobRefs(projection.pool)
+        render = RenderService(
+            projection=projection,
+            client=None,
+            task_queue=settings.temporal_task_queue_render,
+            config=config,
+            paths=paths,
+            metrics=metrics,
+        )
+        queue, runner = render, render.render_preview
+    else:
+        assert store is not None
+        legacy = RenderQueue(
+            config,
+            paths,
+            store=store,
+            history=history,
+            metrics=metrics,
+            events=events,
+            checkouts=checkouts,
+            fetcher=fetcher,
+            assets=assets,
+        )
+
+        def runner(slug: str) -> Awaitable[bytes]:
+            return legacy.run_background(
+                lambda: render_preview(
+                    slug,
+                    config=config,
+                    paths=paths,
+                    history=history,
+                    assets=assets,
+                    executor=legacy.thumbnail_executor,
+                    checkouts=checkouts,
+                )
+            )
+
+        queue = legacy
     previews: PreviewScheduler | None = None
     if settings.preview_renders and preview_store is not None:
         previews = PreviewScheduler(
             catalogue,
             preview_store,
-            queue,
-            lambda slug: render_preview(
-                slug,
-                config=config,
-                paths=paths,
-                history=history,
-                assets=assets,
-                executor=queue.thumbnail_executor,
-                checkouts=checkouts,
-            ),
+            runner,
             timeout=config.render_timeout * TIMEOUT_FACTOR,
         )
         # Everything that can change whether a model needs a preview, or which one.
@@ -281,6 +339,9 @@ def build_state(settings: Settings) -> AppState:
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
+        projection=projection,
+        blobs=blobs,
+        refs=refs,
     )
 
 
@@ -358,7 +419,7 @@ def get_assets(state: StateDep) -> AssetStore:
     return state.assets
 
 
-def get_queue(state: StateDep) -> RenderQueue:
+def get_queue(state: StateDep) -> RenderBackend:
     return state.queue
 
 
@@ -416,7 +477,7 @@ SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 AssetsDep = Annotated[AssetStore, Depends(get_assets)]
-QueueDep = Annotated[RenderQueue, Depends(get_queue)]
+QueueDep = Annotated[RenderBackend, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]

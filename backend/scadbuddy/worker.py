@@ -20,6 +20,7 @@ from starlette.routing import Route
 from temporalio.client import Client
 from temporalio.service import RPCError
 
+from scadbuddy.api.deps import AppState
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import Metrics
@@ -82,6 +83,28 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
             max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=metrics,
+    )
+
+
+def worker_deps_from_state(state: AppState) -> WorkerDeps:
+    """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the worker on the API's own stores and
+    gates, so its renders lease the same checkouts the routes do. The thumbnail pool is
+    its own; the lifespan shuts it down with the worker."""
+    assert state.projection is not None and state.blobs is not None and state.refs is not None
+    return WorkerDeps(
+        config=state.config,
+        paths=state.paths,
+        assets=state.assets,
+        blobs=state.blobs,
+        refs=state.refs,
+        projection=state.projection,
+        history=state.history,
+        checkouts=state.checkouts,
+        fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
+        thumbnail_executor=ThreadPoolExecutor(
+            max_workers=state.config.render_concurrency, thread_name_prefix="thumbnail"
+        ),
+        metrics=state.metrics,
     )
 
 

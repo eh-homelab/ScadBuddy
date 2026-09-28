@@ -16,6 +16,7 @@ flag); the legacy claim and reap skip rows that carry a ``workflow_id``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import JobEvent, JobKind
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.job_models import Job, StepInfo, now
 from scadbuddy.render.job_store import (
     SUPERSEDED_ERROR,
@@ -80,6 +82,8 @@ class JobProjection:
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self.events = events
+        #: This process's LISTEN connection, which the event bus shares.
+        self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             conninfo,
             min_size=1,
@@ -103,6 +107,14 @@ class JobProjection:
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
+
+    def listener(self, *, on_state: Callable[[bool], None], check_interval: float) -> PgListener:
+        """The LISTEN connection, told whose state to report; the bus runs it. No
+        channel of its own: no worker here waits for a NOTIFY to claim a job."""
+        listener = self.pg_listener
+        listener.check_interval = check_interval
+        listener.on_state(on_state)
+        return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
         if self.events is not None:

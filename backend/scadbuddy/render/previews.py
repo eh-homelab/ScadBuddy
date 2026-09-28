@@ -8,9 +8,10 @@ declares them -- and keeps that render's plate image as a stand-in, in the
 The work never sits in a request's path. A catalogue change hands the model's id to
 :meth:`PreviewScheduler.request`, which returns at once; the scheduler's one worker
 waits out a short debounce (a burst of edits is rendered once), decides whether a
-render is needed at all, and runs one through
+render is needed at all, and runs one through its ``runner``: on the legacy queue,
 :meth:`~scadbuddy.render.jobs.RenderQueue.run_background`, behind every render a
-person has asked for. One preview at a time, with a pause after each, is also what
+person has asked for; on Temporal, :meth:`~scadbuddy.render.submit.RenderService.render_preview`,
+on the render worker. One preview at a time, with a pause after each, is also what
 throttles the boot-time pass over every model without a thumbnail.
 """
 
@@ -32,7 +33,6 @@ from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
-    RenderQueue,
     extruder_order,
     library_lease,
     plate_thumbnails,
@@ -110,8 +110,7 @@ class PreviewScheduler:
         self,
         catalogue: Catalogue,
         store: PreviewStore,
-        queue: RenderQueue,
-        render: PreviewRender,
+        runner: PreviewRender,
         *,
         timeout: float,
         debounce: float = DEFAULT_DEBOUNCE,
@@ -119,8 +118,7 @@ class PreviewScheduler:
     ) -> None:
         self.catalogue = catalogue
         self.store = store
-        self.queue = queue
-        self.render = render
+        self.runner = runner
         self.timeout = timeout
         self.debounce = debounce
         self.interval = interval
@@ -211,9 +209,7 @@ class PreviewScheduler:
         if key is None:
             return False
         try:
-            png = await self.queue.run_background(
-                lambda: asyncio.wait_for(self.render(slug), timeout=self.timeout)
-            )
+            png = await asyncio.wait_for(self.runner(slug), timeout=self.timeout)
         except asyncio.CancelledError:
             raise
         except Exception as error:
