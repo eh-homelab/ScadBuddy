@@ -421,6 +421,39 @@ class LibraryFile(BambuddyModel):
     notes: str | None = None
 
 
+class LibraryListRow(BambuddyModel):
+    """A row of ``GET /api/v1/library/files/`` (Bambuddy's ``FileListResponse``;
+    ``library-files-root.json``). ``file_type`` is ``"3mf"``, ``"gcode.3mf"`` for a
+    sliced file, ``"stl"`` and so on."""
+
+    id: int
+    filename: str
+    file_type: str
+    folder_id: int | None = None
+    file_size: int | None = None
+    thumbnail_path: str | None = None
+    print_count: int = 0
+    sliced_for_model: str | None = None
+
+
+class LibraryPlate(BambuddyModel):
+    """One plate of ``GET /api/v1/library/files/{id}/plates``."""
+
+    index: int
+    name: str | None = None
+    has_thumbnail: bool = False
+
+
+class LibraryPlates(BambuddyModel):
+    """``GET /api/v1/library/files/{id}/plates``. Bambuddy's OpenAPI declares no schema
+    for it (its 200 is ``{}``); this is the recorded shape. An STL, or a 3MF that
+    carries no plate metadata, answers ``plates: []``."""
+
+    file_id: int
+    plates: list[LibraryPlate] = Field(default_factory=list)
+    is_multi_plate: bool = False
+
+
 class SliceRequest(BambuddyModel):
     """``POST /api/v1/library/files/{id}/slice``.
 
