@@ -771,6 +771,11 @@ export const WARNED_NAME = 'nopic'
 
 export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
 
+/** #408 — a name the mock fails the way a template drawing only a missing picture does. */
+export const PICTURELESS_NAME = 'nosvg'
+
+export const FAILED_JOB_WARNINGS = ['OpenSCAD could not open pic.svg']
+
 export const OPENSCAD_LOG_TAIL = [
   'Compiling design (CSG Tree generation)...',
   'ERROR: Parser error: syntax error in file model.scad, line 42',

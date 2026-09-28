@@ -81,6 +81,8 @@ COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
 #: The subject the pre-#155 copy-if-absent seed committed a bundled model under:
 #: ``Seed name-keychain and tag from the image``.
 _SEED_SUBJECT = re.compile(r"^Seed .+ from the image$")
+#: A full SHA-1 or SHA-256 object id, on its own (not part of a longer hex run).
+_OBJECT_ID = re.compile(r"(?<![0-9a-f])(?:[0-9a-f]{64}|[0-9a-f]{40})(?![0-9a-f])")
 
 # git's own hash of the empty tree: what a root commit's diff is taken against,
 # since it has no parent to compare with.
@@ -553,6 +555,31 @@ class ModelHistory:
                 if model_id:
                     newest.setdefault(model_id, commit)
         return newest
+
+    def object_ids_in(self, *pathspecs: str) -> set[str]:
+        """Every full object id (40 or 64 hex digits) written into any version of
+        the files ``pathspecs`` match, on any ref, deleted files included.
+
+        ONE ``git log -p`` over the whole history, not a read per revision. Each
+        value a file ever held appears on an added line of some diff, so scanning
+        every line of every diff finds them all; it cannot tell a library pin from
+        any other id in those files, and so errs towards finding too many.
+        """
+        if self.head() is None:
+            return set()
+        text = self._patch(
+            "log",
+            "--all",
+            "-p",
+            "-m",
+            "--format=",
+            "--no-color",
+            "--no-ext-diff",
+            "--unified=0",
+            "--",
+            *pathspecs,
+        )
+        return set(_OBJECT_ID.findall(text))
 
     def log(self, slug: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT) -> list[Revision]:
         args = ["log", f"--max-count={limit}", _LOG_FORMAT, "--name-status", "--no-renames"]

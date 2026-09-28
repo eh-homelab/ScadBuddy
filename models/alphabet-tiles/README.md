@@ -34,12 +34,12 @@ unchanged on MakerWorld and in ScadBuddy.
 |---|---|---|
 | `shape` | `rounded_square` | `rounded_square`, `circle`, `hexagon` (points left and right), `scalloped` (ten round bumps) or `heart`. Every shape is `tile_size` wide. |
 | `tile_size` | `30` | Tile width in mm, 20–50. |
-| `thickness` | `5` | Tile thickness in mm, 3–10. It is raised automatically when a magnet needs more room, and the render log's `SB_TILES` line reports the thickness used. |
+| `thickness` | `5` | Tile thickness in mm, 3–10. It is raised automatically when a magnet, or the edge rounding plus the inlay, needs more room, and the log says so with `NOTE: thickness raised`. |
 | `corner_radius` | `5` | Corner radius of the rounded square. Ignored for the other shapes. |
 | `edge_round` | `1.2` | Rounding on the top edge, in four steps. 0 gives a sharp edge. |
 | `letter_style` | `inlay` | `inlay`: the letter is flush with the top. `raised`: it stands up by `letter_depth`. The border follows the same style. |
 | `letter_depth` | `0.6` | Inlay depth, or how far raised letters stand up, 0.4–2 mm. |
-| `gap` | `5` | Gap between tiles on the plate. Rows wrap at 300 mm, the H2C's two-nozzle width. If the rows would run past the bed's 320 mm depth, the gap shrinks until they fit. The `SB_TILES` line reports the gap used. |
+| `gap` | `5` | Gap between tiles on the plate. Rows wrap at 300 mm, the H2C's two-nozzle width. If the rows would run past the bed's 320 mm depth, the gap shrinks until they fit, and the log says so with `NOTE: gap reduced`. |
 
 ### Border
 
@@ -52,7 +52,9 @@ unchanged on MakerWorld and in ScadBuddy.
 The border and its inset may take at most 60 % of the room inside the tile, so
 every tile keeps room for its letter. On a small tile a wide or far-inset
 border is narrowed first (down to 1 mm), then moved out towards the edge. The
-`SB_TILES` line in the render log reports the border width and inset used.
+log says so with `NOTE: border set to`, giving the width and inset used. A
+border inset smaller than the edge rounding is moved in clear of it, and the
+log says `NOTE: border moved in`.
 
 ### Magnets
 
@@ -113,7 +115,7 @@ the top 0.6 mm.
 ./verify.sh
 ```
 
-Renders the defaults and thirteen variations in `scadbuddy-verify:local`:
+Renders the defaults and fifteen variations in `scadbuddy-verify:local`:
 
 - every shape with a border and the awkward glyphs `WQg69&`;
 - both magnet sizes and both mounts;
@@ -122,11 +124,16 @@ Renders the defaults and thirteen variations in `scadbuddy-verify:local`:
 - 24 of the biggest tiles with a 15 mm gap, where the gap has to shrink to
   12 mm to fit the bed;
 - the smallest, thinnest tile with the deepest inlay and the biggest magnet;
+- a thin tile with no magnet whose edge rounding and inlay raise the thickness;
+- a border inset less than the edge rounding, so the border moves in;
 - sharp square tiles with spaces in the text;
 - text that is all spaces;
 - a serif face;
 - the smallest square and heart tiles with the widest, furthest-in border,
   where the border has to narrow.
+
+For each one it checks (besides the list below) that every value the model
+changes is logged with a `NOTE:`, with the right reason, and nothing else is.
 
 For each one it checks:
 
