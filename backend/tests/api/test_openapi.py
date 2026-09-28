@@ -77,7 +77,6 @@ EXPECTED_PATHS = {
     "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
     "/api/v1/prints/{archive_id}/files/sliced",
     "/api/v1/prints/{archive_id}/files/source",
-    "/api/v1/prints/{archive_id}/attachments/{library_file_id}",
 }
 
 

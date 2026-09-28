@@ -469,7 +469,9 @@ class BambuddyClient:
         ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
         a seek with a ``206`` and only those bytes. The response is open for the
         duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
-        as every other call's is, once its (small) body has been read.
+        as every other call's is, once its (small) body has been read, except a ``416``:
+        that is the answer to a seek past the end, and its ``Content-Range`` carries the
+        length the media element needs, so it is passed through.
         """
         headers = dict(self._headers)
         if range_header is not None:
@@ -483,7 +485,7 @@ class BambuddyClient:
             logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
             raise map_transport(error, what=what) from error
         try:
-            if not response.is_success:
+            if not response.is_success and response.status_code != 416:
                 await response.aread()
                 raise map_response(response, scope=Scope.READ_STATUS, what=what)
             yield response

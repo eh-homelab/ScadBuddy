@@ -23,6 +23,7 @@ from scadbuddy.library.settings_store import SettingsStore
 MEDIA_RESPONSES: dict[int | str, dict[str, Any]] = {
     200: {"content": {"application/octet-stream": {}}, "description": "The file"},
     206: {"content": {"application/octet-stream": {}}, "description": "The requested range"},
+    416: {"description": "The range is past the end; `Content-Range` gives the length"},
 }
 
 router = APIRouter(
@@ -164,25 +165,4 @@ async def get_source_file(
     require_linked_archive(archive_id)
     return await _proxy(
         store, request, f"/archives/{archive_id}/source", what="download the source 3MF"
-    )
-
-
-@router.get(
-    "/attachments/{library_file_id}",
-    summary="A photo or video of the print kept in Bambuddy's library (Range supported)",
-)
-async def get_attachment(
-    archive_id: ArchiveIdPath,
-    library_file_id: Annotated[int, Path(ge=1)],
-    request: Request,
-    store: SettingsStoreDep,
-) -> StreamingResponse:
-    """#309 records which library files are a print's attachments and checks it here;
-    until then this is gated like the rest."""
-    require_linked_archive(archive_id)
-    return await _proxy(
-        store,
-        request,
-        f"/library/files/{library_file_id}/download",
-        what="play the attachment",
     )

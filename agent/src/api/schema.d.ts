@@ -1235,27 +1235,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/prints/{archive_id}/attachments/{library_file_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * A photo or video of the print kept in Bambuddy's library (Range supported)
-         * @description #309 records which library files are a print's attachments and checks it here;
-         *     until then this is gated like the rest.
-         */
-        get: operations["get_attachment_api_v1_prints__archive_id__attachments__library_file_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/prints/{archive_id}/files/sliced": {
         parameters: {
             query?: never;
@@ -5932,47 +5911,6 @@ export interface operations {
             };
         };
     };
-    get_attachment_api_v1_prints__archive_id__attachments__library_file_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                archive_id: number;
-                library_file_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The file */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": unknown;
-                };
-            };
-            /** @description The requested range */
-            206: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/octet-stream": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     get_sliced_file_api_v1_prints__archive_id__files_sliced_get: {
         parameters: {
             query?: never;
@@ -6001,6 +5939,13 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -6041,6 +5986,13 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -6083,6 +6035,13 @@ export interface operations {
                     "application/octet-stream": unknown;
                 };
             };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -6124,6 +6083,13 @@ export interface operations {
                     "application/octet-stream": unknown;
                 };
             };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -6164,6 +6130,13 @@ export interface operations {
                     "application/octet-stream": unknown;
                 };
             };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -6203,6 +6176,13 @@ export interface operations {
                 content: {
                     "application/octet-stream": unknown;
                 };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

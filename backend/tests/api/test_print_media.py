@@ -91,18 +91,24 @@ def test_each_archive_file_is_proxied(client: TestClient, path: str, upstream: s
 
 
 @respx.mock
-def test_a_library_attachment_is_proxied_with_range(client: TestClient) -> None:
+def test_a_seek_past_the_end_comes_back_as_416_with_the_length(client: TestClient) -> None:
+    # A media element seeking past the end must learn the real length, not a 502.
     configure(client)
-    route = respx.get(f"{API}/library/files/77/download").mock(
-        return_value=httpx.Response(
-            206, content=b"m" * 10, headers={**VIDEO_HEADERS, "Content-Range": "bytes 0-9/99"}
-        )
+    respx.get(f"{API}/archives/35/timelapse").mock(
+        return_value=httpx.Response(416, content=b"", headers={"Content-Range": "bytes */2143595"})
     )
 
-    response = client.get("/api/v1/prints/35/attachments/77", headers={"Range": "bytes=0-9"})
+    response = client.get("/api/v1/prints/35/timelapse", headers={"Range": "bytes=9999999-"})
 
-    assert route.calls.last.request.headers["Range"] == "bytes=0-9"
-    assert response.status_code == 206
+    assert response.status_code == 416
+    assert response.headers["content-range"] == "bytes */2143595"
+
+
+def test_no_route_serves_an_arbitrary_library_file(client: TestClient) -> None:
+    # Attachments (#309) come with their own check; until then the library is not
+    # reachable through the print proxy.
+    configure(client)
+    assert client.get("/api/v1/prints/35/attachments/77").status_code == 404
 
 
 @respx.mock
