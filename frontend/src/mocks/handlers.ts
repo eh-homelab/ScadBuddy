@@ -1713,7 +1713,7 @@ export const handlers = [
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, library_file_id: libraryFileId, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -1810,12 +1810,6 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    if (output.pipeline_run_id) {
-      return HttpResponse.json({
-        ...fixtures.pipelineProgress,
-        pipeline_run_id: output.pipeline_run_id,
-      } satisfies PrintProgress)
-    }
     if (output.queue_item_id) {
       return HttpResponse.json({
         ...fixtures.queuedSliceProgress,

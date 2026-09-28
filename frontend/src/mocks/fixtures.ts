@@ -648,78 +648,27 @@ export const targets: BambuddyTargets = {
  */
 const QUEUE_URL = `${settings.bambuddy_url}/queue`
 
-/** A pipeline run mid-flight: both copies have reached the queue, neither has printed. */
-export const pipelineProgress: PrintProgress = {
-  route: 'pipeline',
-  stage: 'queued',
-  settled: false,
-  pipeline_run_id: 12,
-  slice_job_id: 21,
-  copies: 2,
-  copies_completed: 0,
-  copies_failed: 0,
-  copies_cancelled: 0,
-  copies_in_progress: 2,
-  error_message: null,
-  fix: null,
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: '3DP-31B-598',
-      queue_entry_id: 4472,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-    // A fan-out Bambuddy has not assigned yet: `assigned_printer_name` is null until it
-    // picks, which is a normal state and not a missing value to hide.
-    {
-      copy_index: 1,
-      printer_name: null,
-      queue_entry_id: 4473,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
-  bambuddy_url: QUEUE_URL,
-}
-
 /**
- * The real failed run, transcribed from `backend/tests/bambuddy/recordings/pipeline-run.json`
- * as `progress.from_run` normalises it. Its point is that Bambuddy's own fields all say
- * the run is fine — `status: "in_progress"`, `copies_in_progress: 1`, the one job still
- * `pending` — while `completed_at` and `error_message` say it is over. `settled` is the
- * backend's resolution of that contradiction, and the only reason the poll ever stops.
- * `fix` is chosen from `slice_job_id` set with `sliced_library_file_id` still null, not
- * from the wording of the message.
+ * A slice that failed, so no queue item was ever created. `fix` is chosen by the
+ * backend from *where* it failed (the slice), not from the wording of the message.
  */
-export const failedRunProgress: PrintProgress = {
-  route: 'pipeline',
+export const failedSliceProgress: PrintProgress = {
+  route: 'slice_queue',
   stage: 'failed',
   settled: true,
-  pipeline_run_id: 1,
   slice_job_id: 7,
+  queue_item_id: null,
   copies: 1,
   copies_completed: 0,
-  copies_failed: 0,
+  copies_failed: 1,
   copies_cancelled: 0,
-  copies_in_progress: 1,
+  copies_in_progress: 0,
   error_message:
     'Slice failed: The selected printer is not compatible with the process preset in the 3mf.',
   fix:
-    'Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix ' +
-    'the model, and print again.',
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: null,
-      queue_entry_id: null,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
+    'Bambuddy could not slice this plate. Change the plate or print settings, or fix the ' +
+    'model, and print again.',
+  copies_detail: [],
   bambuddy_url: QUEUE_URL,
 }
 

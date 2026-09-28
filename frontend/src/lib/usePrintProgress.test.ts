@@ -44,13 +44,12 @@ describe('usePrintProgress', () => {
   })
 
   it('stops as soon as the backend says the print has settled', async () => {
-    // The recorded failed run: Bambuddy still calls it `in_progress` with a copy in
-    // flight, so only `settled` can end this.
-    read.mockResolvedValue(fixtures.failedRunProgress)
+    // A failed slice is settled, so only `settled` can end the poll.
+    read.mockResolvedValue(fixtures.failedSliceProgress)
     const { result } = renderHook(() => usePrintProgress(OUTPUT_A, true))
     await settle()
 
-    expect(result.current.progress).toEqual(fixtures.failedRunProgress)
+    expect(result.current.progress).toEqual(fixtures.failedSliceProgress)
     expect(result.current.polling).toBe(false)
     expect(read).toHaveBeenCalledTimes(1)
 
@@ -72,7 +71,7 @@ describe('usePrintProgress', () => {
   })
 
   it('leaves no timer behind when it unmounts mid-print', async () => {
-    read.mockResolvedValue(fixtures.pipelineProgress)
+    read.mockResolvedValue(fixtures.queuedSliceProgress)
     const { result, unmount } = renderHook(() => usePrintProgress(OUTPUT_A, true))
     await settle()
 
@@ -101,7 +100,7 @@ describe('usePrintProgress', () => {
     await settle()
     // The older output's read finishes last, which is the ordering that would otherwise
     // overwrite the newer answer.
-    first.resolve(fixtures.failedRunProgress)
+    first.resolve(fixtures.failedSliceProgress)
     await settle()
 
     expect(result.current.progress).toEqual(fixtures.queuedSliceProgress)

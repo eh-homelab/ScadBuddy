@@ -24,7 +24,7 @@ function renderPicker(
     <PrintPicker
       open
       slug="name-keychain"
-      output={{ ...output, library_file_id: undefined, pipeline_run_id: undefined }}
+      output={{ ...output, library_file_id: undefined }}
       onClose={vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
@@ -593,7 +593,7 @@ describe('PrintPicker · Remembered choices', () => {
       process_name: null,
     })
     // ActionBar's shape: one PrintPicker stays mounted and `open` toggles.
-    const target = { ...output, library_file_id: undefined, pipeline_run_id: undefined }
+    const target = { ...output, library_file_id: undefined }
     function Harness() {
       const [open, setOpen] = useState(true)
       return (
