@@ -141,7 +141,11 @@ def build_state(settings: Settings) -> AppState:
     )
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(
-        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+        paths,
+        history,
+        outputs,
+        duplicate_staging_max_age=config.duplicate_staging_max_age,
+        wrapper_prefix=WRAPPER_PREFIX,
     )
     history.on_commit = announce_commits(events, catalogue)
     return AppState(

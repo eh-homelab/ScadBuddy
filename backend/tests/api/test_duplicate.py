@@ -514,7 +514,7 @@ def test_an_unreadable_base_fails_the_duplicate(
 
 
 def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
-    catalogue = Catalogue(paths)
+    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create(
         "keychain", SOURCE, ModelMeta(name="Keychain", tags=["t"]), thumbnail=THUMBNAIL
     )
@@ -654,3 +654,37 @@ def test_a_dropped_model_json_cannot_claim_an_upstream(client: TestClient) -> No
     )
     assert response.status_code == 201, response.text
     assert response.json()["upstream"] is None
+
+
+def test_the_boot_sweeps_a_claim_a_crashed_create_stranded(app: FastAPI, paths: DataPaths) -> None:
+    """A create or duplicate killed between claiming its slug and writing it leaves an
+    empty directory: 404 to a GET, 409 to a retry. The boot moves an old one to the
+    tombstones and leaves a fresh one, which another replica may be claiming (#218)."""
+    stranded = paths.model_dir("stranded")
+    stranded.mkdir(parents=True)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(stranded, (old, old))
+    fresh = paths.model_dir("fresh")
+    fresh.mkdir()
+
+    with TestClient(app) as client:
+        assert not stranded.exists()
+        assert fresh.is_dir()
+        created = client.post("/api/v1/models", json={"name": "Stranded", "source": SOURCE})
+        assert created.status_code == 201, created.text
+        taken = client.post("/api/v1/models", json={"name": "Fresh", "source": SOURCE})
+        assert taken.status_code == 409
+
+
+def test_the_claim_sweep_leaves_a_model_whose_source_is_only_missing_from_disk(
+    paths: DataPaths,
+) -> None:
+    """Tracked at HEAD, it is a model to restore, not a claim to sweep."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    history.ensure_repo()
+    catalogue = Catalogue(paths, history, duplicate_staging_max_age=0)
+    catalogue.create("kept", SOURCE, ModelMeta(name="Kept"))
+    paths.model_source("kept").unlink()
+
+    assert catalogue.sweep_stranded_claims() == []
+    assert paths.model_dir("kept").is_dir()

@@ -149,6 +149,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # After the sync, so the built-ins exist: a model the old seed copied in
     # becomes a duplicate of its built-in (#158). Contains its own failures.
     await asyncio.to_thread(state.catalogue.link_seeded)
+    # A create or duplicate that died between claiming its slug and writing it left
+    # an empty directory; it becomes a tombstone for the sweep below. Logs and skips
+    # whatever it cannot read or move, so it never stops the boot.
+    await asyncio.to_thread(state.catalogue.sweep_stranded_claims)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:

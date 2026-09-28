@@ -964,6 +964,33 @@ def test_a_template_with_no_seed_commit_is_left_alone(
     assert sorted(slug for slug in skipped if slug) == ["name-keychain", "tag"]
 
 
+def test_a_seed_subject_by_another_author_is_not_the_seed(catalogue: Catalogue) -> None:
+    """Any commit can carry the subject; only ScadBuddy's own identity makes it the
+    seed a merge can take as its base (#224)."""
+    assert catalogue.history is not None
+    catalogue.create("name-keychain", KEYCHAIN, ModelMeta(name="Mine"))
+    catalogue.paths.model_source("name-keychain").write_text("cube(3);\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "Someone",
+        "GIT_AUTHOR_EMAIL": "someone@example.com",
+        "GIT_COMMITTER_NAME": "Someone",
+        "GIT_COMMITTER_EMAIL": "someone@example.com",
+    }
+    models = catalogue.paths.models
+    subprocess.run(["git", "add", "name-keychain"], cwd=models, env=env, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "Seed name-keychain from the image"],
+        cwd=models,
+        env=env,
+        check=True,
+    )
+
+    assert catalogue.history.seed_commit("name-keychain") is None
+
+
 def test_a_template_that_already_has_an_upstream_is_left_alone(
     catalogue: Catalogue, tmp_path: Path
 ) -> None:
