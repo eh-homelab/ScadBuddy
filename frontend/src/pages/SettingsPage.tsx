@@ -7,6 +7,10 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import { McpOidcSettings } from '../components/McpOidcSettings'
+import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -43,6 +47,8 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
 
 export function SettingsPage() {
   const settingsState = useAsync(() => api.getSettings(), [])
+  // The agent-service sections render only where the agent is (#256, #261).
+  const ai = useAiAvailability()
 
   const [url, setUrl] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
@@ -63,7 +69,6 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
-  const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -534,10 +539,24 @@ export function SettingsPage() {
           </div>
         </section>
 
+        <HeadlessBrowserSetting />
+
         {/* Applied at once, not part of the saved form (#251). The agent service serves
             these routes, so the section shows only where the assistant would: hidden in
             a production build until the service is deployed and routed. */}
         {ai.available && <McpTokensSection />}
+
+        {ai.available && (
+          <section className="mt-4 rounded-[6px] border border-line bg-surface">
+            <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+              MCP sign-in (OIDC)
+            </h2>
+            <div className="p-4">
+              {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+              <McpOidcSettings />
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
@@ -605,6 +624,18 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Applied as you go, not by Save changes: each action is its own request. */}
+        {ai.available && (
+          <div className="mt-8">
+            <h2 className="text-[15px] font-semibold tracking-tight">Assistant plugins</h2>
+            <p className="mt-0.5 text-[13px] text-muted">
+              What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            </p>
+            <PluginPackagesPanel />
+            <RemotePluginsPanel />
+          </div>
+        )}
       </div>
     </div>
   )
