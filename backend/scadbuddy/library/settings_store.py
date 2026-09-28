@@ -282,11 +282,14 @@ class SettingsStore:
         for secret in ("bambuddy_api_key", "bambuddy_render_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
-        if changes.get("store_backend") == "bambuddy":
+        # The merged result, not the patch: clearing the URL or the inbox while on the
+        # Bambuddy store would leave a store the next start refuses (`build_store`).
+        if changes.keys() & {"store_backend", "bambuddy_url", "library_folder_id"}:
             current = self.load()
+            backend = changes.get("store_backend", current.store_backend) or "local"
             url = changes.get("bambuddy_url", current.bambuddy_url)
             inbox = changes.get("library_folder_id", current.library_folder_id)
-            if not url or inbox is None:
+            if backend == "bambuddy" and (not url or inbox is None):
                 raise StoreNotReadyError(
                     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
                     " saved first"

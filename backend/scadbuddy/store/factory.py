@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from scadbuddy.core.metrics import Metrics
 
 
+#: The recovery from a refused start: back to the local store (README, "Deploying").
+RECOVER_LOCAL_SQL = "UPDATE settings SET value = '\"local\"' WHERE name = 'store_backend';"
+
+
 @dataclass
 class StoreBundle:
     backend: StoreBackend
@@ -63,7 +67,10 @@ def build_store(
     if not current.bambuddy_url or current.library_folder_id is None:
         raise StoreNotReadyError(
             "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
-            " library folder (its inbox); set both in Settings, or run on the local store"
+            " library folder (its inbox). To start on the local store, run"
+            f" {RECOVER_LOCAL_SQL} in ScadBuddy's database (or, when no store_backend is"
+            " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
+            ' See README, "Recovering an unready blob store".'
         )
     remote = BambuddyContentBackend(source.target, pool)
     content = ContentStore(

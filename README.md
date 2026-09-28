@@ -345,6 +345,21 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   nothing to do. Nothing reads what the legacy queue left on the volume any more:
   `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
 
+### Recovering an unready blob store
+
+With `store_backend` set to `bambuddy`, the API and the render worker refuse to start
+without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
+is out of reach. Settings no longer saves that state, but a stored `bambuddy` beats
+`SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
+database, then set the URL and folder in Settings and choose the Bambuddy store again:
+
+```sql
+UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
+```
+
+When nothing is stored (the refusal comes from `SCADBUDDY_STORE_BACKEND=bambuddy`),
+set `SCADBUDDY_STORE_BACKEND=local` instead.
+
 ### The agent sidecar (AI, #261)
 
 The AI agent service in `agent/` ships as a **separate image**,
