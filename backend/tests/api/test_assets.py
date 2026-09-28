@@ -373,38 +373,35 @@ def test_usage_is_reported_by_the_api_and_the_metrics(client: TestClient) -> Non
     assert "scadbuddy_assets_max_count 10000.0" in text
 
 
-@pytest.mark.requires_postgres
-def test_a_preset_refuses_a_file_value_that_is_not_an_upload(
-    settings: Settings, file_model: str, pg_conninfo: str
-) -> None:
-    # Saved presets live in Postgres (#332): without one, saving is a 503 first.
-    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
-    with TestClient(app) as client:
-        response = client.post(
-            f"/api/v1/models/{file_model}/presets",
-            json={"name": "Ghost", "params": {"label": "f" * 64}},
-        )
+def test_a_preset_refuses_a_file_value_that_is_not_an_upload(client: TestClient) -> None:
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/presets",
+        json={"name": "Ghost", "params": {"label": "f" * 64}},
+    )
     assert response.status_code == 422, response.text
     assert "label" in response.json()["detail"]
 
 
-def test_the_sweep_keeps_what_outputs_and_jobs_use(
+def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     app: FastAPI, client: TestClient, paths: DataPaths
 ) -> None:
-    # A saved preset keeps its uploads too; those are rows in Postgres (#332), so that
-    # case is `test_presets.py`'s `test_an_upload_a_saved_preset_names_is_kept_by_the_sweep`.
-    in_output, in_job, unused = (str(_upload(client, _svg(n))["id"]) for n in range(3))
+    in_output, in_preset, in_job, unused = (str(_upload(client, _svg(n))["id"]) for n in range(4))
     render = f"/api/v1/models/{MODEL_SLUG}/render"
     accepted = client.post(render, json={"params": {"label": in_output}})
     job = wait_for_job(client, accepted.json()["job_id"])
     saved = client.post(f"/api/v1/models/{MODEL_SLUG}/outputs", json={"job_id": job["id"]})
     assert saved.status_code == 201, saved.text
+    preset = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/presets",
+        json={"name": "Heart", "params": {"label": in_preset}},
+    )
+    assert preset.status_code == 201, preset.text
     # The job and the output are the same render: drop the job, so only the output
     # keeps `in_output`, and leave a second job as the only thing keeping `in_job`.
     paths.job_file(job["id"]).unlink()
     other = client.post(render, json={"params": {"label": in_job}})
     wait_for_job(client, other.json()["job_id"])
-    for asset_id in (in_output, in_job, unused):
+    for asset_id in (in_output, in_preset, in_job, unused):
         _age(paths, asset_id, 30 * 86400)
 
     # The jobs are in the stubbed queue the `app` fixture swaps in, not in the app's
@@ -413,7 +410,7 @@ def test_the_sweep_keeps_what_outputs_and_jobs_use(
     stubbed = client.portal.call(app.dependency_overrides[get_queue])
     assert sweep_assets(replace(getattr(app.state, STATE_ATTR), queue=stubbed)) == [unused]
 
-    for asset_id in (in_output, in_job):
+    for asset_id in (in_output, in_preset, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{unused}").status_code == 404
     assert "scadbuddy_assets_swept_total 1.0" in client.get("/metrics").text
