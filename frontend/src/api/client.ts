@@ -163,8 +163,47 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
 
 const seg = encodeURIComponent
 
-/** How often `runPrint` reads a running print run (#470); tests shorten it. */
-export const printRunPoll = { intervalMs: 1000 }
+/**
+ * How often `runPrint` reads a running print run (#470), and how many times it tries a
+ * request no ScadBuddy answer described again before giving up; tests shorten it.
+ */
+export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+
+/**
+ * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
+ * a retry of that press re-attaches to its run and the next press is a new print.
+ * `getRandomValues`, not `randomUUID`, which only secure contexts have.
+ */
+export function newRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * The request never got ScadBuddy's own answer: the connection dropped (fetch's
+ * `TypeError`), or a proxy in front answered 502/503/504 with a page of its own. The
+ * backend's problems always carry a `detail`.
+ */
+function unanswered(caught: unknown): boolean {
+  if (caught instanceof TypeError) return true
+  return (
+    caught instanceof ApiError &&
+    caught.problem.detail === undefined &&
+    [502, 503, 504].includes(caught.status)
+  )
+}
+
+/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
+async function reattach<T>(attempt: () => Promise<T>): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await attempt()
+    } catch (caught) {
+      if (!unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
+      await new Promise((resolve) => setTimeout(resolve, printRunPoll.intervalMs))
+    }
+  }
+}
 
 /** Appended to a failed run that had already tried to queue (#470). */
 export const MAY_HAVE_QUEUED =
@@ -581,25 +620,31 @@ export const api = {
   runPrint: async (outputId: string, body: PrintRunRequest): Promise<PrintRunResult> => {
     // #470: the server answers 202 with a run and slices and queues in the background,
     // since that takes longer than the proxies in front wait. A repeat of the same
-    // request is the same run, so following it again never queues a second print.
-    let run = await request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
+    // request (the same `request_id`) is the same run, so re-sending it after an
+    // answer that never arrived re-attaches to that run and never queues a second print.
+    let run = await reattach(() =>
+      request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    )
     while (run.status === 'running') {
       await new Promise((resolve) => setTimeout(resolve, printRunPoll.intervalMs))
-      run = await request<PrintRun>(`/print/runs/${seg(run.id)}`)
+      const id = run.id
+      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`))
     }
     if (run.status === 'failed' || !run.result) {
       const error = run.error
       const detail = error?.detail ?? 'The print run ended without a result.'
       throw new ApiError({
         ...error?.extensions,
+        // The problem's type, so the failure reads as a synchronous answer would have.
+        type: error?.type,
         title: error?.title ?? 'Print failed',
         status: error?.status ?? 500,
         // The run had already tried to queue (a queue call that timed out, or a later
-        // plate failing after an earlier one was queued): printing again repeats this
-        // run for ten minutes rather than queueing, so say where to look.
+        // plate failing after an earlier one was queued): another Print is a new
+        // print, so say where to look first.
         detail: run.may_have_queued && !detail.includes("Bambuddy's queue")
           ? `${detail} ${MAY_HAVE_QUEUED}`
           : detail,

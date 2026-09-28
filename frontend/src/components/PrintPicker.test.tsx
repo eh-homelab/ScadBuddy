@@ -140,6 +140,7 @@ describe('PrintPicker', () => {
       all_plates: false,
       project_id: null,
       options: {},
+      request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
 
@@ -311,6 +312,30 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(run).toHaveBeenCalledTimes(2)
+    // #470: each press is its own print, so the server does not answer the second with
+    // the first's run.
+    const ids = run.mock.calls.map(([, body]) => body.request_id)
+    expect(ids[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[1]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[0]).not.toBe(ids[1])
+  })
+
+  it('keeps Print disabled after a run that may have queued', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+        title: 'Gateway Timeout',
+        status: 504,
+        detail: "Bambuddy did not answer in time. Check Bambuddy's queue before printing again.",
+        may_have_queued: true,
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent("Check Bambuddy's queue")
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
   })
 })
 

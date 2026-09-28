@@ -108,6 +108,11 @@ class PrintRunRequest(BaseModel):
     #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
     #: a ``quantity`` sent alongside it.
     options: PrintOptions = Field(default_factory=PrintOptions)
+    #: The caller's idempotency key for this print (#470): a new one (a UUID) per
+    #: deliberate Print, the same one on every retry of it. Part of the run's key, so a
+    #: retry re-attaches to its run while a reprint with the same choices is a new
+    #: print. Omitted (an older client), the key is the output and choices alone.
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PrintRunResult(BaseModel):

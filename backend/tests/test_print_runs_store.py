@@ -189,3 +189,48 @@ async def test_a_lapsed_run_expired_after_it_started_queueing_keeps_its_key(
     release.set()
     await _until_ended(runs, run.id)
     assert (await store.get(run.id)).status == "failed"  # type: ignore[union-attr]
+
+
+async def test_a_run_expired_after_it_started_queueing_holds_its_key_from_its_real_end(
+    jobs: PostgresJobStore,
+) -> None:
+    """Expired as lost while it queues, the slow run goes on: each beat and its end
+    move ``finished_at``, so the key is held for the repeat window after the run
+    really stopped, not after the expiry."""
+    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    run, _ = await store.claim(OUTPUT, "k")
+    await store.start_enqueue(run.id)
+    held, created = await other.claim(OUTPUT, "k")
+    assert not created and held.status == "failed" and held.may_have_queued
+
+    def backdate() -> None:
+        with jobs.pool.connection() as conn:
+            conn.execute(
+                "UPDATE print_runs SET finished_at = now() - interval '1 hour' WHERE id = %s",
+                (run.id,),
+            )
+
+    # The expiry was long ago: without the run's own beats the key would be free.
+    await asyncio.to_thread(backdate)
+    assert await other.find("k") is None
+    await store.heartbeat(run.id)
+    assert (await other.find("k")).id == run.id  # type: ignore[union-attr]
+
+    await asyncio.to_thread(backdate)
+    await store.succeed(run.id, RESULT)
+    ended = await other.find("k")
+    assert ended is not None and ended.id == run.id
+    assert ended.status == "failed" and ended.error is not None
+    assert ended.error.detail == LOST_DETAIL
+
+
+async def test_a_run_expired_before_it_queued_is_not_held_by_its_beats(
+    jobs: PostgresJobStore,
+) -> None:
+    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    run, _ = await store.claim(OUTPUT, "k")
+    assert await other.find("k") is None  # expired, never queued: the key is free
+    await store.heartbeat(run.id)
+    assert await other.find("k") is None

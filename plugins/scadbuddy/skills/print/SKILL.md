@@ -117,13 +117,16 @@ The route answers **202** with a `PrintRun` (`status: "running"`) and slices and
 queues in the background, because the slices outlast the proxies in front.
 Follow `GET /api/v1/print/runs/{run_id}` until `status` is `succeeded` (its
 `result` is the `PrintRunResult` below) or `failed` (its `error` carries the
-`status` and `detail` of the refusal). The same request for the same output
-again answers **200** with that run while it is in flight, or for ten minutes
-after it succeeded, and queues nothing more (`backend/openapi.json`; #470). A
-`failed` run with `may_have_queued: true` had already tried to queue (a queue
-call that timed out, or a later plate failing after an earlier one was queued):
-tell the user to check Bambuddy's queue, and do not retry, since the same request
-answers with that run for ten minutes too.
+`type`, `status` and `detail` of the refusal). The body's optional `request_id`
+names one deliberate print: send a new one per print and the same one on a
+retry of it. The same request (same `request_id`) for the same output again
+answers **200** with that run (`repeated: true`) while it is in flight, or for
+ten minutes after it succeeded, and queues nothing more; a new `request_id` with
+the same choices is a new print (`backend/openapi.json`; #470). `print_output`
+makes a new one per call. A `failed` run with `may_have_queued: true` had already
+tried to queue (a queue call that timed out, or a later plate failing after an
+earlier one was queued): tell the user to check Bambuddy's queue, and do not
+print again until they have, since another print would be a second one.
 
 - **Errors** are a 422 before anything is sliced, and name the slot or setting:
   mixed nozzle sizes, or a slot with no filament preset for the nozzle

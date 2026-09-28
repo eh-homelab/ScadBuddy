@@ -158,14 +158,17 @@ async def post_run(
     or for ten minutes after it succeeded or failed once it had tried to queue
     (``may_have_queued``: a queue call that timed out, or a later plate that failed
     after an earlier one was queued), this answers **200** with that run and starts
-    nothing, so a retry after a proxy timeout cannot queue the print twice.
+    nothing (``repeated`` is true), so a retry after a proxy timeout cannot queue the
+    print twice. "The same request" includes ``request_id``: a client that makes a new
+    one per deliberate Print gets a new print each time, and a retry of one press
+    (same id) its run.
     """
     meta = require_output(outputs, output_id)
     key = run_key(meta.id, body)
     repeated = await runs.store.find(key)
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
-        return repeated
+        return repeated.model_copy(update={"repeated": True})
     settings = store.load()
     async with client_for(settings) as client:
         prepared = await prepare_run(client, outputs, meta, settings, body)
@@ -173,7 +176,7 @@ async def post_run(
     if not created:
         # Another request for the same print claimed it while this one was checking.
         response.status_code = status.HTTP_200_OK
-        return run
+        return run.model_copy(update={"repeated": True})
 
     async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:

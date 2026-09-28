@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { http, HttpResponse } from 'msw'
 import { server } from '../mocks/server'
-import { ApiError, MAY_HAVE_QUEUED, api, printRunPoll } from './client'
+import { ApiError, MAY_HAVE_QUEUED, api, newRequestId, printRunPoll } from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -169,6 +169,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
   afterEach(() => {
     server.resetHandlers()
     printRunPoll.intervalMs = 1000
+    printRunPoll.reattempts = 3
   })
 
   it('reads the run until it succeeds and returns its result', async () => {
@@ -224,6 +225,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
           status: 'failed',
           may_have_queued: true,
           error: {
+            type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
             status: 504,
             title: 'Gateway Timeout',
             detail: 'Bambuddy did not answer in time.',
@@ -237,6 +239,76 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).status).toBe(504)
     expect((error as ApiError).detail).toBe(`Bambuddy did not answer in time. ${MAY_HAVE_QUEUED}`)
-    expect((error as ApiError).problem).toMatchObject({ may_have_queued: true })
+    // The type a synchronous 504 would have carried, which "may have run" is told by.
+    expect((error as ApiError).problem).toMatchObject({
+      type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+      status: 504,
+      may_have_queued: true,
+    })
+  })
+
+  it('re-sends the same request when its answer never arrived, and re-attaches to the run', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: unknown[] = []
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push(await request.json())
+        return sent.length === 1 ? HttpResponse.error() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        // A proxy's own 504 page: not ScadBuddy's answer, so read again.
+        if (reads === 1) return new HttpResponse('<html>504</html>', { status: 504 })
+        return HttpResponse.json({ ...started, status: 'succeeded', result })
+      }),
+    )
+
+    const press = { ...body, request_id: 'press-1' }
+    await expect(api.runPrint('out-1', press)).resolves.toEqual(result)
+    expect(sent).toEqual([press, press])
+    expect(reads).toBe(2)
+  })
+
+  it("does not re-send a request ScadBuddy's server refused", async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused the API key' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).detail).toBe('Bambuddy refused the API key')
+    expect(posts).toBe(1)
+  })
+
+  it('gives up re-attaching after a few unanswered tries', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.reattempts = 2
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return HttpResponse.error()
+      }),
+    )
+
+    await expect(api.runPrint('out-1', body)).rejects.toBeInstanceOf(TypeError)
+    expect(posts).toBe(3)
+  })
+})
+
+describe('newRequestId', () => {
+  it('is a new 128-bit hex id each time', () => {
+    const one = newRequestId()
+    expect(one).toMatch(/^[0-9a-f]{32}$/)
+    expect(newRequestId()).not.toBe(one)
   })
 })

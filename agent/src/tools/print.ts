@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ok } from './call.js'
@@ -61,7 +62,7 @@ function runOutcome(run: PrintRun) {
   if (run.status === 'failed') {
     const error = run.error
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
-    // print_output with the same choices returns this run for ten minutes rather than queueing.
+    // another print_output call is a new print (its own request_id), so check first.
     const queued = run.may_have_queued
       ? " The print may still have been queued: check Bambuddy's queue before printing again."
       : ''
@@ -430,6 +431,9 @@ export const printTools: Tool[] = [
               },
               project_id: args.project_id ?? null,
               options: args.options,
+              // One per call (#470): a call is a deliberate print, so the same choices
+              // again are a new one rather than the last call's run.
+              request_id: randomUUID(),
             },
           }),
           `print ${args.output_id}`,

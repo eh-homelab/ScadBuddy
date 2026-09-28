@@ -249,7 +249,21 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       },
       project_id: null,
       options: {},
+      request_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
     })
+  })
+
+  it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
+    const first: { body?: { request_id?: string } } = {}
+    const second: { body?: { request_id?: string } } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    server.use(...capturedRun(first))
+    await tool('print_output').execute(args, ctx())
+    server.use(...capturedRun(second))
+    await tool('print_output').execute(args, ctx())
+    expect(first.body?.request_id).toBeTruthy()
+    expect(second.body?.request_id).toBeTruthy()
+    expect(second.body?.request_id).not.toBe(first.body?.request_id)
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {

@@ -2255,6 +2255,7 @@ export const handlers = [
       result,
       error: null,
       may_have_queued: false,
+      repeated: false,
     }
     state.printRuns.set(run.id, run)
     return HttpResponse.json(run, { status: 202 })

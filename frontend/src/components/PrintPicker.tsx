@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, newRequestId } from '../api/client'
 import type {
   ChoicesView,
   FilamentOptions,
@@ -407,6 +407,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         all_plates: plate === 'all',
         project_id: projectId,
         options,
+        // One per press: the same choices printed again are a new print, while
+        // runPrint's own retries of this press re-attach to its run (#470).
+        request_id: newRequestId(),
       }
       const ran = await api.runPrint(outputId, body)
       setResult(ran)
@@ -415,8 +418,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       rememberBedType()
     } catch (cause) {
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
-      setRefused(cause instanceof ApiError && cause.status === 422)
+      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands, except
+      // a run that may have queued: Print again would be a new print (#470).
+      setRefused(
+        cause instanceof ApiError &&
+          (cause.status === 422 || cause.problem.may_have_queued === true),
+      )
     } finally {
       setRunning(false)
     }

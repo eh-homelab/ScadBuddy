@@ -10,6 +10,7 @@ that run rather than queueing a second print.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import time
@@ -23,6 +24,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.pipelines import PrintRunRequest
 from scadbuddy.bambuddy.runs import LOST_DETAIL, LOST_UNQUEUED_DETAIL, run_key
 from scadbuddy.core.paths import DataPaths
@@ -157,9 +159,57 @@ def test_a_retry_after_the_run_succeeded_returns_it_and_queues_nothing_more(
 
     assert again.status_code == 200
     assert again.json()["id"] == first.json()["id"]
+    assert again.json()["repeated"] is True
     assert again.json()["status"] == "succeeded"
     assert again.json()["result"]["queue_item_ids"] == [51]
+    assert first.json()["repeated"] is False
+    assert client.get(f"/api/v1/print/runs/{first.json()['id']}").json()["repeated"] is False
     assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_retry_with_the_same_request_id_returns_its_run(
+    client: TestClient, model: str, gate: Gate
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    queued = queue_route()
+    gate.open()
+    press = {**body(), "request_id": str(uuid.uuid4())}
+
+    first = start(client, output_id, press)
+    follow_run(client, first.json()["id"])
+    again = start(client, output_id, press)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["repeated"] is True
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_deliberate_reprint_with_the_same_choices_is_a_new_print(
+    client: TestClient, model: str, gate: Gate
+) -> None:
+    """The user prints, deletes the item in Bambuddy, and prints again with the same
+    choices inside the repeat window: a new ``request_id`` is a new print."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    queued = queue_route()
+    gate.open()
+
+    first = start(client, output_id, {**body(), "request_id": str(uuid.uuid4())})
+    follow_run(client, first.json()["id"])
+    second = start(client, output_id, {**body(), "request_id": str(uuid.uuid4())})
+
+    assert second.status_code == 202, second.text
+    assert second.json()["id"] != first.json()["id"]
+    assert follow_run(client, second.json()["id"])["status"] == "succeeded"
+    assert queued.call_count == 2
 
 
 @respx.mock
@@ -270,6 +320,9 @@ def test_a_queue_call_that_timed_out_holds_the_key_so_a_retry_queues_nothing(
     failed = follow_run(client, first.json()["id"])
     assert failed["status"] == "failed"
     assert failed["error"]["status"] == 504
+    # The problem's type, as the synchronous 504 carried it, so a client can tell a
+    # Bambuddy call that may have gone through from any other failure.
+    assert failed["error"]["type"] == UNAVAILABLE_PROBLEM
     assert failed["may_have_queued"] is True
 
     again = start(client, output_id, body())
@@ -421,6 +474,18 @@ def test_the_key_is_the_output_and_the_request_not_its_spelling() -> None:
     assert run_key("a" * 32, one) != run_key(
         "a" * 32, PrintRunRequest.model_validate(run_request(copies=2))
     )
+
+
+def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -> None:
+    plain = PrintRunRequest.model_validate(body())
+    one = PrintRunRequest.model_validate({**body(), "request_id": "one"})
+    two = PrintRunRequest.model_validate({**body(), "request_id": "two"})
+    assert len({run_key("a" * 32, r) for r in (plain, one, two)}) == 3
+    # An older client that sends none keeps the key it had before the field existed.
+    before = json.dumps(
+        plain.model_dump(mode="json", exclude={"request_id"}), sort_keys=True, separators=(",", ":")
+    )
+    assert run_key("a" * 32, plain) == hashlib.sha256(f"{'a' * 32}\n{before}".encode()).hexdigest()
 
 
 def test_an_unknown_run_is_a_404(client: TestClient) -> None:

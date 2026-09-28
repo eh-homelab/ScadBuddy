@@ -13,11 +13,13 @@ reads the row, so any replica can answer it.
 
 Idempotency
 -----------
-A run's key is the output plus the parsed request body (:func:`run_key`). Outputs are
-immutable, so the two together name exactly one print. A second POST with the same key
-returns the run it repeats, instead of starting another, while that run is in flight
-or for ``REPEAT_WINDOW`` after it succeeded. The key is looked up and the new row
-inserted under one advisory lock, so two POSTs that race get one run.
+A run's key is the output plus the parsed request body (:func:`run_key`), including
+the caller's ``request_id``: one per deliberate Print, reused by every retry of it, so a
+retry re-attaches to its run while a reprint with the same choices is a new print. An
+older client sends none, and then the output and choices alone are the key. A second
+POST with the same key returns the run it repeats, instead of starting another, while
+that run is in flight or for ``REPEAT_WINDOW`` after it succeeded. The key is looked
+up and the new row inserted under one advisory lock, so two POSTs that race get one run.
 
 A run that failed before it tried to queue anything holds nothing: repeating it tries
 again. Once it has tried (``enqueue_attempted``, set by :meth:`PrintRunStore.
@@ -39,7 +41,9 @@ state change is a compare-and-set on ``status = 'running'``, which makes that sa
   ``start_enqueue`` finds the row failed and it stops), so the key is released and
   the message says nothing was queued (``LOST_UNQUEUED_DETAIL``);
 - expiry after it keeps the key and says the print may be queued (``LOST_DETAIL``);
-- either way the slow run's own end no longer overwrites the row.
+- either way the slow run's own end no longer overwrites the row. After it, though,
+  the slow run's heartbeats and its end still move ``finished_at``, so the key is
+  held until ``REPEAT_WINDOW`` after the run really stopped, not after the expiry.
 
 A run this process is still running when it shuts down is failed the same way.
 """
@@ -77,9 +81,9 @@ HEARTBEAT_INTERVAL = 10.0
 #: A ``running`` run whose heartbeat is older than this was lost with its process.
 LOST_AFTER = timedelta(seconds=60)
 #: How long a succeeded run answers a repeat of its request instead of a new print.
-#: Long enough for any retry of a request a proxy cut; a deliberate reprint of the
-#: same output with the same choices inside it is the price, and ``copies`` is the
-#: way to ask for more than one.
+#: Long enough for any retry of a request a proxy cut. A client that sends a
+#: ``request_id`` makes a deliberate reprint a new key; one that does not pays with
+#: its reprints of the same choices inside the window.
 REPEAT_WINDOW = timedelta(minutes=10)
 #: Finished runs are kept this long, then pruned when a new run is recorded.
 RETENTION = timedelta(days=7)
@@ -105,6 +109,9 @@ _COLUMNS = (
 class PrintRunError(BaseModel):
     """Why a run failed: the problem document the route answered with before #470."""
 
+    #: The problem's ``type``, e.g. ``bambuddy-unavailable`` for a Bambuddy call that
+    #: timed out or dropped, as a synchronous answer would have carried it.
+    type: str = "about:blank"
     #: The HTTP status that problem carries: 422 for a choice or slot the resolver
     #: refuses, 502 for a slice Bambuddy failed, 504 for one that never finished, and
     #: Bambuddy's own scope-aware 4xx/5xx for a call it refused.
@@ -134,6 +141,9 @@ class PrintRun(BaseModel):
     #: Bambuddy's queue anyway, so check there before printing again. A repeat of the
     #: request answers with this run rather than queueing again, for ``REPEAT_WINDOW``.
     may_have_queued: bool = False
+    #: Only on a ``POST .../run`` answered 200: this is an earlier run with the same key,
+    #: and the POST started nothing.
+    repeated: bool = False
 
 
 #: A run whose process went away before it ended: lost to a restart, or shut down.
@@ -152,8 +162,14 @@ class RunLostError(RuntimeError):
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
-    """The output plus the request as parsed, so key order and spacing do not matter."""
-    canonical = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """The output plus the request as parsed, so key order and spacing do not matter.
+
+    ``request_id`` is part of it when sent; without one the key is what it was before
+    the field existed.
+    """
+    exclude = {"request_id"} if request.request_id is None else None
+    body = request.model_dump(mode="json", exclude=exclude)
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 
 
@@ -286,6 +302,16 @@ class PrintRunStore:
                 "UPDATE print_runs SET heartbeat_at = now() WHERE id = %s AND status = 'running'",
                 (run_id,),
             )
+            self._hold_lost(conn, run_id)
+
+    def _hold_lost(self, conn: Connection[DictRow], run_id: str) -> None:
+        # A run failed as lost after it tried to queue, which this process is still
+        # running: it may queue more, so its key is held from now, not from the expiry.
+        conn.execute(
+            "UPDATE print_runs SET finished_at = now()"
+            " WHERE id = %s AND status = 'failed' AND enqueue_attempted",
+            (run_id,),
+        )
 
     def _start_enqueue(self, run_id: str) -> None:
         # The compare-and-set that orders this against `_expire_lost`: if the run was
@@ -309,6 +335,7 @@ class PrintRunStore:
                 " heartbeat_at = now() WHERE id = %s AND status = 'running'",
                 (state, Jsonb(value), run_id),
             )
+            self._hold_lost(conn, run_id)
 
 
 #: Awaited by the work before each ``POST /queue/`` (:meth:`PrintRunStore.start_enqueue`).
@@ -384,6 +411,7 @@ class PrintRuns:
                 await self.store.fail(
                     run.id,
                     PrintRunError(
+                        type=error.type,
                         status=error.status,
                         title=error.title,
                         detail=error.detail,
