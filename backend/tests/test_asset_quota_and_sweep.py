@@ -13,6 +13,7 @@ import pytest
 import trimesh
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import assets as assets_module
 from scadbuddy.library.assets import (
     AssetMeta,
     AssetNotFoundError,
@@ -300,3 +301,137 @@ def test_use_marks_the_asset_used_now(store: AssetStore) -> None:
     age(store, meta, 10 * GRACE)
     store.use(meta.id)
     assert time.time() - (store.root / f"{meta.id}.json").stat().st_mtime < 60
+
+
+# -- the running total (#390) -----------------------------------------------------
+
+
+def no_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail anything that lists the store: usage must come from the ledger."""
+
+    def refuse(self: AssetStore) -> dict[str, Path]:
+        raise AssertionError("the store was scanned")
+
+    monkeypatch.setattr(AssetStore, "_blobs", refuse)
+
+
+def test_uploads_keep_the_total_without_scanning_the_store(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = store.put(svg(1), "a.svg")
+    no_scan(monkeypatch)
+    second = store.put(svg(2), "b.svg")
+    store.put(svg(2), "again.svg")  # already stored: counted once
+    usage = store.usage()
+    assert (usage.count, usage.bytes) == (2, first.size + second.size)
+
+
+def test_the_count_cap_is_enforced_without_scanning_the_store(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = AssetStore(paths.assets, max_count=1)
+    store.put(svg(1), "a.svg")
+    no_scan(monkeypatch)
+    with pytest.raises(AssetQuotaError):
+        store.put(svg(2), "b.svg")
+
+
+def test_the_sweep_keeps_the_total_without_scanning_it_again(
+    paths: DataPaths, store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = store.put(svg(1), "old.svg")
+    kept = store.put(svg(2), "kept.svg")
+    age(store, old, GRACE + DAY)
+    blobs = store._blobs()
+    # The sweep lists the store once to find candidates; the total must not need more.
+    calls: list[int] = []
+
+    def listed_once(self: AssetStore) -> dict[str, Path]:
+        calls.append(1)
+        return dict(blobs)
+
+    monkeypatch.setattr(AssetStore, "_blobs", listed_once)
+    assert store.sweep(set(), grace=GRACE) == [old.id]
+    usage = store.usage()
+    assert (usage.count, usage.bytes) == (1, kept.size)
+    assert len(calls) == 1
+
+
+def test_a_new_instance_reads_the_total_the_last_one_left(
+    paths: DataPaths, store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = store.put(svg(1), "a.svg")
+    second = store.put(svg(2), "b.svg")
+    no_scan(monkeypatch)
+    usage = AssetStore(paths.assets).usage()
+    assert (usage.count, usage.bytes) == (2, first.size + second.size)
+
+
+def test_rebuild_counts_files_changed_behind_the_stores_back(
+    paths: DataPaths, store: AssetStore
+) -> None:
+    first = store.put(svg(1), "a.svg")
+    second = store.put(svg(2), "b.svg")
+    # Removed while the process was down: the ledger still counts it.
+    store.blob_path(second).unlink()
+    (store.root / f"{second.id}.json").unlink()
+    restarted = AssetStore(paths.assets)
+    usage = restarted.rebuild_usage()
+    assert (usage.count, usage.bytes) == (1, first.size)
+    assert restarted.usage().count == 1
+
+
+def test_an_upload_that_dies_midway_is_recounted(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = store.put(svg(1), "a.svg")
+    real = assets_module._write_atomically
+
+    def crash_on_metadata(path: Path, payload: bytes) -> None:
+        if path.suffix == ".json" and path.parent == store.root:
+            raise OSError("disk went away")
+        real(path, payload)
+
+    monkeypatch.setattr(assets_module, "_write_atomically", crash_on_metadata)
+    with pytest.raises(OSError):
+        store.put(svg(2), "b.svg")
+    monkeypatch.setattr(assets_module, "_write_atomically", real)
+    # The blob landed; the ledger was left dirty, so the next read counts it.
+    blob_size = sum(p.stat().st_size for p in store.root.glob("*.svg"))
+    usage = store.usage()
+    assert usage.count == 2
+    assert usage.bytes == blob_size
+    assert blob_size > first.size
+
+
+def test_a_missing_or_damaged_ledger_is_recounted(store: AssetStore) -> None:
+    meta = store.put(svg(1), "a.svg")
+    store.ledger_path.write_text("{not json", encoding="utf-8")
+    assert store.usage().count == 1
+    store.ledger_path.unlink()
+    usage = store.usage()
+    assert (usage.count, usage.bytes) == (1, meta.size)
+    assert json.loads(store.ledger_path.read_text(encoding="utf-8"))["dirty"] is False
+
+
+def test_the_sweep_removes_the_metadata_of_a_blob_already_gone(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blob removed behind the store's back between the sweep's listing and its
+    removal: the metadata must still go, and the total is recounted."""
+    gone = store.put(svg(1), "gone.svg")
+    kept = store.put(svg(2), "kept.svg")
+    age(store, gone, GRACE + DAY)
+    real_last_used = AssetStore._last_used
+
+    def vanish_first(self: AssetStore, asset_id: str, blob: Path) -> float | None:
+        stamp = real_last_used(self, asset_id, blob)
+        if asset_id == gone.id:
+            blob.unlink(missing_ok=True)
+        return stamp
+
+    monkeypatch.setattr(AssetStore, "_last_used", vanish_first)
+    assert store.sweep(set(), grace=GRACE) == [gone.id]
+    assert not (store.root / f"{gone.id}.json").exists()
+    usage = store.usage()
+    assert (usage.count, usage.bytes) == (1, kept.size)
