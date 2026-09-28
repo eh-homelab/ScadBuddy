@@ -228,3 +228,23 @@ def test_temporal_settings_reach_the_config() -> None:
     assert config.temporal_namespace == "scadbuddy"
     assert config.temporal_task_queue_render == "render"
     assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
+
+
+def test_load_config_reads_the_temporal_settings() -> None:
+    config = load_config(
+        {
+            "SCADBUDDY_TEMPORAL_ADDRESS": "temporal:7233",
+            "SCADBUDDY_TEMPORAL_NAMESPACE": "elsewhere",
+            "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER": "render-2",
+        }
+    )
+    assert config.temporal_address == "temporal:7233"
+    assert config.temporal_namespace == "elsewhere"
+    assert config.temporal_task_queue_render == "render-2"
+
+
+def test_load_config_defaults_the_temporal_settings() -> None:
+    config = load_config({})
+    assert config.temporal_address == ""
+    assert config.temporal_namespace == "scadbuddy"
+    assert config.temporal_task_queue_render == "render"

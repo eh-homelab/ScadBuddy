@@ -349,6 +349,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         duplicate_staging_max_age=_float_or(
             source.get("SCADBUDDY_DUPLICATE_STAGING_MAX_AGE"), DEFAULT_DUPLICATE_STAGING_MAX_AGE
         ),
+        temporal_address=source.get("SCADBUDDY_TEMPORAL_ADDRESS") or "",
+        temporal_namespace=source.get("SCADBUDDY_TEMPORAL_NAMESPACE") or DEFAULT_TEMPORAL_NAMESPACE,
+        temporal_task_queue_render=source.get("SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER")
+        or DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     )
 
 
