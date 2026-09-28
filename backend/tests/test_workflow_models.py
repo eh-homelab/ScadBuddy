@@ -78,6 +78,34 @@ def test_a_piece_request_carries_its_own_key() -> None:
     assert PieceRequest.model_validate(request.model_dump(mode="json")) == request
 
 
+def test_a_revision_less_piece_request_is_keyed_by_its_scope() -> None:
+    """#642: a live source's piece is its job's own, so its key names the job."""
+    key = piece_key("demo", "job:1", "model.scad", {"width": 1})
+    request = PieceRequest(
+        slug="demo", revision=None, scope="job:1", params={"width": 1}, piece_key=key
+    )
+    assert PieceRequest.model_validate(request.model_dump(mode="json")) == request
+
+    with pytest.raises(ValidationError, match="does not match"):
+        PieceRequest(
+            slug="demo",
+            revision=None,
+            scope="job:2",
+            params={"width": 1},
+            piece_key=key,
+        )
+
+
+def test_a_piece_request_at_a_revision_takes_no_scope() -> None:
+    with pytest.raises(ValidationError, match="takes no scope"):
+        PieceRequest(
+            slug="demo",
+            revision="abc1234",
+            scope="job:1",
+            piece_key=piece_key("demo", "abc1234", "model.scad", {}),
+        )
+
+
 def test_a_piece_request_with_another_requests_key_is_refused() -> None:
     other = piece_key("demo", "abc1234", "model.scad", {"width": 9, "height": 2})
 

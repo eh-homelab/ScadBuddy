@@ -190,9 +190,17 @@ class TemplatePipeline:
         try:
             await project(state="running")
             params = job.inputs.get("params", job.params)
-            key = piece_key(job.slug, job.model_version, "model.scad", params)
+            # Without a revision the source is live and may change before the next job,
+            # so the piece is this job's own: its blob directory and workflow (#642).
+            scope = f"job:{job.id}" if job.model_version is None else None
+            version = job.model_version if job.model_version is not None else scope
+            key = piece_key(job.slug, version, "model.scad", params)
             req = PieceRequest(
-                slug=job.slug, revision=job.model_version, params=dict(params), piece_key=key
+                slug=job.slug,
+                revision=job.model_version,
+                scope=scope,
+                params=dict(params),
+                piece_key=key,
             )
             await project(steps=steps)
             outcome = await self._piece(req)

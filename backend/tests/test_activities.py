@@ -13,6 +13,7 @@ from typing import Any
 
 import psycopg
 import pytest
+import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -53,7 +54,7 @@ from scadbuddy.workflows.models import (
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad
+from tests.conftest import fake_3mf_openscad, write_openscad_3mf
 from tests.support.temporal import temporal_client
 
 REVISION = "c0ffee0"
@@ -560,3 +561,53 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert raw.stat().st_mtime_ns == rendered
     refs.drop_holder("job", job.id)
     assert key in refs.referenced()  # the repeat's own ref
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_revision_less_job_never_renders_over_another_jobs_files(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """#642: without a revision the key named only the slug and params, so a second job
+    re-rendered a live source into the first job's blob directory, under its row."""
+    paths = _paths(tmp_path)
+    refs = BlobRefs(projection.pool)
+    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with render_worker(
+            client,
+            queue,
+            RenderActivities(deps),
+            build_id="test",
+            max_concurrent_activities=2,
+        ):
+            await make_current(client, namespace=client.namespace, build_id="test")
+
+            async def rendered(job: Job) -> Path:
+                projection.submit(job, render_key("demo", {"width": 1}, None))
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                    ),
+                    timeout=120,
+                )
+                done = projection.read(job.id)
+                assert done.state == "done", done.error
+                assert done.result is not None
+                return paths.root / done.result.model_3mf
+
+            first = await rendered(_job(width=1))
+            before = first.read_bytes()
+            # The author edits the template, which now draws a taller box.
+            paths.model_source("demo").write_text("cube(20);\n", encoding="utf-8")
+            write_openscad_3mf(
+                tmp_path / "bin" / "drawn.3mf",
+                [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 20)))],
+            )
+            second = await rendered(_job(width=1))
+
+    assert first.read_bytes() == before
+    assert second.parent != first.parent
+    assert second.read_bytes() != before
