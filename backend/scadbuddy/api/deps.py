@@ -13,6 +13,7 @@ from starlette.requests import HTTPConnection
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 STATE_ATTR = "scadbuddy"
 VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
+RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
@@ -83,6 +85,8 @@ class AppState:
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
+    #: The print dialog's runs, answered 202 and run in the background (#470).
+    print_runs: PrintRuns
     metrics: Metrics
     #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
     #: (until #401 makes one required): the routes that persist answer 503.
@@ -279,6 +283,9 @@ def build_state(settings: Settings) -> AppState:
             prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
+        print_runs=PrintRuns(
+            PrintRunStore(store.pool if isinstance(store, PostgresJobStore) else None), events
+        ),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -377,6 +384,10 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
     return state.print_watcher
 
 
+def get_print_runs(state: StateDep) -> PrintRuns:
+    return state.print_runs
+
+
 #: Problem ``type`` for a route that needs the database when none is configured.
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
@@ -423,6 +434,7 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
+PrintRunsDep = Annotated[PrintRuns, Depends(get_print_runs)]
 OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
@@ -441,6 +453,7 @@ FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
+RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]

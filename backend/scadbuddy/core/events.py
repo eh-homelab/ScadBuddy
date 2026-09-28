@@ -156,6 +156,16 @@ class PrintEvent(BaseEvent):
     slug: str
 
 
+class PrintRunEvent(BaseEvent):
+    """A print run (#470) was accepted or ended: re-read ``GET /print/runs/{run_id}``.
+    Published on the output's ``print:<output id>`` topic, beside ``print.progress``."""
+
+    kind: Literal["print.run"] = "print.run"
+    output_id: str
+    slug: str
+    run_id: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -232,6 +242,7 @@ Event = Annotated[
     | UpstreamAvailable
     | OutputEvent
     | PrintEvent
+    | PrintRunEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled

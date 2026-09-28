@@ -73,6 +73,7 @@ from scadbuddy.core.events import (
     ModelEvent,
     OutputEvent,
     PrintEvent,
+    PrintRunEvent,
     SettingsChanged,
     SourceChanged,
     Subscription,
@@ -139,7 +140,7 @@ def topics_of(event: Event) -> list[str]:
             return [f"model:{event.slug}"]
         case OutputEvent():
             return ["outputs", f"model:{event.slug}"]
-        case PrintEvent():
+        case PrintEvent() | PrintRunEvent():
             return [f"print:{event.output_id}"]
         case LibraryChanged():
             return ["libraries", f"model:{event.slug}"]

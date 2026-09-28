@@ -1,6 +1,6 @@
 """Slicing an output for print: the filament step's options, and the spool-first run.
 
-ScadBuddy owns no slicing settings. The print dialog's run (:func:`run_for_output`)
+ScadBuddy owns no slicing settings. The print dialog's run (:func:`execute_run`)
 derives every preset from the dialog's choices — spools, nozzles, quality and plate
 (spec 2026-09-27 §4) — and always slices then queues; there is no pipeline to run or
 choose from here. Bambuddy's own slicer pipelines are still what the send bar runs
@@ -10,12 +10,13 @@ choose from here. Bambuddy's own slicer pipelines are still what the send bar ru
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import status
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import _catalogue
+from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
@@ -201,24 +202,31 @@ async def _spool_colours(
     ]
 
 
-async def run_for_output(
+@dataclass(frozen=True)
+class PreparedRun:
+    """What :func:`prepare_run` checked, handed on to :func:`execute_run`."""
+
+    plate_ids: list[int]
+    printer_id: int
+    #: Read once, before the 202, and reused by the run rather than read again.
+    catalogue: _Catalogue
+
+
+async def prepare_run(
     client: BambuddyClient,
     store: OutputStore,
-    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
-) -> PrintRunResult:
-    """Slice with presets derived from the dialog's choices, then queue (spec §4).
+) -> PreparedRun:
+    """Every refusal the request alone decides, before anything is uploaded (#470).
 
-    Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
-    decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
-    (spec §6).
-
-    What the choices alone decide (nozzle sizes, printer and process preset) is
-    refused before the 3MF is uploaded. Every plate is then resolved before any is
-    sliced, so a slot error is a 422 with nothing on Bambuddy's queue, however many
-    plates the print has.
+    This is what ``POST .../run`` makes before it answers 202: the plates exist, a
+    printer is chosen and the resolver can serve it, and the choices resolve to a
+    printer and process preset. Each is a read (the local 3MF, ``/printers/``, the
+    preset catalogue), none waits on a slice, so it stays well inside a proxy's
+    timeout. What needs a plate's slots is left to :func:`execute_run`, because only a
+    library file answers those.
     """
     plate_ids = (
         [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
@@ -239,18 +247,44 @@ async def run_for_output(
             "no printer is chosen and none is configured, so there is nothing to print on"
         )
     await _require_resolvable_printer(client, printer_id)
-    choices = request.choices
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
     # Read before the upload, so that what the choices alone refuse — mixed nozzle
     # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
     # library. Slot errors need the plate's slots, which only a library file answers,
-    # so those are still found after the upload, by `resolve` below.
+    # so those are still found after the upload, by `resolve` in `execute_run`. It is
+    # two GETs, the same the dialog's own choices read makes to open (`choices.py`).
     catalogue = await _catalogue(client)
-    refused = choice_errors(choices, catalogue)
+    refused = choice_errors(request.choices, catalogue)
     if refused:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
+    return PreparedRun(plate_ids=plate_ids, printer_id=printer_id, catalogue=catalogue)
+
+
+async def execute_run(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+    prepared: PreparedRun,
+) -> PrintRunResult:
+    """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
+    decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
+    (spec §6).
+
+    Runs after :func:`prepare_run`, in the background of a 202 (#470): it uploads,
+    and waits on every slice. Every plate is resolved before any is sliced, so a slot
+    error is a 422 with nothing on Bambuddy's queue, however many plates the print has.
+    """
+    plate_ids = prepared.plate_ids
+    printer_id = prepared.printer_id
+    catalogue = prepared.catalogue
+    choices = request.choices
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
         client,

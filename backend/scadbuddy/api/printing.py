@@ -10,14 +10,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintProgressDep,
+    PrintRunsDep,
     PrintWatcherDep,
+    RunIdPath,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
@@ -29,8 +31,9 @@ from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.pipelines import (
     PrintRunRequest,
     PrintRunResult,
+    execute_run,
     filament_options_for_output,
-    run_for_output,
+    prepare_run,
 )
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
@@ -42,6 +45,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
 )
+from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 
@@ -112,32 +116,92 @@ def put_printer_bed_type(
 
 @router.post(
     "/outputs/{output_id}/run",
-    response_model=PrintRunResult,
-    summary="Slice this output with the dialog's choices and queue it",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PrintRun,
+    responses={
+        status.HTTP_200_OK: {
+            "model": PrintRun,
+            "description": "A repeat of a run in flight, or one that succeeded within "
+            "the last ten minutes: that run, and no new print.",
+        },
+    },
+    summary="Slice this output with the dialog's choices and queue it, in the background",
 )
 async def post_run(
     output_id: OutputIdPath,
     body: PrintRunRequest,
+    response: Response,
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
-) -> PrintRunResult:
+    runs: PrintRunsDep,
+) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
 
-    A choice the resolver cannot turn into presets — mixed nozzle sizes, or a slot with
-    no filament preset for the nozzle — is a 422 before anything is sliced. Which AMS
-    tray and extruder each spool feeds is still Bambuddy's decision at dispatch.
+    Answers **202** with a ``running`` run once the request is accepted, and uploads,
+    slices and queues in the background (#470): the slices alone can take minutes,
+    longer than the proxies in front wait. Follow ``GET /print/runs/{id}`` (or the
+    ``print.run`` event on the ``print:<output id>`` topic) to ``succeeded``, whose
+    ``result`` is what this route used to answer, or ``failed``, whose ``error`` is
+    the problem it used to answer with.
+
+    Refused before any run starts, with nothing uploaded: an output with no plates, no
+    printer, a printer the resolver cannot serve, and choices the resolver refuses —
+    mixed nozzle sizes, no printer or process preset (422). A slot with no filament
+    preset for the nozzle needs the plate's slots, which only the uploaded file
+    answers, so that one is the run's ``failed`` with the same 422 and message.
+
+    The same request for the same output again is the same run: while it is in flight,
+    or for ten minutes after it succeeded, this answers **200** with that run and
+    starts nothing, so a retry after a proxy timeout cannot queue the print twice.
     """
     meta = require_output(outputs, output_id)
+    key = run_key(meta.id, body)
+    repeated = await runs.store.find(key)
+    if repeated is not None:
+        response.status_code = status.HTTP_200_OK
+        return repeated
     settings = store.load()
     async with client_for(settings) as client:
-        result = await run_for_output(client, outputs, uploads, meta, settings, body)
-    observer.started(meta)
-    await watcher.started(meta.id)
-    return result
+        prepared = await prepare_run(client, outputs, meta, settings, body)
+    run, created = await runs.store.claim(meta.id, key)
+    if not created:
+        # Another request for the same print claimed it while this one was checking.
+        response.status_code = status.HTTP_200_OK
+        return run
+
+    async def work() -> PrintRunResult:
+        async with client_for(settings) as client:
+            result = await execute_run(client, outputs, uploads, meta, settings, body, prepared)
+        observer.started(meta)
+        await watcher.started(meta.id)
+        return result
+
+    runs.start(run, meta.slug, work)
+    runs.announce(run, meta.slug)
+    return run
+
+
+@router.get(
+    "/runs/{run_id}",
+    response_model=PrintRun,
+    summary="How a print run is going",
+)
+async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
+    """A run ``POST /print/outputs/{id}/run`` accepted, from any replica (#470).
+
+    ``running`` until it ends as ``succeeded`` (with ``result``) or ``failed`` (with
+    ``error``). A run whose process went away before it ended reads as ``failed``: it
+    may have queued the print, and its message says to check Bambuddy's queue.
+    Once ``succeeded``, the print itself is followed by ``/outputs/{id}/progress``.
+    """
+    run = await runs.store.get(run_id)
+    if run is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no print run {run_id}")
+    return run
 
 
 @router.get(

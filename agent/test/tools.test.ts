@@ -201,17 +201,24 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices }),
     )
   }
-  function capturedRun(into: { body?: unknown }) {
-    return http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
-      into.body = await request.json()
-      return HttpResponse.json({ library_file_id: 5, copies: 1, bambuddy_url: 'http://b', queue_item_ids: [9] })
-    })
+  const RUN = 'fedcba9876543210fedcba9876543210'
+  const RESULT = { library_file_id: 5, copies: 1, bambuddy_url: 'http://b', queue_item_ids: [9] }
+  const running = { id: RUN, output_id: OUT, status: 'running', created_at: '2026-09-28T00:00:00Z' }
+  // #470: the POST answers 202 with a running run, which the tool follows to its end.
+  function capturedRun(into: { body?: unknown }, ended: Record<string, unknown> = { status: 'succeeded', result: RESULT }) {
+    return [
+      http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+        into.body = await request.json()
+        return HttpResponse.json(running, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.json({ ...running, ...ended })),
+    ]
   }
 
   it('with every choice given, runs without reading the dialog', async () => {
     const run: { body?: unknown } = {}
     // No choices handler: reading it would be an unhandled request.
-    server.use(capturedRun(run))
+    server.use(...capturedRun(run))
     const result = await tool('print_output').execute(
       {
         output_id: OUT,
@@ -226,6 +233,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       ctx(),
     )
     expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded', result: RESULT })
     expect(run.body).toEqual({
       printer_id: 2,
       copies: 2,
@@ -246,7 +254,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
     const run: { body?: unknown } = {}
-    server.use(choicesView(), capturedRun(run))
+    server.use(choicesView(), ...capturedRun(run))
     const result = await tool('print_output').execute({ output_id: OUT }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run.body).toMatchObject({
@@ -277,7 +285,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
           { slot_id: 2, spool_id: 99 },
         ],
       }),
-      capturedRun(run),
+      ...capturedRun(run),
     )
     await tool('print_output').execute({ output_id: OUT }, ctx())
     expect(run.body).toMatchObject({
@@ -300,12 +308,37 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         asked = new URL(request.url).searchParams
         return HttpResponse.json({ ...FILAMENTS, slots: [{ slot_id: 3 }], suggested: [{ slot_id: 3, spool_id: 12 }] })
       }),
-      capturedRun(run),
+      ...capturedRun(run),
     )
     await tool('print_output').execute({ output_id: OUT, all_plates: true }, ctx())
     expect(asked?.get('all_plates')).toBe('true')
     expect(asked?.get('printer_id')).toBe('1')
     expect(run.body).toMatchObject({ all_plates: true, filament_plan: { slots: [{ slot_id: 3, spool_id: 12 }] } })
+  })
+
+  const CHOSEN = {
+    output_id: OUT,
+    printer_id: 1,
+    filament_plan: { slots: [] },
+    nozzles: [{ size: '0.4' }],
+    tier: 'standard',
+    bed_type: 'Cool Plate',
+  }
+
+  it("is an error in the backend's words when the run fails after the 202", async () => {
+    const failed = { status: 422, title: 'Unprocessable Content', detail: 'Slot 2 has no spool chosen.' }
+    server.use(...capturedRun({}, { status: 'failed', error: failed }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('(HTTP 422): Slot 2 has no spool chosen.')
+  })
+
+  it('hands back a run still slicing when the wait runs out', async () => {
+    server.use(...capturedRun({}, { status: 'running' }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx({ renderWaitMs: 20 }))
+    expect(firstText(result)).toMatchObject({ id: RUN, status: 'running', note: expect.stringContaining('get_print_run') })
+    const read = await runTool(tool('get_print_run'), { run_id: RUN }, ctx())
+    expect(firstText(read)).toMatchObject({ id: RUN, status: 'running' })
   })
 
   it("passes the resolver's refusal through", async () => {

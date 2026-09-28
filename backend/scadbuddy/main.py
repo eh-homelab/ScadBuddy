@@ -335,6 +335,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        # Before the watcher (a run starts one) and the queue (its pool records the
+        # runs this process leaves unfinished as failed).
+        await state.print_runs.aclose()
         await state.print_watcher.aclose()
         await state.queue.aclose()
         if state.decisions is not None:

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, get_print_watcher
 from tests.api.test_print import pipelines_route, printers_route, run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 
@@ -145,7 +145,7 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     slice_routes()
     queue_route()
 
-    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()).json()
+    ran = run_print(client, output_id, json=run_request()).json()
     assert ran["route"] == "slice_queue"
 
     respx.get(f"{API}/queue/51").mock(
@@ -201,7 +201,7 @@ def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     run_routes()
     slice_routes()
     queue_route()
-    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+    ran = run_print(client, output_id, json=run_request())
     assert ran.status_code == 200, ran.text
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]

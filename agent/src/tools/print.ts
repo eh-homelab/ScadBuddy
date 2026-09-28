@@ -1,7 +1,8 @@
+import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -25,6 +26,47 @@ import { defineTool, json, type Tool } from './registry.js'
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
 
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional()
+
+/** Print run ids are 32 lowercase hex digits (`run_id` in backend/openapi.json). */
+const runId = z
+  .string()
+  .regex(/^[0-9a-f]{32}$/, 'must be a print run id: 32 lowercase hex digits, as print_output returns it')
+  .describe('Print run id, as print_output returns it')
+
+type PrintRun = Awaited<ReturnType<typeof getRun>>
+
+async function getRun(ctx: ToolContext, id: string) {
+  return ok(
+    ctx.backend.GET('/api/v1/print/runs/{run_id}', { params: { path: { run_id: id } }, signal: ctx.signal }),
+    `get print run ${id}`,
+  )
+}
+
+/**
+ * `POST .../run` answers 202 and slices in the background (#470): follow the
+ * run until it ends or `renderWaitMs` passes, as render_model follows a render.
+ */
+async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
+  const deadline = Date.now() + ctx.renderWaitMs
+  for (let step = 1; run.status === 'running' && Date.now() < deadline; step++) {
+    await ctx.progress(step, undefined, 'print run: slicing and queueing')
+    await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    run = await getRun(ctx, run.id)
+  }
+  return run
+}
+
+/** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
+function runOutcome(run: PrintRun) {
+  if (run.status === 'failed') {
+    const error = run.error
+    throw new ToolError(
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`,
+    )
+  }
+  if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
+  return json(run)
+}
 const calibration = z.enum(['off', 'on', 'auto'])
 
 /** `PrintOptions` in backend/openapi.json: sparse, and the backend refuses unknown fields. */
@@ -158,6 +200,17 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_print_run',
+    description:
+      'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
+      '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it.',
+    input: z.object({ run_id: runId }),
+    risk: 'read',
+    routes: ['GET /api/v1/print/runs/{run_id}'],
+    handler: async ({ run_id }, ctx) => json(await getRun(ctx, run_id)),
+  }),
+
+  defineTool({
     name: 'list_print_projects',
     description: "Bambuddy's projects, to file prints under.",
     input: z.object({}),
@@ -256,7 +309,9 @@ export const printTools: Tool[] = [
       "the way the print dialog opens: the chosen printer, this model's remembered nozzles, tier or process " +
       "and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
-      'spool or preset) is refused before anything is sliced. Follow it with get_print_progress.',
+      'spool or preset) is refused before anything is sliced. The run slices and queues in the background: ' +
+      'this waits for it and answers with the run and its `result` (warnings, queue item ids), or hands back ' +
+      'the still-running run to poll with get_print_run. Then follow the print with get_print_progress.',
     input: z.object({
       output_id: outputId,
       printer_id: z.number().int().optional(),
@@ -281,7 +336,7 @@ export const printTools: Tool[] = [
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
-    routes: ['POST /api/v1/print/outputs/{output_id}/run'],
+    routes: ['POST /api/v1/print/outputs/{output_id}/run', 'GET /api/v1/print/runs/{run_id}'],
     summarize: (args) => {
       const { output_id, printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
       const defaulted =
@@ -299,7 +354,8 @@ export const printTools: Tool[] = [
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
-    handler: async (args, { backend }) => {
+    handler: async (args, ctx) => {
+      const { backend } = ctx
       const path = { output_id: args.output_id }
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
       let slots = args.filament_plan?.slots
@@ -351,8 +407,7 @@ export const printTools: Tool[] = [
           slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
       }
-      return json(
-        await ok(
+      const started = await ok(
           backend.POST('/api/v1/print/outputs/{output_id}/run', {
             params: { path },
             body: {
@@ -373,8 +428,8 @@ export const printTools: Tool[] = [
             },
           }),
           `print ${args.output_id}`,
-        ),
-      )
+        )
+      return runOutcome(await waitForRun(ctx, started))
     },
   }),
 

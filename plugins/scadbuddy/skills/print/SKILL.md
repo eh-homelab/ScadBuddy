@@ -113,9 +113,18 @@ chosen spools (spool-first spec §4), slices through Bambuddy, waits for the sli
 job, then `POST /queue/` on the one printer the dialog is scoped to. No pipeline
 runs on this path.
 
+The route answers **202** with a `PrintRun` (`status: "running"`) and slices and
+queues in the background, because the slices outlast the proxies in front.
+Follow `GET /api/v1/print/runs/{run_id}` until `status` is `succeeded` (its
+`result` is the `PrintRunResult` below) or `failed` (its `error` carries the
+`status` and `detail` of the refusal). The same request for the same output
+again answers **200** with that run while it is in flight, or for ten minutes
+after it succeeded, and queues nothing more (`backend/openapi.json`; #470).
+
 - **Errors** are a 422 before anything is sliced, and name the slot or setting:
   mixed nozzle sizes, or a slot with no filament preset for the nozzle
-  (spool-first spec §4.5).
+  (spool-first spec §4.5). A slot error needs the uploaded file, so it arrives
+  as the run's `failed` `error` with that 422, not as the POST's answer.
 - **Warnings** come back in the result and never block: spool not loaded, nozzle
   not installed, High Flow slicing as Standard, a Generic filament preset
   fallback, or a plate that differs from the last print (spool-first spec §4.5).
@@ -131,7 +140,7 @@ main spec §7; spool-first spec §0). It is outward too.
 
 ## 4. After the run: the result
 
-`PrintRunResult` reports `route` (always `slice_queue`), `slice_job_id`,
+A `succeeded` run's `result`, a `PrintRunResult`, reports `route` (always `slice_queue`), `slice_job_id`,
 `queue_item_ids`, `library_file_id`, `copies`, `bambuddy_url` and `warnings`
 (`backend/openapi.json`). Give the user the `bambuddy_url` and every warning.
 
