@@ -519,14 +519,20 @@ async def gather_options(
     printer_id: int | None = None,
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
 ) -> FilamentOptions:
-    """Read Bambuddy once for everything the filament step needs."""
+    """Read Bambuddy once for everything the filament step needs.
+
+    ``own_colours`` replace the colors the file reports, slot by slot: the file was
+    recolored for a run's spools (#457), and the step shows the model's.
+    """
     (options,) = await gather_plate_options(
         client,
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_ids=[plate_id],
         fallback_colours=fallback_colours,
+        own_colours=own_colours,
     )
     return options
 
@@ -538,6 +544,7 @@ async def gather_plate_options(
     printer_id: int | None = None,
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -557,7 +564,9 @@ async def gather_plate_options(
             library_file_id=library_file_id,
             spools=spools,
             assignments=assignments,
-            requirements=await _requirements(client, library_file_id, plate, fallback_colours),
+            requirements=await _requirements(
+                client, library_file_id, plate, fallback_colours, own_colours
+            ),
             printer=printer,
             slot_materials=slot_materials,
         )
@@ -570,6 +579,7 @@ async def _requirements(
     library_file_id: int,
     plate_id: int | None,
     fallback_colours: list[str] | None,
+    own_colours: list[str] | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -582,7 +592,11 @@ async def _requirements(
         SlotNeed(
             slot_id=filament.slot_id,
             material=filament.type or None,
-            colour=normalise_colour(filament.color),
+            colour=normalise_colour(
+                own_colours[filament.slot_id - 1]
+                if own_colours and 0 < filament.slot_id <= len(own_colours)
+                else filament.color
+            ),
             # 0 g is what an unsliced plate reports for every slot; it is unknown, and
             # saying so is what keeps the "enough filament left" warning honest.
             used_grams=filament.used_grams or None,

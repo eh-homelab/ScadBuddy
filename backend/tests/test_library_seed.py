@@ -30,6 +30,7 @@ from scadbuddy.library.library_seed import (
     verify_seed,
 )
 from scadbuddy.main import create_app
+from tests.conftest import UNUSED_DATABASE_URL
 from tests.test_library_processes import _age
 
 COMMIT = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"
@@ -298,7 +299,7 @@ def test_the_build_check_refuses_a_malformed_pair(
 # ── boot ──────────────────────────────────────────────────────────────────────
 
 
-def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path) -> None:
+def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path, pg_conninfo: str) -> None:
     models = tmp_path / "models"
     models.mkdir()
     settings = Settings(
@@ -307,6 +308,7 @@ def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path) -> Non
         seed_models_dir=models,
         seed_libraries_dir=seed,
         frontend_dir=Path("/nonexistent"),
+        database_url=pg_conninfo,
     )
     with TestClient(create_app(settings)):
         pass
@@ -315,7 +317,9 @@ def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path) -> Non
 
 
 @pytest.mark.requires_git
-def test_the_boot_checkout_sweep_keeps_the_seed_nothing_pins(seed: Path, tmp_path: Path) -> None:
+def test_the_boot_checkout_sweep_keeps_the_seed_nothing_pins(
+    seed: Path, tmp_path: Path, pg_conninfo: str
+) -> None:
     """Otherwise every later boot would delete it and the next copy it back."""
     models = tmp_path / "models"
     models.mkdir()
@@ -325,6 +329,7 @@ def test_the_boot_checkout_sweep_keeps_the_seed_nothing_pins(seed: Path, tmp_pat
         seed_models_dir=models,
         seed_libraries_dir=seed,
         frontend_dir=Path("/nonexistent"),
+        database_url=pg_conninfo,
     )
     libraries = tmp_path / "data" / "libraries"
     with TestClient(create_app(settings)):
@@ -347,7 +352,12 @@ def test_the_container_seed_is_used_when_it_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path)
-    assert Settings().resolve_seed_libraries_dir() == tmp_path
+    assert Settings(database_url=UNUSED_DATABASE_URL).resolve_seed_libraries_dir() == tmp_path
     monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path / "gone")
-    assert Settings().resolve_seed_libraries_dir() is None
-    assert Settings(seed_libraries_dir=tmp_path).resolve_seed_libraries_dir() == tmp_path
+    assert Settings(database_url=UNUSED_DATABASE_URL).resolve_seed_libraries_dir() is None
+    assert (
+        Settings(
+            seed_libraries_dir=tmp_path, database_url=UNUSED_DATABASE_URL
+        ).resolve_seed_libraries_dir()
+        == tmp_path
+    )

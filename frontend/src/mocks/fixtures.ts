@@ -9,6 +9,7 @@ import type {
   CustomizerSchema,
   FontFamily,
   CatalogueLibrary,
+  MediaView,
   ModelSummary,
   ModelVersion,
   Output,
@@ -182,6 +183,59 @@ export const BUILTIN_PREVIEW_ID = '5eed0f00d5eed0f0'
 
 export const builtinSchema: CustomizerSchema = { ...keychainSchema, title: 'Keychain Template' }
 
+/**
+ * #274 — the bytes the media routes serve: a 1×1 PNG, and the head of an MP4 (its
+ * `ftyp` box), which is all the backend reads to type one.
+ */
+export const MEDIA_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4DwABAQEABRjYTgAAAABJRU5ErkJggg=='
+export const MEDIA_MP4_BASE64 = 'AAAAGGZ0eXBpc29tAAACAGlzb21pc28y'
+
+function image(id: string, caption = ''): MediaView {
+  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, content_type: 'image/png', size: 67 }
+}
+
+/** #274 — the template of mine with a gallery: three images and a video. */
+export const GALLERY_SLUG = 'creme-coaster'
+
+/**
+ * #274 — each template's media, in order (the first is the cover). The keychain has
+ * only a legacy `thumbnail.png`, which the API lists as one image with the id
+ * `thumbnail`; the coaster has three images and a video; the bin and the built-in
+ * (whose default-render preview stands in) have none.
+ */
+export const media: Record<string, MediaView[]> = {
+  'name-keychain': [
+    {
+      id: 'thumbnail',
+      file: 'thumbnail.png',
+      kind: 'image',
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'image/png',
+      size: 67,
+    },
+  ],
+  'gridfinity-bin': [],
+  [BUILTIN_SLUG]: [],
+  [GALLERY_SLUG]: [
+    image('a1b2c3d4e5f6', 'Printed in blue and orange'),
+    image('b2c3d4e5f6a1', 'The raised rim'),
+    image('c3d4e5f6a1b2'),
+    {
+      id: 'd4e5f6a1b2c3',
+      file: 'd4e5f6a1b2c3.mp4',
+      kind: 'video',
+      caption: 'Printing on an H2C',
+      poster: 'd4e5f6a1b2c3-poster.png',
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    },
+  ],
+}
+
 export const models: ModelSummary[] = [
   {
     slug: 'name-keychain',
@@ -195,6 +249,7 @@ export const models: ModelSummary[] = [
     upstream: null,
     has_readme: true,
     origin: 'mine',
+    media: media['name-keychain'],
   },
   {
     slug: 'gridfinity-bin',
@@ -205,6 +260,7 @@ export const models: ModelSummary[] = [
     has_thumbnail: false,
     has_readme: false,
     origin: 'mine',
+    media: [],
   },
   {
     slug: BUILTIN_SLUG,
@@ -221,6 +277,7 @@ export const models: ModelSummary[] = [
     upstream: null,
     has_readme: false,
     origin: 'builtin',
+    media: media[BUILTIN_SLUG],
   },
   // #276 — an accented name and a tag with a space and `&`, for the catalogue filters.
   {
@@ -229,9 +286,12 @@ export const models: ModelSummary[] = [
     description: 'A drinks coaster with a raised rim.',
     tags: ['kitchen', 'Tea & Coffee'],
     updated_at: '2026-09-18T12:00:00Z',
-    has_thumbnail: false,
+    has_thumbnail: true,
+    thumbnail_source: 'model',
+    thumbnail_output_id: null,
     has_readme: false,
     origin: 'mine',
+    media: media[GALLERY_SLUG],
   },
 ]
 
@@ -373,6 +433,8 @@ export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
   [BUILTIN_SLUG]: builtinSchema,
+  // #280 — the template page's gallery needs a template with media that opens.
+  [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
 }
 
 export const fonts: FontFamily[] = [
@@ -558,6 +620,7 @@ export const settings: Settings = {
   bed_type: null,
   default_plate: null,
   display_unit: 'mm',
+  media_upload_max_bytes: 1024 * 1024 * 1024,
 }
 
 /**

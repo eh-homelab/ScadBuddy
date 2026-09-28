@@ -44,13 +44,13 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -180,13 +180,21 @@ def git_env() -> dict[str, str]:
 
 def _gitignore_body(wrapper_prefix: str) -> str:
     # Every transient file a render drops beside a model: the colour wrappers and,
-    # since #204, the uploaded assets staged for `import()` -- which are not .scad.
+    # since #204, the uploaded assets staged for `import()` -- which are not .scad
+    # -- and the finished renders kept under the template (`render_cache`).
     transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
         "# source, so versioning it would only add noise to the history.\n"
         f"{transient}\n"
+        f"{RENDERS_DIR_NAME}/\n"
         f"{LOCK_NAME}\n"
+        "# Template videos (#274) stay out of the history so the repository stays\n"
+        "# small; their order in model.json is still committed. Images are kept.\n"
+        "*/media/*.mp4\n"
+        "*/media/*.webm\n"
+        "_builtin/*/media/*.mp4\n"
+        "_builtin/*/media/*.webm\n"
     )
 
 
@@ -437,15 +445,8 @@ class ModelHistory:
             return bool(self._out("ls-files", "--cached").strip())
         return self._run("diff", "--cached", "--quiet", check=False).returncode != 0
 
-    def restore(
-        self, slug: str, commit: str, *, also: Callable[[str], Sequence[str]] | None = None
-    ) -> str:
-        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite.
-
-        ``also`` is called with the resolved commit under the write lock, and the
-        paths it returns go into the same commit -- how a revision from before
-        per-model library pins comes back pinned (#93).
-        """
+    def restore(self, slug: str, commit: str) -> str:
+        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
         resolved = self.resolve(commit)
         with self._exclusive():
             present = set(self._files_at(resolved, slug))
@@ -457,8 +458,7 @@ class ModelHistory:
             for path in self._tracked(slug):
                 if path not in present:
                     (self.root / path).unlink(missing_ok=True)
-            extra = also(resolved) if also is not None else []
-            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, *extra)
+            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug)
             touched = self._touched_by(created)
         self._announce(created, touched)
         if created is None:
@@ -510,15 +510,15 @@ class ModelHistory:
 
         Walks the model's own history newest first. ``None`` when the model was
         made some other way -- uploaded, duplicated, or recreated after a delete --
-        since an older seed of the same slug is then not its origin.
+        since an older seed of the same slug is then not its origin. The subject
+        alone is not trusted: any commit can carry it, so the seed must also be
+        authored and committed as ScadBuddy.
         """
-        completed = self._run("log", "--format=%H%x1f%s", "--", slug, check=False)
-        assert isinstance(completed.stdout, str)
-        if completed.returncode != 0:
-            raise GitError(f"git log failed: {completed.stderr.strip()}", completed.stderr)
-        for line in completed.stdout.splitlines():
-            commit, _, subject = line.partition(_FIELD)
-            if _SEED_SUBJECT.match(subject):
+        log = self._out("log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s", "--", slug)
+        ours = [AUTHOR_NAME, AUTHOR_EMAIL, AUTHOR_NAME, AUTHOR_EMAIL]
+        for line in log.splitlines():
+            commit, *identity, subject = line.split(_FIELD, 5)
+            if _SEED_SUBJECT.match(subject) and identity == ours:
                 return commit
             if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
                 return None

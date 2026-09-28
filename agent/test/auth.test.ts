@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { FailClosedTokenStore, hashToken, InMemoryTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
+import { FailClosedTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { BoundedEventStore } from '../src/mcp/eventStore.js'
 import { PendingActionStore, PendingStoreFullError } from '../src/tools/pending.js'
+import { InMemoryTokenStore } from './support/memoryTokens.js'
 
 describe('tiers', () => {
   it('include every lower tier', () => {
@@ -12,7 +13,7 @@ describe('tiers', () => {
   })
 })
 
-describe('InMemoryTokenStore', () => {
+describe('InMemoryTokenStore (the /mcp tests’ stand-in; Postgres is test/tokens.pg.test.ts)', () => {
   it('stores only a hash, verifies to the token tier, and records last use', async () => {
     const store = new InMemoryTokenStore()
     const { token, record } = await store.mint({ name: 'ci', tier: 'write' })
@@ -37,11 +38,11 @@ describe('InMemoryTokenStore', () => {
   })
 })
 
-describe('FailClosedTokenStore (production until #255)', () => {
+describe('FailClosedTokenStore (no database configured)', () => {
   it('verifies nothing and cannot mint', async () => {
     const store = new FailClosedTokenStore()
     expect(await store.verify()).toBeNull()
-    await expect(store.mint()).rejects.toThrow(/#255/)
+    await expect(store.mint()).rejects.toThrow(/SCADBUDDY_DATABASE_URL/)
     expect(await store.list()).toEqual([])
     expect(await store.revoke()).toBe(false)
   })
@@ -71,24 +72,36 @@ describe('BoundedEventStore (Last-Event-ID replay, in memory)', () => {
 })
 
 describe('PendingActionStore bounds', () => {
-  const prep = (store: PendingActionStore, principalId: string, n = 1) =>
-    Array.from({ length: n }, (_, i) =>
-      store.prepare({ tool: 't', args: {}, summary: `${principalId} ${i}`, principalId }),
-    )
+  const who = (id: string) => ({ id, kind: 'bearer' as const, tiers: tiersUpTo('outward') })
+  const prep = async (store: PendingActionStore, principalId: string, n = 1) => {
+    const made = []
+    for (let i = 0; i < n; i++) {
+      made.push(await store.prepare(who(principalId), { tool: 't', input: {}, summary: `${principalId} ${i}` }))
+    }
+    return made
+  }
 
-  it("a principal filling its quota evicts only its own oldest, never another's", () => {
+  it("a principal filling its quota evicts only its own oldest, never another's", async () => {
     const store = new PendingActionStore({ perPrincipal: 3, total: 100 })
-    const [b] = prep(store, 'B')
-    const a = prep(store, 'A', 10)
-    expect(store.get(b!.id, 'B')).toBeDefined()
-    expect(store.list('A').map((x) => x.id)).toEqual(a.slice(-3).map((x) => x.id))
-    expect(store.list('B')).toHaveLength(1)
+    const [b] = await prep(store, 'B')
+    const a = await prep(store, 'A', 10)
+    expect(await store.find(b!.id, who('B'))).toBeDefined()
+    expect((await store.list(who('A'))).map((x) => x.id)).toEqual(a.slice(-3).map((x) => x.id))
+    expect(await store.list(who('B'))).toHaveLength(1)
   })
 
-  it('refuses new prepares at the global bound instead of evicting anyone', () => {
+  it('refuses new prepares at the global bound instead of evicting anyone', async () => {
     const store = new PendingActionStore({ perPrincipal: 5, total: 4 })
-    const kept = [...prep(store, 'A', 2), ...prep(store, 'B', 2)]
-    expect(() => prep(store, 'C')).toThrow(PendingStoreFullError)
-    for (const action of kept) expect(store.get(action.id, action.principalId)).toBeDefined()
+    const kept = [...(await prep(store, 'A', 2)), ...(await prep(store, 'B', 2))]
+    await expect(prep(store, 'C')).rejects.toThrow(PendingStoreFullError)
+    for (const [i, action] of kept.entries()) expect(await store.find(action.id, who(i < 2 ? 'A' : 'B'))).toBeDefined()
+  })
+
+  it('never confirms: without the database nothing can approve an action', async () => {
+    const store = new PendingActionStore()
+    const [action] = await prep(store, 'A')
+    const claim = await store.claim(action!.id, who('A'))
+    expect(claim).toMatchObject({ status: 'refused' })
+    expect(await store.find(action!.id, who('B'))).toBeUndefined()
   })
 })
