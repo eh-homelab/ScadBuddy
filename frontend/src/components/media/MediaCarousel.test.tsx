@@ -120,6 +120,23 @@ describe('MediaCarousel (#275)', () => {
     expect(media.map((button) => button.tabIndex)).toEqual([0, -1, -1])
   })
 
+  it('makes only the current dot a tab stop, and moves it with the arrow keys', async () => {
+    const { user, onOpen } = setup()
+    const dots = () =>
+      [1, 2, 3].map((n) => screen.getByRole('button', { name: `Go to slide ${n}` }))
+    expect(dots().map((dot) => dot.tabIndex)).toEqual([0, -1, -1])
+
+    await user.click(screen.getByRole('button', { name: 'Go to slide 3' }))
+    expect(dots().map((dot) => dot.tabIndex)).toEqual([-1, -1, 0])
+
+    dots()[2]!.focus()
+    await user.keyboard('{ArrowLeft}')
+    expect(current()).toBe('2 of 3')
+    expect(dots().map((dot) => dot.tabIndex)).toEqual([-1, 0, -1])
+    expect(dots()[1]).toHaveFocus()
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
   it('moves with the arrow keys when focused', async () => {
     const { user, onOpen } = setup()
     screen.getByRole('region', { name: 'Crème Coaster' }).focus()

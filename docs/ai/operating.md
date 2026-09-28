@@ -36,7 +36,8 @@ covers the same ground more briefly.
   `emptyDir` there and run the root filesystem read-only (spec §4.4). At start,
   `ensureStateDirs()` in
   [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) recreates
-  `claude/` and `work/` and checks both are writable. If it cannot, the process exits 1
+  `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
+  writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
 - **Pinned Claude Code.** The build runs `node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"`
   (currently `2.1.283`) and fails when the SDK's bundled binary differs
@@ -183,6 +184,53 @@ This works because the loopback pair is always accepted from a loopback peer
 (`checkOrigin()`, `origins.ts`). Through the ingress, the browser's own `Origin` must
 match `SCADBUDDY_PUBLIC_URL`.
 
+### 4.1 MCP access tokens
+
+An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth mode,
+spec §8.3). Tokens are managed in Settings → **MCP access tokens**, which calls the
+routes in `registerMcpTokenRoutes()` in
+[`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
+stored in `ai_mcp_tokens` (§7). The Settings section renders only where
+`useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
+reports AI available, which today is the msw-mocked build: nothing routes
+`/api/v1/ai/*` to the sidecar yet. Until then, the routes below are the interface.
+
+| Route | Guarded | What it does |
+|---|---|---|
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
+| `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
+
+"Read guard" is `uiReadProblem()` in
+[`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts). It requires HTTPS
+transport as in §6. When an `Origin` is sent, it must be allowed. Otherwise the
+request's own origin must be the public URL, or the loopback pair from a loopback peer,
+and a `Sec-Fetch-Site` other than `same-origin` or `none` is refused. Every route
+answers `503` while there is no database, or while migrations have not applied.
+
+Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
+Settings warns about that; they take effect again when the mode returns to `bearer`.
+The mode is not stored yet: `main.ts` passes `DEFAULT_MCP_AUTH` (`bearer`).
+
+To give a client a token, create one with a name that says where it will live, copy it
+from the panel, and paste it into the client's MCP configuration as
+`Authorization: Bearer sbmcp_…`. Choose **Done** once it is saved. The token cannot be
+shown again; if it is lost, revoke it and create another. Inside Bambuddy's iframe, the
+browser may refuse the Clipboard API (the frame has no `allow="clipboard-write"`).
+**Copy token** then falls back to `document.execCommand('copy')`. If that fails too,
+the token is left selected for Ctrl+C
+([`frontend/src/lib/clipboard.ts`](../../frontend/src/lib/clipboard.ts)).
+
+From a loopback shell on the pod:
+
+```bash
+curl -sS -X POST http://localhost:8081/api/v1/ai/mcp-tokens \
+  -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
+  -d '{"name":"ops laptop","tier":"read","expires_in":2592000}'
+curl -sS http://localhost:8081/api/v1/ai/mcp-tokens
+curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: http://localhost:8081'
+```
+
 ## 5. Health
 
 `GET /healthz` is in `createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts).
@@ -263,6 +311,88 @@ Why an allowlist rather than "Origin equals Host" is explained in
 the same rule to the stored public URL (`origin_allowed()` in
 [`backend/scadbuddy/api/realtime.py`](../../backend/scadbuddy/api/realtime.py)).
 
+## 6a. MCP sign-in with OIDC
+
+Issue #262. With OIDC on, MCP clients such as Claude Code or Claude Desktop sign in
+through the homelab IdP instead of being given a pasted `sbmcp_` token. Bearer tokens
+keep working. The design and the specifications followed are in spec §8.3 (`oidc`) and
+[security.md](security.md#mcp-oidc-access-tokens).
+
+**Prerequisites.**
+
+- `SCADBUDDY_PUBLIC_URL` is set (§2). The resource URI is its origin plus `/mcp`, e.g.
+  `https://scadbuddy.example/mcp`; tokens must name it as their audience.
+- The ingress sends `/.well-known/oauth-protected-resource` and
+  `/.well-known/oauth-protected-resource/mcp` to the agent, besides `/mcp` (spec §4.2).
+  Clients find the IdP through that document; a 401 names its URL.
+- The IdP is reachable from the agent over https at an address that is not link-local
+  or a cloud metadata service (the same rule as gateway URLs, §4; enforced on the
+  connection, see security.md).
+
+**In the IdP.**
+
+1. Create three scopes (or reuse existing ones and rename them in Settings):
+   `scadbuddy:read`, `scadbuddy:write`, `scadbuddy:outward`. Grant each user the
+   ones they should have. A group claim works too: set "Also read tiers from claim" to
+   `groups` and use group names as the three values.
+2. Make access tokens JWTs whose `aud` is the resource URI. The MCP client sends it as
+   the RFC 8707 `resource` parameter; IdPs that ignore that parameter need an audience
+   mapper (Keycloak: an "Audience" protocol mapper; other IdPs have their own
+   setting, not verified here). If the IdP cannot put a URL in `aud`, set **Audience** in Settings to
+   what it does write, understanding that any client of that audience is then accepted.
+   Tokens must then be RFC 9068 access tokens (header `typ` `at+jwt`, or a `client_id`
+   claim), so the IdP's ID tokens for that client are not accepted.
+3. Keep access-token lifetimes short (minutes): a JWT stays valid until `exp`.
+
+**Client registration.** MCP clients register in one of two ways
+([MCP authorization spec, 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization),
+"Client Registration Approaches"):
+
+- **Dynamic client registration** (RFC 7591), when the IdP's metadata has a
+  `registration_endpoint`. The Settings "Test discovery" result says whether it does.
+  Clients then need nothing but the `/mcp` URL. Restrict what registered clients may
+  request in the IdP, since anyone can register.
+- **Pre-registered clients** otherwise: create a public client (PKCE, no secret) per
+  MCP client with its redirect URI (Claude Code uses a loopback redirect), and give the
+  client ID to the MCP client's configuration.
+
+**In ScadBuddy.** Settings → "MCP sign-in (OIDC)" (the section appears where the agent
+service is available), or the API it uses:
+
+```bash
+# see the defaults, the resource URI and the metadata URL
+curl https://scadbuddy.example/api/v1/ai/mcp/oidc
+# check an issuer without saving anything
+curl -X POST -H 'content-type: application/json' -H 'origin: https://scadbuddy.example' \
+  -d '{"issuer":"https://auth.example/application/o/scadbuddy/"}' \
+  https://scadbuddy.example/api/v1/ai/mcp/oidc/test
+```
+
+Writes pass the same UI gate as credential writes (§6), so a `curl` needs the public
+`Origin` and must come through the ingress. `PUT` takes the whole configuration:
+`enabled`, `issuer` (exactly as the IdP writes `iss`, trailing slash included),
+`audience` (null for the resource URI), `client_id` (kept for a future in-app login;
+not used to check `/mcp` tokens), `scopes` `{read, write, outward}`, `tier_claim`
+(null or a claim name) and `algorithms` (from `RS256 RS384 RS512 PS256 PS384 PS512
+ES256 ES384 ES512 EdDSA`; default `RS256`, `ES256`). With `enabled: true` the discovery
+check runs first, and on failure nothing is saved (`400`, naming the reason).
+
+**Checking it.** `curl -i -X POST https://scadbuddy.example/mcp` should answer `401`
+with `WWW-Authenticate: Bearer realm="scadbuddy", resource_metadata="…"`, and that URL
+should return a document whose `authorization_servers` is the issuer. Common failures:
+
+| Symptom | Cause |
+|---|---|
+| `401 … error_description="the token was issued for another audience (resource)"` | the IdP did not put the resource URI in `aud` (step 2) |
+| `401 … "the token was issued by another issuer"` | the issuer in Settings differs from `iss` (often the trailing slash) |
+| `401 … "signed with PS256, which is not allowed"` | add the IdP's algorithm in Settings |
+| `403 … error="insufficient_scope"` | the user or client was granted none of the three scopes |
+| `503` with `Retry-After: 30` | the agent cannot reach the IdP's metadata or JWKS |
+| metadata URL answers 404 | OIDC is off, `SCADBUDDY_PUBLIC_URL` is unset, or the ingress does not route `/.well-known/oauth-protected-resource` to the agent |
+
+A stored configuration that no longer parses (a hand-edited row) reads as "off" and is
+logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
+
 ## 7. Database tables
 
 The agent owns and migrates its `ai_*` tables (spec §9;
@@ -276,7 +406,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
   The keys read today are `model` (`main.ts`), and `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
+  and `mcp_oidc`, the OIDC configuration for `/mcp` (#262; see
+  [§6a](#6a-mcp-sign-in-with-oidc)), which `PUT /api/v1/ai/mcp/oidc` writes.
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
@@ -286,7 +418,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
   `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
-  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` answers 503.
+  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
+  (§4.1) answer 503. Settings writes this table through §4.1's routes.
+
+- `ai_plugin_packages`: installed Claude plugin packages (#297,
+  `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
+  hash, the review, the approval and the enabled flag. See §9.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
@@ -299,3 +436,71 @@ Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 U
 them "placeholders until Settings stores per-session caps". Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
 #377 body, "Budget and turns").
+
+## 9. Plugin packages (#297)
+
+A plugin package is a Claude plugin (skills, subagents, hooks, `.mcp.json`) fetched from
+a git repository, or from an entry of a marketplace repository, at a pinned commit. The
+Agent SDK loads plugins by local path only: "To use a plugin distributed through a
+marketplace or remote repository, download it first and provide the local directory
+path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
+
+- **Postgres is the record.** `ai_plugin_packages` holds the pin (commit SHA and content
+  hash) and everything the admin reviewed
+  ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
+- **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
+  (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
+  Before each load, every file is hashed and compared with the pin. A missing, partial
+  or altered copy is deleted and fetched again at the pinned commit. If the new files do
+  not hash to the pin, the package is not loaded (`materialise()` in
+  [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
+  The cache can be the same `emptyDir` as the rest of the state directory.
+- **git in the image.** The `agent` stage installs `git` and `ca-certificates`
+  ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
+  [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
+  never sees the service's own environment. It passes through only the proxy and CA
+  variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, their lower-case forms,
+  `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `SSL_CERT_DIR`).
+- **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
+  and every URL a package declares, go through the same egress check as the gateway
+  (see [security.md](security.md#plugin-packages)).
+
+### The routes
+
+These routes sit under `/api/v1/ai/plugin-packages` and use the same UI guard as the
+other Settings writes
+([`agent/src/routes/pluginPackages.ts`](../../agent/src/routes/pluginPackages.ts)):
+
+| Route | What it does |
+|---|---|
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201). A refused package gets 422 with every problem. |
+| `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
+| `POST /:name/approve` with `{ "commit_sha", "content_hash" }` | Approves exactly the pin the review showed. A mismatch is a 409. |
+| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
+| `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
+
+Plugins are never updated automatically (issue #297). At most two fetches run at a
+time, and one per package; another request gets 429.
+
+### Status
+
+The session manager reads the enabled packages at the start of each turn
+(`packagePlugins` in `SessionManagerDeps`,
+[`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)). A package that
+cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
+turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
+`SessionManager`, but nothing starts a session over HTTP yet (the comment on `sessions`
+in `main.ts`).
+
+Settings has an "Assistant plugins" area with two sections: "Plugin packages"
+([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
+and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+You install, review, approve and re-pin packages there. The approval dialog shows the
+full commit SHA and content hash, and you must tick a confirmation before it sends
+exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
+in-page agent's `click` and `fill` refuse it. The area follows the assistant's
+availability (`useAiAvailability()`), so it is hidden in production builds until the
+agent service is deployed.
+

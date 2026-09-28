@@ -376,8 +376,11 @@ async def test_a_job_past_its_queue_deadline_is_failed_unrendered(
     make_queue: QueueFactory,
 ) -> None:
     gate = Gate()
-    queue = await make_queue(gate, replace(CONFIG, render_queue_timeout=0.05))
+    queue = await make_queue(gate)
+    # The deadline is set only once the worker is busy: the job occupying it would be
+    # expired too if its own claim took longer than 50 ms, as it can under load (#570).
     await _occupy_the_worker(queue, gate)
+    queue.config = replace(queue.config, render_queue_timeout=0.05)
 
     late = await queue.submit("demo", {"n": 1})
     await asyncio.sleep(0.15)
