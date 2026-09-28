@@ -6,8 +6,10 @@ The upstream is a local bare repository, so the clone is real and offline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -22,16 +24,24 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
+from scadbuddy.api.deps import (
+    INSTALL_CONCURRENCY,
+    STATE_ATTR,
+    AppState,
+    get_libraries,
+)
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.history import GIT, ModelHistory, git_env
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
+    CheckoutGate,
     LibraryStore,
+    ModelLibrary,
 )
 from tests.conftest import make_library_upstream
+from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
 
@@ -317,6 +327,7 @@ def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: D
     staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
     staging.mkdir(parents=True)
     (staging / "std.scad").write_text("cube(1);\n", encoding="utf-8")
+    _age(staging.parent)
     checkout = paths.libraries / "BOSL2" / ("a" * 40) / "BOSL2"
     checkout.mkdir(parents=True)
 
@@ -633,3 +644,314 @@ def test_a_dropped_model_json_with_a_malformed_pin_is_a_422(lib_client: TestClie
     assert refused.status_code == 422, refused.text
     assert "'BOSL2' is not valid: commit:" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+# ── re-pinning (#253) ────────────────────────────────────────────────────────
+
+
+def repin(client: TestClient, name: str, slug: str = SLUG, **body: Any) -> httpx.Response:
+    response: httpx.Response = client.patch(f"/api/v1/models/{slug}/libraries/{name}", json=body)
+    return response
+
+
+def test_a_repin_moves_the_model_to_another_ref(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+
+    response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["libraries"] == [
+        {"name": "BOSL2", "url": url, "ref": "v2", "commit": commits["v2"]}
+    ]
+
+
+def test_a_repin_keeps_the_fork_the_model_pins(lib_client: TestClient, tmp_path: Path) -> None:
+    """PUT without a url would go back to the catalogue's upstream; PATCH must not."""
+    elsewhere, commits = make_library_upstream(
+        tmp_path / "elsewhere", {"v1": "sphere(1);\n", "v2": "sphere(2);\n"}
+    )
+    create_model(lib_client)
+    pin(lib_client, "BOSL2", url=elsewhere, ref="v1")
+
+    response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 200, response.text
+    [library] = response.json()["libraries"]
+    assert (library["url"], library["commit"]) == (elsewhere, commits["v2"])
+
+
+def test_a_repin_without_a_ref_follows_the_branch(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]], tmp_path: Path
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    first = pin(lib_client, "BOSL2", ref="main")["libraries"][0]["commit"]
+    assert first == commits["v2"]
+    work = tmp_path / "upstream-work"
+    env = git_env()
+    (work / "std.scad").write_text("module marker() cube(3);\n", encoding="utf-8")
+    for args in (
+        ("commit", "-am", "later"),
+        ("push", "--quiet", str(tmp_path / "upstream.git"), "main"),
+    ):
+        subprocess.run([GIT, *args], cwd=work, env=env, check=True, capture_output=True)
+
+    response = repin(lib_client, "BOSL2")
+
+    assert response.status_code == 200, response.text
+    [library] = response.json()["libraries"]
+    assert library["ref"] == "main"
+    assert library["commit"] not in (first, commits["v1"])
+
+
+def test_a_repin_of_a_library_the_model_does_not_declare_is_a_404(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 404
+    assert "does not declare" in response.json()["detail"]
+
+
+def test_a_repin_is_refused_like_a_pin(lib_client: TestClient, libraries_app: FastAPI) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    store = libraries_app.dependency_overrides[get_libraries]()
+
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        dot_dot = repin(lib_client, "BOSL2", ref="v1..v2")
+        built_in = repin(lib_client, "BOSL2", "builtin:anything", ref="v2")
+    missing_ref = repin(lib_client, "BOSL2", ref="v9")
+
+    assert dot_dot.status_code == 422
+    assert built_in.status_code == 403
+    assert missing_ref.status_code == 502
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"][0]["ref"] == "v1"
+
+
+# ── checkouts on the volume (#253) ───────────────────────────────────────────
+
+
+def test_the_installed_checkouts_name_the_models_that_pin_them(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    create_model(lib_client, "gadget")
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", "gadget", ref="v2")
+    pin(lib_client, "BOSL2", "gadget", ref="v1")
+
+    installed = lib_client.get("/api/v1/libraries/installed").json()
+
+    assert sorted((entry["commit"], entry["used_by"]) for entry in installed) == sorted(
+        [(commits["v1"], ["gadget", SLUG]), (commits["v2"], [])]
+    )
+
+
+def test_a_library_a_model_still_pins_is_not_removed(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+
+    refused = lib_client.delete("/api/v1/libraries/BOSL2")
+    one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+
+    for response in (refused, one):
+        assert response.status_code == 409, response.text
+        assert response.json()["models"] == [SLUG]
+        assert SLUG in response.json()["detail"]
+    assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2").is_dir()
+
+
+def test_a_checkout_no_model_pins_is_removed(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", ref="v2")  # v1's checkout stays, pinned by nothing live
+
+    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+
+    assert removed.status_code == 204, removed.text
+    assert not (paths.libraries / "BOSL2" / commits["v1"]).exists()
+    assert (paths.libraries / "BOSL2" / commits["v2"] / "BOSL2").is_dir()
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+
+def test_every_checkout_goes_once_nothing_pins_the_library(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", ref="v2")
+    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+
+    removed = lib_client.delete("/api/v1/libraries/BOSL2")
+    again = lib_client.delete("/api/v1/libraries/BOSL2")
+
+    assert removed.status_code == 204, removed.text
+    assert not (paths.libraries / "BOSL2").exists()
+    assert again.status_code == 404
+    assert lib_client.get("/api/v1/libraries/installed").json() == []
+
+
+def test_a_name_only_declaration_counts_as_a_pin_of_every_commit(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """A bare name from before per-model pins, or an unreadable model.json, cannot say
+    which checkout it needs, so it keeps them all."""
+    _, commits = upstream
+    create_model(lib_client)
+    create_model(lib_client, "legacy")
+    create_model(lib_client, "broken")
+    pin(lib_client, "BOSL2")
+    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+    meta = json.loads(paths.model_meta("legacy").read_text(encoding="utf-8"))
+    paths.model_meta("legacy").write_text(
+        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+    )
+    paths.model_meta("broken").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
+
+    refused = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+
+    assert refused.status_code == 409
+    assert refused.json()["models"] == ["broken", "legacy"]
+
+
+def test_a_removal_refuses_what_is_not_a_checkout(lib_client: TestClient) -> None:
+    assert lib_client.delete("/api/v1/libraries/BOSL2").status_code == 404
+    assert lib_client.delete("/api/v1/libraries/.git").status_code == 422
+    assert lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": "HEAD"}).status_code == (
+        422
+    )
+
+
+async def test_a_removal_waits_for_pins_in_flight() -> None:
+    gate = CheckoutGate()
+    order: list[str] = []
+    pinning = asyncio.Event()
+    finish_pin = asyncio.Event()
+
+    async def pin_one() -> None:
+        async with gate.pinning():
+            pinning.set()
+            await finish_pin.wait()
+            order.append("pinned")
+
+    async def remove_one() -> None:
+        await pinning.wait()
+        async with gate.removing():
+            order.append("removed")
+
+    pin_task = asyncio.create_task(pin_one())
+    remove_task = asyncio.create_task(remove_one())
+    await asyncio.sleep(0.01)
+    assert order == []
+    finish_pin.set()
+    await asyncio.gather(pin_task, remove_task)
+
+    assert order == ["pinned", "removed"]
+
+
+# ── review follow-ups: races (#324) ──────────────────────────────────────────
+
+
+def _during_clone(libraries_app: FastAPI, meanwhile: Any) -> Any:
+    """``resolve`` that runs ``meanwhile`` first: another request landing while this
+    one's clone is in flight, at exactly that point."""
+    store = libraries_app.dependency_overrides[get_libraries]()
+    real = store.resolve
+
+    def resolve(name: str, **kwargs: Any) -> Any:
+        meanwhile()
+        return real(name, **kwargs)
+
+    return patch.object(store, "resolve", side_effect=resolve)
+
+
+def test_a_repin_does_not_bring_back_a_library_unpinned_while_it_cloned(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+
+    with _during_clone(libraries_app, lambda: state.catalogue.unpin_library(SLUG, "BOSL2")):
+        response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 409, response.text
+    assert "changed or removed" in response.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
+
+
+def test_a_repin_does_not_overwrite_a_pin_moved_while_it_cloned(
+    lib_client: TestClient, libraries_app: FastAPI, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    moved = ModelLibrary(name="BOSL2", url=url, ref="main", commit=commits["v2"])
+
+    with _during_clone(libraries_app, lambda: state.catalogue.pin_library(SLUG, moved)):
+        response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 409, response.text
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"][0]["ref"] == "main"
+
+
+def test_a_checkout_a_render_is_reading_is_not_removed(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """The model's pin is already gone, but a render that resolved it still runs."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    job_id = "a" * 32
+    lease = state.checkouts.hold(job_id, [checkout])
+    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+
+    whole = lib_client.delete("/api/v1/libraries/BOSL2")
+    one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    state.checkouts.release(lease)
+    after = lib_client.delete("/api/v1/libraries/BOSL2")
+
+    for response in (whole, one):
+        assert response.status_code == 409, response.text
+        assert response.json()["jobs"] == [job_id]
+    assert after.status_code == 204, after.text
+    assert not checkout.exists()
+
+
+def test_a_lease_elsewhere_does_not_block_a_removal(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", ref="v2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.checkouts.hold("b" * 32, [paths.libraries / "BOSL2" / commits["v2"]])
+
+    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+
+    assert removed.status_code == 204, removed.text

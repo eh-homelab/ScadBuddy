@@ -1,5 +1,6 @@
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
   BambuddyTargets,
   ChoicesView,
@@ -323,6 +324,9 @@ export const api = {
 
   getAsset: (slug: string, id: string) =>
     request<Asset>(`/models/${seg(slug)}/assets/${seg(id)}`),
+
+  /** #296 — the upload store's size against its caps, for Settings. */
+  getAssetUsage: () => request<AssetUsage>('/assets/usage'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

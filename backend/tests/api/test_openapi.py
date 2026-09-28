@@ -60,11 +60,17 @@ EXPECTED_PATHS = {
     "/api/v1/plate/fit",
     "/api/v1/plates",
     "/api/v1/libraries",
+    "/api/v1/assets/usage",
     "/api/v1/models/{slug}/assets",
     "/api/v1/models/{slug}/assets/{asset_id}",
     "/api/v1/models/{slug}/assets/{asset_id}/content",
     "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
+    "/api/v1/libraries/installed",
+    "/api/v1/libraries/{name}",
+    "/api/v1/models/{slug}/diagnostics",
+    "/api/v1/jobs/{job_id}/views/{view}.png",
+    "/api/v1/outputs/{output_id}/views/{view}.png",
 }
 
 
@@ -102,3 +108,23 @@ def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path
     for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
         for method in ("put", "delete"):
             assert success_types(path, method) == {"application/json"}, (method, path)
+
+
+def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
+    """#371: a conflict, no update, and a merge that kept racing are all 409s."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+    merge = paths["/api/v1/models/{slug}/upstream/merge"]["post"]
+    conflict = merge["responses"]["409"]["description"]
+    for case in ("merge_base", "`current`", "`gone`", "kept changing", "retry"):
+        assert case in conflict, case
+        assert case in merge["description"], case
+
+
+def test_the_view_routes_document_a_png(tmp_path: Path) -> None:
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+
+    for path in (
+        "/api/v1/jobs/{job_id}/views/{view}.png",
+        "/api/v1/outputs/{output_id}/views/{view}.png",
+    ):
+        assert set(paths[path]["get"]["responses"]["200"]["content"]) == {"image/png"}, path

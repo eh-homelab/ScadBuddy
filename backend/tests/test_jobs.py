@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import threading
 import zipfile
 from collections.abc import AsyncIterator
@@ -17,7 +18,9 @@ import trimesh
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
+from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
     THUMBNAIL_FAILED_WARNING,
@@ -425,7 +428,9 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
                 ("Color 2", "#0047BB00", trimesh.creation.box(extents=(10, 10, 1))),
             ],
         )
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return schema
@@ -463,7 +468,9 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _colour_schema(("base_color", "#0047BB"))
@@ -526,7 +533,9 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -586,7 +595,9 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=("pic.svg",))
+        return mock.Mock(
+            log_tail=[], missing_files=("pic.svg",), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -602,3 +613,274 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
 
     assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]
+
+
+# ── diagnostics (#252) ───────────────────────────────────────────────────────
+
+WARNING = Diagnostic(severity="warning", message="unknown variable", file="model.scad", line=3)
+ERROR = Diagnostic(severity="error", message="Parser error: syntax error", file="model.scad")
+
+
+async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(WARNING,), diagnostics_dropped=0, notes=()
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(_job("d"), config=CONFIG, paths=paths)
+
+    assert result.diagnostics == [WARNING]
+
+
+async def test_a_job_carries_its_diagnostics_done_or_failed(paths: DataPaths) -> None:
+    async def render(job: Job) -> tuple[JobResult, list[str]]:
+        if job.params.get("mode") == "boom":
+            raise OpenSCADError("openscad exited with 1", [], 1, [ERROR])
+        return _result().model_copy(update={"diagnostics": [WARNING]}), []
+
+    queue = RenderQueue(CONFIG, paths, render=render)
+    await queue.start()
+    try:
+        done = await queue.submit("demo", {})
+        failed = await queue.submit("demo", {"mode": "boom"})
+        await queue.join()
+    finally:
+        await queue.aclose()
+
+    assert queue.store.read(done.id).diagnostics == [WARNING]
+    assert queue.store.read(failed.id).diagnostics == [ERROR]
+
+
+def test_latest_finished_is_the_render_that_settled_last(paths: DataPaths) -> None:
+    store = JobStore(paths)
+    now = datetime.now(UTC)
+    store.write(_job("older", state="done", finished_at=now - timedelta(minutes=2)))
+    store.write(_job("newer", state="failed", finished_at=now - timedelta(minutes=1)))
+    store.write(_job("running", state="running"))
+    store.write(Job(id="other", slug="another", state="done", created_at=now, finished_at=now))
+
+    latest = store.latest_finished("demo")
+
+    assert latest is not None and latest.id == "newer"
+    assert store.latest_finished("nothing") is None
+
+
+def test_a_job_written_before_diagnostics_still_reads(paths: DataPaths) -> None:
+    """Job files outlive a deploy on the PVC; the new field must not fail the old ones."""
+    store = JobStore(paths)
+    job = _job("old", state="done", result=_result())
+    raw = job.model_dump(mode="json")
+    del raw["diagnostics"]
+    del raw["result"]["diagnostics"]
+    paths.job_file("old").write_text(json.dumps(raw), encoding="utf-8")
+
+    read = store.read("old")
+
+    assert read.diagnostics == []
+    assert read.result is not None and read.result.diagnostics == []
+
+
+# ── library leases (#253, review of #324) ────────────────────────────────────
+
+LIBRARY_COMMIT = "c" * 40
+
+
+def _model_pinning_a_library(paths: DataPaths) -> Path:
+    """``demo`` pinned to a BOSL2 checkout that is on the volume; returns it."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    pin = {
+        "name": "BOSL2",
+        "url": "https://example.invalid/BOSL2.git",
+        "ref": "v1",
+        "commit": LIBRARY_COMMIT,
+    }
+    paths.model_meta("demo").write_text(json.dumps({"libraries": [pin]}), encoding="utf-8")
+    checkout = paths.libraries / "BOSL2" / LIBRARY_COMMIT
+    (checkout / "BOSL2").mkdir(parents=True)
+    return checkout
+
+
+async def test_a_render_holds_the_checkouts_it_resolved(paths: DataPaths) -> None:
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    seen: list[list[str]] = []
+
+    async def render(*args: object, **kwargs: object) -> object:
+        seen.append(gate.leased(checkout))
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        seen.append(gate.leased(checkout.parent))
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        await jobs.render_job(_job("l"), config=CONFIG, paths=paths, checkouts=gate)
+
+    assert seen == [["l"], ["l"]]
+    assert gate.leased(checkout) == []
+
+
+async def test_a_render_that_waited_out_a_removal_fails_cleanly(paths: DataPaths) -> None:
+    """Resolved before the removal, leased after it: the checkout is gone, and the
+    render says so rather than running OpenSCAD against a missing library."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    schema_reads: list[object] = []
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        schema_reads.append(args)
+        return _file_schema()
+
+    with mock.patch.object(jobs, "cached_schema", cached_schema):
+        async with gate.removing():
+            task = asyncio.create_task(
+                jobs.render_job(_job("w"), config=CONFIG, paths=paths, checkouts=gate)
+            )
+            await asyncio.sleep(0.2)
+            shutil.rmtree(checkout)
+        with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
+            await task
+
+    assert schema_reads == []
+    assert gate.leased(checkout) == []
+
+
+async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> None:
+    """A lapsed store lease retries the job while the first attempt may still run
+    (#241). The first finishing must not release the retry's hold on the checkout."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    release: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
+    rendering: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        attempt = 2 if "attempt-2" in str(out) else 1
+        rendering[attempt].set()
+        await release[attempt].wait()
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(
+            log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    def attempt(number: int) -> asyncio.Task[tuple[JobResult, list[str]]]:
+        return asyncio.create_task(
+            jobs.render_job(_job("r").claimed(number), config=CONFIG, paths=paths, checkouts=gate)
+        )
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        first, retry = attempt(1), attempt(2)
+        await asyncio.wait_for(rendering[1].wait(), 5)
+        await asyncio.wait_for(rendering[2].wait(), 5)
+        assert gate.leased(checkout) == ["r"]
+
+        release[1].set()
+        await first
+        assert gate.leased(checkout) == ["r"]  # the retry still reads it
+
+        release[2].set()
+        await retry
+    assert gate.leased(checkout) == []
+
+
+async def test_a_cancelled_render_releases_its_lease(paths: DataPaths) -> None:
+    """Shutdown cancels a worker mid-render; the checkout must not stay leased."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    started = asyncio.Event()
+
+    async def render(*args: object, **kwargs: object) -> object:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+    ):
+        task = asyncio.create_task(
+            jobs.render_job(_job("c"), config=CONFIG, paths=paths, checkouts=gate)
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        assert gate.leased(checkout) == ["c"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert gate.leased(checkout) == []
+
+
+async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=(),
+            notes=("letter_size reduced",),
+            diagnostics=(),
+            diagnostics_dropped=0,
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+
+    assert result.notes == ["letter_size reduced"]

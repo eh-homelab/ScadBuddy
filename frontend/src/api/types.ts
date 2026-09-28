@@ -21,6 +21,8 @@ export type CustomizerSchema = Schemas['CustomizerSchema']
 
 /** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
 export type Asset = Schemas['AssetMeta']
+/** #296 — how much the upload store holds, against its caps (0 is no limit). */
+export type AssetUsage = Schemas['AssetUsage']
 
 export type ModelSummary = Schemas['ModelRecord']
 export type SourceCheck = Schemas['SourceCheck']

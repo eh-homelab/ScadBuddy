@@ -237,6 +237,53 @@ def test_pinning_and_unpinning_a_library_publish_library_changed(
     )
 
 
+@pytest.mark.requires_git
+def test_repinning_and_removing_checkouts_publish_their_events(
+    app: FastAPI, client: TestClient, mine: str, events: list[Event], tmp_path: Path
+) -> None:
+    """#253: a re-pin changes the model as a pin does; removing checkouts changes no
+    model (it is refused while one pins them), so it is `library.removed` alone. A
+    refused removal and a refused re-pin publish nothing."""
+    url, commits = make_library_upstream(
+        tmp_path, {"v1": "module marker() cube(1);\n", "v2": "module marker() cube(2);\n"}
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    store = LibraryStore(
+        state.paths,
+        catalogue=(
+            CatalogueLibrary(
+                name="BOSL2", url=url, ref="v1", licence="BSD-2-Clause", homepage="https://x"
+            ),
+        ),
+        protocols=("file",),
+    )
+    app.dependency_overrides[get_libraries] = lambda: store
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
+    events.clear()
+
+    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}))
+    assert client.delete("/api/v1/libraries/BOSL2").status_code == 409  # still pinned
+    assert client.patch("/api/v1/models/widget/libraries/other", json={}).status_code == 404
+    repinned = [
+        event.model_dump(exclude={"id", "at"})
+        for event in events
+        if event.kind in ("library.changed", "model.updated", "library.removed")
+    ]
+    events.clear()
+    _ok(
+        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}),
+        204,
+    )
+
+    assert repinned == [
+        {"kind": "library.changed", "slug": mine, "name": "BOSL2"},
+        {"kind": "model.updated", "slug": mine},
+    ]
+    assert published(events) == [
+        {"kind": "library.removed", "name": "BOSL2", "commits": [commits["v1"]]}
+    ]
+
+
 # ── renders and outputs ──────────────────────────────────────────────────────────
 
 
