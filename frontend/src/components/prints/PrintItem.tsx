@@ -136,7 +136,7 @@ function Facts({ print }: { print: PrintSummary }) {
   ].filter((fact): fact is string => fact !== null)
   if (!when && facts.length === 0) return null
   return (
-    <p className="sb-num mt-1 flex flex-wrap gap-x-2 text-[12px] text-muted">
+    <p className="sb-num mt-1 flex flex-wrap gap-x-3 text-[12px] text-muted">
       {when && (
         <time dateTime={when}>
           {new Date(when).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}

@@ -111,7 +111,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
             Scad<span className="text-accent">Buddy</span>
           </span>
           {!embedded && (
-            <span className="text-[11px] text-faint">OpenSCAD customizer</span>
+            <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
           )}
         </NavLink>
 
