@@ -90,9 +90,8 @@ class OutputMeta(BaseModel):
     #: has not changed. ``None`` on records written before #105.
     library_file_plate: str | None = None
     queue_item_id: int | None = None
-    #: Which of Bambuddy's two routes the last print took (#87). Without it an output
-    #: that has been printed both ways carries a run id *and* a queue item id, and
-    #: nothing says which one describes the print now in progress.
+    #: Which route the last print took (#87). Only slice-and-queue is left; a record
+    #: from the retired pipeline route loads as never printed (see the validator below).
     print_route: PrintRoute | None = None
     slice_job_id: int | None = None
     #: The Bambuddy project this output was last printed into (#79), so reopening the
