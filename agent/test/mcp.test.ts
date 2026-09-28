@@ -291,8 +291,8 @@ describe('/mcp: oidc mode', () => {
   })
 })
 
-describe('/mcp: outward tools prepare, and confirm is refused until approvals exist (#258)', () => {
-  it('prepares a pending action instead of printing, and refuses to confirm it', async () => {
+describe('/mcp: outward tools prepare; with no approval store, confirm is refused', () => {
+  it('prepares a pending action instead of printing, and refuses to confirm it without the database', async () => {
     // No backend handler for the print routes: an attempt to call them would
     // fail the test through onUnhandledRequest: 'error'.
     const { app, auth } = await bearerApp('outward')
@@ -311,10 +311,13 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
 
     const confirmed = await client.callTool({
       name: 'confirm_action',
-      arguments: { pending_action_id: body.pending_action_id },
+      arguments: {
+        pending_action_id: body.pending_action_id,
+        arguments: { output_id: '0123456789abcdef0123456789abcdef', nozzles: [{ size: '0.4' }], tier: 'fine', copies: 2 },
+      },
     })
     expect(confirmed.isError).toBe(true)
-    expect(firstText(confirmed)).toContain('#258')
+    expect(firstText(confirmed)).toContain('SCADBUDDY_DATABASE_URL')
     expect(firstText(confirmed)).toContain('Nothing was sent')
   })
 

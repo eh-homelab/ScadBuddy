@@ -44,6 +44,12 @@ export function progressFrom(extra: unknown): Progress {
   }
 }
 
+/** Name → tool over the projection's own list, for `confirm_action`. */
+function lookupIn(tools: readonly Tool[]): (name: string) => Tool | undefined {
+  const byName = new Map(tools.map((t) => [t.name, t]))
+  return (name) => byName.get(name)
+}
+
 function signalFrom(extra: unknown): AbortSignal {
   return (extra as ExtraLike | undefined)?.signal ?? new AbortController().signal
 }
@@ -59,6 +65,7 @@ export function createHarnessServer(
   services: ToolServices,
   principal: Principal,
 ): McpSdkServerConfigWithInstance {
+  const lookup = lookupIn(tools)
   return createSdkMcpServer({
     name: SERVER_NAME,
     version: SERVER_VERSION,
@@ -68,7 +75,13 @@ export function createHarnessServer(
         t.description,
         t.shape,
         (args, extra) =>
-          runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: signalFrom(extra) }),
+          runTool(t, args, {
+            ...services,
+            principal,
+            progress: progressFrom(extra),
+            signal: signalFrom(extra),
+            lookup,
+          }),
         { annotations: t.annotations },
       ),
     ),
@@ -87,6 +100,7 @@ export function principalFrom(extra: unknown): Principal | undefined {
  * request's auth, so a token revoked mid-session stops working at once.
  */
 export function createExternalServer(tools: readonly Tool[], services: ToolServices): McpServer {
+  const lookup = lookupIn(tools)
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
@@ -94,7 +108,7 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
       instructions:
         'ScadBuddy: an OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. Outward tools ' +
         '(send, print, delete, settings writes) return a pending action for a human to approve in the ' +
-        'ScadBuddy UI instead of acting.',
+        'ScadBuddy UI instead of acting; once approved, confirm_action with the same arguments runs it once.',
     },
   )
   for (const t of tools) {
@@ -104,7 +118,7 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
       async (args, extra): Promise<CallToolResult> => {
         const principal = principalFrom(extra)
         if (!principal) return errorResult('unauthenticated')
-        return runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: extra.signal })
+        return runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: extra.signal, lookup })
       },
     )
   }

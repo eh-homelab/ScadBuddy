@@ -39,3 +39,18 @@ if (!URL.createObjectURL) {
   URL.createObjectURL = () => 'blob:mock'
   URL.revokeObjectURL = () => {}
 }
+
+// Embla watches which slides are in view; jsdom lays nothing out, so none ever is.
+if (!globalThis.IntersectionObserver) {
+  globalThis.IntersectionObserver = class {
+    readonly root = null
+    readonly rootMargin = ''
+    readonly thresholds = []
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return []
+    }
+  } as unknown as typeof IntersectionObserver
+}

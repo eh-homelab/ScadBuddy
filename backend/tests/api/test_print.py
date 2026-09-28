@@ -11,13 +11,12 @@ other print test modules.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import httpx
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.settings import Settings
+from tests.api.conftest import read_stored
 from tests.api.test_send import BASE
 from tests.bambuddy.conftest import recording
 
@@ -47,12 +46,12 @@ NO_DIALOG_CHOICES: dict[str, object] = {"nozzles": [], "tier": None, "process_na
 
 
 def test_the_models_printer_and_spools_are_remembered(
-    client: TestClient, model: str, data_dir: Path
+    client: TestClient, model: str, settings: Settings
 ) -> None:
     """#78 — the picker reopens on the printer and spools it last chose for this model.
 
     Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug. Verified by
-    reading the persisted file back, independently of either write's own echoed
+    reading the stored rows back, independently of either write's own echoed
     response — a store that ignored the slug key would still echo each PUT correctly
     (it is just handed back what was sent) while silently sharing one entry between
     models, and only a real readback catches that.
@@ -72,13 +71,13 @@ def test_the_models_printer_and_spools_are_remembered(
         == choices_b
     )
 
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["model_print_choices"] == {model: choices_a, "some-other-model": choices_b}
 
 
-def test_a_built_ins_choices_are_its_own(client: TestClient, data_dir: Path) -> None:
+def test_a_built_ins_choices_are_its_own(client: TestClient, settings: Settings) -> None:
     """A built-in prints too (#155); its remembered choices are kept apart from a
-    template of mine with the same slug. Verified by reading the persisted file back
+    template of mine with the same slug. Verified by reading the stored rows back
     (see :func:`test_the_models_printer_and_spools_are_remembered` for why)."""
     builtin_choices = {
         **{"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]},
@@ -98,7 +97,7 @@ def test_a_built_ins_choices_are_its_own(client: TestClient, data_dir: Path) -> 
         == mine_choices
     )
 
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["model_print_choices"] == {
         "builtin:keychain": builtin_choices,
         "keychain": mine_choices,

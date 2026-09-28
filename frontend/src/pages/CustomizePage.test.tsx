@@ -104,6 +104,28 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
+  it('manages the template media from a Media dialog (#279)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Media' }))
+    const dialog = screen.getByRole('dialog', { name: 'Media' })
+    // The keychain's legacy thumbnail.png is its one item, and so its cover.
+    const items = within(within(dialog).getByRole('list', { name: 'Media items' })).getAllByRole(
+      'listitem',
+    )
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent('Cover')
+    expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
+  })
+
+  it('shows a built-in media read-only, with Duplicate (#279)', async () => {
+    const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    await user.click(await screen.findByRole('button', { name: 'Media' }))
+    const dialog = screen.getByRole('dialog', { name: 'Media' })
+    expect(within(dialog).getByText(/Built-in media is read-only/)).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Add images or videos')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+  })
+
   it('offers to edit the model details (#179)', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Edit details' }))
