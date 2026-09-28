@@ -4,7 +4,15 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.core.fontconfig import cache_dir, conf_path, env_for, fonts_dir, write_conf
+from scadbuddy.core.fontconfig import (
+    PASSTHROUGH,
+    cache_dir,
+    conf_path,
+    env_for,
+    fonts_dir,
+    minimal_env,
+    write_conf,
+)
 
 
 def test_the_fonts_directory_hangs_off_the_data_dir() -> None:
@@ -50,6 +58,19 @@ def test_env_keeps_what_the_child_needs(tmp_path: Path) -> None:
         "TMPDIR": "/tmp",
     }
     assert env_for(tmp_path, base=base) == base | {"FONTCONFIG_FILE": str(conf_path(tmp_path))}
+
+
+def test_minimal_env_keeps_exactly_the_allowlist() -> None:
+    """Every PASSTHROUGH name and LC_* survives; the allowlist is the contract."""
+    base = {name: f"/value/{name}" for name in PASSTHROUGH} | {
+        "LC_CTYPE": "C.UTF-8",
+        "LC_NUMERIC": "C",
+        "FONTCONFIG_PATH": "/etc/fonts",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "XDG_DATA_DIRS": "/usr/share",
+    }
+    assert minimal_env(base) == base
+    assert {"FONTCONFIG_PATH", "FONTCONFIG_FILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME"} <= PASSTHROUGH
 
 
 def test_env_drops_everything_else(tmp_path: Path) -> None:
