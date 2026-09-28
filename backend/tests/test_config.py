@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.core.config import available_cpus, default_solid_concurrency, load_config
+from scadbuddy.core.config import (
+    ACTIVITY_TIMEOUT_MARGIN,
+    available_cpus,
+    default_solid_concurrency,
+    load_config,
+)
 from scadbuddy.core.settings import Settings
 from tests.conftest import UNUSED_DATABASE_URL
 
@@ -210,3 +215,26 @@ def test_a_duplicate_staging_max_age_under_one_is_refused(tmp_path: Path, value:
         load_config({"SCADBUDDY_DUPLICATE_STAGING_MAX_AGE": value})
     with pytest.raises(ValueError, match="SCADBUDDY_DUPLICATE_STAGING_MAX_AGE must be at least 1"):
         Settings(data_dir=tmp_path, duplicate_staging_max_age=float(value)).to_config()
+
+
+def test_temporal_settings_reach_the_config() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        temporal_address="temporal:7233",
+        render_timeout=45.0,
+    )
+    config = settings.to_config()
+    assert config.temporal_address == "temporal:7233"
+    assert config.temporal_namespace == "scadbuddy"
+    assert config.temporal_task_queue_render == "render"
+    assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
+
+
+def test_the_render_key_falls_back_to_the_full_key_and_says_so() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        bambuddy_api_key="full",
+    )
+    assert settings.render_bambuddy_key() == ("full", True)
+    with_own = settings.model_copy(update={"bambuddy_render_api_key": "narrow"})
+    assert with_own.render_bambuddy_key() == ("narrow", False)

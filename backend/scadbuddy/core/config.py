@@ -48,6 +48,14 @@ DEFAULT_RENDER_MAX_ATTEMPTS = 2
 DEFAULT_RENDER_QUEUE_DEPTH_SLO = 16
 DEFAULT_RENDER_LATENCY_SLO = 60.0
 DEFAULT_DATABASE_POOL_SIZE = 10
+# Temporal (spec 2026-09-27 §3.1). An empty address keeps the legacy render queue;
+# the final phase-1 PR makes it required. The namespace and task queue have defaults.
+DEFAULT_TEMPORAL_NAMESPACE = "scadbuddy"
+DEFAULT_TEMPORAL_TASK_QUEUE_RENDER = "render"
+# An openscad activity's start_to_close is derived from the one timeout an operator
+# tunes (§3.4): the subprocess is killed at render_timeout, and Temporal gives up on
+# the attempt this much later, so the two can never invert.
+ACTIVITY_TIMEOUT_MARGIN = 60.0
 # The event log (Postgres only) is for Last-Event-ID replay after a short disconnect,
 # not an audit trail: a day of events, and never more than this many rows. 0 is no
 # limit on that dimension.
@@ -130,6 +138,14 @@ class Config:
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
+    temporal_address: str = ""
+    temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
+    temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+
+    @property
+    def activity_timeout(self) -> float:
+        """start_to_close for the openscad activities: `render_timeout` plus the margin."""
+        return self.render_timeout + ACTIVITY_TIMEOUT_MARGIN
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be

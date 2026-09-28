@@ -35,6 +35,8 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
+    DEFAULT_TEMPORAL_NAMESPACE,
+    DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     Config,
 )
 
@@ -135,6 +137,27 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
         return value
 
+    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Empty (for now)
+    # keeps renders on the legacy queue; set, they run on Temporal. The final phase-1
+    # PR makes it required and removes the legacy queue.
+    temporal_address: str = ""
+    temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
+    temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
+    # process (one replica, dev and tests). Production runs `python -m
+    # scadbuddy.worker` as its own Deployment and leaves this off.
+    temporal_worker_inprocess: bool = False
+
+    # SCADBUDDY_BAMBUDDY_RENDER_API_KEY: the Manage-Library-only key render workers
+    # hold (spec §9). Unset, they fall back to `bambuddy_api_key` and /healthz says so.
+    bambuddy_render_api_key: str | None = None
+
+    def render_bambuddy_key(self) -> tuple[str | None, bool]:
+        """The key render workers use, and whether it is the full key by fallback."""
+        if self.bambuddy_render_api_key:
+            return self.bambuddy_render_api_key, False
+        return self.bambuddy_api_key, True
+
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.
@@ -192,6 +215,9 @@ class Settings(BaseSettings):
             asset_sweep_grace=self.asset_sweep_grace,
             asset_sweep_interval=self.asset_sweep_interval,
             duplicate_staging_max_age=self.duplicate_staging_max_age,
+            temporal_address=self.temporal_address,
+            temporal_namespace=self.temporal_namespace,
+            temporal_task_queue_render=self.temporal_task_queue_render,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
