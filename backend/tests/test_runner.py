@@ -154,6 +154,15 @@ def _process_is_dead(pid: int) -> bool:
     return state is not None and state[1] == "Z"
 
 
+async def _child_pid(pid_file: Path) -> int:
+    """The fake openscad's `sleep`, once the script has written it (up to 2 s)."""
+    for _ in range(100):
+        if pid_file.is_file() and pid_file.read_text().strip():
+            return int(pid_file.read_text())
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"the fake openscad never wrote {pid_file.name}")
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/status")
 async def test_a_timed_out_openscad_takes_its_children_with_it(tmp_path: Path) -> None:
     fake = tmp_path / "openscad"
@@ -162,7 +171,7 @@ async def test_a_timed_out_openscad_takes_its_children_with_it(tmp_path: Path) -
     config = Config(data_dir=tmp_path, openscad=str(fake), render_timeout=0.3)
     with pytest.raises(RenderTimeoutError):
         await run_openscad([], cwd=tmp_path, config=config)
-    child = int((tmp_path / "child.pid").read_text())
+    child = await _child_pid(tmp_path / "child.pid")
     await asyncio.sleep(0.1)
     assert _process_is_dead(child)
 
@@ -174,12 +183,7 @@ async def test_a_cancelled_openscad_takes_its_children_with_it(tmp_path: Path) -
     fake.chmod(0o755)
     config = Config(data_dir=tmp_path, openscad=str(fake), render_timeout=30.0)
     task = asyncio.create_task(run_openscad([], cwd=tmp_path, config=config))
-    pid_file = tmp_path / "child.pid"
-    for _ in range(100):
-        if pid_file.is_file() and pid_file.read_text().strip():
-            break
-        await asyncio.sleep(0.02)
-    child = int(pid_file.read_text())
+    child = await _child_pid(tmp_path / "child.pid")
     task.cancel()
     # Bounded: with only the direct child killed, the orphaned `sleep` keeps stdout
     # open and the cancel would take the whole 30 s, then find the child dead anyway.
