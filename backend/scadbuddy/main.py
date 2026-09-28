@@ -33,11 +33,12 @@ from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
+from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
-from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
@@ -105,6 +106,53 @@ def sweep_assets(state: AppState) -> list[str]:
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
+    return removed
+
+
+def _sweep_checkouts(state: AppState) -> list[str]:
+    """The thread half of :func:`sweep_library_checkouts`."""
+    # Every id any revision of any model.json -- live or deleted model, mine or a
+    # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
+    # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
+    # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
+    # no file of that name inside a model's folder.
+    named = state.history.object_ids_in(
+        f":(glob)*/{MODEL_META_NAME}",
+        f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
+        f":(literal){LOCKFILE_NAME}",
+    )
+    lock = read_lock(state.paths)
+    if lock is not None:
+        named |= {pin.commit for pin in lock.pins.values()}
+
+    def keep(name: str, commit: str) -> bool:
+        return (
+            commit in named
+            or bool(state.checkouts.leased(state.paths.libraries / name / commit))
+            # The live pins as a removal counts them: uncommitted edits, and a bare
+            # name or an unreadable model.json keeps every checkout of the library.
+            or bool(state.catalogue.library_users(name, commit))
+        )
+
+    return state.libraries.sweep_checkouts(keep)
+
+
+async def sweep_library_checkouts(state: AppState) -> list[str]:
+    """Remove the library checkouts that nothing pins (#271): no live model, and no
+    revision of any model in the history -- so restoring any revision never needs a
+    checkout this removed.
+
+    Under the checkout gate alone, as a removal: no pin or render in this process
+    runs meanwhile. Another replica sharing ``/data`` is kept apart by the age
+    guard in :meth:`LibraryStore.sweep_checkouts`. Without a repository there is
+    no history to read, so nothing is swept.
+    """
+    if not state.history.available:
+        return []
+    async with state.checkouts.removing():
+        removed = await asyncio.to_thread(_sweep_checkouts, state)
+    if removed:
+        logger.info("removed unpinned library checkouts", extra={"checkouts": removed})
     return removed
 
 
@@ -186,6 +234,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.libraries.sweep_staging)
     except OSError:
         logger.exception("could not sweep library staging clones")
+    # After the migration, so every pin is where the sweep reads it. It logs and
+    # keeps what it cannot remove; one that cannot read the history removes nothing.
+    try:
+        await sweep_library_checkouts(state)
+    except (OSError, GitError):
+        logger.exception("could not sweep library checkouts")
     # The upload store's running total, recounted once (#390): uploads and sweeps
     # keep it from here, but a file added or removed while the process was down is
     # only counted by a scan.

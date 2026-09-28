@@ -181,7 +181,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a library's checkouts from the volume
-         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout clones it again at that commit, and is a 409 only when that fails.
          */
         delete: operations["remove_library_api_v1_libraries__name__delete"];
         options?: never;
