@@ -252,6 +252,75 @@ def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: s
     assert upload.call_count == 1
 
 
+# --- the filament step reads any copy (#457) -------------------------------------------
+
+
+def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+    assert response.status_code == 200, response.text
+    result: dict[str, Any] = response.json()
+    return result
+
+
+@respx.mock
+def test_a_dialog_open_after_a_run_does_not_upload_again(client: TestClient, model: str) -> None:
+    """The first open has nothing to read and uploads; the run needs its own layout and
+    uploads again, superseding the first. From then on the dialog reads the run's copy."""
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    deletes()
+
+    open_dialog(client, output_id)
+    run(client, output_id)
+    assert upload.call_count == 2
+    open_dialog(client, output_id)
+    open_dialog(client, output_id)
+    run(client, output_id)
+
+    assert upload.call_count == 2
+
+
+@respx.mock
+def test_the_dialog_reads_a_projects_copy_without_moving_it(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41)
+    moved = never_moved()
+    run(client, output_id, project_id=7)
+
+    open_dialog(client, output_id)
+
+    assert upload.call_count == 1
+    assert not moved.called
+    assert copies(client, output_id) == [(41, 9)]
+
+
+@respx.mock
+def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    deletes()
+    run(client, output_id)
+    respx.get(f"{API}/library/files/41").mock(return_value=httpx.Response(404, json={}))
+
+    open_dialog(client, output_id)
+
+    assert upload.call_count == 2
+    assert copies(client, output_id) == [(42, INBOX)]
+
+
+@respx.mock
+def test_a_recolored_copy_still_shows_the_models_colors(client: TestClient, model: str) -> None:
+    """The run's copy is in the spools' colors (#476); the dialog shows the model's."""
+    output_id = set_up(client, model)
+    uploads(41)
+    run(client, output_id)
+
+    slots = open_dialog(client, output_id)["slots"]
+
+    # The test model is one red filament; the recorded file reports blue and pink.
+    assert [slot["colour"] for slot in slots] == ["#FF0000", "#FF1493"]
+
+
 # --- records written before #455 ----------------------------------------------------
 
 
