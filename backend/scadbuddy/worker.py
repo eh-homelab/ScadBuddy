@@ -76,21 +76,26 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
-    source = RenderSettingsSource(projection.pool, settings)
-    current = load_render_store_settings(projection.pool, settings)
-    backend = current.store_backend
-    store = build_store(
-        backend=backend,
-        current=current,
-        config=config,
-        paths=paths,
-        pool=projection.pool,
-        source=source,
-        # On bambuddy a worker has no git: the API makes the snapshots it renders from.
-        history=None,
-        fonts=FontService(settings.data_dir),
-        metrics=metrics,
-    )
+    try:
+        source = RenderSettingsSource(projection.pool, settings)
+        current = load_render_store_settings(projection.pool, settings)
+        backend = current.store_backend
+        store = build_store(
+            backend=backend,
+            current=current,
+            config=config,
+            paths=paths,
+            pool=projection.pool,
+            source=source,
+            # On bambuddy a worker has no git: the API makes the snapshots it renders from.
+            history=None,
+            fonts=FontService(settings.data_dir),
+            metrics=metrics,
+        )
+    except BaseException:
+        # A refused start (an unready store) closes what it opened before propagating.
+        projection.close()
+        raise
     deps = WorkerDeps(
         config=config,
         paths=paths,
@@ -209,9 +214,16 @@ class _HealthServer(uvicorn.Server):
         yield
 
 
-def _health_server(
-    settings: Settings, metrics: Metrics, store: StoreBundle, port: int
-) -> _HealthServer:
+async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle) -> None:
+    """The store gauges this process owns: its piece cache and the key it holds. The
+    store's usage is the API's to export (one database, one set of numbers)."""
+    health = await store_health(store)
+    metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
+    if isinstance(store.blobs, CachedBlobStore):
+        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+
+
+def _health_app(settings: Settings, metrics: Metrics, store: StoreBundle) -> Starlette:
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse(
             {
@@ -223,9 +235,20 @@ def _health_server(
         )
 
     async def exposition(_: Request) -> Response:
+        try:
+            await _refresh_store_metrics(metrics, store)
+        except Exception:
+            # Like the API's: keep the last values, never fail the scrape.
+            logger.exception("could not read the store's gauges")
         return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
-    app = Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+    return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+
+
+def _health_server(
+    settings: Settings, metrics: Metrics, store: StoreBundle, port: int
+) -> _HealthServer:
+    app = _health_app(settings, metrics, store)
     return _HealthServer(
         uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
     )

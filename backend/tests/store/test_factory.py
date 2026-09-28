@@ -15,7 +15,7 @@ from scadbuddy.library.settings_store import (
 )
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
-from scadbuddy.store.factory import build_store, store_health, store_usage
+from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import UNUSED_DATABASE_URL
@@ -79,8 +79,9 @@ def test_an_unready_bambuddy_backend_is_refused(
     tmp_path: Path, pool: Pool, url: str | None, folder: int | None
 ) -> None:
     current = READY.model_copy(update={"bambuddy_url": url, "library_folder_id": folder})
-    with pytest.raises(StoreNotReadyError):
+    with pytest.raises(StoreNotReadyError) as refused:
         _build(tmp_path, pool, "bambuddy", current)
+    assert RECOVER_LOCAL_SQL in str(refused.value)
 
 
 def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
@@ -90,5 +91,18 @@ def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
     seeded = Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL, store_backend="bambuddy")
     current = load_render_store_settings(pool, seeded)
     assert current.store_backend == "bambuddy"
-    with pytest.raises(StoreNotReadyError):
+    with pytest.raises(StoreNotReadyError) as refused:
         _build(tmp_path, pool, "bambuddy", current)
+    assert RECOVER_LOCAL_SQL in str(refused.value)
+
+
+def test_the_named_recovery_puts_a_stored_bambuddy_back_on_the_local_store(
+    tmp_path: Path, pool: Pool
+) -> None:
+    defaults = Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL)
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO settings (name, value) VALUES ('store_backend', '\"bambuddy\"')")
+    assert load_render_store_settings(pool, defaults).store_backend == "bambuddy"
+    with pool.connection() as conn:
+        conn.execute(RECOVER_LOCAL_SQL)
+    assert load_render_store_settings(pool, defaults).store_backend == "local"
