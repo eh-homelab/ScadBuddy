@@ -55,6 +55,10 @@ describe('parsePresetTags', () => {
     expect(parsePresetTags(' gift,Gift , ,  big   tag,x')).toEqual(['gift', 'big tag', 'x'])
     expect(parsePresetTags('')).toEqual([])
   })
+
+  it('treats tags the server would fold together as one', () => {
+    expect(parsePresetTags('Straße, STRASSE, strasse')).toEqual(['Straße'])
+  })
 })
 
 describe('presetTagsProblem', () => {
@@ -66,5 +70,11 @@ describe('presetTagsProblem', () => {
     expect(presetTagsProblem(['t'.repeat(MAX_PRESET_TAG + 1)])).toContain(
       `longer than ${MAX_PRESET_TAG} characters`,
     )
+  })
+
+  it('counts a tag\'s length in code points, as the server does', () => {
+    // 40 emoji are 80 UTF-16 units but 40 characters to the server.
+    expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG)])).toBeNull()
+    expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG + 1)])).not.toBeNull()
   })
 })

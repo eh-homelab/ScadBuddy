@@ -561,6 +561,8 @@ def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, 
     assert _patch_presets(client, model, many_tags).status_code == 422
     long_tag = [{"name": "X", "tags": ["t" * (MAX_PRESET_TAG + 1)]}]
     assert _patch_presets(client, model, long_tag).status_code == 422
+    comma_tag = [{"name": "X", "tags": ["M3, M4"]}]
+    assert _patch_presets(client, model, comma_tag).status_code == 422
     fine = [{"name": "X", "description": "d" * MAX_PRESET_DESCRIPTION, "tags": ["a", "b"]}]
     assert _patch_presets(client, model, fine).status_code == 200
 
@@ -616,12 +618,18 @@ def test_a_saved_preset_s_details_are_bounded(client: TestClient, model: str) ->
     assert refused({"description": "d" * (MAX_PRESET_DESCRIPTION + 1)})
     assert refused({"tags": [f"t{n}" for n in range(MAX_PRESET_TAGS + 1)]})
     assert refused({"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    # A comma would split the tag in two when the UI edits tags as one line.
+    assert refused({"tags": ["M3, M4"]})
+    # The length is counted in code points, not UTF-16 units.
+    assert not refused({"tags": ["\U0001f600" * MAX_PRESET_TAG]})
     # Repeats count once: they are dropped before the bound is checked.
     repeated = [f"t{n % MAX_PRESET_TAGS}" for n in range(MAX_PRESET_TAGS * 2)]
     assert not refused({"tags": repeated, "description": "d" * MAX_PRESET_DESCRIPTION})
     saved = client.get(_url(model)).json()[0]
     too_long = client.patch(_url(model, saved["id"]), json={"tags": ["t" * (MAX_PRESET_TAG + 1)]})
     assert too_long.status_code == 422
+    comma = client.patch(_url(model, saved["id"]), json={"tags": ["a,b"]})
+    assert comma.status_code == 422
 
 
 @pytest.mark.requires_git

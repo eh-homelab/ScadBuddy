@@ -39,16 +39,31 @@ export const MAX_PRESET_TAGS = 20
 export const MAX_PRESET_TAG = 40
 
 /**
+ * A tag's key for "the same tag", as close to the server's `str.casefold()` as JS
+ * gets: upper then lower folds `ß` with `SS` and `ſ` with `s`, which `toLowerCase()`
+ * alone does not. A fold it still misses only makes the client stricter.
+ */
+export function foldTag(tag: string): string {
+  return tag.toUpperCase().toLowerCase()
+}
+
+/** A tag's length as the server counts it: in code points, not UTF-16 units. */
+export function tagLength(tag: string): number {
+  return [...tag].length
+}
+
+/**
  * Tags as typed, comma-separated, cleaned as the server cleans them: trimmed, inner
- * whitespace collapsed, blanks dropped, each kept once ignoring case.
+ * whitespace collapsed, blanks dropped, each kept once ignoring case. The server
+ * refuses a comma in a tag, so the split never breaks a stored tag in two.
  */
 export function parsePresetTags(text: string): string[] {
   const seen = new Set<string>()
   const tags: string[] = []
   for (const raw of text.split(',')) {
     const tag = raw.trim().replace(/\s+/g, ' ')
-    if (tag && !seen.has(tag.toLowerCase())) {
-      seen.add(tag.toLowerCase())
+    if (tag && !seen.has(foldTag(tag))) {
+      seen.add(foldTag(tag))
       tags.push(tag)
     }
   }
@@ -61,6 +76,6 @@ export function parsePresetTags(text: string): string[] {
  */
 export function presetTagsProblem(tags: readonly string[]): string | null {
   if (tags.length > MAX_PRESET_TAGS) return `At most ${MAX_PRESET_TAGS} tags.`
-  const long = tags.find((tag) => tag.length > MAX_PRESET_TAG)
+  const long = tags.find((tag) => tagLength(tag) > MAX_PRESET_TAG)
   return long ? `“${long}” is longer than ${MAX_PRESET_TAG} characters.` : null
 }

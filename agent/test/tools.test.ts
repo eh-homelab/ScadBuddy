@@ -355,6 +355,29 @@ describe('analyze_geometry', () => {
   })
 })
 
+describe('preset tools carry a description and tags (#327)', () => {
+  it('save_preset and update_preset send them, and refuse a comma in a tag', async () => {
+    const bodies: unknown[] = []
+    const record = async ({ request }: { request: Request }) => {
+      bodies.push(await request.json())
+      return HttpResponse.json({ id: 'p', name: 'P', origin: 'mine', params: {}, description: 'D', tags: ['a'] })
+    }
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/m/presets`, record),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, record),
+    )
+    await runTool(tool('save_preset'), { slug: 'm', name: 'P', description: 'D', tags: ['a'] }, ctx())
+    await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', tags: [] }, ctx())
+    expect(bodies).toEqual([
+      { name: 'P', params: {}, description: 'D', tags: ['a'] },
+      { name: null, params: null, description: null, tags: [] },
+    ])
+    const refused = await runTool(tool('save_preset'), { slug: 'm', name: 'P', tags: ['M3, M4'] }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(bodies).toHaveLength(2)
+  })
+})
+
 describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
 

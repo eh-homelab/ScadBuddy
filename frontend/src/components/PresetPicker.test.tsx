@@ -302,8 +302,33 @@ describe('PresetPicker', () => {
       Array.from({ length: 21 }, (_, n) => `t${n}`).join(','),
     )
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('At most 20 tags.')
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('At most 20 tags.')
+    // The error is tied to the field it is about.
+    const tags = within(dialog).getByRole('textbox', { name: 'Tags (optional, comma-separated)' })
+    expect(tags).toHaveAttribute('aria-invalid', 'true')
+    expect(tags).toHaveAccessibleDescription('At most 20 tags.')
+    expect(tags).toHaveFocus()
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('leaves the tags out of an Edit details save that did not touch them', async () => {
+    const update = vi.spyOn(api, 'updatePreset')
+    const { user } = render()
+    const select = await picker()
+    await user.selectOptions(select, 'Mum')
+    await user.click(screen.getByRole('button', { name: 'Edit details of preset Mum' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details of Mum' })
+    const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    await user.clear(name)
+    await user.type(name, 'Mother')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(update).toHaveBeenCalledWith('name-keychain', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', {
+      name: 'Mother',
+      description: '',
+    })
   })
 
   it('offers Edit details only on a saved preset', async () => {

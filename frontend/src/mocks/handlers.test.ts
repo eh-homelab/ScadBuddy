@@ -645,6 +645,15 @@ describe('mock API: a preset\'s description and tags (#327)', () => {
     await refused({ description: 'd'.repeat(MAX_PRESET_DESCRIPTION + 1) })
     await refused({ tags: Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`) })
     await refused({ tags: ['t'.repeat(MAX_PRESET_TAG + 1)] })
+    // A comma would split the tag in two in the Edit details dialog.
+    await refused({ tags: ['M3, M4'] })
+    // Lengths are code points, as Python counts them, and case folds as `casefold`.
+    const wide = await api.createPreset('name-keychain', {
+      name: 'Emoji',
+      params: {},
+      tags: ['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße', 'STRASSE'],
+    })
+    expect(wide.tags).toEqual(['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße'])
     // Repeats are dropped before the bound: this many copies of one tag is one tag.
     const created = await api.createPreset('name-keychain', {
       name: 'Many',

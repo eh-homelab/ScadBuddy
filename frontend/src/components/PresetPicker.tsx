@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useRef, useState, type FormEvent } from 'react'
 import { Markdown } from '../agent/chat/Markdown'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
@@ -63,6 +63,10 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
   const [description, setDescription] = useState('')
   const [tagsText, setTagsText] = useState('')
   const [nameError, setNameError] = useState<string | null>(null)
+  /** Whether `nameError` is about the tags, so the Tags field is marked with it. */
+  const [tagsInvalid, setTagsInvalid] = useState(false)
+  const tagsInput = useRef<HTMLInputElement>(null)
+  const dialogErrorId = useId()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const selected = selection?.preset
@@ -88,6 +92,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setDescription('')
     setTagsText('')
     setNameError(null)
+    setTagsInvalid(false)
     setNaming('save')
   }
 
@@ -104,18 +109,27 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setDescription(selected.description)
     setTagsText(selected.tags.join(', '))
     setNameError(null)
+    setTagsInvalid(false)
     setNaming('details')
   }
 
-  /** The details as typed, or null after saying why they cannot be sent. */
-  function details(): { description: string; tags: string[] } | null {
+  /**
+   * The details as typed, or null after saying why they cannot be sent. Given the
+   * preset's current tags, the tags are left out when their text is as the dialog
+   * opened it, so an edit of the name alone never rewrites them.
+   */
+  function details(current?: readonly string[]): { description: string; tags?: string[] } | null {
+    const trimmed = description.trim()
+    if (current && tagsText === current.join(', ')) return { description: trimmed }
     const tags = parsePresetTags(tagsText)
     const problem = presetTagsProblem(tags)
+    setTagsInvalid(problem !== null)
     if (problem) {
       setNameError(problem)
+      tagsInput.current?.focus()
       return null
     }
-    return { description: description.trim(), tags }
+    return { description: trimmed, tags }
   }
 
   function closeNaming() {
@@ -181,7 +195,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     const chosen = name.trim()
     if (!selected || selected.origin !== 'mine' || !chosen || busy) return
     setNameError(null)
-    const described = details()
+    const described = details(selected.tags)
     if (!described) return
     setBusy(true)
     try {
@@ -411,8 +425,11 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
               <label className="flex flex-col gap-1 text-[13px] text-muted">
                 Tags (optional, comma-separated)
                 <input
+                  ref={tagsInput}
                   value={tagsText}
                   onChange={(event) => setTagsText(event.target.value)}
+                  aria-invalid={tagsInvalid || undefined}
+                  aria-describedby={tagsInvalid && nameError ? dialogErrorId : undefined}
                   placeholder="gift, small"
                   className={`h-8 ${FIELD}`}
                 />
@@ -421,7 +438,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
           )}
         </form>
         {nameError && (
-          <p role="alert" className="mt-3 text-[13px] text-warn">
+          <p id={dialogErrorId} role="alert" className="mt-3 text-[13px] text-warn">
             {nameError}
           </p>
         )}

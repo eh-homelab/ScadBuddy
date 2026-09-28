@@ -868,8 +868,10 @@ export function cleanTags(tags: readonly string[]): string[] {
   const cleaned: string[] = []
   for (const raw of tags) {
     const tag = raw.trim().replace(/\s+/g, ' ')
-    if (tag && !seen.has(tag.toLowerCase())) {
-      seen.add(tag.toLowerCase())
+    // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
+    const key = tag.toUpperCase().toLowerCase()
+    if (tag && !seen.has(key)) {
+      seen.add(key)
       cleaned.push(tag)
     }
   }
@@ -886,10 +888,14 @@ function detailsRefusal(description: string | null | undefined, tags: string[] |
     return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
   }
   const cleaned = cleanTags(tags ?? [])
-  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => tag.length > MAX_PRESET_TAG)) {
+  // Lengths in code points, as Python counts them.
+  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
     return shapeRefusal(
       `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
     )
+  }
+  if (cleaned.some((tag) => tag.includes(','))) {
+    return shapeRefusal('a preset tag cannot contain a comma')
   }
   return undefined
 }

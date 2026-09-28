@@ -116,9 +116,10 @@ def _clean_tags(value: object) -> object:
 
 
 #: A preset's tags (#327): cleaned before the bounds are checked, so padding and
-#: repeats never count against them.
+#: repeats never count against them. A tag holds no comma: the UI edits tags as one
+#: comma-separated line, which would split such a tag in two.
 PresetTags = Annotated[
-    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]],
+    list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
     BeforeValidator(_clean_tags),
     Field(max_length=MAX_PRESET_TAGS),
 ]

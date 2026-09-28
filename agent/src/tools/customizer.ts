@@ -19,6 +19,12 @@ const jobId = z
   .regex(/^[0-9a-f]{32}$/, 'must be a render job id: 32 lowercase hex digits, as render_model returns it')
   .describe('Render job id, as render_model returns it')
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
+// The bounds of backend/scadbuddy/library/presets.py (#327).
+const presetDescription = z.string().max(2000).describe("What the preset is for, in short Markdown")
+const presetTags = z
+  .array(z.string().max(40).regex(/^[^,]*$/, 'a tag cannot contain a comma'))
+  .max(20)
+  .describe('Short labels to find the preset by')
 async function fetchSchema(ctx: ToolContext, slug: string, version?: string) {
   return version
     ? ok(
@@ -233,14 +239,23 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'save_preset',
-    description: 'Save a parameter set as a named preset of a model.',
-    input: z.object({ slug, name: z.string().min(1).max(80), params: params.default({}) }),
+    description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.',
+    input: z.object({
+      slug,
+      name: z.string().min(1).max(80),
+      params: params.default({}),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params }, { backend }) =>
+    handler: async ({ slug, name, params, description, tags }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/models/{slug}/presets', { params: { path: { slug } }, body: { name, params } }),
+          backend.POST('/api/v1/models/{slug}/presets', {
+            params: { path: { slug } },
+            body: { name, params, description, tags },
+          }),
           `save preset ${name}`,
         ),
       ),
@@ -248,16 +263,24 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'update_preset',
-    description: "Rename a preset or replace its values. Omitted fields are unchanged.",
-    input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80).optional(), params: params.optional() }),
+    description:
+      'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.',
+    input: z.object({
+      slug,
+      preset_id: presetId,
+      name: z.string().min(1).max(80).optional(),
+      params: params.optional(),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params }, { backend }) =>
+    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
       json(
         await ok(
           backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
-            body: { name: name ?? null, params: params ?? null },
+            body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
           }),
           `update preset ${preset_id}`,
         ),
