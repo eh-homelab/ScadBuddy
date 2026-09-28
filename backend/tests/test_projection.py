@@ -1,0 +1,259 @@
+"""The render_jobs projection: rows the API reads and the workflow writes in place."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import psycopg
+import pytest
+
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
+from scadbuddy.render.job_store import SUPERSEDED_ERROR, QueueFullError, render_key
+from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.schema import ParamValue
+
+pytestmark = pytest.mark.requires_postgres
+
+MIGRATION_ID = "20260928T0900Z_render_jobs_projection"
+
+
+def _job(slug: str = "demo", **params: ParamValue) -> Job:
+    return Job(id=uuid.uuid4().hex, slug=slug, params=dict(params), created_at=datetime.now(UTC))
+
+
+def _result() -> JobResult:
+    return JobResult(
+        model_3mf="blobs/k/model.3mf",
+        preview_glb="blobs/k/preview.glb",
+        parts=[PartInfo(name="Color 1", colour="#FF0000", extruder=1, watertight=True)],
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+    )
+
+
+def _kinds(conninfo: str) -> list[str]:
+    with psycopg.connect(conninfo) as conn:
+        return [row[0] for row in conn.execute("SELECT kind FROM events ORDER BY seq")]
+
+
+@pytest.fixture
+def projection(pg_conninfo: str) -> Iterator[JobProjection]:
+    store = JobProjection(pg_conninfo, pool_size=2)
+    store.open()
+    try:
+        yield store
+    finally:
+        store.close()
+
+
+def test_the_migration_adds_the_projection_and_keeps_the_queue(
+    pg_conninfo: str, projection: JobProjection
+) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'render_jobs' AND table_schema = current_schema()"
+            )
+        }
+        applied = {row[0] for row in conn.execute("SELECT id FROM scadbuddy_migrations")}
+    assert {"workflow_id", "kind", "inputs", "pipeline_version", "steps"} <= columns
+    assert "heartbeat_at" in columns
+    assert MIGRATION_ID in applied
+
+
+def test_submit_inserts_pending_with_its_workflow_id(projection: JobProjection) -> None:
+    job = _job(width=1)
+    submitted = projection.submit(job, render_key("demo", {"width": 1}, None))
+    assert not submitted.coalesced
+    stored = projection.read(job.id)
+    assert stored.state == "pending"
+    assert stored.workflow_id == f"render-{job.id}"
+    assert stored.inputs == {"params": {"width": 1}}
+
+
+def test_an_identical_pending_submit_coalesces(projection: JobProjection) -> None:
+    key = render_key("demo", {"width": 1}, None)
+    first = projection.submit(_job(width=1), key)
+    second = projection.submit(_job(width=1), key)
+    assert second.coalesced and second.job.id == first.job.id
+    assert projection.read(first.job.id).claims == 2
+
+
+def test_releasing_the_last_claim_cancels(projection: JobProjection) -> None:
+    key = render_key("demo", {"width": 1}, None)
+    first = projection.submit(_job(width=1), key)
+    projection.submit(_job(width=1), key)
+    assert projection.release_claim(first.job.id, slug="demo") is None  # one claim left
+    gone = projection.release_claim(first.job.id, slug="demo")
+    assert gone is not None and gone.state == "cancelled"
+
+
+def test_state_moves_forward_only(projection: JobProjection) -> None:
+    job = projection.submit(_job(width=2), render_key("demo", {"width": 2}, None)).job
+    assert projection.mark_started(job.id) is not None
+    assert projection.mark_started(job.id) is None  # already running
+    job.state, job.result, job.finished_at = "done", _result(), datetime.now(UTC)
+    assert projection.finish(job)
+    assert not projection.finish(job)  # already settled
+
+
+def test_a_late_running_projection_never_moves_a_settled_job_back(
+    projection: JobProjection,
+) -> None:
+    job = projection.submit(_job(width=3), render_key("demo", {"width": 3}, None)).job
+    projection.mark_started(job.id)
+    job.state, job.result, job.finished_at = "done", _result(), datetime.now(UTC)
+    projection.finish(job)
+    assert projection.mark_started(job.id) is None
+    assert projection.read(job.id).state == "done"
+
+
+def test_steps_are_stored_as_given(projection: JobProjection) -> None:
+    job = projection.submit(_job(width=4), render_key("demo", {"width": 4}, None)).job
+    projection.set_steps(job.id, [StepInfo(name="render", state="running")])
+    assert projection.read(job.id).steps == [StepInfo(name="render", state="running")]
+
+
+def test_stale_pending_is_what_the_reconciler_restarts(projection: JobProjection) -> None:
+    job = projection.submit(_job(width=5), render_key("demo", {"width": 5}, None)).job
+    assert projection.stale_pending(older_than=3600) == []
+    assert [j.id for j in projection.stale_pending(older_than=0)] == [job.id]
+    projection.mark_started(job.id)
+    assert projection.stale_pending(older_than=0) == []
+
+
+def test_every_state_change_is_published_on_the_bus(pg_conninfo: str) -> None:
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+    store = JobProjection(pg_conninfo, pool_size=2, events=bus)
+    store.open()
+    try:
+        job = store.submit(_job(width=6), render_key("demo", {"width": 6}, None)).job
+        store.mark_started(job.id)
+        job.state, job.error, job.finished_at = "failed", "boom", datetime.now(UTC)
+        store.finish(job)
+        cancelled = store.submit(_job(width=9), render_key("demo", {"width": 9}, None)).job
+        store.release_claim(cancelled.id, slug="demo")
+    finally:
+        store.close()
+    assert _kinds(pg_conninfo) == [
+        "job.pending",
+        "job.running",
+        "job.failed",
+        "job.pending",
+        "job.superseded",
+    ]
+
+
+def test_a_newer_render_supersedes_the_pending_one(pg_conninfo: str) -> None:
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+    store = JobProjection(pg_conninfo, pool_size=2, events=bus)
+    store.open()
+    try:
+        first = store.submit(_job(width=12), render_key("demo", {"width": 12}, None)).job
+        second = _job(width=13)
+        submitted = store.submit(
+            second, render_key("demo", {"width": 13}, None), supersedes=first.id
+        )
+        assert submitted.superseded is not None and submitted.superseded.id == first.id
+        dropped = store.read(first.id)
+        assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
+        assert store.read(second.id).state == "pending"
+    finally:
+        store.close()
+    assert _kinds(pg_conninfo) == ["job.pending", "job.superseded", "job.pending"]
+
+
+def test_a_full_queue_refuses_a_new_render_and_supersedes_nothing(
+    projection: JobProjection,
+) -> None:
+    first = projection.submit(_job(width=14), render_key("demo", {"width": 14}, None)).job
+    with pytest.raises(QueueFullError):
+        projection.submit(_job(width=15), render_key("demo", {"width": 15}, None), max_pending=1)
+    # The supersede frees `first`'s place, but `other` still fills the queue: the
+    # refusal rolls the supersede back.
+    other = projection.submit(_job(width=16), render_key("demo", {"width": 16}, None)).job
+    with pytest.raises(QueueFullError):
+        projection.submit(
+            _job(width=17),
+            render_key("demo", {"width": 17}, None),
+            supersedes=first.id,
+            max_pending=1,
+        )
+    assert projection.read(first.id).state == "pending"
+    assert {job.id for job in projection.list_jobs()} == {first.id, other.id}
+
+
+def test_finishing_as_cancelled_announces_superseded(pg_conninfo: str) -> None:
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+    store = JobProjection(pg_conninfo, pool_size=2, events=bus)
+    store.open()
+    try:
+        job = store.submit(_job(width=18), render_key("demo", {"width": 18}, None)).job
+        store.mark_started(job.id)
+        job.state, job.error, job.finished_at = "cancelled", "withdrawn", datetime.now(UTC)
+        assert store.finish(job)
+    finally:
+        store.close()
+    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
+
+
+def test_prune_removes_settled_rows_and_their_blob_refs(
+    pg_conninfo: str, projection: JobProjection
+) -> None:
+    old = projection.submit(_job(width=7), render_key("demo", {"width": 7}, None)).job
+    projection.mark_started(old.id)
+    old.state, old.error, old.finished_at = "failed", "x", datetime.now(UTC) - timedelta(days=2)
+    projection.finish(old)
+    fresh = projection.submit(_job(width=8), render_key("demo", {"width": 8}, None)).job
+    with psycopg.connect(pg_conninfo) as conn:
+        for job_id in (old.id, fresh.id):
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ('k', 'job', %s)",
+                (job_id,),
+            )
+    assert projection.prune(ttl=86400) == [old.id]
+    assert projection.read(fresh.id).state == "pending"
+    with psycopg.connect(pg_conninfo) as conn:
+        holders = [row[0] for row in conn.execute("SELECT holder_id FROM blob_refs")]
+    assert holders == [fresh.id]
+
+
+def test_delete_removes_the_row_and_its_blob_refs(
+    pg_conninfo: str, projection: JobProjection
+) -> None:
+    job = projection.submit(_job(width=10), render_key("demo", {"width": 10}, None)).job
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ('k', 'job', %s)",
+            (job.id,),
+        )
+    projection.delete(job.id)
+    assert projection.list_jobs() == []
+    with psycopg.connect(pg_conninfo) as conn:
+        assert conn.execute("SELECT count(*) FROM blob_refs").fetchone() == (0,)
+
+
+def test_the_legacy_queue_still_works_on_the_migrated_table(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        job = _job(width=11)
+        store.submit(job, render_key("demo", {"width": 11}, None))
+        claimed = store.claim()
+        assert claimed is not None and claimed.id == job.id
+        claimed.state, claimed.result, claimed.finished_at = "done", _result(), datetime.now(UTC)
+        assert store.finish(claimed)
+        assert store.read(job.id).state == "done"
+    finally:
+        store.close()
