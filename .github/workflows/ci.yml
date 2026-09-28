@@ -234,11 +234,13 @@ jobs:
       # verify-models.sh reaps a timed-out template's containers by the
       # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
       # mounts nothing would survive the timeout, so each one fails here.
-      - name: Check every template docker run is labelled
-        run: .github/scripts/lint-verify-labels.sh
-
+      # Its own tests first, so a regression in the lint reads as a failing
+      # case rather than as a template violation.
       - name: Test the docker run label lint
         run: .github/scripts/lint-verify-labels.test.sh
+
+      - name: Check every template docker run is labelled
+        run: .github/scripts/lint-verify-labels.sh
 
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
