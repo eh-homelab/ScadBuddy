@@ -426,6 +426,12 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: The folder the file sits in (``FileResponse``); the blob store deletes only files
+    #: in a `Work/` folder it made (spec 2026-09-27 §6.3).
+    folder_id: int | None = None
+    #: Bambuddy's own content hash. Whether it is a sha256 is one of §6.3's measurements
+    #: (`python -m scadbuddy.store.verify_bambuddy`); ScadBuddy checks its own.
+    file_hash: str | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None

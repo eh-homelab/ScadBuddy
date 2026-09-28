@@ -513,7 +513,12 @@ class BambuddyClient:
         return Folder.model_validate(response.json())
 
     async def upload_library_file(
-        self, filename: str, content: bytes, *, folder_id: int | None = None
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        folder_id: int | None = None,
+        media_type: str = THREE_MF_MEDIA_TYPE,
     ) -> LibraryFile:
         response = await self._send(
             "POST",
@@ -521,7 +526,7 @@ class BambuddyClient:
             scope=Scope.MANAGE_LIBRARY,
             what=f"upload {filename}",
             params={"folder_id": folder_id} if folder_id is not None else None,
-            files={"file": (filename, content, THREE_MF_MEDIA_TYPE)},
+            files={"file": (filename, content, media_type)},
             timeout=self.config.upload_timeout,
         )
         return LibraryFile.model_validate(response.json())
@@ -535,6 +540,25 @@ class BambuddyClient:
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
+
+    async def download_library_file(self, file_id: int) -> AsyncIterator[bytes]:
+        """``GET /library/files/{id}/download`` (``openapi/routes.txt``): by id, so the
+        blob store never scans a folder to find a file (spec 2026-09-27 §6.3)."""
+        what = f"download library file {file_id}"
+        try:
+            async with self._http.stream(
+                "GET",
+                self.config.url(f"/library/files/{file_id}/download"),
+                headers=self._headers,
+                timeout=self.config.upload_timeout,
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+        except httpx.HTTPError as error:
+            raise map_transport(error, what=what) from error
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
