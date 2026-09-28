@@ -180,7 +180,7 @@ Keep these the same for every piece of one house.
 | Parameter | Default | What it does |
 |---|---|---|
 | `window_style` | `square` | `square`, `arched` (round top), `round`. |
-| `window_width` | `70` | Opening width (round: diameter). Shrinks to leave room for the end keys. Whenever a window setting, the shutters or the flower box cannot be honoured, the render prints a `NOTE:` saying what was made instead. |
+| `window_width` | `70` | Opening width (round: diameter). Shrinks to leave room for the end keys; an arched or round window also shrinks to fit the height it gets (`window_height`, or the room above `window_sill`). Whenever a window setting, the shutters or the flower box cannot be honoured, the render prints a `NOTE:` saying what was made instead. |
 | `window_height` | `120` | Opening height; limited so the top clears the top-edge pegs and keys. |
 | `window_sill` | `40` | Bottom of the opening above the bottom of the course. |
 | `window_panes_x`, `window_panes_y` | `2`, `2` | Glazing bars. |

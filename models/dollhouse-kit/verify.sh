@@ -137,6 +137,10 @@ CASES = [
     ("note-window-shrunk", dict(width_units=0.5, window_width=180, window_height=200, course_height=180), None),
     ("note-door-shrunk", dict(piece="wall_door_lower", width_units=0.5, door_width=140, door_height=400,
                               course_height=180), None),
+    # arched / round windows narrowed by their height, not the wall: the NOTE names that
+    ("note-window-arch-short", dict(window_style="arched", width_units=2, window_width=80, window_height=40), None),
+    ("note-window-arch-high-sill", dict(window_style="arched", width_units=2, window_width=180, window_sill=120), None),
+    ("note-window-round-high-sill", dict(window_style="round", width_units=2, window_width=180, window_sill=120), None),
     ("note-stairwell-narrow", dict(piece="floor_tile", width_units=0.5, stairwell=True), None),
     ("roof-shingles", dict(piece="roof_panel"), ["roof_color", "roof_accent_color"]),
     ("roof-tiles", dict(piece="roof_panel", roof_style="tiles", width_units=2), ["roof_color", "roof_accent_color"]),
@@ -294,10 +298,22 @@ NOTES = {
         "NOTE: door walls are at least 1 unit long; width_units 0.5 made as 1",
         "NOTE: door_width reduced to 108 mm to fit a 1-unit wall with its frame and end keys",
         "NOTE: door_height reduced to 330 mm to leave a 25 mm header in two 180 mm courses"],
+    "note-window-arch-short": [
+        "NOTE: window_width reduced to 70 mm so the arch fits the window's 40 mm height"
+        " (raise window_height for a wider one)"],
+    "note-window-arch-high-sill": [
+        "NOTE: window_width reduced to 134.8 mm so the arch fits the window's 72.4 mm height"
+        " (lower window_sill for a wider one)",
+        "NOTE: window_height reduced to 72.4 mm so the window clears the top-edge pegs and keys"],
+    "note-window-round-high-sill": [
+        "NOTE: window_width reduced to 72.4 mm: a round window is as tall as it is wide and only 72.4 mm"
+        " fits between the sill and the top-edge pegs (lower window_sill for a bigger one)"],
     "note-stairwell-narrow": [
         "NOTE: the stairwell is only 57.2 mm wide on this tile; the stairs are 100 mm wide (use a wider tile)"],
     "floor-rug-no-room": ["NOTE: this floor tile is too small for a rug; left off"],
 }
+# cases whose NOTEs are exactly the listed ones: the wall NOTE must not also blame the wall
+NOTES_EXACT = {"note-window-arch-short", "note-window-arch-high-sill", "note-window-round-high-sill"}
 NOTE_FREE = {"defaults", "door-lower", "door-upper-arched", "leaf-lower", "floor-herringbone-rug", "floor-stairwell",
              "hinge-pins", "room-preview"}
 
@@ -314,6 +330,8 @@ for name, ov, want in CASES:
     log_notes = [l for l in open("%s/%s.log" % (OUT, name)).read().splitlines() if l.startswith('ECHO: "NOTE:')]
     for want_note in NOTES.get(name, []):
         check(any(want_note in l for l in log_notes), "reports %r" % want_note)
+    if name in NOTES_EXACT:
+        check(len(log_notes) == len(NOTES[name]), "reports only its %d NOTE(s) (got %s)" % (len(NOTES[name]), log_notes))
     if name in NOTE_FREE:
         check(not log_notes, "reports no NOTE (got %s)" % log_notes)
     check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
