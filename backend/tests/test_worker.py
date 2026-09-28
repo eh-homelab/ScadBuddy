@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import socket
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,11 +32,14 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
 from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store import BlobRefs
+from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
@@ -365,31 +370,91 @@ async def test_a_lazy_client_connects_on_its_first_call() -> None:
         assert (await client.count_workflows("WorkflowId = 'nothing-here'")).count == 0
 
 
-class _Cache:
-    def __init__(self) -> None:
-        self.calls = 0
+async def test_the_workers_housekeeping_runs_each_interval_and_survives_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
 
-    def evict(self) -> list[str]:
-        self.calls += 1
-        if self.calls == 1:
+    def housekeep(deps: WorkerDeps) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
             raise OSError("a transient disk error")
-        return ["k"]
 
-
-async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_failure() -> None:
-    cache = _Cache()
-    evicting = asyncio.create_task(
-        worker_module._evict_periodically(cache, 0.01)  # type: ignore[arg-type]
+    monkeypatch.setattr(worker_module, "_housekeep", housekeep)
+    running = asyncio.create_task(
+        worker_module._housekeep_periodically(cast(WorkerDeps, None), 0.01)
     )
     try:
         async with asyncio.timeout(5):
-            while cache.calls < 3:
+            while calls < 3:
                 await asyncio.sleep(0.01)
     finally:
-        evicting.cancel()
+        running.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await evicting
-    assert cache.calls >= 3
+            await running
+    assert calls >= 3
+
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>'
+
+
+def _own_volume_deps(tmp_path: Path) -> WorkerDeps:
+    paths = DataPaths(tmp_path / "worker")
+    paths.ensure()
+    return WorkerDeps(
+        config=Config(data_dir=paths.root),
+        paths=paths,
+        assets=AssetStore(paths.assets),
+        blobs=LocalBlobStore(paths.blobs),
+        refs=cast(BlobRefs, None),
+        projection=cast(JobProjection, None),
+        remote_assets=cast(RemoteAssets, object()),
+    )
+
+
+def _aged(*paths: Path, days: float = 7) -> None:
+    old = time.time() - days * 86400
+    for path in paths:
+        os.utime(path, (old, old))
+
+
+def test_one_housekeeping_pass_prunes_old_exports_and_uploads_and_keeps_fresh_ones(
+    tmp_path: Path,
+) -> None:
+    """Final review I2: what a worker fetched is pruned on its own volume, by last use."""
+    deps = _own_volume_deps(tmp_path)
+    old_export = deps.paths.model_revision_dir("demo", "a" * 40)
+    fresh_export = deps.paths.model_revision_dir("demo", "b" * 40)
+    for export in (old_export, fresh_export):
+        export.mkdir(parents=True)
+        (export / "model.scad").write_text("cube(1);")
+    _aged(old_export)
+    old = deps.assets.put(SVG, "old.svg")
+    fresh = deps.assets.put(SVG.replace(b'"4"', b'"5"'), "fresh.svg")
+    _aged(deps.assets.blob_path(old), deps.assets.root / f"{old.id}.json")
+
+    worker_module._housekeep(deps)
+
+    assert not old_export.exists() and fresh_export.is_dir()
+    assert deps.assets.ids() == [fresh.id]
+
+
+def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(tmp_path: Path) -> None:
+    """A worker that still mounts the API's /data holds none of the references: its
+    uploads and exports are the API's to sweep."""
+    deps = _own_volume_deps(tmp_path)
+    deps.paths.model_dir("demo").mkdir(parents=True)  # the API's templates are here
+    export = deps.paths.model_revision_dir("demo", "a" * 40)
+    export.mkdir(parents=True)
+    _aged(export)
+    upload = deps.assets.put(SVG, "old.svg")
+    _aged(deps.assets.blob_path(upload), deps.assets.root / f"{upload.id}.json")
+
+    worker_module._housekeep(deps)
+
+    assert export.is_dir()
+    assert deps.assets.ids() == [upload.id]
 
 
 class _Source:
