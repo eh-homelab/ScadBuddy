@@ -355,6 +355,11 @@ function idTokenMarker(payload: JWTPayload, typ: string | undefined, config: Oid
   return undefined
 }
 
+/** An absent header value, or a short printable-ASCII one safe to echo (`alg`, `typ`). */
+function headerToken(value: unknown): value is string | undefined {
+  return value === undefined || (typeof value === 'string' && /^[A-Za-z0-9+./_-]{1,64}$/.test(value))
+}
+
 /** A short reason for a refused token; it goes into `error_description` (RFC 6750 §3). */
 function reasonOf(err: unknown): string {
   if (err instanceof errors.JWTExpired) return 'the token has expired'
@@ -542,6 +547,12 @@ export class OidcProvider {
     try {
       ;({ alg, typ } = decodeProtectedHeader(token))
     } catch {
+      return { ok: false, error: 'invalid_token', detail: 'the token header is not valid' }
+    }
+    // jose does not type-check `alg` or `typ`. They are the caller's own bytes and
+    // the detail goes into WWW-Authenticate and the log, so only a plain token
+    // (every registered JOSE `alg` and media type fits) is taken at all.
+    if (!headerToken(alg) || !headerToken(typ)) {
       return { ok: false, error: 'invalid_token', detail: 'the token header is not valid' }
     }
     // Checked before any key is fetched, so `none`, HS256 and friends cost nothing.

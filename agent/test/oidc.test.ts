@@ -142,6 +142,15 @@ describe('OidcProvider.verify: refused tokens', () => {
     }
   })
 
+  it('refuses a header with a non-string or unprintable alg or typ, without echoing it or fetching anything', async () => {
+    const body = base64url.encode(JSON.stringify({ iss: idp.issuer, sub: 'alice', aud: AUD, exp: now() + 60 }))
+    for (const header of [{ alg: 'RS256', typ: 1 }, { alg: 'RS\n256' }, { alg: 'RS256', typ: 'x\r\ny' }, { alg: 'RS256', typ: '\u2603' }, { alg: ['RS256'] }]) {
+      const v = await refused(`${base64url.encode(JSON.stringify(header))}.${body}.x`)
+      expect(v).toMatchObject({ error: 'invalid_token', detail: 'the token header is not valid' })
+    }
+    expect(idp.hits.metadata + idp.hits.jwks).toBe(0)
+  })
+
   it('refuses a signature by a key the IdP does not publish, even under a published kid', async () => {
     const forger = await newKey('RS256', idp.key.kid)
     expect((await refused(await idp.sign({ scope: 'scadbuddy:outward' }, { key: forger }))).detail).toBe(

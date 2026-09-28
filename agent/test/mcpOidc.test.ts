@@ -1,6 +1,6 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { McpAuthSettings } from '../src/auth/authenticate.js'
+import { type McpAuthSettings, quoted } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfig, type OidcConfigRepo, OidcProvider } from '../src/auth/oidc.js'
 import { appFetch, connect, firstText, INGRESS, MCP_URL, testApp } from './helpers/mcp.js'
 import { type FakeIdp, startFakeIdp } from './support/fakeIdp.js'
@@ -101,6 +101,17 @@ describe('/mcp: oidc mode, tokens', () => {
     )
   })
 
+  it('401s, not 500s, a forged header whose alg or typ would break WWW-Authenticate', async () => {
+    const { app } = oidcApp()
+    const body = Buffer.from('{}').toString('base64url')
+    for (const header of [{ alg: 'RS256', typ: 1 }, { alg: 'RS\n256' }, { alg: 'RS256', typ: 'x\r\ny' }, { alg: 'RS256', typ: '\u2603' }]) {
+      const token = `${Buffer.from(JSON.stringify(header)).toString('base64url')}.${body}.x`
+      const res = await post(app, { authorization: `Bearer ${token}` })
+      expect(res.status).toBe(401)
+      expect(res.headers.get('www-authenticate')).toContain('error="invalid_token"')
+    }
+  })
+
   it('403s a token without a mapped scope as insufficient_scope, naming the scopes', async () => {
     const { app } = oidcApp()
     const res = await post(app, { authorization: `Bearer ${await idp.sign({ scope: 'openid' })}` })
@@ -141,6 +152,14 @@ describe('/mcp: oidc mode, tokens', () => {
       },
     })(MCP_URL, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) })
     expect(res.status).toBe(403)
+  })
+})
+
+describe('quoted (a WWW-Authenticate parameter value)', () => {
+  it('keeps only the RFC 6750 §3 error_description characters', () => {
+    expect(quoted('the "token" is \\bad')).toBe(`"the 'token' is 'bad"`)
+    expect(quoted('a\r\nb\u2603\u00e9')).toBe('"a??b??"')
+    expect(() => new Headers({ 'www-authenticate': quoted('x\r\ny\u2603') })).not.toThrow()
   })
 })
 

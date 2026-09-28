@@ -42,9 +42,13 @@ export function oidcContext(
   return { config, resource, metadataUrl: resourceMetadataUrl(runtime.publicUrl), audience: config.audience ?? resource }
 }
 
-/** A quoted-string value for a challenge parameter (RFC 9110 §5.6.4): no `"` or `\` inside. */
-function quoted(value: string): string {
-  return `"${value.replace(/["\\]/g, "'")}"`
+/**
+ * A quoted-string value for a challenge parameter (RFC 9110 §5.6.4), limited to
+ * the RFC 6750 §3 `error_description` set (%x20-21 / %x23-5B / %x5D-7E). Anything
+ * else (`"`, `\`, controls, non-ASCII) would break the header or make it unsendable.
+ */
+export function quoted(value: string): string {
+  return `"${value.replace(/[^\x20\x21\x23-\x5b\x5d-\x7e]/g, (c) => (c === '"' || c === '\\' ? "'" : '?'))}"`
 }
 
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
