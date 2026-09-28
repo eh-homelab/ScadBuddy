@@ -220,6 +220,17 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'builtin',
   },
+  // #276 — an accented name and a tag with a space and `&`, for the catalogue filters.
+  {
+    slug: 'creme-coaster',
+    name: 'Crème Coaster',
+    description: 'A drinks coaster with a raised rim.',
+    tags: ['kitchen', 'Tea & Coffee'],
+    updated_at: '2026-09-18T12:00:00Z',
+    has_thumbnail: false,
+    has_readme: false,
+    origin: 'mine',
+  },
 ]
 
 /**
