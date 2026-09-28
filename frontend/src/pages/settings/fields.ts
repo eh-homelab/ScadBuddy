@@ -270,8 +270,10 @@ export function serverValue(settings: Settings, name: FieldName): string {
 /**
  * Decimal and binary units both: the defaults are written either way (the media limit is
  * 1 GiB, the upload store's cap 1 GB), and each is shown in the unit that holds it exactly.
+ * A value that is a whole number of none of them is shown in bytes, so it round-trips.
  */
 export const BYTE_UNITS = {
+  B: 1,
   MB: 1_000_000,
   GB: 1_000_000_000,
   MiB: 1024 * 1024,
@@ -280,10 +282,11 @@ export const BYTE_UNITS = {
 export type ByteUnit = keyof typeof BYTE_UNITS
 
 export function bestUnit(bytes: number): ByteUnit {
+  if (bytes === 0) return 'MB'
   for (const unit of ['GiB', 'GB', 'MiB', 'MB'] as const) {
     if (bytes >= BYTE_UNITS[unit] && bytes % BYTE_UNITS[unit] === 0) return unit
   }
-  return 'MB'
+  return 'B'
 }
 
 export function inUnit(bytes: number, unit: ByteUnit): string {

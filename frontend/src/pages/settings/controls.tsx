@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import type { Settings, SettingSource } from '../../api/types'
 import { Button } from '../../components/ui/Button'
@@ -130,11 +130,14 @@ export function BytesInput({
   const bytes = Number(value)
   const [unit, setUnit] = useState<ByteUnit>(() => (value === '' ? 'MB' : bestUnit(bytes)))
   const [text, setText] = useState(() => (value === '' ? '' : inUnit(bytes, unit)))
+  // The value the shown text stands for. A unit change converts the text for display
+  // only, so the text alone cannot say whether the value changed from outside.
+  const own = useRef(value)
 
   // Follow the value when it changes from outside (a discard, a reload).
   useEffect(() => {
-    const shown = text === '' ? '' : String(Math.round(Number(text) * BYTE_UNITS[unit]))
-    if (shown === value) return
+    if (own.current === value) return
+    own.current = value
     const next = value === '' ? unit : bestUnit(Number(value))
     setUnit(next)
     setText(value === '' ? '' : inUnit(Number(value), next))
@@ -142,11 +145,19 @@ export function BytesInput({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value])
 
-  function emit(nextText: string, nextUnit: ByteUnit) {
+  // Editing the number reinterprets it under the current unit.
+  function editNumber(nextText: string) {
     setText(nextText)
-    setUnit(nextUnit)
     const parsed = Number(nextText)
-    onChange(nextText.trim() === '' || !Number.isFinite(parsed) ? nextText : String(Math.round(parsed * BYTE_UNITS[nextUnit])))
+    const next = nextText.trim() === '' || !Number.isFinite(parsed) ? nextText : String(Math.round(parsed * BYTE_UNITS[unit]))
+    own.current = next
+    onChange(next)
+  }
+
+  // Changing the unit keeps the byte value and converts the shown number.
+  function changeUnit(nextUnit: ByteUnit) {
+    setUnit(nextUnit)
+    if (value.trim() !== '' && Number.isFinite(bytes)) setText(inUnit(bytes, nextUnit))
   }
 
   return (
@@ -158,13 +169,13 @@ export function BytesInput({
         step="any"
         inputMode="decimal"
         value={text}
-        onChange={(event) => emit(event.target.value, unit)}
+        onChange={(event) => editNumber(event.target.value)}
         className="sb-field sb-num"
       />
       <select
         aria-label={`Unit for ${id}`}
         value={unit}
-        onChange={(event) => emit(text, event.target.value as ByteUnit)}
+        onChange={(event) => changeUnit(event.target.value as ByteUnit)}
         className="sb-field w-24 cursor-pointer"
       >
         {(Object.keys(BYTE_UNITS) as ByteUnit[]).map((name) => (

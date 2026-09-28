@@ -150,9 +150,11 @@ describe('SettingsPage sections (#322)', () => {
     expect(limit).toHaveValue(1)
     expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GiB')
 
+    // Picking a unit converts the number; typing one reinterprets it in that unit.
+    await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
+    expect(limit).toHaveValue(1073.742)
     await user.clear(limit)
     await user.type(limit, '500')
-    await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
     await user.click(screen.getByRole('button', { name: 'Save Uploads' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500_000_000 })
