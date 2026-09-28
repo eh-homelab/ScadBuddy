@@ -58,6 +58,14 @@ class Failure(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class PieceOutcome(BaseModel):
+    """What a piece signals to a job that found it already running (§3.6: a child
+    start has no id-conflict policy, so only the first job owns the child)."""
+
+    result: PieceResult | None = None
+    failure: Failure | None = None
+
+
 class Projection(BaseModel):
     job_id: str
     slug: str
