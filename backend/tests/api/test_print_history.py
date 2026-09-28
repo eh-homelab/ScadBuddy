@@ -14,7 +14,9 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.params import schema_of
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_send import API, BASE, configure, make_output
@@ -187,6 +189,49 @@ def test_the_printer_name_is_read_only_for_the_prints_on_the_page(
     assert summary["printer_name"] == "3DP-31B-598"
     assert respx.routes["runs-36"].called
     assert not respx.routes["runs-35"].called, "a print the filter dropped"
+
+
+@respx.mock
+def test_a_page_that_ends_the_history_exactly_has_no_next_cursor(
+    client: TestClient, model: str
+) -> None:
+    # #609 review: a full page is not a promise of another one.
+    configure(client)
+    output_id = make_output(client, model)
+    for archive_id in (16, 17):
+        link(client, output_id, archive_id)
+        mock_archive(archive_id)
+
+    body = client.get("/api/v1/prints", params={"limit": 2}).json()
+
+    assert [item["archive_id"] for item in body["items"]] == [17, 16]
+    assert body["next_cursor"] is None
+
+
+@respx.mock
+def test_a_print_the_filters_drop_costs_no_schema_read(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #609 review: params_diff is worked out only for the prints that are returned.
+    configure(client)
+    demo = make_output(client, model)
+    other = make_output(client, other_model(paths))
+    link(client, demo, 35)
+    link(client, other, 36)
+    mock_archive(35, status="failed")
+    mock_archive(36)
+    asked: list[str] = []
+
+    async def counting(slug: str, *args: Any, **kwargs: Any) -> Any:
+        asked.append(slug)
+        return await schema_of(slug, *args, **kwargs)
+
+    monkeypatch.setattr(print_history, "schema_of", counting)
+
+    [summary] = client.get("/api/v1/prints", params={"status": "failed"}).json()["items"]
+
+    assert summary["params_diff"] == {"width": 12}
+    assert set(asked) == {model}
 
 
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"cursor": "nope"}])
