@@ -223,10 +223,42 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** Title for a session started with a prompt and no title. */
-function titleFrom(prompt: string): string {
-  const line = prompt.trim().split('\n')[0] ?? ''
-  return line.length > 80 ? `${line.slice(0, 79)}…` : line
+export const TITLE_MAX = 80
+
+/**
+ * Title for a session started with a prompt and no title: the first line, at
+ * most TITLE_MAX code points. Counted by code point (`[...line]`), not UTF-16
+ * unit, so an emoji at the cut is never split into a lone surrogate.
+ */
+export function titleFrom(prompt: string): string {
+  const points = [...(prompt.trim().split('\n')[0] ?? '')]
+  return points.length > TITLE_MAX ? `${points.slice(0, TITLE_MAX - 1).join('')}…` : points.join('')
+}
+
+/**
+ * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
+ * creator filter is served by the ai_sessions_owner and ai_sessions_creator
+ * indexes (db/migrations.ts entry 2).
+ */
+export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
+  const where: string[] = []
+  const params: (string | number)[] = []
+  if (principal.kind !== 'browser') {
+    params.push(principal.kind, principal.id)
+    where.push('((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2))')
+  }
+  if (filter.status) {
+    params.push(filter.status)
+    where.push(`status = $${params.length}`)
+  }
+  if (filter.origin) {
+    params.push(filter.origin)
+    where.push(`origin = $${params.length}`)
+  }
+  params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
+  const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY updated_at DESC LIMIT $${params.length}`
+  return { text, params }
 }
 
 /** A turn running in this process. */
@@ -278,26 +310,8 @@ export class SessionManager {
 
   /** Newest first. */
   async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
-    const where: string[] = []
-    const params: (string | number)[] = []
-    if (principal.kind !== 'browser') {
-      params.push(principal.kind, principal.id)
-      where.push('((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2))')
-    }
-    if (filter.status) {
-      params.push(filter.status)
-      where.push(`status = $${params.length}`)
-    }
-    if (filter.origin) {
-      params.push(filter.origin)
-      where.push(`origin = $${params.length}`)
-    }
-    params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
-    const rows = await this.deps.sql.unsafe<Row[]>(
-      `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY updated_at DESC LIMIT $${params.length}`,
-      params,
-    )
+    const { text, params } = listQuery(principal, filter)
+    const rows = await this.deps.sql.unsafe<Row[]>(text, params)
     return rows.map(record)
   }
 

@@ -4,9 +4,12 @@ import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
+  listQuery,
   SessionError,
   SETTING_SESSION_BUDGET_USD,
   SETTING_SESSION_MAX_TURNS,
+  TITLE_MAX,
+  titleFrom,
   type TurnOutcome,
 } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -15,6 +18,24 @@ import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scripted
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
 // end to end is test/sessions.e2e.test.ts.
+
+describe('titleFrom', () => {
+  it('keeps a short first line whole', () => {
+    expect(titleFrom('  Build a box\nwith a lid  ')).toBe('Build a box')
+  })
+
+  it('cuts by code point, so an emoji at the boundary is never split', () => {
+    // 78 ASCII characters, then emoji: a UTF-16 slice at 79 units would end
+    // inside the first emoji's surrogate pair.
+    const title = titleFrom(`${'a'.repeat(78)}🧩🧩🧩`)
+    expect(title).toBe(`${'a'.repeat(78)}🧩…`)
+    expect([...title]).toHaveLength(TITLE_MAX)
+    expect(title.isWellFormed()).toBe(true)
+    // Exactly TITLE_MAX code points is kept whole, though it is more UTF-16 units.
+    const exact = `${'a'.repeat(TITLE_MAX - 1)}🧩`
+    expect(titleFrom(exact)).toBe(exact)
+  })
+})
 
 describe.skipIf(!TEST_DATABASE_URL)(
   `SessionManager${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
@@ -42,6 +63,29 @@ describe.skipIf(!TEST_DATABASE_URL)(
       others.push(other)
       return other
     }
+
+    it('serves a principal’s list from the owner and creator indexes, not a table scan', async () => {
+      const indexes = await db.sql<{ indexname: string; indexdef: string }[]>`
+        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ai_sessions'`
+      const defs = Object.fromEntries(indexes.map((i) => [i.indexname, i.indexdef]))
+      expect(defs.ai_sessions_owner).toMatch(/\(owner_kind, owner_id, updated_at DESC\)/)
+      expect(defs.ai_sessions_creator).toMatch(/\(creator_kind, creator_id, updated_at DESC\)/)
+
+      // 20,000 sessions spread over 2,000 principals.
+      await db.sql.unsafe(`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
+                                 status, max_turns, budget_usd, updated_at)
+        SELECT gen_random_uuid(), 'mcp', 'bearer', 'token:' || (g % 2000), 'agent', 'bearer',
+               'token:' || ((g + 7) % 2000), 'idle', 10, 1, now() - g * interval '1 second'
+        FROM generate_series(1, 20000) AS g`)
+      await db.sql`ANALYZE ai_sessions`
+      const { text, params } = listQuery({ kind: 'bearer', id: 'token:42', label: 'x' })
+      const [row] = await db.sql.unsafe<{ 'QUERY PLAN': unknown }[]>(`EXPLAIN (FORMAT JSON) ${text}`, params)
+      const plan = JSON.stringify(row?.['QUERY PLAN'])
+      expect(plan).not.toContain('Seq Scan')
+      expect(plan).toContain('ai_sessions_owner')
+      expect(plan).toContain('ai_sessions_creator')
+    })
 
     it('starts a session with limits from ai_settings, and defaults without them', async () => {
       const paths = await tempPaths()

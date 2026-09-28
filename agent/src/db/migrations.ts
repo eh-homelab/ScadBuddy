@@ -104,7 +104,12 @@ export const MIGRATIONS: readonly Migration[] = [
         updated_at       timestamptz NOT NULL DEFAULT now(),
         CHECK ((turn_id IS NULL) = (lease_until IS NULL))
       );
-      CREATE INDEX ai_sessions_owner ON ai_sessions (owner_id, updated_at DESC);
+      -- list() for a non-browser principal filters on owner OR creator
+      -- (src/sessions/manager.ts listQuery); one index per side lets Postgres
+      -- BitmapOr them instead of scanning the table. The browser's unfiltered
+      -- list reads ai_sessions_updated.
+      CREATE INDEX ai_sessions_owner ON ai_sessions (owner_kind, owner_id, updated_at DESC);
+      CREATE INDEX ai_sessions_creator ON ai_sessions (creator_kind, creator_id, updated_at DESC);
       CREATE INDEX ai_sessions_updated ON ai_sessions (updated_at DESC);
 
       -- The Agent SDK SessionStore mirror (src/sessions/store.ts): one row per
