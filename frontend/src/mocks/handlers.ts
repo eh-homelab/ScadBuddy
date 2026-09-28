@@ -60,10 +60,6 @@ import * as fixtures from './fixtures'
 
 const base = '/api/v1'
 
-interface MockJob extends Job {
-  polls: number
-}
-
 const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
@@ -78,7 +74,7 @@ const state = {
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
-  jobs: new Map<string, MockJob>(),
+  jobs: new Map<string, Job>(),
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
@@ -111,7 +107,7 @@ export const MOCK_JOB_STEP_MS = 15
 /**
  * #267 — a mock render moves on by itself, as a real one does, and announces each
  * state over the mock socket (`emitRealtime`), as `render/jobs.py` publishes it.
- * `GET /jobs/:id` only reports; `polls` counts those reads.
+ * `GET /jobs/:id` only reports.
  */
 function runJob(jobId: string): void {
   const announce = (kind: string) => {
@@ -428,11 +424,6 @@ function plateFor(model: string | null): Plate | undefined {
 
 function round(value: number): number {
   return Math.round(value * 10) / 10
-}
-
-function jobView(job: MockJob): Job {
-  const { polls: _polls, ...rest } = job
-  return rest
 }
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -1354,7 +1345,6 @@ export const handlers = [
       created_at: new Date().toISOString(),
       params: body.params,
       log_tail: [],
-      polls: 0,
     })
     runJob(jobId)
     return HttpResponse.json(
@@ -1417,8 +1407,7 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
-    job.polls += 1
-    return HttpResponse.json(jobView(job))
+    return HttpResponse.json(job)
   }),
 
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
