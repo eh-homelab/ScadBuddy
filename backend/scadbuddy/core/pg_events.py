@@ -26,11 +26,13 @@ Two paths lead there:
   savepoint: a failing log write is logged and never fails the change.
 - :meth:`PgNotifyEventBus.publish` is for changes that are not in the database (the
   git-backed catalogue, outputs, settings, fonts). It never blocks and is safe from
-  any thread: the event goes into an outbox -- a :class:`~.events.Subscription`,
-  the same bounded, drop-oldest, ``call_soon_threadsafe`` hand-off #321's
-  subscribers use -- and a task on the event loop drains it in short autocommit
-  transactions. Publishes before :meth:`~PgNotifyEventBus.start` wait in a bounded
-  buffer.
+  any thread: the event goes into an outbox -- `_Outbox`, the same bounded,
+  drop-oldest, ``call_soon_threadsafe`` hand-off #321's subscriptions use -- and a
+  task on the event loop drains it in short autocommit transactions. Publishes
+  before :meth:`~PgNotifyEventBus.start` wait in a bounded buffer.
+
+Either way each event is encoded once: the payload whose size was checked is the
+one logged and NOTIFYed, carried through the outbox beside its event.
 
 Neither delivers locally. This process hears its own NOTIFY like every other
 replica, so each subscriber sees each event exactly once whoever published it.
@@ -125,6 +127,68 @@ _INSERT_SQL = (
     "INSERT INTO events (event_id, kind, at, payload) VALUES (%s, %s, %s, %s::jsonb) RETURNING seq"
 )
 _NOTIFY_SQL = "SELECT pg_notify(%s, %s)"
+
+
+#: An event and its encoded payload, as the outbox carries them.
+Outgoing = tuple[Event, str]
+
+
+class _Outbox:
+    """The publish path's queue: bounded, oldest dropped (and counted) first, fed
+    from any thread and drained on ``loop``. #321's `Subscription`, holding each
+    event with the payload `publish` encoded, so the writer need not encode it
+    again."""
+
+    def __init__(self, *, maxsize: int, loop: asyncio.AbstractEventLoop) -> None:
+        self.maxsize = maxsize
+        #: Events lost by the outbox running more than ``maxsize`` behind.
+        self.dropped = 0
+        self._loop = loop
+        self._queue: deque[Outgoing] = deque()
+        self._ready = asyncio.Event()
+        self._closed = False
+
+    def offer(self, item: Outgoing) -> None:
+        """Hand ``item`` over from any thread. Never blocks, never raises."""
+        if self._closed:
+            return
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._put(item)
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._put, item)
+        except RuntimeError:
+            self._closed = True  # the loop is gone: nobody is left to drain
+
+    def _put(self, item: Outgoing) -> None:
+        if self._closed:
+            return
+        if len(self._queue) >= self.maxsize:
+            self._queue.popleft()
+            self.dropped += 1
+        self._queue.append(item)
+        self._ready.set()
+
+    def get_nowait(self) -> Outgoing | None:
+        return self._queue.popleft() if self._queue else None
+
+    async def get(self) -> Outgoing | None:
+        """The next item, or ``None`` once closed and drained."""
+        while not self._queue:
+            if self._closed:
+                return None
+            self._ready.clear()
+            await self._ready.wait()
+        return self._queue.popleft()
+
+    def close(self) -> None:
+        """Take nothing more; `get` ends once what is queued is drained."""
+        self._closed = True
+        self._ready.set()
 
 
 class EventLogMissingError(RuntimeError):
@@ -230,8 +294,8 @@ class PgNotifyEventBus:
             name="scadbuddy-events",
         )
         self._lock = threading.Lock()
-        self._early: deque[Event] = deque()
-        self._outbox: Subscription | None = None
+        self._early: deque[Outgoing] = deque()
+        self._outbox: _Outbox | None = None
         self._outbox_dropped = 0
         self._closed = False
         self._tasks: list[asyncio.Task[None]] = []
@@ -261,17 +325,12 @@ class PgNotifyEventBus:
         except BaseException:
             await self._pool.close()
             raise
-        outbox = Subscription(
-            maxsize=self.outbox_size,
-            kinds=None,
-            loop=asyncio.get_running_loop(),
-            on_close=lambda _: None,
-        )
+        outbox = _Outbox(maxsize=self.outbox_size, loop=asyncio.get_running_loop())
         with self._lock:
             self._outbox = outbox
             early, self._early = list(self._early), deque()
-        for event in early:
-            outbox.offer(event)
+        for item in early:
+            outbox.offer(item)
         self._drainer = asyncio.create_task(self._drain(outbox))
         self._tasks = [
             asyncio.create_task(self.listener.run()),
@@ -301,8 +360,12 @@ class PgNotifyEventBus:
 
     def publish(self, event: Event) -> None:
         """Queue ``event`` for the log and NOTIFY. Non-blocking, thread-safe, and
-        never raises for a database problem (that is logged and counted)."""
-        if notify_payload(event, self.metrics) is None:
+        never raises for a database problem (that is logged and counted).
+
+        Encodes ``event`` once, here: the payload checked against the cap is the
+        one the outbox carries to the log and the NOTIFY."""
+        payload = notify_payload(event, self.metrics)
+        if payload is None:
             return
         with self._lock:
             outbox = self._outbox
@@ -315,9 +378,9 @@ class PgNotifyEventBus:
                 if len(self._early) >= self.outbox_size:
                     self._early.popleft()
                     self.metrics.events_dropped.labels("outbox_full").inc()
-                self._early.append(event)
+                self._early.append((event, payload))
                 return
-        outbox.offer(event)
+        outbox.offer((event, payload))
 
     def publish_in(self, conn: Connection[Any], event: Event) -> None:
         """Log and NOTIFY ``event`` in ``conn``'s open transaction, so it is heard on
@@ -410,9 +473,9 @@ class PgNotifyEventBus:
 
     # -- internals ------------------------------------------------------------------
 
-    async def _drain(self, outbox: Subscription) -> None:
-        async for event in outbox:
-            batch = [event]
+    async def _drain(self, outbox: _Outbox) -> None:
+        while (item := await outbox.get()) is not None:
+            batch = [item]
             while len(batch) < WRITE_BATCH and (more := outbox.get_nowait()) is not None:
                 batch.append(more)
             if outbox.dropped != self._outbox_dropped:
@@ -427,10 +490,9 @@ class PgNotifyEventBus:
                 logger.exception("could not publish events", extra={"count": len(batch)})
                 self.metrics.events_dropped.labels("error").inc(len(batch))
 
-    async def _write(self, batch: list[Event]) -> None:
+    async def _write(self, batch: list[Outgoing]) -> None:
         async with self._pool.connection() as conn, conn.transaction():
-            for event in batch:
-                payload = encode_event(event)  # checked for size in `publish`
+            for event, payload in batch:  # encoded, and size-checked, in `publish`
                 await _awrite_event(conn, event, payload)
         self.metrics.events_published.inc(len(batch))
 

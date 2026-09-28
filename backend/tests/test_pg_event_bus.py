@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 
 from scadbuddy.api.deps import build_state
+from scadbuddy.core import pg_events
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     PG_CHANNEL,
@@ -174,6 +175,36 @@ async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> N
 
     assert bus._pool.closed  # a failed start released what it opened
     await bus.aclose()  # and closing after it is still safe
+
+
+@pytest.mark.requires_postgres
+async def test_each_event_is_encoded_once_whichever_path_publishes_it(
+    make_bus: BusFactory, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The payload `publish` size-checks is the one the outbox writes: no second
+    serialisation in the drain, as `publish_in` never had one."""
+    bus = await make_bus()
+    subscription = bus.subscribe()
+    encoded: list[str] = []
+
+    def counting(event: Event) -> str:
+        encoded.append(event.id)
+        return encode_event(event)
+
+    monkeypatch.setattr(pg_events, "encode_event", counting)
+    published = [_model(f"m{n}") for n in range(3)]
+    for event in published:
+        bus.publish(event)
+    in_transaction = _model("in-transaction")
+    with psycopg.connect(pg_conninfo) as conn, conn.transaction():
+        bus.publish_in(conn, in_transaction)
+
+    heard = [await _next(subscription) for _ in range(4)]
+    assert sorted(_slugs(heard)) == ["in-transaction", "m0", "m1", "m2"]
+    assert sorted(encoded) == sorted(event.id for event in [*published, in_transaction])
+    # And what was logged is that payload, byte for byte decodable.
+    replay = await bus.replay(0)
+    assert {logged.event.id for logged in replay.events} == set(encoded)
 
 
 # --- the payload cap -----------------------------------------------------------------
