@@ -843,6 +843,14 @@ WIRED = {
     "ams_switch_inlet": {},
     "fila_switch": {"installed": False},
 }
+#: Printer 1 as a single-nozzle printer (X1C, P1S, A1): no left nozzle, no switch, and
+#: every AMS wired to the one (right) extruder.
+NO_LEFT = {
+    "nozzles": [{"nozzle_type": "HS00", "nozzle_diameter": "0.4"}],
+    "ams_extruder_map": {"0": 0, "1": 0, "2": 0, "128": 0},
+    "ams_switch_inlet": {},
+    "fila_switch": {"installed": False},
+}
 
 
 @respx.mock
@@ -911,6 +919,32 @@ def test_a_size_neither_nozzle_has_is_a_422_before_anything_is_uploaded(
     assert response.json()["detail"] == (
         "Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm. Choose 0.2 or "
         "0.4, or fit a 0.6 mm nozzle."
+    )
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_single_nozzle_printers_known_wrong_size_is_a_422_before_upload(
+    client: TestClient, model: str
+) -> None:
+    """Review of #538: a single-nozzle printer's one mounted nozzle is known and the
+    wrong size — the printer has no left side at all, so this must refuse the same way
+    a two-nozzle mismatch does, not just warn and let the doomed print through."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    _status(**NO_LEFT)
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json=on_spool(9, nozzles=[{"size": "0.2"}], tier="standard"),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
     )
     assert not upload.called
     assert not sliced.called

@@ -269,6 +269,21 @@ def test_a_single_nozzle_printer_prints_many_colors_through_its_one_nozzle(
     assert result == type(result)()
 
 
+@pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])
+def test_a_single_nozzle_printer_with_the_wrong_size_is_refused(
+    nozzles: list[dict[str, str]],
+) -> None:
+    """Review of #538: the "no side matches" branch must refuse a single-nozzle
+    printer's known, wrong-size nozzle the way the "one side matches" branch already
+    does for the same printer shape — not warn and let a doomed print through."""
+    status = mapped_status(nozzles=nozzles, ams_extruder_map={"0": 0}, fila_switch=None)
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
+    assert result.errors == [
+        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
+    ]
+    assert result.warnings == []
+
+
 @pytest.mark.parametrize("status", [fts_status(), mapped_status()])
 def test_a_two_nozzle_printer_with_one_side_unreported_is_warned_not_refused(
     status: PrinterStatus,
@@ -308,22 +323,6 @@ def test_a_known_mismatched_side_with_the_other_unreported_is_warned_not_refused
         "The right nozzle is 0.4 mm, not 0.2 mm, and the printer didn't report the left "
         "one, so nothing checks that the slicer's extruders match them."
     )
-
-
-@pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])
-def test_a_single_nozzle_printer_with_the_wrong_size_mounted_is_refused(
-    nozzles: list[dict[str, str]],
-) -> None:
-    """Review of #538: an X1C's one nozzle is known and wrong, and there is no left side
-    to be unsure about, so this is the documented refusal, not a warning."""
-    status = mapped_status(
-        nozzles=nozzles, ams_extruder_map={"0": 0}, fila_switch=None, nozzle_rack=[]
-    )
-    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
-    assert result.errors == [
-        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
-    ]
-    assert result.warnings == []
 
 
 def test_an_unreported_left_on_a_printer_wired_to_it_is_warned_about() -> None:
