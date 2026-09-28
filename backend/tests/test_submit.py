@@ -381,11 +381,14 @@ async def test_a_reconciled_start_that_can_never_succeed_fails_the_job(
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
         with monkeypatch.context() as patched:
+            # Transient, both: FAILED_PRECONDITION is how Temporal answers a namespace
+            # that is not active (yet), so the row waits for the reconciler.
+            statuses = iter([RPCStatusCode.UNAVAILABLE, RPCStatusCode.FAILED_PRECONDITION])
 
-            async def unavailable(*_: object, **__: object) -> None:
-                raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+            async def transient(*_: object, **__: object) -> None:
+                raise RPCError("not now", next(statuses), b"")
 
-            patched.setattr(client, "start_workflow", unavailable)
+            patched.setattr(client, "start_workflow", transient)
             job = await service.submit(SLUG, {"width": 9})
             assert await service.reconcile_once() == 0
         assert (await asyncio.to_thread(projection.read, job.id)).state == "pending"
