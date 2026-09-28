@@ -610,16 +610,27 @@ From the merged code and PR bodies:
    `sessions` in `main.ts`).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
+9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
+   `update_source` and other `write` tools in the tier that runs without a human,
+   because a write is reversible through the model's git history (spec §8.1). The
+   eval negative control in [`agent/test/evals.test.ts`](../../agent/test/evals.test.ts)
+   ("control: a model that obeys the README injection") reproduces it: a model that
+   follows a poisoned README overwrites the source, while the `delete_model` it also
+   attempts stops at the approval gate. Prevention of that write rests on the model
+   refusing instructions in tool content on its own judgement (a session appends no
+   system-prompt rule about tool content today), and recovery on
+   history (`GET /api/v1/models/{slug}/versions` and `POST /api/v1/models/{slug}/versions/{commit}/restore`). This is an accepted tradeoff
+   of the tier design, not a gap the gate is meant to close.
+10. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
    token introspection (RFC 7662), so an IdP that issues opaque access tokens is not
    supported, and revoking a session at the IdP does not stop a token already issued;
    keep access-token lifetimes short there. Turning OIDC off in Settings stops every
    JWT at the next request.
-10. **The OIDC settings write is gated, not approved.** `PUT /api/v1/ai/mcp/oidc` uses
+11. **The OIDC settings write is gated, not approved.** `PUT /api/v1/ai/mcp/oidc` uses
     the credential routes' interim gate (item 1). Someone who can reach Settings can
     point `/mcp` at an IdP they control, which is the "Stated plainly" caveat of spec
     §8.3.
-11. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
+12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
     without its sandbox** (see above).
 
 ## Spec §3.2 items still open
