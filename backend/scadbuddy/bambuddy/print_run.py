@@ -3,8 +3,7 @@
 ScadBuddy owns no slicing settings. The print dialog's run (:func:`run_for_output`)
 derives every preset from the dialog's choices — spools, nozzles, quality and plate
 (spec 2026-09-27 §4) — and always slices then queues; there is no pipeline to run or
-choose from here. Bambuddy's own slicer pipelines are still what the send bar runs
-(``scadbuddy.bambuddy.send``), which is unaffected by this module.
+choose from here. The send bar only uploads (#312); this is the only path that prints.
 """
 
 from __future__ import annotations
@@ -104,8 +103,8 @@ class PrintRunRequest(BaseModel):
     #: be — a print with no project is simply one nobody filed.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
-    #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
-    #: a ``quantity`` sent alongside it.
+    #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
+    #: alongside it.
     options: PrintOptions = Field(default_factory=PrintOptions)
 
 
@@ -258,7 +257,6 @@ async def run_for_output(
     target = await target_for(
         client,
         settings,
-        meta.slug,
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
         colours=await _spool_colours(client, meta, request.filament_plan),

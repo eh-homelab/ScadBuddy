@@ -1,32 +1,29 @@
-"""Issue #89 — normalising both print routes into one progress view.
-
-The load-bearing case is the recorded ``pipeline-run.json``: a real run whose slice
-failed, which reports ``status: "in_progress"`` and ``copies_in_progress: 1`` while
-carrying ``completed_at`` and a ``Slice failed: …`` message. Every assertion about
-``settled`` exists because a poll built on ``status`` would never stop on it.
-"""
+"""Issue #89 — normalising the slice-and-queue route into one progress view."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import httpx
+import psycopg
 import pytest
 import respx
 
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
+from scadbuddy.bambuddy.models import QueueItem, SliceJob
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import (
-    NEVER_QUEUED_FIX,
     QUEUED_THEN_FAILED_FIX,
     SLICE_FIX,
     PrintProgress,
     from_queue,
-    from_run,
     progress_for,
-    stage_of,
 )
+from scadbuddy.bambuddy.stages import stage_of
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
@@ -34,12 +31,6 @@ from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
 URL = "https://bambuddy.test/queue"
-
-
-def run(**overrides: object) -> PipelineRun:
-    body = dict(recording("pipeline-run.json"))
-    body.update(overrides)
-    return PipelineRun.model_validate(body)
 
 
 def meta(**overrides: object) -> OutputMeta:
@@ -71,100 +62,6 @@ def test_statuses_map_onto_one_vocabulary(status: str | None, expected: str) -> 
     """A status nobody has seen before must read as "still going", never as "done" —
     that is what would stop the poll on a print that is still live."""
     assert stage_of(status) == expected
-
-
-def test_a_failed_run_still_reporting_in_progress_is_settled_and_failed() -> None:
-    """The recorded run: ``status: in_progress``, ``copies_in_progress: 1``, and a
-    slice failure. Trusting ``status`` here polls forever over an error."""
-    recorded = run()
-    assert recorded.status == "in_progress"
-    assert recorded.copies_in_progress == 1
-
-    progress = from_run(recorded, bambuddy_url=URL)
-    assert progress.settled is True
-    assert progress.stage == "failed"
-    assert progress.error_message is not None
-    assert progress.error_message.startswith("Slice failed:")
-
-
-def test_a_run_whose_slice_never_produced_a_file_points_at_the_slicer() -> None:
-    """``slice_job_id`` set and ``sliced_library_file_id`` still null is the structural
-    fact; the wording of the message is Bambuddy's and is not parsed."""
-    assert from_run(run(), bambuddy_url=URL).fix == SLICE_FIX
-
-
-def test_a_copy_that_never_reached_the_queue_points_at_eligibility() -> None:
-    progress = from_run(
-        run(
-            status="failed",
-            completed_at="2026-09-24T04:13:51",
-            slice_job_id=7,
-            sliced_library_file_id=52,
-            error_message=None,
-            jobs=[
-                {
-                    "id": 1,
-                    "pipeline_run_id": 1,
-                    "copy_index": 0,
-                    "status": "failed",
-                    "queue_entry_id": None,
-                    "error_message": "no printer matched",
-                }
-            ],
-        ),
-        bambuddy_url=URL,
-    )
-    assert progress.fix == NEVER_QUEUED_FIX
-    assert progress.error_message == "no printer matched"
-
-
-def test_a_copy_that_reached_the_queue_and_then_failed_points_at_the_mapping() -> None:
-    progress = from_run(
-        run(
-            status="failed",
-            completed_at="2026-09-24T04:13:51",
-            sliced_library_file_id=52,
-            error_message=None,
-            jobs=[
-                {
-                    "id": 1,
-                    "pipeline_run_id": 1,
-                    "copy_index": 0,
-                    "status": "failed",
-                    "queue_entry_id": 51,
-                    "error_message": "the AMS slot is empty",
-                }
-            ],
-        ),
-        bambuddy_url=URL,
-    )
-    assert progress.fix == QUEUED_THEN_FAILED_FIX
-    assert progress.copies_detail[0].queue_entry_id == 51
-
-
-def test_a_run_still_going_is_not_settled() -> None:
-    progress = from_run(
-        run(completed_at=None, error_message=None, copies=2, copies_completed=1),
-        bambuddy_url=URL,
-    )
-    assert progress.settled is False
-    assert progress.fix is None
-
-
-def test_every_copy_accounted_for_settles_even_without_a_completion_time() -> None:
-    progress = from_run(
-        run(
-            status="completed",
-            completed_at=None,
-            error_message=None,
-            copies=2,
-            copies_completed=2,
-            copies_in_progress=0,
-        ),
-        bambuddy_url=URL,
-    )
-    assert progress.settled is True
-    assert progress.stage == "done"
 
 
 def test_the_queue_route_reports_the_slice_failure_rather_than_an_absent_item() -> None:
@@ -220,7 +117,7 @@ async def test_an_output_that_has_never_printed_has_no_progress(
 async def test_the_route_is_taken_from_the_record_not_guessed(
     bambuddy: BambuddyClient,
 ) -> None:
-    """An output printed both ways carries a run id *and* a queue item id."""
+    """A recorded route is followed as it stands."""
     respx.get(f"{API}/queue/51").mock(
         return_value=httpx.Response(200, json={"id": 51, "status": "completed"})
     )
@@ -230,7 +127,6 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
     progress = await progress_for(
         bambuddy,
         meta(
-            pipeline_run_id=1,
             queue_item_id=51,
             slice_job_id=9,
             print_route="slice_queue",
@@ -242,18 +138,38 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
 
 
 @respx.mock
-async def test_a_record_written_before_this_issue_still_follows_its_run(
+async def test_a_record_whose_last_print_was_a_pipeline_run_has_no_progress(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The older send bar's only outcome was a run id, so one on its own reads as the
-    pipeline route rather than as nothing to show."""
-    respx.get(f"{API}/pipeline-runs/1").mock(
-        return_value=httpx.Response(200, json=recording("pipeline-run.json"))
+    """#312: the pipeline route is gone. The record reads as never printed, and the queue
+    item an *earlier* print left beside it is not mistaken for the print now running."""
+    record = meta(print_route="pipeline", pipeline_run_id=1, queue_item_id=51, slice_job_id=9)
+    assert record.print_route is None
+    assert record.queue_item_id is None
+    assert await progress_for(bambuddy, record) is None
+
+
+@respx.mock
+async def test_a_record_from_before_routes_with_a_run_id_has_no_progress(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Before #89 a run id meant the pipeline route even beside a queue item id."""
+    record = meta(pipeline_run_id=1, queue_item_id=51)
+    assert record.queue_item_id is None
+    assert await progress_for(bambuddy, record) is None
+
+
+@respx.mock
+async def test_a_record_from_before_routes_with_only_a_queue_item_follows_it(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "completed"})
     )
-    progress = await progress_for(bambuddy, meta(pipeline_run_id=1))
+    progress = await progress_for(bambuddy, meta(queue_item_id=51))
     assert progress is not None
-    assert progress.route == "pipeline"
-    assert progress.pipeline_run_id == 1
+    assert progress.route == "slice_queue"
+    assert progress.queue_item_id == 51
 
 
 @respx.mock
@@ -273,11 +189,13 @@ async def test_a_queue_entry_bambuddy_has_dropped_reads_as_finished(
 async def test_a_bambuddy_that_refuses_the_read_is_not_swallowed(
     bambuddy: BambuddyClient,
 ) -> None:
-    respx.get(f"{API}/pipeline-runs/1").mock(
+    respx.get(f"{API}/slice-jobs/9").mock(
         return_value=httpx.Response(500, json={"detail": "the database is locked"})
     )
     with pytest.raises(ApiError) as raised:
-        await progress_for(bambuddy, meta(pipeline_run_id=1, print_route="pipeline"))
+        await progress_for(
+            bambuddy, meta(slice_job_id=9, queue_item_id=51, print_route="slice_queue")
+        )
     assert "the database is locked" in raised.value.detail
 
 
@@ -410,7 +328,11 @@ async def test_when_several_plates_fail_the_earliest_plates_error_is_raised(
     released = asyncio.Event()
 
     async def read(
-        client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+        client: BambuddyClient,
+        slice_job_id: int | None,
+        queue_item_id: int | None,
+        url: str,
+        **_: object,
     ) -> PrintProgress:
         if queue_item_id == 52:
             released.set()
@@ -491,3 +413,117 @@ async def test_a_failed_plate_beside_an_unsettled_one_keeps_polling(
     assert progress.error_message == "AMS slot empty"
     assert progress.copies_failed == 1
     assert progress.copies_in_progress == 1
+
+
+# --- linking archives is best effort (#306, #522 review) --------------------
+
+
+class FakeLinks(PrintLinkStore):
+    """Links in memory; ``fail`` makes every write raise what a lost database would."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(None)
+        self.fail = fail
+        self.recorded: list[PrintLink] = []
+
+    async def record(self, output_id: str, link: PrintLink) -> None:
+        if self.fail:
+            raise psycopg.OperationalError("the database went away")
+        self.recorded.append(link)
+
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        return list(self.recorded)
+
+    async def linked_queue_items(self, output_id: str) -> set[int]:
+        return {link.queue_item_id for link in self.recorded if link.queue_item_id is not None}
+
+
+class FakeUploads(BambuddyUploadStore):
+    """One library copy whose slice's hash is already known."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    async def for_output(self, output_id: str) -> list[LibraryCopy]:
+        return [
+            LibraryCopy(
+                id=11, folder_id=2, target_key="H2C", sliced=[SlicedCopy(id=80, file_hash="ab")]
+            )
+        ]
+
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        sent = datetime(2026, 9, 27, tzinfo=UTC)
+        return sent, sent
+
+
+@pytest.fixture
+def no_recent_scans() -> Iterator[None]:
+    progress_module._last_hash_scan.clear()
+    yield
+    progress_module._last_hash_scan.clear()
+
+
+@respx.mock
+async def test_a_link_that_cannot_be_recorded_does_not_fail_any_plates_read(
+    bambuddy: BambuddyClient,
+) -> None:
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing", "archive_id": 7})
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "completed", "archive_id": 8})
+    )
+    progress = await progress_for(
+        bambuddy, plates_meta(), uploads=FakeUploads(), links=FakeLinks(fail=True)
+    )
+    assert progress is not None
+    assert [(c.plate_id, c.stage) for c in progress.copies_detail] == [
+        (1, "running"),
+        (2, "done"),
+    ]
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
+async def test_a_failing_archive_scan_still_reads_the_gone_item_as_finished(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    scan = respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    progress = await progress_for(
+        bambuddy,
+        meta(queue_item_id=51, print_route="slice_queue"),
+        uploads=FakeUploads(),
+        links=FakeLinks(),
+    )
+    assert scan.called
+    assert progress is not None
+    assert (progress.stage, progress.settled) == ("done", True)
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
+async def test_without_a_database_a_gone_item_still_reads_as_finished(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    progress = await progress_for(
+        bambuddy,
+        meta(queue_item_id=51, print_route="slice_queue"),
+        uploads=BambuddyUploadStore(None),
+        links=PrintLinkStore(None),
+    )
+    assert progress is not None
+    assert progress.stage == "done"
+
+
+@pytest.mark.usefixtures("no_recent_scans")
+def test_scans_older_than_the_interval_are_forgotten() -> None:
+    interval = progress_module.HASH_SCAN_INTERVAL
+    assert progress_module._claim_hash_scan("a", 0.0)
+    assert not progress_module._claim_hash_scan("a", interval / 2)
+    assert progress_module._claim_hash_scan("b", interval + 1)
+    assert set(progress_module._last_hash_scan) == {"b"}
