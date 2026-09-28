@@ -222,6 +222,8 @@ export function CustomizePage() {
       bbox_mm: settledJob?.bbox_mm ?? null,
       colors: settledJob?.colors ?? [],
       warnings: settledJob?.warnings ?? [],
+      // What the template changed from the parameters it was given (#285).
+      notes: settledJob?.notes ?? [],
       // The log only earns its tokens when something went wrong.
       log_tail: settledJob?.status === 'failed' ? (settledJob.log_tail ?? []).slice(-20) : undefined,
       plate: plateFit?.plate.name ?? null,
