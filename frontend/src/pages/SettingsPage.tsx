@@ -7,6 +7,7 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import { McpOidcSettings } from '../components/McpOidcSettings'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
@@ -44,6 +45,8 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
 
 export function SettingsPage() {
   const settingsState = useAsync(() => api.getSettings(), [])
+  // The agent-service sections render only where the agent is (#256, #261).
+  const ai = useAiAvailability()
 
   const [url, setUrl] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
@@ -64,7 +67,6 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
-  const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -541,6 +543,18 @@ export function SettingsPage() {
             these routes, so the section shows only where the assistant would: hidden in
             a production build until the service is deployed and routed. */}
         {ai.available && <McpTokensSection />}
+
+        {ai.available && (
+          <section className="mt-4 rounded-[6px] border border-line bg-surface">
+            <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+              MCP sign-in (OIDC)
+            </h2>
+            <div className="p-4">
+              {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+              <McpOidcSettings />
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
