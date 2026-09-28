@@ -50,22 +50,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Captioning, reordering and removing a template's media happen on the edit page (#279); the plan " +
       'adds no agent tools in the gallery epic (#273, decision 7).',
   })),
-  // #477: Bambuddy archive files, proxied for the print history (#305).
-  ...(
-    [
-      'GET /api/v1/prints/{archive_id}/files/sliced',
-      'GET /api/v1/prints/{archive_id}/files/source',
-      'GET /api/v1/prints/{archive_id}/photos/{filename}',
-      'GET /api/v1/prints/{archive_id}/plates/{index}/thumbnail',
-      'GET /api/v1/prints/{archive_id}/thumbnail',
-      'GET /api/v1/prints/{archive_id}/timelapse',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "A Range-passing proxy of a Bambuddy archive's files, photos and timelapse for the browser's print " +
-      'history; binary content, not an agent task.',
-  })),
 ]
 
 /**
