@@ -913,9 +913,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Send the 3MF to Bambuddy
-         * @description Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-         *     slice and queue it.
+         * Upload the 3MF to the Bambuddy library
+         * @description Upload ``model.3mf`` to the configured library folder, laid out for the printer
+         *     set in Settings, and note the "Edit in ScadBuddy" link on it.
+         *
+         *     Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+         *     ``mode`` accepts only ``"library"``.
          *
          *     The file is read from the PVC and pushed by the server, so the API key never
          *     reaches the browser. A re-send replaces the file Bambuddy already holds rather
@@ -3028,17 +3031,21 @@ export interface components {
             /** Version */
             version?: string | null;
         };
-        /** SendRequest */
+        /**
+         * SendRequest
+         * @description The send bar's body. It only uploads to the library (#312).
+         *
+         *     ``mode`` stays so that a client still asking for the removed ``"queue"`` mode is
+         *     refused with a 422 rather than silently getting an upload it did not ask for. Any
+         *     other field an older client sends (``copies``, ``options``) is ignored.
+         */
         SendRequest: {
-            /** Copies */
-            copies?: number | null;
             /**
              * Mode
              * @default library
-             * @enum {string}
+             * @constant
              */
-            mode: "library" | "queue";
-            options?: components["schemas"]["PrintOptions"];
+            mode: "library";
         };
         /** SendResult */
         SendResult: {
@@ -3050,16 +3057,6 @@ export interface components {
             filename: string;
             /** Library File Id */
             library_file_id: number;
-            /**
-             * Mode
-             * @enum {string}
-             */
-            mode: "library" | "queue";
-            options?: components["schemas"]["PrintOptions"];
-            /** Pipeline Run Id */
-            pipeline_run_id?: number | null;
-            /** Queue Item Id */
-            queue_item_id?: number | null;
         };
         /**
          * SettingsPatch

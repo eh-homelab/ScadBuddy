@@ -4460,31 +4460,13 @@
         "type": "object"
       },
       "SendRequest": {
+        "description": "The send bar's body. It only uploads to the library (#312).\n\n``mode`` stays so that a client still asking for the removed ``\"queue\"`` mode is\nrefused with a 422 rather than silently getting an upload it did not ask for. Any\nother field an older client sends (``copies``, ``options``) is ignored.",
         "properties": {
-          "copies": {
-            "anyOf": [
-              {
-                "maximum": 1000.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Copies"
-          },
           "mode": {
+            "const": "library",
             "default": "library",
-            "enum": [
-              "library",
-              "queue"
-            ],
             "title": "Mode",
             "type": "string"
-          },
-          "options": {
-            "$ref": "#/components/schemas/PrintOptions"
           }
         },
         "title": "SendRequest",
@@ -4521,43 +4503,9 @@
           "library_file_id": {
             "title": "Library File Id",
             "type": "integer"
-          },
-          "mode": {
-            "enum": [
-              "library",
-              "queue"
-            ],
-            "title": "Mode",
-            "type": "string"
-          },
-          "options": {
-            "$ref": "#/components/schemas/PrintOptions"
-          },
-          "pipeline_run_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pipeline Run Id"
-          },
-          "queue_item_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queue Item Id"
           }
         },
         "required": [
-          "mode",
           "library_file_id",
           "filename"
         ],
@@ -8429,7 +8377,7 @@
     },
     "/api/v1/outputs/{output_id}/send": {
       "post": {
-        "description": "Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,\nslice and queue it.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send replaces the file Bambuddy already holds rather\nthan adding a second copy.",
+        "description": "Upload ``model.3mf`` to the configured library folder, laid out for the printer\nset in Settings, and note the \"Edit in ScadBuddy\" link on it.\n\nNothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.\n``mode`` accepts only ``\"library\"``.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send replaces the file Bambuddy already holds rather\nthan adding a second copy.",
         "operationId": "send_output_to_bambuddy_api_v1_outputs__output_id__send_post",
         "parameters": [
           {
@@ -8475,7 +8423,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Send the 3MF to Bambuddy",
+        "summary": "Upload the 3MF to the Bambuddy library",
         "tags": [
           "outputs"
         ]

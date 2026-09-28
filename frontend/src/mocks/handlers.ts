@@ -1596,7 +1596,6 @@ export const handlers = [
       o.id === id ? { ...o, library_file_id: libraryFileId } : o,
     )
     const result: SendResult = {
-      mode: 'library',
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
       bambuddy_url: `${state.settings.bambuddy_url}/library`,

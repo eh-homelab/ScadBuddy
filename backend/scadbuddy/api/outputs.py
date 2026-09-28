@@ -14,7 +14,6 @@ from scadbuddy.api.deps import (
     EventsDep,
     OutputIdPath,
     OutputsDep,
-    PrintProgressDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
@@ -344,27 +343,26 @@ async def put_output_thumbnail(
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
-    summary="Send the 3MF to Bambuddy",
+    summary="Upload the 3MF to the Bambuddy library",
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
     body: SendRequest,
     outputs: OutputsDep,
     store: SettingsStoreDep,
-    observer: PrintProgressDep,
 ) -> SendResult:
-    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-    slice and queue it.
+    """Upload ``model.3mf`` to the configured library folder, laid out for the printer
+    set in Settings, and note the "Edit in ScadBuddy" link on it.
+
+    Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+    ``mode`` accepts only ``"library"``.
 
     The file is read from the PVC and pushed by the server, so the API key never
     reaches the browser. A re-send replaces the file Bambuddy already holds rather
     than adding a second copy.
     """
+    del body  # validated for its ``mode`` alone
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, meta, settings, body)
-    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
-    if result.pipeline_run_id is not None or result.queue_item_id is not None:
-        observer.started(meta)
-    return result
+        return await send_output(client, outputs, meta, settings)

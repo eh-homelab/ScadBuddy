@@ -6,11 +6,9 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print import pipelines_route, printers_route, run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
-from tests.bambuddy.conftest import recording
 
 API = f"{BASE}/api/v1"
 
@@ -22,92 +20,6 @@ def test_an_output_that_has_never_printed_answers_null(client: TestClient, model
     response = client.get(f"/api/v1/print/outputs/{output_id}/progress")
     assert response.status_code == 200
     assert response.json() is None
-
-
-@respx.mock
-def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, model: str) -> None:
-    # The send bar is what still runs a pipeline; the picker slices and queues.
-    configure(client, pipeline_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    # A send resolves the target printer's plate before uploading, to lay the 3MF out
-    # on it (#105) — a read of the pipeline list and the printers.
-    pipelines_route()
-    printers_route()
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
-    assert (
-        client.post(
-            f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2}
-        ).status_code
-        == 200
-    )
-
-    # The run answered 202 with no queue entries; they appear on the next read.
-    respx.get(f"{API}/pipeline-runs/12").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                **run_body(),
-                "status": "completed",
-                "completed_at": "2026-09-24T04:20:00",
-                "copies_completed": 2,
-                "copies_in_progress": 0,
-                "sliced_library_file_id": 52,
-                "jobs": [
-                    {
-                        "id": 31,
-                        "pipeline_run_id": 12,
-                        "copy_index": 0,
-                        "assigned_printer_name": "3DP-31B-598",
-                        "queue_entry_id": 71,
-                        "status": "completed",
-                    },
-                    {
-                        "id": 32,
-                        "pipeline_run_id": 12,
-                        "copy_index": 1,
-                        "assigned_printer_name": "3DP-31B-598",
-                        "queue_entry_id": 72,
-                        "status": "completed",
-                    },
-                ],
-            },
-        )
-    )
-    body = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
-    assert body["route"] == "pipeline"
-    assert body["settled"] is True
-    assert [copy["queue_entry_id"] for copy in body["copies_detail"]] == [71, 72]
-
-
-@respx.mock
-def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
-    client: TestClient, model: str
-) -> None:
-    """The recorded run: still ``in_progress`` by its own status, with a slice failure.
-    A send bar that waited for the status to move would spin over it forever."""
-    configure(client, pipeline_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    # A send resolves the target printer's plate before uploading, to lay the 3MF out
-    # on it (#105) — a read of the pipeline list and the printers.
-    pipelines_route()
-    printers_route()
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body(1))
-    )
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-    respx.get(f"{API}/pipeline-runs/1").mock(
-        return_value=httpx.Response(200, json=recording("pipeline-run.json"))
-    )
-
-    body = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
-    assert body["stage"] == "failed"
-    assert body["settled"] is True
-    assert "Slice failed" in body["error_message"]
-    assert "slice" in body["fix"].lower()
 
 
 @respx.mock

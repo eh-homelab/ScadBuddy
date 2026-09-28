@@ -8,14 +8,33 @@ Assertions are on the request bodies, because that is all Bambuddy sees.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import httpx
 import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import slice_routes
 from tests.api.test_print_run_choices import body, run_request, run_routes
-from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route, remember
+from tests.api.test_send import API, configure, make_output, upload_route
+from tests.bambuddy.conftest import recording
+
+OPTIONS_ROUTE = "/api/v1/settings/print-options"
+
+
+def remember(
+    client: TestClient, scope: str, options: dict[str, Any], key: str | None = None
+) -> None:
+    body: dict[str, Any] = {"scope": scope, "options": options}
+    if key is not None:
+        body["key"] = key
+    assert client.put(OPTIONS_ROUTE, json=body).status_code == 200
+
+
+def queue_route() -> respx.Route:
+    return respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
 
 
 def _prepared(client: TestClient, model: str, *, printer_id: int = 1) -> str:
