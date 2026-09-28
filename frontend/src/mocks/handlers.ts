@@ -42,7 +42,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { realtimeHandler } from './realtime'
+import { emitRealtime, realtimeHandler } from './realtime'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -56,10 +56,6 @@ import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
-
-interface MockJob extends Job {
-  polls: number
-}
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -95,7 +91,7 @@ const state = {
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
-  jobs: new Map<string, MockJob>(),
+  jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
@@ -125,6 +121,68 @@ const state = {
    * it and a later read has it (`landPreviews`).
    */
   pendingPreviews: new Set<string>(),
+}
+
+/** Milliseconds a mock render spends pending, then running. */
+export const MOCK_JOB_STEP_MS = 15
+
+/**
+ * #267 — a mock render moves on by itself, as a real one does, and announces each
+ * state over the mock socket (`emitRealtime`), as `render/jobs.py` publishes it.
+ * `GET /jobs/:id` only reports.
+ */
+function runJob(jobId: string): void {
+  const announce = (kind: string) => {
+    const job = state.jobs.get(jobId)
+    if (job) emitRealtime(kind, [`job:${jobId}`], { job_id: jobId, slug: job.slug })
+  }
+  // Ids restart at every resetMockState, so a timer left by an earlier test checks
+  // it is still acting on the job it was started for.
+  const started = state.jobs.get(jobId)
+  setTimeout(() => {
+    const job = state.jobs.get(jobId)
+    if (!job || job !== started || job.status !== 'pending') return
+    job.status = 'running'
+    job.log_tail = ['Compiling design (CSG Tree generation)...']
+    announce('job.running')
+    emitRealtime('job.progress', [`job:${jobId}`], { job_id: jobId, slug: job.slug, stage: 'render' })
+    setTimeout(() => {
+      if (state.jobs.get(jobId) !== job || job.status !== 'running') return
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = fixtures.OPENSCAD_LOG_TAIL
+        announce('job.failed')
+        return
+      }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = [
+          "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
+          'Current top level object is empty.',
+        ]
+        job.warnings = fixtures.FAILED_JOB_WARNINGS
+        announce('job.failed')
+        return
+      }
+      job.status = 'done'
+      job.bbox_mm = bboxOf(job.params ?? {})
+      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.plates = state.plates[job.slug] ?? []
+      job.preview_url = `${base}/jobs/${job.id}/preview.glb`
+      job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+      job.notes =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
+          ? fixtures.TEMPLATE_NOTES
+          : []
+      job.warnings =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
+          ? fixtures.JOB_WARNINGS
+          : []
+      announce('job.done')
+    }, MOCK_JOB_STEP_MS)
+  }, MOCK_JOB_STEP_MS)
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -393,6 +451,29 @@ function nextNumber(): number {
   return 8800 + state.seq
 }
 
+/**
+ * #316 — the output's library copy in `folderId` (the inbox when null), recording a new
+ * one when there is none. The mock has one target, so the folder alone is the key.
+ */
+function copyIn(output: Output, folderId: number | null): number {
+  const folder = folderId ?? state.settings.library_folder_id ?? null
+  const existing = (output.library_files ?? []).find((copy) => copy.folder_id === folder)
+  if (existing) return existing.id
+  const id = nextNumber()
+  state.outputs = state.outputs.map((o) =>
+    o.id === output.id
+      ? {
+          ...o,
+          library_files: [
+            ...(o.library_files ?? []),
+            { id, folder_id: folder, target_key: 'Bambu Lab H2C', sliced: [] },
+          ],
+        }
+      : o,
+  )
+  return id
+}
+
 function num(params: Record<string, ParamValue>, key: string, fallback: number): number {
   const value = params[key]
   return typeof value === 'number' ? value : fallback
@@ -440,11 +521,6 @@ function plateFor(model: string | null): Plate | undefined {
 
 function round(value: number): number {
   return Math.round(value * 10) / 10
-}
-
-function jobView(job: MockJob): Job {
-  const { polls: _polls, ...rest } = job
-  return rest
 }
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -1532,8 +1608,8 @@ export const handlers = [
       created_at: new Date().toISOString(),
       params: body.params,
       log_tail: [],
-      polls: 0,
     })
+    runJob(jobId)
     return HttpResponse.json(
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
@@ -1594,43 +1670,7 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
-
-    job.polls += 1
-    if (job.polls === 1) {
-      job.status = 'running'
-      job.log_tail = ['Compiling design (CSG Tree generation)...']
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = fixtures.OPENSCAD_LOG_TAIL
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = [
-        "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
-        'Current top level object is empty.',
-      ]
-      job.warnings = fixtures.FAILED_JOB_WARNINGS
-      return HttpResponse.json(jobView(job))
-    }
-
-    job.status = 'done'
-    job.bbox_mm = bboxOf(job.params ?? {})
-    job.colors = colorsOf(job.slug, job.params ?? {})
-    job.plates = state.plates[job.slug] ?? []
-    job.preview_url = `${base}/jobs/${job.id}/preview.glb`
-    job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-    job.notes =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
-    job.warnings =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME ? fixtures.JOB_WARNINGS : []
-    return HttpResponse.json(jobView(job))
+    return HttpResponse.json(job)
   }),
 
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
@@ -1732,7 +1772,7 @@ export const handlers = [
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, null)
     const queued = body.mode === 'queue'
     const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
     const queueItemId = queued && !pipelineRunId ? nextNumber() : null
@@ -1740,7 +1780,6 @@ export const handlers = [
       o.id === id
         ? {
             ...o,
-            library_file_id: libraryFileId,
             pipeline_run_id: pipelineRunId,
             queue_item_id: queueItemId,
           }
@@ -1822,7 +1861,8 @@ export const handlers = [
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
-      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      library_file_id:
+        output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
   }),
@@ -1863,11 +1903,11 @@ export const handlers = [
       projectId === null
         ? null
         : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, folderId)
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)

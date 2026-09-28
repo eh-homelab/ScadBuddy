@@ -201,7 +201,10 @@ Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
 database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
-`events` log). The event log's retention
+`events` log, and
+`20260928T0724Z_analyzer_decisions.sql` the print analyzers' `analyzer_decisions`;
+without a database those analyzers still run, but their decisions cannot be
+recorded). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
