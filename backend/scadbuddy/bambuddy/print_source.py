@@ -202,8 +202,10 @@ class OutputSource:
         return sent
 
 
-#: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2).
-PRINTABLE_TYPES: frozenset[str] = frozenset({"3mf"})
+#: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2). An
+#: STL is one plate of one filament; Bambuddy's slice route takes it (the #313 probe,
+#: recordings/README.md).
+PRINTABLE_TYPES: frozenset[str] = frozenset({"3mf", "stl"})
 #: A sliced file: printed from Bambuddy directly, never through the dialog.
 SLICED_TYPE = "gcode.3mf"
 #: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
@@ -219,7 +221,10 @@ def _refusal(file: LibraryFile) -> str:
     if file.file_type == SLICED_TYPE:
         return f"{file.filename} is sliced already. Print it from Bambuddy."
     kind = file.file_type or "file of unknown type"
-    return f"ScadBuddy prints only 3MF files from the library, and {file.filename} is a {kind}."
+    return (
+        f"ScadBuddy prints only 3MF and STL files from the library, and "
+        f"{file.filename} is a {kind}."
+    )
 
 
 @dataclass(frozen=True)

@@ -73,14 +73,34 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
 
 
 @respx.mock
-def test_an_stl_is_listed_under_advanced_without_print(client: TestClient) -> None:
+def test_an_stl_is_listed_under_advanced_with_print(client: TestClient) -> None:
     configure(client)
     listing_routes(recording("library-files-folder.json"))
 
     every = client.get("/api/v1/print/library", params={"folder_id": 4, "all": "true"}).json()
 
     stls = [row for row in every["files"] if row["file_type"] == "stl"]
-    assert stls and not any(row["printable"] for row in stls)
+    assert stls and all(row["printable"] for row in stls)
+
+
+@respx.mock
+def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/library/files/46/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements-stl.json"))
+    )
+    library_file(46, file_type="stl", plates="library-plates-stl.json")
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = client.post(
+        "/api/v1/print/library/46/run",
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 1
 
 
 @respx.mock

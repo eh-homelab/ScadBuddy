@@ -49,10 +49,10 @@ def _file(file_id: int, file_type: str) -> None:
     )
 
 
-def test_only_an_unsliced_3mf_is_printable() -> None:
+def test_only_an_unsliced_3mf_or_stl_is_printable() -> None:
     assert printable("3mf")
     assert not printable("gcode.3mf")
-    assert not printable("stl")
+    assert printable("stl")
     assert not printable(None)
     assert printable("3MF")
 
@@ -154,7 +154,7 @@ async def test_a_file_with_no_plates_or_filaments_is_one_plate_one_filament(
 
 
 @respx.mock
-@pytest.mark.parametrize("file_type", ["gcode.3mf", "stl"])
+@pytest.mark.parametrize("file_type", ["gcode.3mf"])
 async def test_a_file_the_dialog_cannot_print_is_a_422(
     bambuddy: BambuddyClient, file_type: str
 ) -> None:
@@ -165,6 +165,23 @@ async def test_a_file_the_dialog_cannot_print_is_a_422(
 
     assert refused.value.status == 422
     assert f"f104.{file_type}" in refused.value.detail
+
+
+@respx.mock
+async def test_an_stl_is_one_plate_of_one_filament(bambuddy: BambuddyClient) -> None:
+    _file(46, "stl")
+    respx.get(f"{API}/library/files/46/plates").mock(
+        return_value=httpx.Response(200, json=recording("library-plates-stl.json"))
+    )
+    respx.get(f"{API}/library/files/46/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements-stl.json"))
+    )
+
+    source = await LibrarySource.load(bambuddy, 46)
+
+    assert await source.plate_ids(bambuddy) == [1]
+    assert len(source.colours) == 1
+    assert await source.used_slots(bambuddy, [1]) == {1}
 
 
 @respx.mock
