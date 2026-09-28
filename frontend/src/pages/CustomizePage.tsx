@@ -524,6 +524,12 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
+          <Link
+            to={modelPath(slug, 'prints')}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Prints
+          </Link>
           {modelState.data && origin && (
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
