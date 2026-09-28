@@ -224,6 +224,22 @@ def plan_extruders(
                     f"{left} mm. Choose {sizes}, or fit a {size} mm nozzle."
                 ]
             )
+        known_side = RIGHT if right is not None else LEFT if left is not None else None
+        if known_side is not None:
+            known = right if known_side == RIGHT else left
+            other_side = LEFT if known_side == RIGHT else RIGHT
+            return ExtruderPlan(
+                warnings=[
+                    FilamentWarning(
+                        kind="side-unknown",
+                        message=(
+                            f"The {_side_word(known_side)} nozzle is {known} mm, not {size} mm, "
+                            f"and the printer didn't report the {_side_word(other_side)} one, so "
+                            f"nothing checks that the slicer's extruders match them."
+                        ),
+                    )
+                ]
+            )
         return ExtruderPlan(
             warnings=[
                 FilamentWarning(

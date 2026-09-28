@@ -264,6 +264,27 @@ def test_a_two_nozzle_printer_with_one_side_unreported_is_warned_not_refused(
     )
 
 
+@pytest.mark.parametrize("status", [fts_status(), mapped_status()])
+def test_a_known_mismatched_side_with_the_other_unreported_is_warned_not_refused(
+    status: PrinterStatus,
+) -> None:
+    """Review of #538: the right is known and wrong for the requested size, and nothing
+    names the left at all — say what's known, not that nothing was read."""
+    nozzles = [
+        {"nozzle_type": "HS00", "nozzle_diameter": "0.4"},
+        {"nozzle_type": "", "nozzle_diameter": ""},
+    ]
+    status = status.model_copy(update={"nozzles": [NozzleInfo.model_validate(n) for n in nozzles]})
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
+    assert result.errors == []
+    [warning] = result.warnings
+    assert warning.kind == "side-unknown"
+    assert warning.message == (
+        "The right nozzle is 0.4 mm, not 0.2 mm, and the printer didn't report the left "
+        "one, so nothing checks that the slicer's extruders match them."
+    )
+
+
 def test_an_unreported_left_on_a_printer_wired_to_it_is_warned_about() -> None:
     """Nothing but ``ams_extruder_map`` says the left exists."""
     status = mapped_status(nozzles=SINGLE, fila_switch=None)
