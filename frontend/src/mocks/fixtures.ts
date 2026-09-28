@@ -433,6 +433,8 @@ export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
   [BUILTIN_SLUG]: builtinSchema,
+  // #280 — the template page's gallery needs a template with media that opens.
+  [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
 }
 
 export const fonts: FontFamily[] = [

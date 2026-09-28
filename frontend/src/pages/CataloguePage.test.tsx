@@ -243,7 +243,8 @@ describe('CataloguePage', () => {
   })
 
   it('refetches a thumbnail whose fallback moved to another output with no new commit', async () => {
-    const base = { ...(models[0] as (typeof models)[number]), version: 'a'.repeat(40) }
+    // Covered by an output: no thumbnail.png, so no media and the card shows the fallback.
+    const base = { ...(models[0] as (typeof models)[number]), version: 'a'.repeat(40), media: [] }
     let record: typeof base = { ...base, thumbnail_source: 'output', thumbnail_output_id: 'f'.repeat(32) }
     server.use(http.get('/api/v1/models', () => HttpResponse.json([record])))
     const imageOf = async () =>
@@ -293,6 +294,7 @@ describe('CataloguePage', () => {
       version: 'a'.repeat(40),
       has_thumbnail: true,
       thumbnail_source: 'preview' as const,
+      media: [],
     }
     let record = { ...base, thumbnail_preview_id: '1'.repeat(16) }
     server.use(http.get('/api/v1/models', () => HttpResponse.json([record])))
@@ -424,6 +426,144 @@ describe('CataloguePage', () => {
     ) as HTMLElement
     expect(within(copy).getByTestId('upstream-gone')).toHaveTextContent('Upstream gone')
     expect((await api.getModel(COPY)).upstream_state).toBe('gone')
+  })
+})
+
+describe('CataloguePage cards (#277)', () => {
+  function renderWithRoutes() {
+    return renderPage(
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <>
+              <CataloguePage />
+              <Search />
+            </>
+          }
+        />
+        <Route path="/m/:slug" element={<p>Customizer</p>} />
+      </Routes>,
+    )
+  }
+
+  async function coasterCard() {
+    return (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+      'li',
+    ) as HTMLElement
+  }
+
+  it('browses a card inline: next changes the slide, stays here and opens nothing', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+    const carousel = within(card).getByRole('region', { name: 'Crème Coaster' })
+    expect(within(carousel).getByTestId('carousel-position')).toHaveTextContent('1 of 4')
+
+    await user.click(within(card).getByRole('button', { name: 'Next slide' }))
+    await user.click(within(card).getByRole('button', { name: 'Next slide' }))
+
+    expect(within(carousel).getByTestId('carousel-position')).toHaveTextContent('3 of 4')
+    // An uncaptioned slide is named after the template.
+    expect(
+      within(card).getByRole('button', { name: 'Open Crème Coaster, image 3 of 4' }),
+    ).toHaveAttribute('tabindex', '0')
+    expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
+    expect(screen.getByTestId('search')).toBeEmptyDOMElement()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens the lightbox at the media clicked', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    await user.click(within(card).getByRole('button', { name: 'Next slide' }))
+    await user.click(within(card).getByRole('button', { name: 'Open The raised rim' }))
+
+    const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        `/api/v1/models/${GALLERY_SLUG}/media/b2c3d4e5f6a1`,
+      ),
+    )
+    expect(dialog).toHaveTextContent('The raised rim')
+    expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
+  })
+
+  it('links the title, with the media outside the link', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+    const link = within(card).getByRole('link', { name: 'Crème Coaster' })
+    expect(link).toHaveAttribute('href', `/m/${GALLERY_SLUG}`)
+    expect(link.contains(within(card).getByRole('region', { name: 'Crème Coaster' }))).toBe(false)
+
+    await user.click(link)
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+  })
+
+  it('tabs from one card into the next, with a bounded set of stops per card', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+    // Sorted by updated: the keychain comes just before the coaster, the bin after it.
+    const keychain = screen.getByRole('heading', { name: 'Name Keychain' }).closest(
+      'li',
+    ) as HTMLElement
+    within(keychain).getByRole('button', { name: 'Duplicate' }).focus()
+
+    const stops: string[] = []
+    for (;;) {
+      await user.tab()
+      const focused = document.activeElement as HTMLElement
+      if (!card.contains(focused)) break
+      stops.push(focused.getAttribute('aria-label') ?? focused.textContent ?? '')
+    }
+
+    // The carousel, its visible media, the enabled arrow and only the current dot:
+    // not one stop per slide.
+    expect(stops).toEqual([
+      'Crème Coaster',
+      'Open Printed in blue and orange',
+      'Next slide',
+      'Go to slide 1',
+      'Crème Coaster',
+      'Filter by kitchen',
+      'Filter by Tea & Coffee',
+      'Duplicate',
+    ])
+    const bin = screen.getByRole('heading', { name: 'Gridfinity Bin' }).closest('li') as HTMLElement
+    expect(document.activeElement).toBe(within(bin).getByRole('link', { name: 'Gridfinity Bin' }))
+  })
+
+  it('shows the fallback, with no carousel chrome, for a template with no media', async () => {
+    renderWithRoutes()
+    const bin = (await screen.findByRole('heading', { name: 'Gridfinity Bin' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(
+      within(bin).getByRole('img', { name: 'Gridfinity Bin — not generated yet' }),
+    ).toBeInTheDocument()
+    expect(within(bin).queryByRole('region')).not.toBeInTheDocument()
+    expect(within(bin).queryByRole('button', { name: /slide|^Open / })).not.toBeInTheDocument()
+
+    // The built-in has no media, so its default-render preview stands in.
+    const builtin = screen.getByRole('heading', { name: 'Keychain Template' }).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(builtin).getByRole('img', { name: 'Keychain Template' })).toHaveAttribute(
+      'src',
+      expect.stringContaining('/thumbnail'),
+    )
+  })
+
+  it('shows a legacy thumbnail as the one slide, which opens the lightbox', async () => {
+    const { user } = renderWithRoutes()
+    const keychain = (await screen.findByRole('heading', { name: 'Name Keychain' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(keychain).queryByRole('button', { name: 'Next slide' })).not.toBeInTheDocument()
+
+    await user.click(within(keychain).getByRole('button', { name: 'Open Name Keychain' }))
+    expect(await screen.findByRole('dialog', {}, { timeout: 3000 })).toBeInTheDocument()
   })
 })
 
