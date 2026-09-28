@@ -1026,7 +1026,9 @@ async def _render_plated(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", solids or no_solids),
     ):
-        result, _ = await jobs.render_job(_job("p"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
     return result, asked
 
 
