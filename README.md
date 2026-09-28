@@ -124,8 +124,7 @@ for the project picker).
   a time and behind any render someone asked for, and that plate image is its
   catalogue thumbnail; `false` renders nothing, and such a model shows no image
   until one is set or generated. The previews are kept in the
-  `SCADBUDDY_DATABASE_URL` database's `model_previews` table, so without a
-  database there are none);
+  `SCADBUDDY_DATABASE_URL` database's `model_previews` table);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -192,15 +191,15 @@ for the project picker).
     as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
     and the settings each hold one). The schema is created and migrated at
     startup.
-  - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
-    Postgres too: each change is appended to an `events` table and sent with
+  - The **event bus** (spec §7) is in the same Postgres database (the backend
+    will not start without `SCADBUDDY_DATABASE_URL`, #467): each change is appended to an `events` table and sent with
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
-    hear it once over the same `LISTEN` connection the render queue uses. After
+    hear it once over the same `LISTEN` connection the job store uses. After
     that connection drops and comes back, subscribers get a `bus.resync` event.
     The table keeps events for `Last-Event-ID` replay:
     `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
     `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
-    replica every 5 minutes. Unset, events stay in the process as before.
+    replica every 5 minutes.
     `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
     `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
     `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
@@ -321,7 +320,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 - **One replica in phase 1**, sharing `/data` with the API. A rendered piece is
   written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
   the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
-  same node (pod affinity).
+  same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
+  may mount it.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
   the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
