@@ -32,6 +32,7 @@ from scadbuddy.library.libraries import (
     LibraryStore,
 )
 from tests.conftest import make_library_upstream
+from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
 
@@ -317,6 +318,7 @@ def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: D
     staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
     staging.mkdir(parents=True)
     (staging / "std.scad").write_text("cube(1);\n", encoding="utf-8")
+    _age(staging.parent)
     checkout = paths.libraries / "BOSL2" / ("a" * 40) / "BOSL2"
     checkout.mkdir(parents=True)
 

@@ -50,6 +50,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -88,6 +89,10 @@ COMMIT_PATTERN = r"^[0-9a-f]{40}([0-9a-f]{24})?$"
 # is large; a stalled one still has to give its executor slot back.
 CLONE_TIMEOUT = 300.0
 STAGING_PREFIX = ".staging-"
+#: Seconds past the clone timeout before the boot sweep treats a staging clone as
+#: abandoned: room for the ``rev-parse`` and move after the clone, and for clocks
+#: that differ between replicas sharing ``/data``.
+STAGING_MAX_AGE_MARGIN = 600.0
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -476,22 +481,29 @@ def migrate_lockfile(
 # every SIZE_POLL_INTERVAL, or nine times as long as the last walk took so that
 # walking costs at most about a tenth of the clone's wall time, but never less
 # often than SIZE_POLL_MAX_INTERVAL. A clone can overshoot the cap by what it
-# transfers in one interval before it is killed.
+# transfers in one interval plus one walk before it is killed. A walk stops once it
+# has counted past the cap, but its cost grows with the number of files, so for a
+# repository of very many small files that walk can take seconds; CLONE_TIMEOUT
+# still bounds the whole clone.
 SIZE_POLL_INTERVAL = 0.2
 SIZE_POLL_MAX_INTERVAL = 2.0
 # How long to wait for a killed git to be reaped before giving up on it.
 KILL_WAIT = 5.0
 
 
-def _tree_size(root: Path) -> int:
+def _tree_size(root: Path, limit: int | None = None) -> int:
     """Bytes of every file under ``root``, ``.git`` included: what it takes on the
     volume. Symlinks count as themselves, never what they point at. A file git
-    renames or removes mid-walk (a running clone's temporaries) counts as nothing."""
+    renames or removes mid-walk (a running clone's temporaries) counts as nothing.
+    With ``limit``, it returns as soon as the count passes it, rather than walking
+    the rest of a tree already known to be too large."""
     total = 0
     for directory, _, files in os.walk(root):
         for file in files:
             with contextlib.suppress(FileNotFoundError):
                 total += (Path(directory) / file).lstat().st_size
+            if limit is not None and total > limit:
+                return total
     return total
 
 
@@ -540,15 +552,24 @@ class LibraryStore:
     def sweep_staging(self) -> list[str]:
         """Remove the staging clones an install killed mid-clone left behind.
 
-        Only safe while no install can run -- at boot, before the first request --
-        since a live clone is in one of these too.
+        Runs at boot. Another replica sharing ``/data`` may be mid-clone, so only
+        staging older than the clone timeout plus ``STAGING_MAX_AGE_MARGIN`` goes.
         """
         root = self.paths.libraries
         if not root.is_dir():
             return []
+        cutoff = time.time() - self.timeout - STAGING_MAX_AGE_MARGIN
         removed: list[str] = []
         for entry in sorted(root.iterdir()):
             if not entry.name.startswith(STAGING_PREFIX):
+                continue
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception("could not read a staging clone", extra={"entry": entry.name})
                 continue
             # One that cannot go must not keep the rest; as the catalogue's
             # sweeps, log it and move on.
@@ -661,7 +682,7 @@ class LibraryStore:
             except LibraryTooLargeError as error:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {error}") from None
             # The last poll can land before the clone's final writes.
-            size = _tree_size(staging)
+            size = _tree_size(staging, self.max_bytes)
             if size > self.max_bytes:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {self._over(size)}")
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
@@ -723,7 +744,7 @@ class LibraryStore:
                     raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
                 if watch is not None:
                     started = time.monotonic()
-                    size = _tree_size(watch)
+                    size = _tree_size(watch, self.max_bytes)
                     if size > self.max_bytes:
                         self._kill(process)
                         raise LibraryTooLargeError(self._over(size)) from None
@@ -747,9 +768,12 @@ class LibraryStore:
     @staticmethod
     def _kill(process: subprocess.Popen[str]) -> None:
         # The whole group: a clone's git-remote-https child goes too. A git that
-        # is not reaped in time (stuck in the kernel) is left behind rather than
-        # holding up the caller's error.
+        # is not reaped in time (stuck in the kernel) is reaped by a daemon thread
+        # whenever it does die, rather than holding up the caller's error or
+        # staying a zombie.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
+        try:
             process.communicate(timeout=KILL_WAIT)
+        except subprocess.TimeoutExpired:
+            threading.Thread(target=process.wait, name="git-reaper", daemon=True).start()
