@@ -34,12 +34,12 @@ unchanged on MakerWorld and in ScadBuddy.
 |---|---|---|
 | `shape` | `rounded_square` | `rounded_square`, `circle`, `hexagon` (points left and right), `scalloped` (ten round bumps) or `heart`. Every shape is `tile_size` wide. |
 | `tile_size` | `30` | Tile width in mm, 20–50. |
-| `thickness` | `5` | Tile thickness in mm, 3–10. It is raised automatically when a magnet needs more room, and the render log's `SB_TILES` line reports the thickness used. |
+| `thickness` | `5` | Tile thickness in mm, 3–10. It is raised automatically when a magnet, or the edge rounding plus the inlay, needs more room, and the log says so with `NOTE: thickness raised`. |
 | `corner_radius` | `5` | Corner radius of the rounded square. Ignored for the other shapes. |
 | `edge_round` | `1.2` | Rounding on the top edge, in four steps. 0 gives a sharp edge. |
 | `letter_style` | `inlay` | `inlay`: the letter is flush with the top. `raised`: it stands up by `letter_depth`. The border follows the same style. |
 | `letter_depth` | `0.6` | Inlay depth, or how far raised letters stand up, 0.4–2 mm. |
-| `gap` | `5` | Gap between tiles on the plate. Rows wrap at 300 mm, the H2C's two-nozzle width. If the rows would run past the bed's 320 mm depth, the gap shrinks until they fit. The `SB_TILES` line reports the gap used. |
+| `gap` | `5` | Gap between tiles on the plate. Rows wrap at 300 mm, the H2C's two-nozzle width. If the rows would run past the bed's 320 mm depth, the gap shrinks until they fit, and the log says so with `NOTE: gap reduced`. |
 
 ### Border
 
@@ -52,7 +52,7 @@ unchanged on MakerWorld and in ScadBuddy.
 The border and its inset may take at most 60 % of the room inside the tile, so
 every tile keeps room for its letter. On a small tile a wide or far-inset
 border is narrowed first (down to 1 mm), then moved out towards the edge. The
-`SB_TILES` line in the render log reports the border width and inset used.
+log says so with `NOTE: border set to`, giving the width and inset used.
 
 ### Magnets
 

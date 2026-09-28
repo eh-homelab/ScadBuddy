@@ -314,6 +314,14 @@ module tile_border() {
 
 function tile_pos(j) = [(j % cols) * (S + G) + S / 2, -floor(j / cols) * (S + G) - S / 2];
 
+if (T > thickness)
+    echo(str("NOTE: thickness raised from ", thickness, " to ", T, " mm",
+             has_mag ? str(" to fit the ", magnet, " mm magnet") : " for the edge rounding and inlay"));
+if (G < gap)
+    echo(str("NOTE: gap reduced from ", gap, " to ", G, " mm to fit ", n, " tiles on the plate"));
+if (has_border && (bw < border_width || abs(inset - border_inset) > 1e-6))
+    echo(str("NOTE: border set to ", bw, " mm wide, ", round(inset * 100) / 100,
+             " mm from the edge, to leave room for the letter"));
 assert(room() >= 0.35 * base_r, str("no room for a letter: ", room(), " mm"));
 echo(str("SB_TILES n=", n, " cols=", cols, " rows=", rows, " gap=", G, " thickness=", T, " inset=", inset,
          " border_width=", bw, " margin=", margin, " room=", room(), " heart_k=", heart_k));

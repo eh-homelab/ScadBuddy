@@ -89,15 +89,19 @@ CASES = [
     # Too wide for its length even with one segment: the length grows (and
     # the render log says so) rather than the head and tail overlapping.
     ("dragon-grows", dict(width=40, length=120, pose="straight")),
+    # A name longer than the length has segments for: the critter grows to
+    # give every letter its segment (and the log says so) instead of failing.
+    ("name-grows", dict(animal="lizard", length=120, name="Maximilian12")),
+    ("name-wide-grows", dict(animal="caterpillar", length=120, width=40, name="WQW")),
+    ("name-8-default", dict(name="ALEXANDR")),
 ]
 
 # Requests that cannot be met must fail the render with a message that says
 # what to change, never render a critter with letters missing.
 ERROR_CASES = [
-    ("name-too-long", dict(animal="lizard", length=120, name="Maximilian12"),
-     "raise length or shorten the name"),
-    ("name-wide-short", dict(animal="caterpillar", length=120, width=40, name="WQW"),
-     "raise length or shorten the name"),
+    # Twelve W's make a straight dragon longer than the plate even at 300 mm.
+    ("name-too-long-for-plate", dict(pose="straight", length=300, name="WWWWWWWWWWWW"),
+     "shorten the name"),
     # The plate-fit assert fires. No customizer combination reaches it (the
     # widest straight critter is about 100 mm across), so the plate is
     # narrowed through the hidden bed size to prove the guard works.
@@ -109,9 +113,10 @@ ERROR_CASES = [
 # factors in model.scad).
 DROPPED = {"snake-max-tight": 15, "caterpillar-fat-short": 3, "dragon-min": 2,
            "name-pitch-limited": 7, "dragon-grows": 1,
-           "dragon-straight-name": 6}
-# Cases where even one segment does not fit, so the critter is longer than asked.
-GROWS = {"dragon-grows"}
+           "dragon-straight-name": 6, "name-wide-grows": 3}
+# Cases longer than asked, and the segments they have: even one segment does
+# not fit, or the name needs more segments than the length has room for.
+GROWS = {"dragon-grows": 1, "name-grows": 12, "name-wide-grows": 3, "name-8-default": 8}
 
 
 def scad(v):
@@ -242,7 +247,7 @@ for name, ov in CASES:
                       cap_top=float(m.group(7)), cap_lip=float(m.group(8)),
                       name_size=float(m.group(10)),
                       bound=(float(m.group(11)), float(m.group(12))),
-                      joints=[float(x) for x in m.group(13).split(",")])
+                      joints=[float(x) for x in m.group(13).split(",")], log=log)
 
 failures = []
 
@@ -268,8 +273,11 @@ for name, ov in CASES:
         # Too many for the length: as many as fit, each at least the hinge minimum.
         check(N == DROPPED[name], "segments dropped to fit the length: %d of %d (expected %d)"
               % (N, want_n, DROPPED[name]))
-    else:
+        check("NOTE: only %d body segment" % N in I["log"], "the log says only %d segments fit" % N)
+    elif name not in GROWS:
         check(N == want_n, "%d body segments (want %d)" % (N, want_n))
+    if name not in DROPPED:
+        check("NOTE: only" not in I["log"], "no segments-dropped note")
     check(I["pitch"] >= 2 * I["R"] + c + 2 - 1e-6,
           "segment pitch %.2f >= hinge minimum %.2f" % (I["pitch"], 2 * I["R"] + c + 2))
 
@@ -292,9 +300,10 @@ for name, ov in CASES:
           "render %.1f x %.1f lies inside the model's own bound %.1f x %.1f"
           % (sx, sy, bx, by))
     if name in GROWS:
-        check(I["L"] > p["length"], "too short for one segment: grows to %.1f (asked %s)"
-              % (I["L"], p["length"]))
-        check(N == 1, "with a single body segment (%d)" % N)
+        check(I["L"] > p["length"], "grows to %.1f (asked %s)" % (I["L"], p["length"]))
+        check(N == GROWS[name], "with %d body segment(s) (%d)" % (GROWS[name], N))
+        check("NOTE: length raised from %s to %d mm" % (p["length"], round(I["L"])) in I["log"],
+              "the log says the length was raised")
     elif p["pose"] == "straight":
         check(abs(I["L"] - p["length"]) < 1e-3, "length %.1f == %s" % (I["L"], p["length"]))
         check(abs(sx - I["L"]) <= 1.5, "straight: %.1f mm long (%.1f)" % (sx, I["L"]))

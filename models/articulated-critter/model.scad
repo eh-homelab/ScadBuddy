@@ -47,7 +47,7 @@ pose = "wave"; // [straight:Straight, wave:Wave, curl:Curl]
 
 /* [Name] */
 
-// Name along the back, one letter per body segment; body segments are added to fit it (leave empty for none)
+// Name along the back, one letter per body segment; segments are added, and the critter lengthened if need be, to fit it (leave empty for none)
 name = ""; // 12
 
 // Typeface for the name (the app fills this dropdown from the fonts installed in the image)
@@ -157,9 +157,17 @@ span_len = length - head_len() - tail_len();
 function fits(n) = span_len / sumf(n) >= P_seg;
 function best_n(n) = n <= 1 ? 1 : fits(n) ? n : best_n(n - 1);
 
-N = best_n(max(segments, len(name)));
+// A name always gets its segments: when the length has no room for them, the
+// critter grows (the plate-fit assert below still bounds it).
+N = max(best_n(max(segments, len(name))), len(name));
 p = max(P_seg, span_len / sumf(N));
 L = head_len() + tail_len() + p * sumf(N);       // == length unless it had to grow
+if (N < segments)
+    echo(str("NOTE: only ", N, " body segment", N == 1 ? "" : "s", " of ", segments, " fit in a ", length,
+             " mm ", animal, " (each at least ", round(P_seg * 10) / 10, " mm long); raise length for more"));
+if (L > length + 0.05)
+    echo(str("NOTE: length raised from ", length, " to ", round(L), " mm to fit ",
+             len(name) > 0 && N == len(name) ? str("the ", len(name), "-letter name") : "one body segment"));
 feats = [for (k = [1:N]) feat(k, N)];
 function f_at(k) = factor(feats[k - 1]);
 
@@ -565,16 +573,12 @@ bound_x = max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]);
 bound_y = max([for (q = corners) q[1]]) - min([for (q = corners) q[1]]);
 assert(bound_x <= bed_w && bound_y <= bed_d,
        str("the critter could be ", bound_x, " x ", bound_y, " mm, more than the ", bed_w, " x ",
-           bed_d, " mm plate: shorten it or make it narrower"));
+           bed_d, " mm plate: ", nm > 0 ? "shorten the name, curl it, " : "", "shorten it or make it narrower"));
 
 echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 * neck_hw,
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,
          " low_h=", low_h, " name_size=", name_size, " bound=", [bound_x, bound_y], " joints=", [for (k = [1:N + 1]) J[k]]));
 assert(neck_hw >= 1, "hinge neck too thin");
-// A name that cannot fit is an error, not a silently shortened name.
-assert(nm <= N, str("the name needs ", nm, " body segments, but a ", length, " mm ", animal,
-                    " only has room for ", N, " (each at least ", P_seg,
-                    " mm long): raise length or shorten the name"));
 assert(nm == 0 || name_size >= name_min - 0.01,
        str("name letters would be ", name_size, " mm, under ", name_min, " mm"));
 assert(cap_mid > 0.3 && cap_top > 0.15 && cap_lip > 0.5, "hinge pin not captured");
