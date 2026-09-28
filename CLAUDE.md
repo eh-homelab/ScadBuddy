@@ -167,7 +167,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
   `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
-  the authoritative manifest check.
+  the authoritative manifest check. The agent image copies it to `/app/plugins/scadbuddy`
+  and every session loads it (`agent/src/harness/plugins.ts` `BUNDLED_PLUGIN_DIR`), so
+  it must keep passing the harness's plugin vetting.
 
 ## Migrations (#491)
 

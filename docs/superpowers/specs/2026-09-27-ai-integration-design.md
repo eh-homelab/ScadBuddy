@@ -355,6 +355,18 @@ A test asserts both lists are identical, apart from browser-only tools. A CI che
 when an operation in `backend/openapi.json` has neither a tool nor an explicit allowlist
 entry.
 
+As wired (#255, `agent/src/tools/harness.ts`): every session's queries get the harness
+projection, bound to the session owner's principal, and a `tierOf` that maps
+`mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
+outward call that the seam approved runs at once, because the harness projection tells
+`runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+arguments with its own bundled zod 4.4.3, which refused any call that left out a
+`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
+therefore offers such top-level fields as optional, with the same default in the JSON
+Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
+`sdkShape`; `agent/test/harnessWiring.test.ts`).
+
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
 choice the way the print dialog opens, then slices and queues behind a single approval.
@@ -531,7 +543,16 @@ including `disabled`. Where it is enforced:
   `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
-  approval.
+  approval. As built (#255): the prepare records an `ai_approvals` row with no session
+  and no turn, requested by the caller's principal, under the pending action's id, and
+  keeps the call itself (tool and parsed arguments) in the agent's memory only, since
+  the table stores no inputs. `confirm_action` runs it only when the action is the
+  caller's, the row is the caller's, the row's tool and input hash match the prepared
+  call, and the row is approved and still usable. Using it is one conditional update
+  (`consumeById`), so it runs once. It does not wait: a pending approval is refused with
+  the reason, and the client confirms again once the user has decided. A call prepared
+  before a restart, or on another replica, cannot be confirmed and is prepared again.
+  The code is `agent/src/tools/registry.ts` `prepare` and `agent/src/tools/approvals.ts`.
 - **Headless browser (#349):** the backend refuses outward routes on requests that carry
   the agent-actor marker unless an approved outward action authorises them (§5.3). Until
   the §3.2 items for that mechanism are verified, the headless browser stays off.
@@ -540,6 +561,15 @@ including `disabled`. Where it is enforced:
 
 The mode is a database setting, changed in Settings, and changing it counts as a
 settings write, so it needs approval.
+
+As built (#255): two `ai_settings` keys, `mcp_auth_mode` (`"bearer"`, `"disabled"` or
+`"oidc"`; unset means `bearer`) and `mcp_anonymous_cap` (`"read"`, `"write"` or
+`"outward"`; unset means `outward`). They are read on every `/mcp` request, so a change
+applies on every replica without a restart. An unknown value fails closed, to `bearer`
+or a `read` cap, and a failed read serves `bearer` with no verifiable token. The agent
+logs a warning while the mode is `disabled`, once per change of the settings (the
+banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettings`.
+There is no Settings route for them yet, so no approval applies yet either.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
@@ -633,6 +663,14 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
+  As built (#299): the agent image carries it at `/app/plugins/scadbuddy` (Dockerfile
+  `agent` stage), and every session query gets it as a local plugin after
+  `agent/src/harness/plugins.ts` vets it (`bundledPluginPaths`, once at start, then
+  per query). Its `.mcp.json` is not started there: `strictMcpConfig` ignores
+  "plugins" among "all other MCP configurations" (`sdk.d.ts` 0.3.283), and the tools
+  come from the in-process server (§5.1). Measured on Claude Code 2.1.283: the init
+  message lists `scadbuddy` 0.1.0 in `plugins`, with its three skills and no
+  `plugin_errors` (`agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has

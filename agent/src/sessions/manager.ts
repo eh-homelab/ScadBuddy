@@ -46,14 +46,14 @@ import { PostgresSessionStore } from './store.js'
 //     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
 //     sessions.approve/deny → approvals.decide (#258, src/approvals/service.ts),
 //     with the token's approval grant as `approvalGrants`.
-//   - #251's registry also supplies `tierOf` and the in-process MCP servers
-//     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
-//     tools, settle how tool payloads are redacted: tool.call inputs and
-//     tool.result summaries go into the durable, multi-watcher event log,
-//     scrubbed only by sdkEvents.ts `scrubForLog` (the turn's credential,
-//     arguments named like secrets, a size cap). A tool that takes a secret
-//     under another name must declare it to the registry, and scrubForLog must
-//     read that declaration.
+//   - #251's registry supplies `tierOf` and the in-process MCP servers
+//     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
+//     Tool payloads: tool.call inputs and tool.result summaries go into the
+//     durable, multi-watcher event log, scrubbed only by sdkEvents.ts
+//     `scrubForLog` (the turn's credential, arguments named like secrets, a
+//     size cap). No registry tool takes a secret argument; one that takes a
+//     secret under another name must declare it to the registry, and
+//     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
 //   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its

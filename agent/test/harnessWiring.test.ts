@@ -138,10 +138,16 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     return { result, init, decisions, stderr }
   }
 
-  it('reports the ScadBuddy plugin loaded, with no plugin errors, and only the in-process server', async () => {
-    script = () => ({ text: 'ok' })
-    const { result, init } = await collect()
+  // One query for both, to spawn Claude Code as few times as the suite can.
+  it('reports the ScadBuddy plugin loaded with no plugin errors, and runs a read tool within its tier', async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'done' }
+        : { toolUse: { name: 'mcp__scadbuddy__list_models', input: {} } }
+    const { result, init, decisions } = await collect()
     expect(result.subtype).toBe('success')
+    expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
+    expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
     // Beside Claude Code's own built-in ones (`agents-md@builtin` on 2.1.283).
     expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([
       expect.objectContaining({ name: 'scadbuddy', path: BUNDLED_PLUGIN_DIR, version: '0.1.0' }),
@@ -153,18 +159,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(init.mcp_servers.map((s) => [s.name, s.status])).toEqual([['scadbuddy', 'connected']])
     // Every registry tool is offered, by its harness name, and no built-in.
     expect([...init.tools].sort()).toEqual(ALL_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`).sort())
-  })
-
-  it('runs a read tool against the backend, allowed by its tier', async () => {
-    script = (r) =>
-      lastContent(r).includes('tool_result')
-        ? { text: 'done' }
-        : { toolUse: { name: 'mcp__scadbuddy__list_models', input: {} } }
-    const { result, decisions } = await collect()
-    expect(result.subtype).toBe('success')
-    expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
-    expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
-  })
+  }, 60_000)
 
   it('parks an outward tool at the gate, and once approved runs it (not a second prepare)', async () => {
     script = (r) =>
@@ -183,7 +178,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(deletes).toBe(1)
     expect(followUp).toContain('deleted')
     expect(followUp).not.toContain('pending_approval')
-  })
+  }, 60_000)
 
   it('never runs an outward tool without a gate', async () => {
     script = (r) =>
@@ -195,5 +190,5 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(decisions).toEqual([['mcp__scadbuddy__delete_model', 'needs_approval']])
     expect(deletes).toBe(0)
     expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/needs a human approval in the ScadBuddy UI/)
-  })
+  }, 60_000)
 })
