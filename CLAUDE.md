@@ -32,8 +32,15 @@ postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
-running Temporal or a `temporal` CLI is on `PATH` (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`
-can point at one); the test image ships it.
+running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
+(`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
+`/usr/local/bin/temporal`), from which the tests start their own dev server.
+Run `tests/` files and `tests/api/` files in separate pytest commands, grouped by
+directory: given both in one command, pytest drops `tests/api/conftest.py`.
+Renders: `SCADBUDDY_TEMPORAL_ADDRESS` empty runs the legacy in-process render queue; set,
+renders run on Temporal with `python -m scadbuddy.worker` as the worker (or
+`SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). The legacy path
+goes in the follow-up that makes the address required (#546).
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
@@ -113,7 +120,25 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
   (`render_job` ties the steps together; job queue), `render_cache.py` (finished
   renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
-  parameters at the same revision is answered without OpenSCAD).
+  parameters at the same revision is answered without OpenSCAD), `submit.py`
+  (`RenderService`, the Temporal path: submit inserts the row, starts the workflow, and a
+  reconciler starts any pending row nothing picked up), `projection.py` (`render_jobs`
+  as a projection the workflow writes in place through the `project` activity),
+  `backend.py` (the `RenderBackend` Protocol the routes see, met by the legacy
+  `RenderQueue` and by `RenderService`).
+- `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
+  (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
+  (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
+  `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
+  `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
+  renders* across jobs. Never swap them.
+- `backend/scadbuddy/store/` — the blob store: the directory-shaped `BlobStore`
+  Protocol, `LocalBlobStore` (a piece in `data/blobs/<piece_key>/`), `BlobRefs` (the
+  `blob_refs` table that keeps a blob alive) and `sweep_blobs` (the grace-period sweep).
+- `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
+  `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
+  pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
+  `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` mode (no drain).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
