@@ -67,6 +67,8 @@ def deletes() -> respx.Route:
 
 
 def project_routes() -> None:
+    # A project folder's copy is named uniquely among the files already in it (#317).
+    respx.get(f"{API}/library/files").mock(return_value=httpx.Response(200, json=[]))
     for project_id, folder_id in PROJECT_FOLDERS.items():
         respx.get(f"{API}/library/folders/by-project/{project_id}").mock(
             return_value=httpx.Response(

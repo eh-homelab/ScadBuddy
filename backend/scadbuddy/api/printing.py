@@ -14,15 +14,20 @@ from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
+    CatalogueDep,
+    ConfigDep,
+    FetcherDep,
+    HistoryDep,
     OutputIdPath,
     OutputsDep,
+    PathsDep,
     PrintProgressDep,
     PrintWatcherDep,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.outputs import require_output
+from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -123,6 +128,11 @@ async def post_run(
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> PrintRunResult:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -133,8 +143,16 @@ async def post_run(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
+    # A copy uploaded into a project's folder is named like the one Generate files (#317).
+    stem = (
+        await output_stem(
+            meta, outputs, catalogue, paths=paths, history=history, config=config, fetcher=fetcher
+        )
+        if (body.project_id or settings.last_project_id) is not None
+        else None
+    )
     async with client_for(settings) as client:
-        result = await run_for_output(client, outputs, uploads, meta, settings, body)
+        result = await run_for_output(client, outputs, uploads, meta, settings, body, stem=stem)
     observer.started(meta)
     await watcher.started(meta.id)
     return result
@@ -254,6 +272,20 @@ async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
     settings = store.load()
     async with client_for(settings) as client:
         return await describe_projects(client, last_project_id=settings.last_project_id)
+
+
+class LastProject(BaseModel):
+    """The project the pickers open on (#317); ``null`` is "No project"."""
+
+    project_id: int | None = None
+
+
+@router.put("/projects/last", response_model=LastProject, summary="Remember the chosen project")
+def put_last_project(body: LastProject, store: SettingsStoreDep) -> LastProject:
+    """The project chosen on the Customize page or in the print dialog, which both open
+    on next (``last_project_id``). ScadBuddy's own preference: it needs no Bambuddy."""
+    settings = store.remember_project(body.project_id)
+    return LastProject(project_id=settings.last_project_id)
 
 
 @router.post("/projects", response_model=ProjectView, summary="Create or link a project")

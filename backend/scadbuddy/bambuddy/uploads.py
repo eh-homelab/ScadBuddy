@@ -4,7 +4,9 @@ Every copy of an output's ``model.3mf`` ScadBuddy has put in Bambuddy's *file li
 (not an OpenSCAD library), and every sliced 3MF Bambuddy wrote beside one. They are
 the only pointers ScadBuddy has to those files, so they live in the database rather
 than in the output's ``meta.json``. The tables are migration
-``20260928T0720Z_output_bambuddy_uploads``.
+``20260928T0720Z_output_bambuddy_uploads``. Beside them, the printer and nozzle each
+Bambuddy project last printed on (``20260928T1317Z_project_print_targets``, #317): what
+the project's file is laid out for when Generate files it there.
 
 The database is required (#401): without ``SCADBUDDY_DATABASE_URL`` there is no
 fallback, and every call raises `DatabaseRequiredError`.
@@ -64,6 +66,13 @@ class LibraryCopy(BaseModel):
     sliced: list[SlicedCopy] = Field(default_factory=list)
 
 
+class ProjectTarget(BaseModel):
+    """The printer and nozzle a Bambuddy project last printed on (#317)."""
+
+    printer_id: int
+    nozzle_diameter: str | None = None
+
+
 class BambuddyUploadStore:
     """``output_bambuddy_uploads`` and ``output_bambuddy_slices``, on the process's pool.
 
@@ -119,7 +128,37 @@ class BambuddyUploadStore:
         """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
         await asyncio.to_thread(self._delete_outputs, list(output_ids))
 
+    async def project_target(self, project_id: int) -> ProjectTarget | None:
+        """What ``project_id`` last printed on, or ``None`` if nothing has been printed
+        into it from here (#317). Generate lays the project's file out for it."""
+        return await asyncio.to_thread(self._project_target, project_id)
+
+    async def remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
+        """Record the printer and nozzle a print into ``project_id`` used (#317)."""
+        await asyncio.to_thread(self._remember_project_target, project_id, target)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
+
+    def _project_target(self, project_id: int) -> ProjectTarget | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "SELECT printer_id, nozzle_diameter FROM project_print_targets"
+                " WHERE project_id = %s",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ProjectTarget(printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"])
+
+    def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
+        with self._require().connection() as conn:
+            conn.execute(
+                "INSERT INTO project_print_targets (project_id, printer_id, nozzle_diameter)"
+                " VALUES (%s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
+                " SET printer_id = EXCLUDED.printer_id,"
+                " nozzle_diameter = EXCLUDED.nozzle_diameter, updated_at = now()",
+                (project_id, target.printer_id, target.nozzle_diameter),
+            )
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}

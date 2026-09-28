@@ -140,7 +140,7 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             )
         )
 
-    folder = next(iter(await client.folders_by_project(project.id)), None)
+    folder = project_folder(await client.folders_by_project(project.id))
     if folder is None and request.folder_id is not None:
         # Flattened, like every other folder lookup here: `/library/folders` answers
         # with a tree, so a folder nested under another is invisible to a scan of the
@@ -167,7 +167,7 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
     picker offers folderless projects on the promise that the first send creates the
     folder. One read when the folder exists; :func:`ensure_project` otherwise.
     """
-    folder = next(iter(await client.folders_by_project(project_id)), None)
+    folder = project_folder(await client.folders_by_project(project_id))
     if folder is not None:
         return folder.id
     view = await ensure_project(client, ProjectRequest(project_id=project_id))
@@ -177,6 +177,49 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
             f"Bambuddy did not link a library folder to project {project_id}",
         )
     return view.folder_id
+
+
+#: The sub-folder of a project's folder that real-result photos and videos go in (#309).
+MEDIA_FOLDER_NAME = "Media"
+
+
+def project_folder(folders: list[Folder]) -> Folder | None:
+    """The project's own folder among the folders linked to it.
+
+    ``Media/`` is linked to the project too (#317), so the by-project list can hold it
+    and, in whatever order Bambuddy lists them, "the first one" could be it. The
+    project folder is the one whose parent is not another folder of the same project.
+    """
+    ids = {folder.id for folder in folders}
+    return next((folder for folder in folders if folder.parent_id not in ids), None)
+
+
+async def media_folder_for(client: BambuddyClient, project_id: int) -> int:
+    """The id of the project's ``Media/`` folder, created if missing (#317, for #309).
+
+    A sub-folder of the project folder, with ``project_id`` set so Bambuddy's project
+    page counts what is in it. It is the only sub-folder ScadBuddy makes: the project
+    folder stays flat apart from it, and it is not named with a dot, because Bambuddy
+    hides dot-folders only on external mounts.
+    """
+    folders = await client.folders_by_project(project_id)
+    found = project_folder(folders)
+    # No project folder yet: `folder_for` creates and links one, as a send would.
+    parent = found.id if found is not None else await folder_for(client, project_id)
+    existing = next(
+        (
+            folder
+            for folder in folders
+            if folder.parent_id == parent and folder.name == MEDIA_FOLDER_NAME
+        ),
+        None,
+    )
+    if existing is not None:
+        return existing.id
+    created = await client.create_folder(
+        FolderCreate(name=MEDIA_FOLDER_NAME, parent_id=parent, project_id=project_id)
+    )
+    return created.id
 
 
 class AttachResult(BaseModel):

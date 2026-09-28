@@ -203,6 +203,20 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'remember_last_project',
+    description:
+      'Choose the Bambuddy project the Customize page and the print dialog open on (null for "No project"). ' +
+      'Generate files its 3MF there; list_print_projects shows the current `last_project_id`.',
+    input: z.object({ project_id: z.number().int().nullable() }),
+    risk: 'write',
+    routes: ['PUT /api/v1/print/projects/last'],
+    handler: async ({ project_id }, { backend }) =>
+      json(
+        await ok(backend.PUT('/api/v1/print/projects/last', { body: { project_id } }), 'remember the project'),
+      ),
+  }),
+
+  defineTool({
     name: 'remember_printer_bed_type',
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
@@ -410,6 +424,30 @@ export const printTools: Tool[] = [
             },
           }),
           'create project',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'file_output_in_project_folder',
+    description:
+      "Upload an output's editable 3MF into a Bambuddy project's library folder, as Generate does with a " +
+      'project chosen. Idempotent: the same project again reuses the file already there (`created: false`), ' +
+      'and a later print on the same printer reuses it too.',
+    input: z.object({ output_id: outputId, project_id: z.number().int() }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library', 'Manage Projects'],
+    routes: ['POST /api/v1/outputs/{output_id}/project-file'],
+    summarize: ({ output_id, project_id }) =>
+      `Upload output ${output_id}'s 3MF into Bambuddy project ${project_id}'s folder`,
+    handler: async ({ output_id, project_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/outputs/{output_id}/project-file', {
+            params: { path: { output_id } },
+            body: { project_id },
+          }),
+          `file ${output_id} in project ${project_id}`,
         ),
       ),
   }),

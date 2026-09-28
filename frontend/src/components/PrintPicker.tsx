@@ -73,9 +73,22 @@ interface Props {
   onRan: (result: PrintRunResult) => void
   /** #81 — the model of the printer in view, so the preview can draw its plate. */
   onPrinterModel?: (model: string | null) => void
+  /**
+   * #317 — the project chosen on the Customize page. Given, the dialog's picker shows and
+   * moves that one choice rather than a copy of its own, so the two never disagree.
+   */
+  project?: { value: number | null; onChange: (projectId: number | null) => void }
 }
 
-export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
+export function PrintPicker({
+  open,
+  slug,
+  output,
+  onClose,
+  onRan,
+  onPrinterModel,
+  project,
+}: Props) {
   const [choices, setChoices] = useState<ChoicesView | null>(null)
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
@@ -98,8 +111,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
-  /** #79 — the Bambuddy project this print is filed under. */
-  const [projectId, setProjectId] = useState<number | null>(null)
+  /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
+  const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
+  const projectId = project ? project.value : ownProjectId
   /** #83 — the output's plates, and the one (or all) to print. */
   const [plates, setPlates] = useState<OutputPlate[]>([])
   const [plate, setPlate] = useState<number | 'all'>(1)
@@ -309,7 +323,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     )
 
   function close() {
-    setProjectId(null)
+    // The page's project (#317) outlives the dialog; only its own copy is reset.
+    setOwnProjectId(null)
     setOptions({})
     setRunError(null)
     setRefused(false)
@@ -697,7 +712,15 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               />
 
               {/* #79 — a send to a project uploads into that project's folder. */}
-              <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
+              {project ? (
+                <ProjectPicker value={project.value} onChange={project.onChange} />
+              ) : (
+                <ProjectPicker
+                  value={ownProjectId}
+                  onChange={setOwnProjectId}
+                  onLoaded={setOwnProjectId}
+                />
+              )}
 
               <div className="flex items-center gap-3">
                 <label htmlFor="print-copies" className="text-[13px] text-ink">

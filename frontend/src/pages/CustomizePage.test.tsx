@@ -10,6 +10,7 @@ import {
   BUILTIN_SLUG,
   keychainSchema,
   printOptions,
+  projectViews,
   settings as settingsFixture,
   targets,
   versionIds,
@@ -1176,5 +1177,89 @@ describe('full screen', () => {
     // With nothing else to take it, the next one leaves full screen.
     await user.keyboard('{Escape}')
     expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+  })
+})
+
+describe('CustomizePage, project file (#317)', () => {
+  /** The last send went to `Reagan Keychain` (1), so both pickers open on it. */
+  function withLastProject(projectId: number | null) {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: projectViews, last_project_id: projectId }),
+      ),
+    )
+  }
+
+  /** The bodies of every request to a path ending in `suffix`, by method. */
+  function watchBodies(method: string, suffix: string): Promise<unknown>[] {
+    const bodies: Promise<unknown>[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === method && new URL(request.url).pathname.endsWith(suffix)) {
+        bodies.push(request.clone().json())
+      }
+    })
+    return bodies
+  }
+
+  function pagePicker(): HTMLSelectElement {
+    return screen.getByTestId('customize-project-select')
+  }
+
+  async function generate(user: ReturnType<typeof render>['user']) {
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved [0-9a-f]/)).toBeInTheDocument())
+  }
+
+  it('opens the picker on the last project', async () => {
+    withLastProject(1)
+    render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+  })
+
+  it('files the generated output in the chosen project and links to it', async () => {
+    withLastProject(1)
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await generate(user)
+
+    const status = await screen.findByTestId('project-filed')
+    expect(status).toHaveTextContent('Saved to Reagan Keychain')
+    expect(within(status).getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
+    expect(filed).toHaveLength(1)
+    expect(await filed[0]).toEqual({ project_id: 1 })
+  })
+
+  it('uploads nothing on Generate with "No project", and remembers that choice', async () => {
+    withLastProject(1)
+    const filed = watchBodies('POST', '/project-file')
+    const remembered = watchBodies('PUT', '/print/projects/last')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await user.selectOptions(pagePicker(), '')
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    expect(await remembered[0]).toEqual({ project_id: null })
+
+    await generate(user)
+    expect(filed).toHaveLength(0)
+    expect(screen.queryByTestId('project-filed')).not.toBeInTheDocument()
+  })
+
+  it('shares one choice with the print dialog', async () => {
+    withLastProject(null)
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue(''))
+    await user.selectOptions(pagePicker(), '2')
+    await generate(user)
+
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    expect(dialogPicker).toHaveValue('2')
+
+    await user.selectOptions(dialogPicker, '1')
+    expect(pagePicker()).toHaveValue('1')
   })
 })

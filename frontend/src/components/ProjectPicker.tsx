@@ -45,9 +45,27 @@ interface Props {
    * can seed `value` from it without ever handling a `ProjectChoices`.
    */
   onLoaded?: (projectId: number | null) => void
+  /**
+   * #317 — the chosen project's row, whenever it changes, so the parent can name it
+   * ("Saved to Kids' room") without fetching the list a second time.
+   */
+  onProject?: (project: ProjectView | null) => void
+  /** The select's id and test id, which differ when two pickers share a page (#317). */
+  id?: string
+  testId?: string
+  /** The label beside the select rather than above it, for the Customize page's bar. */
+  inline?: boolean
 }
 
-export function ProjectPicker({ value, onChange, onLoaded }: Props) {
+export function ProjectPicker({
+  value,
+  onChange,
+  onLoaded,
+  onProject,
+  id = 'print-project',
+  testId = 'project-select',
+  inline = false,
+}: Props) {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
@@ -64,8 +82,10 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
    * re-fetch the list forever.
    */
   const report = useRef(onLoaded)
+  const reportProject = useRef(onProject)
   useEffect(() => {
     report.current = onLoaded
+    reportProject.current = onProject
   })
 
   const load = useCallback(async () => {
@@ -88,6 +108,23 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
 
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)
+
+  useEffect(() => {
+    reportProject.current?.(current ?? null)
+  }, [current])
+
+  /**
+   * #317 — the other picker on the page may have just created the project in view, which
+   * this one's list predates. Re-read once per such id, so a project deleted in Bambuddy
+   * does not re-fetch forever.
+   */
+  const missing = choices !== null && value !== null && current === undefined ? value : null
+  const reread = useRef<number | null>(null)
+  useEffect(() => {
+    if (missing === null || reread.current === missing) return
+    reread.current = missing
+    void load()
+  }, [missing, load])
 
   async function create() {
     const body: ProjectRequest = {
@@ -125,13 +162,13 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
   }
 
   return (
-    <div>
-      <label htmlFor="print-project" className="block text-[13px]">
+    <div className={inline ? 'flex flex-wrap items-center gap-2' : undefined}>
+      <label htmlFor={id} className={inline ? 'text-[12px] text-muted' : 'block text-[13px]'}>
         Project
       </label>
       <select
-        id="print-project"
-        data-testid="project-select"
+        id={id}
+        data-testid={testId}
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
@@ -141,7 +178,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
           setCreating(false)
           onChange(event.target.value === '' ? null : Number(event.target.value))
         }}
-        className="sb-field mt-1.5 cursor-pointer"
+        className={inline ? 'sb-field w-auto max-w-56 cursor-pointer py-1 text-[12px]' : 'sb-field mt-1.5 cursor-pointer'}
       >
         <option value="">No project</option>
         {projects.map((project) => (
@@ -155,7 +192,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       </select>
 
       {!creating && current && current.folder_id === null && (
-        <p className="mt-1.5 text-[12px] text-muted" data-testid="project-no-folder">
+        <p className="mt-1.5 basis-full text-[12px] text-muted" data-testid="project-no-folder">
           {current.name} has no library folder yet &mdash; ScadBuddy creates one and links it
           the first time it sends here, because the folder is what Bambuddy&rsquo;s project
           page lists.
@@ -163,7 +200,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       )}
 
       {creating && (
-        <div className="mt-2 space-y-3 rounded-[6px] border border-line bg-surface-2 p-3">
+        <div className="mt-2 basis-full space-y-3 rounded-[6px] border border-line bg-surface-2 p-3">
           <div>
             <label htmlFor="new-project-name" className="block text-[13px]">
               Name
@@ -235,7 +272,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       )}
 
       {error && (
-        <p role="alert" className="mt-2 text-[13px] text-warn">
+        <p role="alert" className="mt-2 basis-full text-[13px] text-warn">
           {error}
         </p>
       )}

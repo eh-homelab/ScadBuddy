@@ -13,8 +13,11 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
     EventsDep,
+    FetcherDep,
+    HistoryDep,
     OutputIdPath,
     OutputsDep,
+    PathsDep,
     PrintProgressDep,
     PrintWatcherDep,
     QueueDep,
@@ -25,11 +28,22 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.project_file import (
+    ProjectFile,
+    ProjectFileRequest,
+    file_into_project,
+    project_stem,
+)
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.config import Config
 from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -41,6 +55,8 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
+from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
@@ -418,3 +434,71 @@ async def send_output_to_bambuddy(
         observer.started(meta)
         await watcher.started(meta.id)
     return result
+
+
+async def output_stem(
+    meta: OutputMeta,
+    outputs: OutputStore,
+    catalogue: Catalogue,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+    config: Config,
+    fetcher: CheckoutFetcher,
+) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    The defaults are the model's current schema, which is cached with the source. A
+    model deleted since, or a schema OpenSCAD cannot build, costs only the summary: the
+    name is then the template (or slug) and the output's own name.
+    """
+    params = await asyncio.to_thread(outputs.params, meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+        source = await resolve_source(
+            meta.slug, None, paths=paths, history=history, fetcher=fetcher
+        )
+        schema = await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(config)
+        )
+    except (ModelNotFoundError, FileNotFoundError, OpenSCADError):
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = {param.name: param.initial for param in schema.parameters}
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+@router.post(
+    "/outputs/{output_id}/project-file",
+    response_model=ProjectFile,
+    summary="File this output's 3MF in a project's Bambuddy folder",
+)
+async def post_project_file(
+    output_id: OutputIdPath,
+    body: ProjectFileRequest,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    store: SettingsStoreDep,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> ProjectFile:
+    """Upload the editable project 3MF into the project's folder (#317), as Generate does
+    when a project is chosen.
+
+    Idempotent per (folder, target): the same project chosen again answers with the file
+    already there (``created: false``), and a later print on the same printer reuses it
+    (#316). The folder is created and linked if the project has none. Every Bambuddy
+    call is made here, so the API key never reaches the browser.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    stem = await output_stem(
+        meta, outputs, catalogue, paths=paths, history=history, config=config, fetcher=fetcher
+    )
+    async with client_for(settings) as client:
+        return await file_into_project(
+            client, outputs, uploads, meta, settings, body.project_id, stem=stem
+        )

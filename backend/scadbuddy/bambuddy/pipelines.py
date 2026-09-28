@@ -51,7 +51,7 @@ from scadbuddy.bambuddy.send import (
     resolve_print_options,
     target_for,
 )
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
@@ -208,8 +208,14 @@ async def run_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    stem: str | None = None,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    ``stem`` names a copy uploaded into a project's folder (:func:`project_filename`,
+    #317). A print into a project also records its printer and nozzle for that project,
+    which is what the next Generate into it lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
@@ -267,7 +273,7 @@ async def run_for_output(
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     library_file_id = await ensure_uploaded(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
     )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
@@ -359,6 +365,11 @@ async def run_for_output(
         )
         if warning.kind == "low-filament"
     ]
+    if project_id is not None:
+        await uploads.remember_project_target(
+            project_id,
+            ProjectTarget(printer_id=printer_id, nozzle_diameter=choices.nozzles[0].size),
+        )
     return _queued(
         client,
         outcomes,
