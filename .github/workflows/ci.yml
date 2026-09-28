@@ -234,6 +234,9 @@ jobs:
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
 
+      - name: Test the issue-intake failure check
+        run: .github/scripts/intake-verify.test.sh
+
       # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
       # in CI reads: a skill that loses its frontmatter still loads with its
       # description gone, and a malformed marketplace.json only fails when a
