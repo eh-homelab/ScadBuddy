@@ -49,7 +49,8 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 
 The Agent SDK is used under Anthropic's Commercial Terms ("Use of the Claude Agent
 SDK is governed by Anthropic's Commercial Terms of Service", [overview][sdk-overview]).
-ScadBuddy stays MIT. Nothing from the SDK is vendored into the repo; it is an npm
+ScadBuddy is Apache-2.0 (`LICENSE`; it switched from MIT in #301). Nothing from the
+SDK is vendored into the repo; it is an npm
 dependency of `agent/`.
 
 ## 3. Facts this design rests on
