@@ -28,8 +28,7 @@ multi-colour rules, connecting Bambuddy and each feature.
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
   saved preset, to an editable preset of your own. Saved presets are kept in the
-  database (`SCADBUDDY_DATABASE_URL`); without one, a template's own presets still
-  list but saving one is refused.
+  database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
