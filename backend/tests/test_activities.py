@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import uuid
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -21,6 +24,8 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
+from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
@@ -29,6 +34,7 @@ from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.workflows import activities
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
     RenderActivities,
@@ -37,7 +43,14 @@ from scadbuddy.workflows.activities import (
     _write_piece,
 )
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, render_worker
-from scadbuddy.workflows.models import Failure, PieceRequest, PieceResult, Projection, piece_key
+from scadbuddy.workflows.models import (
+    Failure,
+    PieceRequest,
+    PieceResult,
+    PrepareResult,
+    Projection,
+    piece_key,
+)
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import write_openscad_3mf
 from tests.support.temporal import temporal_client
@@ -125,6 +138,98 @@ def _request(revision: str | None = REVISION) -> PieceRequest:
         params=dict(params),
         piece_key=piece_key("demo", revision, "model.scad", params),
     )
+
+
+# ── the library lease, per activity ────────────────────────────────────────────
+
+
+def _checkout(paths: DataPaths) -> Path:
+    """A pinned library's checkout as `require_checkouts` finds it:
+    ``libraries/<name>/<sha>/<name>/``."""
+    checkout = paths.libraries / "bosl" / ("ab12cd3" + "0" * 33)
+    (checkout / "bosl").mkdir(parents=True)
+    (checkout / "bosl" / "std.scad").write_text("module bosl() {}\n", encoding="utf-8")
+    return checkout
+
+
+async def _prepared_with_library(
+    acts: RenderActivities, env: ActivityEnvironment, req: PieceRequest, checkout: Path
+) -> PrepareResult:
+    prepared = await env.run(acts.prepare, req)
+    # The template pins the library: `prepare_source` resolved its checkout.
+    return prepared.model_copy(update={"library_path": [str(checkout)]})
+
+
+async def test_each_stage_activity_holds_the_library_lease_for_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Held while the activity reads the checkouts, released when it returns: a lease
+    cannot span activities, each one is its own unit of work."""
+    paths = _paths(tmp_path)
+    gate = CheckoutGate()
+    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = _request()
+    checkout = _checkout(paths)
+    holder = f"piece:{req.piece_key}"
+    seen: dict[str, list[str]] = {}
+
+    real_main = jobs._render_main
+
+    async def observed_main(*args: Any, **kwargs: Any) -> Any:
+        seen["render_main"] = gate.leased(checkout)
+        return await real_main(*args, **kwargs)
+
+    real_finish = jobs.finish_piece_stage  # what `activities` imported
+
+    async def observed_finish(*args: Any, **kwargs: Any) -> Any:
+        seen["finish_piece"] = gate.leased(checkout)
+        return await real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(jobs, "_render_main", observed_main)
+    monkeypatch.setattr(activities, "finish_piece_stage", observed_finish)
+
+    prepared = await _prepared_with_library(acts, env, req, checkout)
+    main = await env.run(acts.render_main, req, prepared)
+    assert seen["render_main"] == [holder]
+    assert gate.leased(checkout) == []
+    await env.run(acts.render_solids, req, prepared, main)
+    assert gate.leased(checkout) == []
+    await env.run(acts.finish_piece, req, prepared, main)
+    assert seen["finish_piece"] == [holder]
+    assert gate.leased(checkout) == []
+
+
+@pytest.mark.parametrize("stage", ["render_solids", "finish_piece"])
+async def test_a_checkout_removed_between_activities_fails_the_next_one(
+    tmp_path: Path, stage: str
+) -> None:
+    """The gap between two activities is open to a removal. The next activity's lease
+    re-checks its checkouts, so it fails fast rather than reading what is gone; the
+    fetcher restores the pin and the retry renders."""
+    paths = _paths(tmp_path)
+    gate = CheckoutGate()
+    deps = replace(_deps(tmp_path, paths), checkouts=gate)
+    acts = RenderActivities(deps)
+    env = ActivityEnvironment()
+    req = _request()
+    checkout = _checkout(paths)
+    prepared = await _prepared_with_library(acts, env, req, checkout)
+    main = await env.run(acts.render_main, req, prepared)
+    if stage == "finish_piece":
+        await env.run(acts.render_solids, req, prepared, main)
+
+    async with gate.removing():
+        shutil.rmtree(checkout)
+
+    with pytest.raises(LibraryNotInstalledError, match="bosl"):
+        if stage == "render_solids":
+            await env.run(acts.render_solids, req, prepared, main)
+        else:
+            await env.run(acts.finish_piece, req, prepared, main)
+    assert gate.leased(checkout) == []
+    assert not (deps.blobs.dir_for(req.piece_key) / PIECE_NAME).exists()
 
 
 # ── the stage activities ───────────────────────────────────────────────────────

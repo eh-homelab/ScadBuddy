@@ -255,7 +255,12 @@ class RenderActivities:
         source = _prepared(prepared)
         work = d.blobs.dir_for(req.piece_key)
         try:
-            # The schema is derived here, from the checkouts: hold them.
+            # The schema is derived here, from the checkouts: hold them. The lease is per
+            # activity, as in `render_main` and `render_solids`, because each activity is
+            # its own unit of work, possibly on another worker, so no lease can span two.
+            # It is safe because every lease re-checks its checkouts (`require_checkouts`),
+            # so a removal between two activities fails the next one fast and, once the
+            # fetcher restores the pin, its retry renders.
             async with library_lease(d.checkouts, f"piece:{req.piece_key}", source.library_path):
                 result = await finish_piece_stage(
                     source,
