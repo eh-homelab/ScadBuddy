@@ -5,11 +5,14 @@ Bambuddy backend and the byte-stream calls."""
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Protocol
 
 from scadbuddy.store.refs import BlobRefs
+
+logger = logging.getLogger(__name__)
 
 
 class BlobStore(Protocol):
@@ -49,7 +52,13 @@ def sweep_blobs(
             continue  # gone since `keys()`: another sweep took it
         if touched > cutoff:
             continue
-        store.remove(key)
+        try:
+            store.remove(key)
+        except OSError:
+            # Logged and skipped, like the other sweeps: one blob that cannot go
+            # (EACCES, EBUSY) must not keep every one after it.
+            logger.exception("could not remove an unreferenced blob", extra={"key": key})
+            continue
         removed.append(key)
     return removed
 
