@@ -153,7 +153,7 @@ describe('render_model', () => {
       http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status })),
       http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
         saved = await request.json()
-        return HttpResponse.json({ id: 'out-1' }, { status: 201 })
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
       }),
     )
     const waiting = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 20 }))
@@ -161,7 +161,7 @@ describe('render_model', () => {
 
     status = 'done'
     const done = await runTool(tool('render_model'), { slug: 'box', save_output: true, output_name: 'v1' }, ctx())
-    expect(firstText(done)).toMatchObject({ status: 'done', output: { id: 'out-1' } })
+    expect(firstText(done)).toMatchObject({ status: 'done', output: { id: '0123456789abcdef0123456789abcdef' } })
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
   })
 })
@@ -189,33 +189,33 @@ describe('print_output (as it will run once approved, #258)', () => {
   it('checks eligibility, then runs the pipeline', async () => {
     let run: unknown
     server.use(
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/eligibility`, () =>
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, () =>
         HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 3, report: { ok: true, issues: [] } }] }),
       ),
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/run`, async ({ request }) => {
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, async ({ request }) => {
         run = await request.json()
         return HttpResponse.json({ route: 'pipeline' })
       }),
     )
-    const result = await tool('print_output').execute({ output_id: 'out-1', pipeline_id: 3, copies: 2 }, ctx())
+    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3, copies: 2 }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run).toMatchObject({ pipeline_id: 3, copies: 2, plate_id: 1, all_plates: false, force: false, options: {} })
   })
 
   it('stops on a blocking eligibility issue unless forced', async () => {
     server.use(
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/eligibility`, () =>
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, () =>
         HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 3, report: { ok: false, issues: [{ kind: 'nozzle' }] } }] }),
       ),
     )
-    const result = await tool('print_output').execute({ output_id: 'out-1', pipeline_id: 3 }, ctx())
+    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3 }, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatchObject({ status: 'ineligible' })
   })
 
   function defaultPipeline(id: number | null) {
     return [
-      http.get(`${BACKEND}/api/v1/outputs/out-1`, () => HttpResponse.json({ id: 'out-1', slug: 'box' })),
+      http.get(`${BACKEND}/api/v1/outputs/0123456789abcdef0123456789abcdef`, () => HttpResponse.json({ id: '0123456789abcdef0123456789abcdef', slug: 'box' })),
       http.get(`${BACKEND}/api/v1/print/models/box/pipelines`, () =>
         HttpResponse.json({ pipelines: [], printers: [], default_pipeline_id: id, model_choices: {}, printer_bed_types: {} }),
       ),
@@ -227,16 +227,16 @@ describe('print_output (as it will run once approved, #258)', () => {
     let ran = false
     server.use(
       ...defaultPipeline(7),
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/eligibility`, async ({ request }) => {
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, async ({ request }) => {
         checked = await request.json()
         return HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 7, report: { ok: false, issues: [{ kind: 'printer_offline' }] } }] })
       }),
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/run`, () => {
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, () => {
         ran = true
         return HttpResponse.json({})
       }),
     )
-    const result = await tool('print_output').execute({ output_id: 'out-1' }, ctx())
+    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef' }, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatchObject({ status: 'ineligible', pipeline_id: 7 })
     expect(checked).toEqual({ pipeline_ids: [7] })
@@ -248,37 +248,37 @@ describe('print_output (as it will run once approved, #258)', () => {
     server.use(
       ...defaultPipeline(7),
       // No eligibility handler: calling it would be an unhandled request.
-      http.post(`${BACKEND}/api/v1/print/outputs/out-1/run`, async ({ request }) => {
+      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, async ({ request }) => {
         run = await request.json()
         return HttpResponse.json({ route: 'pipeline' })
       }),
     )
-    const result = await tool('print_output').execute({ output_id: 'out-1', force: true }, ctx())
+    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', force: true }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run).toMatchObject({ pipeline_id: 7, force: true })
   })
 
   it('refuses clearly when no pipeline resolves', async () => {
     server.use(...defaultPipeline(null))
-    const result = await runTool({ ...tool('print_output'), gated: false }, { output_id: 'out-1' }, ctx())
+    const result = await runTool({ ...tool('print_output'), gated: false }, { output_id: '0123456789abcdef0123456789abcdef' }, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('no slicer pipeline is set for model box')
   })
 
   it('passes a Bambuddy scope error through with its detail', async () => {
     server.use(
-      http.post(`${BACKEND}/api/v1/outputs/out-1/send`, () =>
+      http.post(`${BACKEND}/api/v1/outputs/0123456789abcdef0123456789abcdef/send`, () =>
         HttpResponse.json(
           { title: 'Bambuddy API key lacks a scope', detail: 'The API key needs "Manage Library" to upload the 3MF' },
           { status: 403 },
         ),
       ),
     )
-    const result = await runTool(tool('send_to_bambuddy'), { output_id: 'out-1' }, { ...ctx(), pending: new PendingActionStore() })
+    const result = await runTool(tool('send_to_bambuddy'), { output_id: '0123456789abcdef0123456789abcdef' }, { ...ctx(), pending: new PendingActionStore() })
     // Through runTool it is only prepared …
     expect(firstText(result)).toMatchObject({ status: 'pending_approval' })
     // … and once executed, the scope error reaches the agent verbatim.
-    const executed = await runTool({ ...tool('send_to_bambuddy'), gated: false }, { output_id: 'out-1' }, ctx())
+    const executed = await runTool({ ...tool('send_to_bambuddy'), gated: false }, { output_id: '0123456789abcdef0123456789abcdef' }, ctx())
     expect(executed.isError).toBe(true)
     expect(firstText(executed)).toContain('needs "Manage Library"')
   })
@@ -411,7 +411,7 @@ describe('binary results: inline under the cap, a link over it', () => {
 
   it('links when a streamed body with no length outgrows the cap, and uses the bare path without a public URL', async () => {
     server.use(
-      http.get(`${BACKEND}/api/v1/jobs/j1/preview.glb`, () => {
+      http.get(`${BACKEND}/api/v1/jobs/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/preview.glb`, () => {
         const body = new ReadableStream<Uint8Array>({
           start(controller) {
             for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array(8))
@@ -421,9 +421,9 @@ describe('binary results: inline under the cap, a link over it', () => {
         return new HttpResponse(body, { headers: { 'content-type': 'model/gltf-binary' } })
       }),
     )
-    const result = await runTool(tool('get_render_preview'), { job_id: 'j1' }, ctx({ maxInlineBytes: 16 }))
+    const result = await runTool(tool('get_render_preview'), { job_id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' }, ctx({ maxInlineBytes: 16 }))
     expect(result.isError).toBeFalsy()
-    expect(result.content[0]).toMatchObject({ type: 'resource_link', uri: '/api/v1/jobs/j1/preview.glb' })
+    expect(result.content[0]).toMatchObject({ type: 'resource_link', uri: '/api/v1/jobs/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/preview.glb' })
     expect((result.content[1] as { text: string }).text).toContain('SCADBUDDY_PUBLIC_URL')
   })
 
@@ -515,6 +515,33 @@ describe('base64 inputs', () => {
     const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('not valid base64')
+  })
+})
+
+describe('set_print_options: a settings write (spec §8.1), unlike the remember_* choices', () => {
+  it('is outward and only prepares, while remember_* are write', async () => {
+    expect(tool('set_print_options').risk).toBe('outward')
+    expect(tool('remember_model_print_choices').risk).toBe('write')
+    expect(tool('remember_printer_bed_type').risk).toBe('write')
+    // No backend handler: reaching PUT /settings/print-options would fail the test.
+    const result = await runTool(tool('set_print_options'), { scope: 'global', options: { timelapse: true } }, ctx())
+    expect(firstText(result)).toMatchObject({
+      status: 'pending_approval',
+      summary: 'Remember print options for global: {"timelapse":true}',
+    })
+  })
+})
+
+describe('id arguments match the backend path patterns', () => {
+  it('refuses a malformed output id with a clear message, before any backend call', async () => {
+    const result = await runTool(tool('get_output'), { output_id: 'out-1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('must be an output id: 32 lowercase hex digits, as list_outputs returns it')
+  })
+  it('refuses a malformed job id the same way', async () => {
+    const result = await runTool(tool('get_render_job'), { job_id: 'J1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('must be a render job id: 32 lowercase hex digits')
   })
 })
 

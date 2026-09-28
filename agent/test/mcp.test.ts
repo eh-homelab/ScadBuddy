@@ -261,7 +261,7 @@ describe('/mcp: disabled mode', () => {
     const { pending_action_id } = firstText(
       await a.callTool({ name: 'delete_model', arguments: { slug: 'keychain' } }),
     ) as { pending_action_id: string }
-    await b.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'out-b' } })
+    await b.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } })
 
     const listA = firstText(await a.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
     const listB = firstText(await b.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
@@ -299,12 +299,12 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
     const client = await open(app, { headers: auth })
     const prepared = await client.callTool({
       name: 'print_output',
-      arguments: { output_id: 'out-1', pipeline_id: 3, copies: 2 },
+      arguments: { output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3, copies: 2 },
     })
     expect(prepared.isError).toBeFalsy()
     const body = firstText(prepared) as { status: string; pending_action_id: string; summary: string }
     expect(body.status).toBe('pending_approval')
-    expect(body.summary).toBe('Print output out-1: 2 copies of plate 1 via pipeline 3')
+    expect(body.summary).toBe('Print output 0123456789abcdef0123456789abcdef: 2 copies of plate 1 via pipeline 3')
 
     const listed = firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))
     expect(listed).toEqual([expect.objectContaining({ pending_action_id: body.pending_action_id, tool: 'print_output' })])
@@ -325,7 +325,7 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
     const ca = await open(t.app, { headers: { authorization: `Bearer ${a.token}` } })
     const cb = await open(t.app, { headers: { authorization: `Bearer ${b.token}` } })
     const { pending_action_id } = firstText(
-      await ca.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'out-1' } }),
+      await ca.callTool({ name: 'send_to_bambuddy', arguments: { output_id: '0123456789abcdef0123456789abcdef' } }),
     ) as { pending_action_id: string }
     const res = await cb.callTool({ name: 'confirm_action', arguments: { pending_action_id } })
     expect(res.isError).toBe(true)
@@ -336,7 +336,7 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
   it('a write token cannot even prepare an outward action', async () => {
     const { app, auth } = await bearerApp('write')
     const client = await open(app, { headers: auth })
-    const res = await client.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'out-1' } })
+    const res = await client.callTool({ name: 'send_to_bambuddy', arguments: { output_id: '0123456789abcdef0123456789abcdef' } })
     expect(res.isError).toBe(true)
     expect(firstText(res)).toContain('needs the "outward" tier')
   })

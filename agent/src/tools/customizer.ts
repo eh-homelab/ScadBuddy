@@ -13,7 +13,11 @@ import { validateParams } from './validate.js'
 
 type JobStatus = Awaited<ReturnType<typeof getJob>>
 
-const jobId = z.string().min(1).describe('Render job id, as render_model returns it')
+/** Job ids are 32 lowercase hex digits (every `job_id` path parameter in backend/openapi.json). */
+const jobId = z
+  .string()
+  .regex(/^[0-9a-f]{32}$/, 'must be a render job id: 32 lowercase hex digits, as render_model returns it')
+  .describe('Render job id, as render_model returns it')
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
 async function fetchSchema(ctx: ToolContext, slug: string, version?: string) {
   return version

@@ -11,7 +11,11 @@ export const slug = z
   .max(108)
   .describe('Model slug, e.g. "keychain" or "builtin:gridfinity-bin" for a bundled template')
 
-export const outputId = z.string().min(1).describe('Output id, as list_outputs returns it')
+/** Output ids are 32 lowercase hex digits (every `output_id` path parameter in backend/openapi.json). */
+export const outputId = z
+  .string()
+  .regex(/^[0-9a-f]{32}$/, 'must be an output id: 32 lowercase hex digits, as list_outputs returns it')
+  .describe('Output id, as list_outputs returns it')
 
 export const commit = z.string().regex(/^[0-9a-f]{7,40}$/).describe('A revision id from list_versions')
 

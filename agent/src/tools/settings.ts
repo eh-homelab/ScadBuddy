@@ -82,6 +82,23 @@ export const settingsTools: Tool[] = [
       ),
   }),
 
+  // `outward`, deliberately, unlike the `remember_*` tools in print.ts (`write`).
+  // Spec §8.1 puts "settings or credential writes" in `outward`, and this is one:
+  // PUT /settings/print-options (backend/scadbuddy/api/settings.py
+  // `put_print_options` → settings_store `save_print_options`) sets options that
+  // bambuddy/send.py `resolve_print_options` then applies, global → per-printer
+  // → per-model, to EVERY later send and print at that scope, by anyone, without
+  // being chosen again: bed levelling, flow calibration, timelapse, preheat,
+  // manual start, queue position. A remembered option the pipeline run cannot
+  // carry also changes the dispatch route to slice-and-queue
+  // (bambuddy/pipelines.py `run_for_output`, #124).
+  //
+  // The `remember_*` tools write a different kind of state: which pipeline,
+  // printer, spools and plate type the print dialog pre-selects for one model
+  // or printer (settings_store `set_model_pipeline`, `model_print_choices`,
+  // `set_printer_bed_type`). Those are starting choices a person or agent picks
+  // again per print, not settings that silently change every print, so they
+  // stay `write`.
   defineTool({
     name: 'set_print_options',
     description:
