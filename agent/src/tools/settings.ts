@@ -83,11 +83,9 @@ export const settingsTools: Tool[] = [
   // PUT /settings/print-options (backend/scadbuddy/api/settings.py
   // `put_print_options` → settings_store `save_print_options`) sets options that
   // bambuddy/send.py `resolve_print_options` then applies, global → per-printer
-  // → per-model, to EVERY later send and print at that scope, by anyone, without
-  // being chosen again: bed levelling, flow calibration, timelapse, preheat,
-  // manual start, queue position. On the send bar, a remembered option the
-  // pipeline run cannot carry also changes the dispatch route to slice-and-queue
-  // (bambuddy/send.py `_queue_send`, #124).
+  // → per-model, to EVERY later print at that scope, by anyone, without being
+  // chosen again: bed levelling, flow calibration, timelapse, preheat, manual
+  // start, queue position.
   //
   // The `remember_*` tools write a different kind of state: which printer,
   // spools, nozzles, quality and plate type the print dialog pre-selects for
