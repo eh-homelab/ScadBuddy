@@ -20,6 +20,10 @@ from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScop
 logger = logging.getLogger(__name__)
 
 
+#: The meta flag on a copy whose upload a sweep removed; `mirror` rewrites meta without it.
+SWEPT = "swept"
+
+
 def asset_key(asset_id: str) -> str:
     return f"asset-{asset_id}"
 
@@ -91,8 +95,16 @@ class RemoteAssets:
     async def drop(self, ids: Iterable[str], *, cutoff: datetime) -> list[str]:
         """Remove the store's copies of uploads swept from the volume, the ids dropped.
         Only a copy not stored again since ``cutoff`` (the sweep's start): a re-upload
-        during the sweep bumps its `touched_at` and keeps it. A failure is logged and
-        leaves that copy for the next sweep's `reconcile`."""
+        during the sweep bumps its `touched_at` and keeps it. Each copy is first marked
+        swept, so a failure (logged) leaves it for the next sweep's `reconcile`."""
+        ids = list(ids)
+        await asyncio.to_thread(
+            self.content.index.mark,
+            [asset_key(asset_id) for asset_id in ids],
+            backend=self.content.name,
+            cutoff=cutoff,
+            **{SWEPT: True},
+        )
         dropped: list[str] = []
         for asset_id in ids:
             try:
@@ -105,16 +117,17 @@ class RemoteAssets:
         return dropped
 
     async def reconcile(self, store: AssetStore, *, cutoff: datetime) -> list[str]:
-        """Drop every copy on this backend whose upload ``store`` no longer holds: what
-        an earlier `drop` failed to remove."""
+        """Retry the drops a sweep decided and could not finish: copies marked swept
+        whose upload ``store`` still lacks. Never a diff against the volume: a copy the
+        volume merely lacks (restored from a backup) may be the only one left."""
         rows = await asyncio.to_thread(
             self.content.index.stats, ["asset"], backend=self.content.name
         )
         local = set(await asyncio.to_thread(store.ids))
         orphans = [
             asset_id
-            for asset_id in (row.key.removeprefix(asset_key("")) for row in rows)
-            if asset_id not in local
+            for asset_id, row in ((row.key.removeprefix(asset_key("")), row) for row in rows)
+            if row.meta.get(SWEPT) and asset_id not in local
         ]
         return await self.drop(orphans, cutoff=cutoff)
 

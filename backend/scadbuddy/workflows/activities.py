@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.assets import AssetStore, asset_ids_in
+from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.job_models import Job, JobNotFoundError, now
@@ -87,6 +87,28 @@ def _failure(error: OpenSCADError) -> ApplicationError:
         type="OpenSCADError",
         non_retryable=True,
     )
+
+
+async def _ensure_assets(d: WorkerDeps, params: Mapping[str, object]) -> set[str] | None:
+    """Bring the render's uploads in from the store; the ids it did not bring in (the
+    ones already local among them), or None without a store (one volume: nothing to
+    bring in). A render that then finds one missing names it as not in the store."""
+    if d.remote_assets is None:
+        return None
+    wanted = asset_ids_in(params)
+    brought = await _heartbeating(asyncio.create_task(d.remote_assets.ensure(d.assets, wanted)))
+    return wanted - set(brought)
+
+
+def _unavailable(error: AssetUnavailableError, missing: set[str] | None) -> ApplicationError:
+    """Non-retryable: the same parameters name the same missing file on every attempt."""
+    message = str(error)
+    if missing is not None and error.asset_id in missing:
+        message = (
+            f"parameter {error.parameter!r} names uploaded file {error.asset_id}, which is"
+            " not in the blob store"
+        )
+    return ApplicationError(message, type="AssetUnavailable", non_retryable=True)
 
 
 async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
@@ -279,10 +301,7 @@ class RenderActivities:
         # It renders into a directory it never fetched: the compare-and-swap baseline is
         # what the index holds now, and the directory is no hit until this publishes.
         baseline = await d.blobs.checkout_fresh(req.piece_key)
-        if d.remote_assets is not None:
-            await _heartbeating(
-                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
-            )
+        missing = await _ensure_assets(d, req.params)
         work = asyncio.create_task(
             render_main(
                 _prepared(prepared),
@@ -299,6 +318,8 @@ class RenderActivities:
             output = await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        except AssetUnavailableError as error:
+            raise _unavailable(error, missing) from None
         await _heartbeating(
             asyncio.create_task(
                 d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
@@ -313,10 +334,7 @@ class RenderActivities:
         d = self.deps
         # The main 3MF may have been rendered on another worker.
         baseline = await _checkout(d.blobs, req.piece_key)
-        if d.remote_assets is not None:
-            await _heartbeating(
-                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
-            )
+        missing = await _ensure_assets(d, req.params)
         work = asyncio.create_task(
             render_solids_stage(
                 _prepared(prepared),
@@ -334,6 +352,8 @@ class RenderActivities:
             await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        except AssetUnavailableError as error:
+            raise _unavailable(error, missing) from None
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(

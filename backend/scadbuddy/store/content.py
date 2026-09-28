@@ -71,6 +71,8 @@ class ContentStore:
     ) -> None:
         self.backend = backend
         self.index = index
+        #: `_keep` tasks still running after the call that started them was cancelled.
+        self._keeping: set[asyncio.Task[None]] = set()
         self.max_total_bytes = max_total_bytes
         self.max_count = max_count
         self.metrics = metrics
@@ -239,23 +241,36 @@ class ContentStore:
 
     async def _release_or_keep(self, stat: BlobStat) -> None:
         """Release a deleted row's object. If that fails for any reason but a refusal,
-        the row is put back (unless the key was stored again meanwhile), so the object
-        stays tracked and a later pass retries; a refused object is outside ScadBuddy's
-        folders and is left untracked on purpose."""
+        a cancellation included, the row is put back so the object stays tracked and a
+        later pass retries; a refused object is outside ScadBuddy's folders and is left
+        untracked on purpose."""
         try:
             await self._release(stat.ref)
         except RefusedDeleteError:
             raise
-        except Exception:
-            await asyncio.to_thread(
-                self.index.swap,
-                stat.key,
-                stat.ref,
-                expected=None,
-                slug=stat.slug,
-                meta=stat.meta,
-            )
+        except BaseException:
+            # Shielded: a second cancellation must not stop the row going back.
+            keep = asyncio.create_task(self._keep(stat))
+            self._keeping.add(keep)
+            keep.add_done_callback(self._keeping.discard)
+            await asyncio.shield(keep)
             raise
+
+    async def _keep(self, stat: BlobStat) -> None:
+        landed = await asyncio.to_thread(
+            self.index.swap, stat.key, stat.ref, expected=None, slug=stat.slug, meta=stat.meta
+        )
+        if landed:
+            return
+        # A put stored the key again meanwhile. If it names another object, nothing
+        # tracks this one any more: try the release once more rather than orphan it.
+        try:
+            await self._release(stat.ref)
+        except Exception:
+            logger.exception(
+                "a replaced object could not be removed and is untracked",
+                extra={"key": stat.key, "backend_id": stat.ref.backend_id},
+            )
 
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
         for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):

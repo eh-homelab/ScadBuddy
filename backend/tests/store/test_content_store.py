@@ -220,3 +220,41 @@ def test_a_local_object_id_with_a_trailing_newline_is_refused(tmp_path: Path) ->
     backend = LocalContentBackend(tmp_path)
     with pytest.raises(ValueError, match="not a local object id"):
         backend._path(f"piece/{'0' * 64}\n")
+
+
+class _CancelledRemove(LocalContentBackend):
+    async def remove(self, backend_id: str) -> None:
+        raise asyncio.CancelledError
+
+
+async def test_a_release_cancelled_midway_keeps_the_row(tmp_path: Path, pool: Pool) -> None:
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"p", name="p", scope=SCOPE, key="k")
+    store.backend = _CancelledRemove(tmp_path / "remote")
+    with pytest.raises(asyncio.CancelledError):
+        await store.delete("k")
+    assert store.index.get("k") is not None
+
+
+async def test_a_failed_release_that_loses_to_a_put_releases_the_old_object(
+    tmp_path: Path, pool: Pool
+) -> None:
+    store = local_content(tmp_path / "remote", pool)
+    old = await store.put("piece", b"old", name="p", scope=SCOPE, key="k")
+
+    class PutMeanwhile(LocalContentBackend):
+        first = True
+
+        async def remove(self, backend_id: str) -> None:
+            if self.first:
+                self.first = False
+                await store.put("piece", b"new", name="p", scope=SCOPE, key="k")
+                raise RuntimeError("Bambuddy is restarting")
+            await super().remove(backend_id)
+
+    store.backend = PutMeanwhile(tmp_path / "remote")
+    with pytest.raises(RuntimeError, match="restarting"):
+        await store.delete("k")
+    row = store.index.get("k")
+    assert row is not None and row.ref.sha256 == hashlib.sha256(b"new").hexdigest()
+    assert not (tmp_path / "remote" / old.backend_id).exists()  # not left untracked

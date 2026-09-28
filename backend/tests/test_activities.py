@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import shutil
 import uuid
 from collections.abc import Iterator
@@ -21,7 +22,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
@@ -30,9 +31,12 @@ from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, rend
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.render.runner import ProcessOutput
+from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
+from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import activities
+from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
     RenderActivities,
@@ -54,6 +58,7 @@ from scadbuddy.workflows.models import (
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import fake_3mf_openscad, write_openscad_3mf
+from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
 
 REVISION = "c0ffee0"
@@ -624,3 +629,46 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
     assert first.read_bytes() == before
     assert second.parent != first.parent
     assert second.read_bytes() != before
+
+
+@pytest.mark.parametrize("stage", ["render_main", "render_solids"])
+async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    missing = "f" * 64
+
+    async def refuses(*_: object, **__: object) -> None:
+        # What `staged_assets` raises for a file parameter naming no upload.
+        file_assets(
+            CustomizerSchema(
+                parameters=[Parameter(name="label", type="file", initial="", accept=["svg"])]
+            ),
+            {"label": missing},
+            AssetStore(tmp_path / "empty"),
+            tmp_path,
+        )
+
+    monkeypatch.setattr(activities_module, "render_main", refuses)
+    monkeypatch.setattr(activities_module, "render_solids_stage", refuses)
+    paths = _paths(tmp_path)
+    with store_pool(pg_conninfo) as pool:
+        deps = dataclasses.replace(
+            _deps(tmp_path, paths),
+            remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
+        )
+        acts = RenderActivities(deps)
+        req = PieceRequest(
+            slug="demo",
+            revision=REVISION,
+            params={"label": missing},
+            piece_key=piece_key("demo", REVISION, "model.scad", {"label": missing}),
+        )
+        deps.blobs.dir_for(req.piece_key)  # render_solids continues a piece
+        prepared = await ActivityEnvironment().run(acts.prepare, req)
+        main = RenderMainResult()
+        run = getattr(acts, stage)
+        args = (req, prepared) if stage == "render_main" else (req, prepared, main)
+        with pytest.raises(ApplicationError) as raised:
+            await ActivityEnvironment().run(run, *args)
+    assert raised.value.type == "AssetUnavailable" and raised.value.non_retryable
+    assert missing in str(raised.value) and "not in the blob store" in str(raised.value)
