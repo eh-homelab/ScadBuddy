@@ -31,6 +31,7 @@ from scadbuddy.render.jobs import (
     render_main,
     render_solids_stage,
 )
+from scadbuddy.render.previews import render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore
@@ -164,6 +165,7 @@ class RenderActivities:
             self.render_solids,
             self.finish_piece,
             self.project,
+            self.render_preview_png,
         ]
 
     def _config(self, prepared: PrepareResult) -> Config:
@@ -273,6 +275,22 @@ class RenderActivities:
         # Last, and atomically: from here on the piece is answered by `cached_piece`.
         await asyncio.to_thread(_write_piece, work, piece)
         return piece
+
+    @activity.defn(name="render_preview_png")
+    async def render_preview_png(self, slug: str) -> bytes:
+        d = self.deps
+        work = asyncio.create_task(
+            render_preview(
+                slug,
+                config=d.config,
+                paths=d.paths,
+                history=d.history,
+                assets=d.assets,
+                executor=d.thumbnail_executor,
+                checkouts=d.checkouts,
+            )
+        )
+        return await _heartbeating(work)
 
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:

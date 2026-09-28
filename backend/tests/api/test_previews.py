@@ -29,6 +29,7 @@ from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.previews import PreviewScheduler
 from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
@@ -80,7 +81,7 @@ def state(app: FastAPI) -> AppState:
 @pytest.fixture
 def stub(state: AppState, paths: DataPaths) -> StubRender:
     render = StubRender(paths)
-    scheduler(state).render = render
+    scheduler(state).runner = render
     scheduler(state).debounce = 0.0
     scheduler(state).interval = 0.0
     return render
@@ -424,7 +425,7 @@ def _boot(settings: Settings, stub: StubRender) -> tuple[FastAPI, AppState]:
     app = create_app(settings)
     booted: AppState = getattr(app.state, STATE_ATTR)
     if booted.previews is not None:
-        booted.previews.render = stub
+        booted.previews.runner = stub
         booted.previews.debounce = 0.0
         booted.previews.interval = 0.0
     return app, booted
@@ -532,6 +533,7 @@ def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
         pass
 
     assert closed == ["previews", "queue"]
+    assert isinstance(booted.queue, RenderQueue)
     assert booted.queue._tasks == []
 
 
