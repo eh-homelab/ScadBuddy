@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { api, ApiError } from '../api/client'
 import type { ChoicesView } from '../api/types'
 import { choicesView } from '../mocks/choices'
-import { DEFAULT_NOZZLES, usePrintChoices } from './usePrintChoices'
+import { DEFAULT_NOZZLES } from './printChoices'
+import { usePrintChoices } from './usePrintChoices'
 
 const OUTPUT_A = 'a'.repeat(32)
 const OUTPUT_B = 'c'.repeat(32)

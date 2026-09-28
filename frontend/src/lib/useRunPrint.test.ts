@@ -2,10 +2,14 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { api, ApiError } from '../api/client'
 import { choicesView, queuedResult } from '../mocks/choices'
-import { DEFAULT_NOZZLES, type PrintSelection } from './usePrintChoices'
+import type { SlotChoice } from '../api/types'
+import { DEFAULT_NOZZLES } from './printChoices'
+import type { PrintSelection } from './usePrintChoices'
 import { useRunPrint } from './useRunPrint'
 
 const OUTPUT = 'a'.repeat(32)
+/** Hoisted: a fresh `[]` per render would itself count as a change of plan. */
+const PLAN: SlotChoice[] = []
 
 const selection: PrintSelection = {
   nozzles: DEFAULT_NOZZLES,
@@ -16,7 +20,10 @@ const selection: PrintSelection = {
   plate: 'all',
 }
 
-/** The props, built once per render set: a fresh `plan` or `overrides` is itself a change. */
+/**
+ * The run's inputs. Every array and object in them is shared, so two calls are the same
+ * choices and only an override is a change.
+ */
 function input(overrides: Partial<PrintSelection> = {}) {
   return {
     outputId: OUTPUT,
@@ -24,7 +31,7 @@ function input(overrides: Partial<PrintSelection> = {}) {
     choices: choicesView,
     printerId: 1,
     selection: { ...selection, ...overrides },
-    plan: [],
+    plan: PLAN,
     planChanged: false,
     copies: null,
     projectId: null,
@@ -67,6 +74,11 @@ describe('useRunPrint', () => {
     await act(() => result.current.run())
     expect(result.current.runError).toBe('No process for 0.2 mm.')
     expect(result.current.refused).toBe(true)
+
+    // The same choices again are still refused.
+    rerender(input())
+    expect(result.current.refused).toBe(true)
+    expect(result.current.runError).toBe('No process for 0.2 mm.')
 
     rerender(input({ tier: 'fine' }))
     await waitFor(() => expect(result.current.refused).toBe(false))

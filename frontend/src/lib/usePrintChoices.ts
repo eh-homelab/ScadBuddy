@@ -1,17 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
+import { DEFAULT_NOZZLES, refKey } from './printChoices'
 
 export type Tier = NonNullable<PrintChoices['tier']>
-
-export const DEFAULT_NOZZLES: NozzleChoice[] = [
-  { size: '0.4', flow: 'standard' },
-  { size: '0.4', flow: 'standard' },
-]
-
-export function refKey(ref: PresetRef): string {
-  return `${ref.source}:${ref.id}`
-}
 
 /** What the run sends of the choices made over the read (the spools aside). */
 export interface PrintSelection {
@@ -30,8 +22,11 @@ export interface PrintSelection {
  * and the choices made over it: the nozzles, tier or process, plate type, per-slot preset
  * overrides and which plate of the output (#83).
  *
- * `reload` re-reads for the printer in view; it is what the load effect itself runs.
+ * `reload` re-reads for `askedPrinter` — `null`, so the server's remembered printer,
+ * unless the user picked one — and is what the load effect itself runs.
  * `reset` puts the choices back as a fresh open finds them, for when the dialog closes.
+ * `sourceKey` identifies what is being printed; what belongs to one source is reset when
+ * it changes, here and by the caller's own effect keyed on it.
  */
 export function usePrintChoices(open: boolean, outputId: string | undefined) {
   const [choices, setChoices] = useState<ChoicesView | null>(null)
@@ -103,13 +98,15 @@ export function usePrintChoices(open: boolean, outputId: string | undefined) {
     reload()
   }, [reload])
 
-  // One output's plates and overrides do not survive a change of output.
+  // One output's plates and overrides do not survive a change of output. PrintPicker
+  // resets its print options on the same `sourceKey`; the two are one reset.
+  const sourceKey = outputId
   useEffect(() => {
     setPlate(1)
     setPlates([])
     setOverrides({})
     seeded.current = false
-  }, [outputId])
+  }, [sourceKey])
 
   useEffect(() => {
     if (!open || !outputId) return
@@ -177,6 +174,7 @@ export function usePrintChoices(open: boolean, outputId: string | undefined) {
 
   const selection: PrintSelection = { nozzles, tier, processName, bedType, overrides, plate }
   return {
+    sourceKey,
     choices,
     loading,
     loadError,

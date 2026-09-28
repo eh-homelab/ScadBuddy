@@ -120,10 +120,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       })
   }, [outputId, projectId, progress])
 
-  // One output's options do not survive a change of output.
+  // One output's options do not survive a change of output — the other half of
+  // usePrintChoices' reset on the same `sourceKey`.
+  const { sourceKey } = picker
   useEffect(() => {
     setOptions({})
-  }, [outputId])
+  }, [sourceKey])
 
   /** #81 — the chosen printer's model, reported once the choices have landed. */
   const printerModel = choices ? (printer?.model ?? null) : undefined

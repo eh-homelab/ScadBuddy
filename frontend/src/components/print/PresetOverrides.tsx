@@ -1,5 +1,5 @@
 import type { FilamentPresetOption, PresetRef, SlotNeed } from '../../api/types'
-import { refKey } from '../../lib/usePrintChoices'
+import { refKey } from '../../lib/printChoices'
 
 type Props = {
   size: string
