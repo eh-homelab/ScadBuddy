@@ -15,13 +15,17 @@ fallback, and every call raises `DatabaseRequiredError`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import datetime
 
-from psycopg import Connection
+from psycopg import AsyncConnection, Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
+
+#: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
+COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
 
 class DatabaseRequiredError(RuntimeError):
@@ -95,6 +99,30 @@ class BambuddyUploadStore:
         if self._pool is None:
             raise DatabaseRequiredError
         return self._pool
+
+    @asynccontextmanager
+    async def copy_lock(self, key: str) -> AsyncIterator[None]:
+        """Held, across every replica on this database, while one caller finds, uploads
+        and records a library copy under ``key`` (#317).
+
+        A session-level advisory lock on a connection of its own, closed on the way
+        out, rather than a transaction-level one on the pool's. The section spans a
+        Bambuddy upload (up to its upload timeout), and the pool is the render queue's:
+        a pooled connection held that long takes a slot from it, and the store's own
+        queries inside the section need further slots, so enough folders locked at
+        once would exhaust the pool against itself. Closing the connection releases
+        the lock however the section ends, cancellation and a lost connection included.
+        """
+        pool = self._require()
+        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
+        conn = await AsyncConnection.connect(conninfo, autocommit=True)
+        try:
+            await conn.execute(
+                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"{COPY_LOCK_PREFIX}{key}",)
+            )
+            yield
+        finally:
+            await conn.close()
 
     async def for_output(self, output_id: str) -> list[LibraryCopy]:
         """The output's copies in upload order, each with its slices."""
