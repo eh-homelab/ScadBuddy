@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import health, libraries, media, metrics, models
+from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.static import SPAStaticFiles
@@ -341,6 +342,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.to_thread(state.decisions.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
+        grants = getattr(app.state, "agent_grants", None)
+        if grants is not None:
+            await grants.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
 
@@ -359,6 +363,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
+    # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
+    # refused on the method, path and marker header alone, before any body is read.
+    grants = postgres_grants(app_settings.database_url) if app_settings.database_url else None
+    # Closed by the lifespan, after everything else has stopped.
+    app.state.agent_grants = grants
+    app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

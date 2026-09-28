@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { NOT_A_TOOL, PENDING_ROUTES } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { connect, testApp } from './helpers/mcp.js'
 
 // The openapi coverage check (spec §5.1, issue #251): every /api/v1 operation
 // in backend/openapi.json has a tool, or an allowlist entry with a reason.
@@ -53,5 +54,45 @@ describe('openapi coverage', () => {
 
   it('gives every allowlist and pending entry a reason', () => {
     for (const entry of [...NOT_A_TOOL, ...PENDING_ROUTES]) expect(entry.reason.length, entry.operation).toBeGreaterThan(20)
+  })
+})
+
+// The same check against what an external agent is actually offered: the
+// tools `/mcp` answers `tools/list` with (issue #259). A tool in the registry
+// that the endpoint failed to serve would leave its routes uncovered here even
+// though the registry-based check above passes.
+describe('openapi coverage over /mcp tools/list', () => {
+  const closers: (() => Promise<void>)[] = []
+  afterEach(async () => {
+    await Promise.all(closers.splice(0).map((close) => close()))
+  })
+
+  async function listed(): Promise<string[]> {
+    const { app, tokens } = testApp()
+    const { token } = await tokens.mint({ name: 'coverage', tier: 'outward' })
+    const client = await connect(app, { headers: { authorization: `Bearer ${token}` } })
+    closers.push(() => client.close())
+    const names: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = await client.listTools(cursor ? { cursor } : {})
+      names.push(...page.tools.map((t) => t.name))
+      cursor = page.nextCursor
+    } while (cursor)
+    return names
+  }
+
+  it('lists only registry tools, each once', async () => {
+    const names = await listed()
+    const registry = new Set(ALL_TOOLS.map((t) => t.name))
+    expect(names.filter((n) => !registry.has(n))).toEqual([])
+    expect(new Set(names).size).toBe(names.length)
+  })
+
+  it('covers every /api/v1 operation with a listed tool or an allowlist entry', async () => {
+    const names = new Set(await listed())
+    const coveredByListed = new Set<string>(ALL_TOOLS.filter((t) => names.has(t.name)).flatMap((t) => [...t.routes]))
+    const uncovered = operations.filter((op) => !coveredByListed.has(op) && !allowlisted.has(op) && !pending.has(op))
+    expect(uncovered, 'a route whose tool /mcp does not list').toEqual([])
   })
 })
