@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useLocation, useNavigate } from 'react-router'
+import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { toSlides } from '../components/media/slides'
@@ -32,12 +32,26 @@ function History() {
   )
 }
 
+/** In-app navigation to the catalogue while it stays mounted: the Models tab, the agent. */
+function AppNav() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <Link to="/">Models</Link>
+      <button type="button" onClick={() => void navigate('/?tag=keychain')}>
+        Agent navigate
+      </button>
+    </>
+  )
+}
+
 function renderCatalogue(route = '/') {
   return renderPage(
     <>
       <CataloguePage />
       <Search />
       <History />
+      <AppNav />
     </>,
     { route },
   )
@@ -660,6 +674,36 @@ describe('CataloguePage list mode (#278)', () => {
     expect(rows()).toHaveLength(2)
   })
 
+  it('keeps List across in-app navigation to the catalogue while it stays mounted', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(4)
+
+    await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list'),
+    )
+    expect(rows()).toHaveLength(2)
+
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?view=list'))
+    expect(rows()).toHaveLength(4)
+    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('shows Cards on Back to an entry with no view, even with List remembered', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('list')
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
+    expect(rows()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
   it('lets a view in the URL win over the remembered one', async () => {
     window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'cards')
     renderCatalogue('/?view=list')
@@ -803,6 +847,53 @@ describe('CataloguePage list mode (#278)', () => {
       expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
         'src',
         slides[0]!.src,
+      ),
+    )
+  })
+
+  it('opens a template whose only media is a video with no poster', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    const list = models.map((model) =>
+      model.slug === 'gridfinity-bin' ? { ...model, media: [posterless] } : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    const thumbnail = within(rowOf('Gridfinity Bin')).getByRole('button', {
+      name: 'View media of Gridfinity Bin',
+    })
+    expect(within(thumbnail).queryByTestId('media-count')).not.toBeInTheDocument()
+    await user.click(thumbnail)
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current video source')).toHaveAttribute(
+        'src',
+        api.mediaUrl('gridfinity-bin', posterless),
+      ),
+    )
+  })
+
+  it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    await user.click(
+      within(rowOf('Name Keychain')).getByRole('button', { name: 'View media of Name Keychain' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'alt',
+        'Name Keychain',
       ),
     )
   })

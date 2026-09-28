@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
 import { useAgentHandlers } from '../agent/useAgentHandlers'
@@ -10,7 +10,7 @@ import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
 import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
-import { type Slide, toSlides } from '../components/media/slides'
+import { namedSlides, type Slide } from '../components/media/slides'
 import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
@@ -44,15 +44,24 @@ export function CataloguePage() {
   const query = useMemo(() => parseQuery(params), [params])
   // #278 — arriving with no `view` in the URL, the one this browser last chose is
   // written into it (replacing this entry), so the URL stays the one source of truth
-  // and back/forward move between views like any other filter (#276).
+  // and back/forward move between views like any other filter (#276). That covers any
+  // in-app navigation to `/` while the page stays mounted (the Models tab, the agent's
+  // `navigate`), but not Back/Forward to an entry without a view, which keeps Cards.
+  const location = useLocation()
+  const navigationType = useNavigationType()
+  const arrived = useRef(false)
   useEffect(() => {
+    const first = !arrived.current
+    arrived.current = true
+    // The first load is a POP too; only a later one is Back/Forward.
+    if (!first && navigationType === 'POP') return
     const stored = readStoredView()
     if (!params.has('view') && stored && stored !== query.view) {
       setParams(toParams({ ...query, view: stored }), { replace: true })
     }
-    // Only on arrival: afterwards the URL alone decides.
+    // Per navigation only: between navigations the URL alone decides.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [location.key])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
@@ -152,18 +161,14 @@ export function CataloguePage() {
 
         {shown.length > 0 && query.view === 'list' && (
           <ul aria-label="Models" className="flex flex-col gap-2">
-            {shown.map((model) => {
-              const slides = toSlides(model.slug, model.media ?? [])
-              return (
-                <ModelRow
-                  key={model.slug}
-                  model={model}
-                  slides={slides}
-                  onOpen={(index) => setLightbox({ slides, index })}
-                  onTag={addTag}
-                />
-              )
-            })}
+            {shown.map((model) => (
+              <ModelRow
+                key={model.slug}
+                model={model}
+                onOpen={(slides, index) => setLightbox({ slides, index })}
+                onTag={addTag}
+              />
+            ))}
           </ul>
         )}
 
@@ -219,16 +224,7 @@ function ModelCard({
   onOpenMedia: (slides: Slide[], index: number) => void
 }) {
   const origin = safeHttpUrl(model.origin_url)
-  // A slide with no caption is named after the template, not just "Image 1 of 1".
-  const slides = useMemo(() => {
-    const all = toSlides(model.slug, model.media ?? [])
-    return all.map((slide, index) => ({
-      ...slide,
-      alt:
-        slide.caption ??
-        (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),
-    }))
-  }, [model.slug, model.name, model.media])
+  const slides = useMemo(() => namedSlides(model), [model])
   // The title is the card's one link, and its ::after stretches over the card. What
   // must not follow it (the carousel, the tag chips, the origin link, the action row)
   // sits above that on `relative z-10`: a carousel's buttons cannot nest in an anchor.

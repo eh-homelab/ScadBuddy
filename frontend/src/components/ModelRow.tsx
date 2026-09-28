@@ -1,19 +1,18 @@
+import { useMemo } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { DuplicateModelButton } from './DuplicateModelButton'
-import type { Slide } from './media/slides'
+import { namedSlides, type Slide } from './media/slides'
 import { ModelThumbnail } from './ModelThumbnail'
 import { UpstreamBadge } from './UpstreamUpdate'
 
 interface Props {
   model: ModelSummary
-  /** The template's media, missing files already skipped (`toSlides`). */
-  slides: Slide[]
-  /** Opens the page's lightbox on these slides, at `index`. */
-  onOpen: (index: number) => void
+  /** Opens the page's lightbox on the template's slides, at `index`. */
+  onOpen: (slides: Slide[], index: number) => void
   onTag: (tag: string) => void
 }
 
@@ -22,9 +21,11 @@ interface Props {
  * lightbox, never navigates), the name (which does), then the details a card shows.
  * No carousel. On narrow widths the description, badge and time are dropped; Duplicate stays.
  */
-export function ModelRow({ model, slides, onOpen, onTag }: Props) {
+export function ModelRow({ model, onOpen, onTag }: Props) {
+  const slides = useMemo(() => namedSlides(model), [model])
   // The backend's cover rule (`catalogue._cover`): a video with no poster has no frame
-  // to show, so the cover is the first image or poster'd video.
+  // to show, so the cover is the first image or poster'd video. It only picks the
+  // picture: poster-less videos alone still open, at the first one.
   const coverIndex = slides.findIndex((slide) => slide.kind === 'image' || slide.poster)
   const cover = coverIndex >= 0 ? slides[coverIndex] : undefined
   const src = model.has_thumbnail
@@ -41,11 +42,11 @@ export function ModelRow({ model, slides, onOpen, onTag }: Props) {
       className="flex items-center gap-3 rounded-[6px] border border-line bg-surface p-2 transition-colors hover:border-line-strong"
     >
       <div className="relative w-20 shrink-0 sm:w-24">
-        {cover ? (
+        {slides.length > 0 ? (
           <button
             type="button"
             aria-label={`View media of ${model.name}${slides.length > 1 ? ` (${slides.length})` : ''}`}
-            onClick={() => onOpen(coverIndex)}
+            onClick={() => onOpen(slides, coverIndex >= 0 ? coverIndex : 0)}
             className="block w-full cursor-zoom-in rounded-[4px] focus-visible:outline-2 focus-visible:outline-accent"
           >
             <ModelThumbnail src={src} alt="" />
