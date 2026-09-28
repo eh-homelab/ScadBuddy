@@ -98,6 +98,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
 > including non-whole initials such as `wall = 1.2`. That is the customizer's
 > default, not a declared step, so `build_schema` keeps `step` only for
 > sliders; the three `.param` fixtures were regenerated on the new build.
+>
+> **Re-verified 2026-09-28 against OpenSCAD 2026.09.28**
+> (`openscad/openscad:dev.2026-09-28@sha256:99250895…`, now pinned by tag and
+> digest in the Dockerfile). Everything below still holds with no change: all 35
+> `models/*/verify.sh` pass, and the backend suite in the `test` image passes
+> (1942 passed; the 65 skips are the Postgres-only tests).
 
 - `openscad -o model.param model.scad` writes the **customizer schema as JSON**:
   `{"parameters":[{name, type, initial, caption, group, min, max, step,
@@ -684,8 +690,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
   heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
   heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
-  jobs survive a restart. Migrations are append-only and applied at startup under
-  an advisory lock. A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
+  jobs survive a restart. Migrations are one file each in
+  `backend/scadbuddy/migrations/`, never edited once merged, and applied at startup
+  in timestamp order under an advisory lock (#491). A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
   the transaction that queues it; each process keeps one `LISTEN` connection
   (reconnected with capped, jittered back-off) that wakes its idle workers, so a job
   queued on one replica starts at once on an idle other. While it is connected,
@@ -750,7 +757,7 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   the warn colour, so they do not read as the template's. A failed render shows
   them above its log. A failed job has no result, so its warnings (#408) live on
   the job record beside `diagnostics` (the job file, or the `render_jobs.warnings`
-  column, migration 3): the files the run could not open (`OpenSCAD could not
+  column, `20260928T0600Z_render_warnings.sql`): the files the run could not open (`OpenSCAD could not
   open pic.svg`, without "rendered without it") and any unreadable colour
   parameter. A template that draws only a missing picture exits 1 with "Current
   top level object is empty.", so this is often the only explanation there is.

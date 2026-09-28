@@ -14,12 +14,14 @@ from starlette.websockets import WebSocketDisconnect
 from scadbuddy.api import realtime
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import (
+    AnalyzerDecisionEvent,
     BusResync,
     Event,
     EventBus,
     FontInstalled,
     InProcessEventBus,
     JobEvent,
+    JobProgress,
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
@@ -259,12 +261,23 @@ def test_origin_allowed(origin: str | None, public_url: str | None, allowed: boo
     ("event", "topics"),
     [
         (JobEvent(kind="job.running", job_id=JOB_ID, slug="demo"), [f"job:{JOB_ID}"]),
+        (JobProgress(job_id=JOB_ID, slug="demo", stage="solids"), [f"job:{JOB_ID}"]),
         (
             PrintEvent(kind="print.progress", output_id=OUTPUT_ID, slug="demo"),
             [f"print:{OUTPUT_ID}"],
         ),
         (LibraryRemoved(name="BOSL2", commits=["c" * 40]), ["libraries"]),
         (SettingsChanged(section="connection"), ["settings"]),
+        (
+            AnalyzerDecisionEvent(
+                decision_id="d" * 32,
+                diagnostic_id="SB2001",
+                scope="template",
+                scope_key="demo",
+                action="recorded",
+            ),
+            ["analyzers"],
+        ),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:
