@@ -43,6 +43,7 @@ __all__ = [
     "PrintChoices",
     "Resolved",
     "Tier",
+    "choice_errors",
     "printer_preset_name",
     "resolve",
 ]
@@ -158,13 +159,17 @@ def _override_problem(
     return None
 
 
-def resolve(
-    options: FilamentOptions,
-    plan: FilamentPlan,
-    choices: PrintChoices,
-    catalogue: _Catalogue,
-    spool_presets: dict[int, list[SpoolFilamentPreset]],
-) -> Resolved:
+class _ChoiceResult(BaseModel):
+    printer_preset_name: str
+    printer_preset: PresetRef | None = None
+    process_preset: PresetRef | None = None
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+    errors: list[FilamentWarning] = Field(default_factory=list)
+
+
+def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceResult:
+    """Everything the choices decide on their own, without any plate's slots: the
+    nozzle sizes, the printer preset and the process preset."""
     warnings: list[FilamentWarning] = []
     errors: list[FilamentWarning] = []
     sizes = {nozzle.size for nozzle in choices.nozzles}
@@ -207,6 +212,35 @@ def resolve(
                 message=f"{process_name!r} is not a process Bambuddy has for a {size} mm nozzle.",
             )
         )
+    return _ChoiceResult(
+        printer_preset_name=name,
+        printer_preset=printer_ref,
+        process_preset=process_ref,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
+def choice_errors(choices: PrintChoices, catalogue: _Catalogue) -> list[FilamentWarning]:
+    """The errors :func:`resolve` would report from the choices alone, before any plate
+    is read — so a caller can refuse before uploading anything. Slot errors (no spool,
+    no filament preset, an unusable Advanced override) need the plate's slots, which
+    only a library file answers, and so are left to :func:`resolve`."""
+    return _resolve_choices(choices, catalogue).errors
+
+
+def resolve(
+    options: FilamentOptions,
+    plan: FilamentPlan,
+    choices: PrintChoices,
+    catalogue: _Catalogue,
+    spool_presets: dict[int, list[SpoolFilamentPreset]],
+) -> Resolved:
+    chosen = _resolve_choices(choices, catalogue)
+    warnings = list(chosen.warnings)
+    errors = list(chosen.errors)
+    size = choices.nozzles[0].size
+    printer = _bambu_printer(size)
 
     by_id = {option.spool_id: option for option in options.spools}
     #: Bambuddy's slice expects a per-AMS-slot array indexed by ``slot_id - 1``, not a
@@ -302,9 +336,9 @@ def resolve(
     filament_colours = [colour if colour is not None else "#FFFFFF" for colour in colours]
 
     return Resolved(
-        printer_preset_name=name,
-        printer_preset=printer_ref,
-        process_preset=process_ref,
+        printer_preset_name=chosen.printer_preset_name,
+        printer_preset=chosen.printer_preset,
+        process_preset=chosen.process_preset,
         filament_presets=filament_presets,
         filament_colours=filament_colours,
         bed_type=choices.bed_type,

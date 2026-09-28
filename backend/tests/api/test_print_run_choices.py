@@ -125,6 +125,33 @@ def test_a_resolver_error_is_a_422_before_anything_is_sliced(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    ("choices", "detail"),
+    [
+        ({"nozzles": [{"size": "0.2"}, {"size": "0.4"}]}, "different sizes"),
+        ({"process_name": "No Such Process @BBL H2C"}, "is not a process"),
+    ],
+    ids=["mixed-sizes", "unknown-process"],
+)
+def test_a_choice_the_resolver_refuses_uploads_nothing(
+    client: TestClient, model: str, choices: dict[str, Any], detail: str
+) -> None:
+    """A refusal that the choices alone decide is made before the 3MF reaches Bambuddy's
+    library, so iterating through invalid nozzle combinations leaves no uploads behind."""
+    output_id = prepared(client, model)
+    uploaded = upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body(**choices))
+
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    assert not uploaded.called
+    assert not sliced.called
+
+
+@respx.mock
 def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
     client: TestClient, model: str
 ) -> None:
