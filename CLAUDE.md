@@ -114,7 +114,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
   `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes now; `/mcp` and `/api/v1/ws` later) uses the one allowlist in
+  (credential writes now; `/mcp` and the agent's own sockets later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
@@ -185,6 +185,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Consequences in `frontend/src/lib/embed.ts`: downloads are fetched as a blob and
   opened with `target=_blank`; deep links to Bambuddy use `window.open(..., '_blank')`
   when embedded.
+- Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
+  Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
+  where it is refused (`document.fullscreenEnabled` is false, or the request is
+  rejected) the full-screen view covers the frame instead.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 

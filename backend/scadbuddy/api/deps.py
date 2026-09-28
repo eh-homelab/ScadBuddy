@@ -7,7 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path, Request
+from fastapi import Depends, Path
+from starlette.requests import HTTPConnection
 
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.core.config import Config
@@ -28,11 +29,13 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.previews import TIMEOUT_FACTOR, PreviewScheduler, render_preview
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,8 @@ class AppState:
     #: Uploads for `// file` parameters, with their caps (#296).
     assets: AssetStore
     queue: RenderQueue
+    #: Default-render previews: the thumbnail of a model with none and no output.
+    previews: PreviewScheduler
     #: Where every state change is published (spec §7). In-process today; the
     #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
     events: EventBus
@@ -89,6 +94,8 @@ class AppState:
     #: held for as long as the editor stays open rather than for one piece of work —
     #: the third term in the pod's worst case above.
     language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
+    realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -136,11 +143,48 @@ def build_state(settings: Settings) -> AppState:
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
-    # The outputs feed the catalogue's fallback thumbnail (#179).
+    # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
+    # stand in behind them.
+    preview_store = PreviewStore(paths)
+    # Off, the catalogue serves no preview at all -- including ones rendered while it
+    # was on, which stay on disk until their model goes (the sweeps work by path).
     catalogue = Catalogue(
-        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+        paths,
+        history,
+        outputs,
+        preview_store if settings.preview_renders else None,
+        duplicate_staging_max_age=config.duplicate_staging_max_age,
     )
     history.on_commit = announce_commits(events, catalogue)
+    queue = RenderQueue(
+        config,
+        paths,
+        store=store,
+        history=history,
+        metrics=metrics,
+        events=events,
+        checkouts=checkouts,
+        assets=assets,
+    )
+    previews = PreviewScheduler(
+        catalogue,
+        preview_store,
+        queue,
+        lambda slug: render_preview(
+            slug,
+            config=config,
+            paths=paths,
+            history=history,
+            assets=assets,
+            executor=queue.thumbnail_executor,
+            checkouts=checkouts,
+        ),
+        timeout=config.render_timeout * TIMEOUT_FACTOR,
+    )
+    if settings.preview_renders:
+        # Everything that can change whether a model needs a preview, or which one.
+        catalogue.on_change = previews.request
+        outputs.on_change = previews.request
     return AppState(
         settings=settings,
         config=config,
@@ -157,22 +201,15 @@ def build_state(settings: Settings) -> AppState:
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
         assets=assets,
-        queue=RenderQueue(
-            config,
-            paths,
-            store=store,
-            history=history,
-            metrics=metrics,
-            events=events,
-            checkouts=checkouts,
-            assets=assets,
-        ),
+        queue=queue,
+        previews=previews,
         metrics=metrics,
         events=events,
         print_progress=ProgressObserver(events),
         checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
+        realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
     )
 
 
@@ -197,8 +234,9 @@ async def probe_openscad_version(config: Config) -> str | None:
     return first[0].strip() if first else None
 
 
-def get_state(request: Request) -> AppState:
-    state: AppState = getattr(request.app.state, STATE_ATTR)
+def get_state(connection: HTTPConnection) -> AppState:
+    """For a request or a WebSocket alike: both are an ``HTTPConnection``."""
+    state: AppState = getattr(connection.app.state, STATE_ATTR)
     return state
 
 
