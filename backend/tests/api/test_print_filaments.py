@@ -155,6 +155,27 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     assert not pipeline.called
 
 
+@pytest.mark.requires_postgres
+@respx.mock
+def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, model: str) -> None:
+    """#469 — the recorded H2C has the Filament Track Switch: AMS 0/1 on inlet B (the
+    right extruder), AMS 2 on inlet A (the left). A shelf spool has no side."""
+    output_id = prepared(client, model)
+    upload_route()
+    pipelines_route()
+    inventory_routes()
+    nozzle_routes()
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    sides = {spool["spool_id"]: (spool["extruder"], spool["side"]) for spool in body["spools"]}
+    assert sides[9] == (0, "R")  # AMS 0 tray 1
+    assert sides[7] == (0, "R")  # AMS 1 tray 0
+    assert sides[10] == (1, "L")  # AMS 2 tray 0
+    assert sides[5] == (None, None)  # on the shelf
+    # With the switch any AMS reaches either nozzle, so those sides are where each rests.
+    assert body["track_switch"] is True
+
+
 def test_the_filament_step_takes_no_nozzle_diameter(client: TestClient) -> None:
     """Fix round 1 #6 — the pipeline-era ``nozzle_diameter`` query is gone."""
     route = client.get("/openapi.json").json()["paths"][
