@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -38,6 +39,7 @@ from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, nozzle_diameter_of, plate_for
 from scadbuddy.render.recolour import recolour_3mf
+from scadbuddy.render.split import normalise_colour
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,10 @@ def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
     return path.read_bytes()
 
 
+#: Marks a :attr:`Target.key` whose file was recolored for chosen spools (#476).
+_RECOLORED = "~"
+
+
 @dataclass(frozen=True)
 class Target:
     """What the 3MF is laid out for: the target's plate and, when known, its nozzle."""
@@ -132,7 +138,7 @@ class Target:
             key = f"{key}@{self.nozzle_diameter}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
-            key = f"{key}~{','.join(self.colours)}"
+            key = f"{key}{_RECOLORED}{','.join(self.colours)}"
         return key
 
     @property
@@ -140,8 +146,8 @@ class Target:
         """:attr:`key` in the model's own colours: the plate and nozzle alone.
 
         What the project file filed on Generate is recorded under (#317). A print into
-        that project reuses it whatever spools it chose, so the project folder keeps one
-        file per printer rather than one per set of spools.
+        that project reuses it when its spools are the model's own colours; spools in
+        other colours get a copy in theirs (#476).
         """
         return Target(self.plate, self.nozzle_diameter).key
 
@@ -422,40 +428,122 @@ async def ensure_copy(
     whether this call uploaded it.
 
     Outside the inbox a copy laid out for the same plate and nozzle in the model's own
-    colours also serves (:attr:`Target.uncoloured_key`): that is the project file
-    Generate filed (#317), and a print into the project uses it rather than putting a
-    second file beside it. An exact match is still preferred.
+    colours also serves (:attr:`Target.uncoloured_key`) when the chosen spools are the
+    model's colours too: that is the project file Generate filed (#317), and a print
+    into the project uses it rather than putting a second file beside it. Spools in
+    other colours get a copy in theirs, as in the inbox (#476). An exact match is still
+    preferred.
+
+    Finding and uploading hold one lock per output and folder, so Generate's filing and
+    a print started while it runs cannot both upload the same copy.
     """
     target = target if target is not None else await target_for(client, settings, meta.slug)
     folder = folder_id if folder_id is not None else settings.library_folder_id
+    async with _copy_lock(meta.id, folder):
+        for copy in await _reusable(uploads, meta, settings, target, folder):
+            filename = await _still_there(client, uploads, meta, copy)
+            if filename is not None:
+                return EnsuredCopy(copy.id, filename, created=False)
+        library_file_id, filename = await upload_output(
+            client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
+        )
+    return EnsuredCopy(library_file_id, filename, created=True)
+
+
+#: One per output and folder while :func:`ensure_copy` holds it; weak, so an idle
+#: pair's lock is dropped rather than kept for the life of the process.
+_COPY_LOCKS: weakref.WeakValueDictionary[tuple[str, int | None], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _copy_lock(output_id: str, folder: int | None) -> asyncio.Lock:
+    key = (output_id, folder)
+    lock = _COPY_LOCKS.get(key)
+    if lock is None:
+        lock = _COPY_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+async def _reusable(
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    target: Target,
+    folder: int | None,
+) -> list[LibraryCopy]:
+    """The recorded copies in ``folder`` that serve ``target``, best first."""
     keys = [target.key]
-    if not is_inbox(folder, settings) and target.uncoloured_key != target.key:
+    own_colours = target.colours is None or [
+        normalise_colour(colour) for colour in target.colours
+    ] == [normalise_colour(colour) for colour in meta.colors]
+    if not is_inbox(folder, settings) and own_colours and target.uncoloured_key != target.key:
         keys.append(target.uncoloured_key)
-    copies = await uploads.for_output(meta.id)
-    ranked = sorted(
-        (copy for copy in copies if copy.folder_id == folder and copy.target_key in keys),
+    return sorted(
+        (
+            copy
+            for copy in await uploads.for_output(meta.id)
+            if copy.folder_id == folder and copy.target_key in keys
+        ),
         key=lambda copy: keys.index(copy.target_key),
     )
-    for copy in ranked:
-        # Someone may have deleted it in Bambuddy since. Reusing a dead id would fail
-        # the slice or the eligibility check with an upstream 404, so it is read first
-        # and a 404 is dropped and uploaded again rather than failing the send.
-        try:
-            found = await client.library_file(copy.id)
-        except ApiError as error:
-            if error.status != status.HTTP_404_NOT_FOUND:
-                raise
-            logger.info(
-                "a recorded library copy was deleted in Bambuddy; uploading it again",
-                extra={"library_file_id": copy.id},
-            )
-            await uploads.forget(meta.id, copy.id)
-            continue
-        return EnsuredCopy(copy.id, found.filename, created=False)
-    library_file_id, filename = await upload_output(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
+
+
+async def _still_there(
+    client: BambuddyClient, uploads: BambuddyUploadStore, meta: OutputMeta, copy: LibraryCopy
+) -> str | None:
+    """The copy's file name, or ``None`` once it is found deleted in Bambuddy.
+
+    Someone may have deleted it there since. Reusing a dead id would fail the slice or
+    the slot read with an upstream 404, so it is read first, and a 404 is forgotten.
+    """
+    try:
+        found = await client.library_file(copy.id)
+    except ApiError as error:
+        if error.status != status.HTTP_404_NOT_FOUND:
+            raise
+        logger.info(
+            "a recorded library copy was deleted in Bambuddy; uploading it again",
+            extra={"library_file_id": copy.id},
+        )
+        await uploads.forget(meta.id, copy.id)
+        return None
+    return found.filename
+
+
+@dataclass(frozen=True)
+class ReadableCopy:
+    """A library file holding the output's 3MF, for reading its slots (#457)."""
+
+    id: int
+    #: Recolored for a run's spools (#476), so its filament colors are the spools', not
+    #: the model's.
+    recolored: bool
+
+
+async def copy_to_read(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+) -> ReadableCopy:
+    """Any recorded copy Bambuddy still has, else a new upload (#457).
+
+    The filament step only reads the plate's slots out of the file, and they don't
+    depend on the plate, nozzle or folder a copy was laid out for. So it reuses a run's
+    copy rather than uploading one of its own, which the next run's inbox upload would
+    supersede and the next open would upload again. Inbox copies come first; a copy in
+    a project's folder is only read, never moved.
+    """
+    recorded = sorted(
+        await uploads.for_output(meta.id), key=lambda copy: not is_inbox(copy.folder_id, settings)
     )
-    return EnsuredCopy(library_file_id, filename, created=True)
+    for copy in recorded:
+        if await _still_there(client, uploads, meta, copy) is not None:
+            return ReadableCopy(copy.id, recolored=_RECOLORED in copy.target_key)
+    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
+    return ReadableCopy(library_file_id, recolored=False)
 
 
 async def ensure_uploaded(
@@ -478,8 +566,8 @@ async def ensure_uploaded(
     so a recorded copy still describes this exact 3MF. What is *not* immutable is where
     it sits and what it was laid out for, so a copy is reused only where both still
     hold: the same folder, and the same :attr:`Target.key` (the plate, #105, and the
-    nozzle, #126). The print picker (#86) leans on the reuse: opening it checks
-    eligibility, which needs a file in Bambuddy, and must not upload on every open.
+    nozzle, #126). A run with the same choices reuses the copy; the print dialog's
+    slot read takes any copy at all (:func:`copy_to_read`, #457).
 
     Anything else uploads a **new copy** there (#316). Never a move: a file sent to
     project A is A's record of what it printed, and A's slices and archives stay in A,

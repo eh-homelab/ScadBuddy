@@ -16,6 +16,11 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
     if (!open) return
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // Only the topmost modal closes: a dialog opened from inside another (Duplicate
+      // from a built-in's Media, #279) comes later in the document, and the one under
+      // it stays open. The outer listener runs first, so `defaultPrevented` cannot tell.
+      const modals = document.querySelectorAll('[role="dialog"][aria-modal="true"]')
+      if (modals[modals.length - 1] !== panelRef.current) return
       // Taken: the full-screen view (useFullscreen) must not leave on the same key.
       event.preventDefault()
       onClose()
