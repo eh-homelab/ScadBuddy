@@ -1,10 +1,10 @@
 import createClient from 'openapi-fetch'
 import type { paths } from './schema.js'
 
-// Typed client for the Python backend (spec §4.3). `schema.d.ts` is generated
-// from backend/openapi.json by `pnpm gen:api` and committed; CI's freshness job
-// regenerates it after the export and the frontend's copy, so a backend route or
-// model change that does not reach this file fails the PR.
+// Typed client for the Python backend (spec §4.3). `schema.d.ts` is not
+// committed (#492): `pnpm gen:api` writes it from the backend's exported spec
+// before every typecheck, test and build. So a backend route or model change
+// that breaks this client fails the PR's `agent` job.
 
 export type BackendClient = ReturnType<typeof createClient<paths>>
 

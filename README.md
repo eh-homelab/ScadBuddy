@@ -405,9 +405,12 @@ what makes the running image knowable.
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.
 - `models/` — bundled example models; `models/<name>/verify.sh` renders one
   against `openscad/openscad:dev` and checks the result.
-- `backend/openapi.json` and `frontend/public/mockServiceWorker.js` are
-  generated and checked for freshness in CI (`python -m
-  scadbuddy.tools.export_openapi`, `pnpm exec msw init public --save`).
+- `backend/openapi.json` and the frontend and agent `src/api/schema.d.ts`
+  are generated at build time and not committed: `pnpm gen:api` in either
+  package exports the spec (`python -m scadbuddy.tools.export_openapi`) and
+  writes the client. CI posts the API diff on each PR.
+  `frontend/public/mockServiceWorker.js` is committed and checked against
+  msw in CI (`pnpm exec msw init public --save`).
 
 The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
 version it was verified against (`OPENSCAD_VERSION`). When that assertion

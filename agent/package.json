@@ -8,13 +8,16 @@
     "node": ">=24"
   },
   "scripts": {
+    "prebuild": "pnpm gen:api",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "lint": "eslint .",
+    "pretypecheck": "pnpm gen:api",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "pnpm gen:api",
     "test": "vitest run",
     "test:watch": "vitest",
-    "gen:api": "openapi-typescript ../backend/openapi.json -o src/api/schema.d.ts"
+    "gen:api": "node scripts/gen-api.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.283",
