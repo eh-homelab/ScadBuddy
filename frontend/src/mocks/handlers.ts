@@ -2675,15 +2675,19 @@ export const handlers = [
       printers: fixtures.targets.printers,
       scopes: [
         { scope: 'Read Status', status: 'ok', required: true, detail: 'Printers, their status, and the print history.' },
-        { scope: 'Manage Library', status: 'ok', required: true, detail: 'Uploading 3MFs to the library, and its folders.' },
-        { scope: 'Manage Queue', status: 'ok', required: true, detail: 'Queueing prints and running slicer pipelines.' },
-        { scope: 'Manage Projects', status: 'ok', required: false, detail: 'Sending to a Bambuddy project.' },
-        {
-          scope: 'Manage Archives',
-          status: 'missing',
-          required: false,
-          detail: 'The key does not have Manage Archives. Needed for: Attaching photos and timelapses to a print.',
-        },
+        ...(
+          [
+            ['Manage Library', true, 'Uploading 3MFs to the library, and its folders.'],
+            ['Manage Queue', true, 'Queueing prints and running slicer pipelines.'],
+            ['Manage Projects', false, 'Sending to a Bambuddy project.'],
+            ['Manage Archives', false, 'Attaching photos and timelapses to a print.'],
+          ] as const
+        ).map(([scope, required, what]) => ({
+          scope,
+          status: 'unknown',
+          required,
+          detail: `Not checked: Bambuddy cannot be asked what a key carries without a write, so a missing scope shows up when it is first used. Needed for: ${what}`,
+        })),
       ],
     })
   }),

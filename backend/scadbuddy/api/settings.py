@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Annotated, Any, Literal, Self
 
@@ -10,7 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.api.deps import AppState, SettingsStoreDep, SlugPath, StateDep
 from scadbuddy.api.runtime import apply_runtime, restart_required
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Pipeline, PresetRef, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
@@ -179,15 +178,14 @@ class ScopeCheck(BaseModel):
 
     scope: str
     status: ScopeStatus
-    #: Required for sending and printing; the others only for projects and attachments,
-    #: so their absence is a warning rather than a failed test.
+    #: Required for sending and printing; the others only for projects and attachments.
     required: bool
     #: What needs it, or what went wrong.
     detail: str
 
 
 class ConnectionTest(BaseModel):
-    #: Reachable, and every required scope is there.
+    #: Reachable, and the key reads Bambuddy (the write scopes are not checked).
     ok: bool
     detail: str
     printers: list[Printer] = Field(default_factory=list)
@@ -418,7 +416,8 @@ def put_print_options(body: PrintOptionsUpdate, store: SettingsStoreDep) -> Prin
 @router.post("/settings/test", response_model=ConnectionTest, summary="Verify the API key")
 async def test_settings(store: SettingsStoreDep) -> ConnectionTest:
     """``GET /api/v1/printers/`` on Bambuddy — note the trailing slash, without which
-    1.2.5.5 answers 404 — then one probe per write scope (#322).
+    1.2.5.5 answers 404. Nothing is written to Bambuddy: only Read Status is checked,
+    and each write scope is reported ``unknown`` (#322).
 
     A reachable Bambuddy that refuses the key is a *result* (``ok: false``), not an
     error; only a missing URL — nothing to test at all — is still a 409.
@@ -428,25 +427,30 @@ async def test_settings(store: SettingsStoreDep) -> ConnectionTest:
             printers = await client.printers()
         except ApiError as error:
             return ConnectionTest(ok=False, detail=error.detail, scopes=_all_failed(error))
-        probed = await asyncio.gather(*(_probe(client, scope) for scope, _, _ in SCOPE_PROBES[1:]))
-    read = ScopeCheck(
-        scope=Scope.READ_STATUS, status="ok", required=True, detail=SCOPE_PROBES[0][2]
-    )
-    scopes = [read, *probed]
-    missing = [check.scope for check in scopes if check.required and check.status != "ok"]
+    scopes = [
+        ScopeCheck(scope=scope, status="ok", required=required, detail=what)
+        if scope == Scope.READ_STATUS
+        else ScopeCheck(
+            scope=scope,
+            status="unknown",
+            required=required,
+            detail=f"Not checked: Bambuddy cannot be asked what a key carries without a"
+            f" write, so a missing scope shows up when it is first used. Needed for: {what}",
+        )
+        for scope, required, what in SCOPES
+    ]
     names = ", ".join(printer.name for printer in printers) or "no printers"
-    if missing:
-        detail = f"Connected, but the key lacks {', '.join(missing)}."
-    else:
-        detail = f"Connected. Bambuddy reports {names}."
-    return ConnectionTest(ok=not missing, detail=detail, printers=printers, scopes=scopes)
+    return ConnectionTest(
+        ok=True, detail=f"Connected. Bambuddy reports {names}.", printers=printers, scopes=scopes
+    )
 
 
-#: Every scope ScadBuddy uses, whether a send needs it, and what for. Read Status is
-#: the printer list itself; each other scope is probed by the client
-#: (:meth:`BambuddyClient.scope_granted`) with a write naming a record that cannot
-#: exist, which Bambuddy refuses on the scope before it looks the record up.
-SCOPE_PROBES: tuple[tuple[Scope, bool, str], ...] = (
+#: Every scope ScadBuddy uses, whether a send needs it, and what for. Only Read Status
+#: is checked, by the printer list itself. Bambuddy has no key-introspection route, and
+#: the only way to tell a write scope is present is to send a write, which a connection
+#: test (reachable from an agent's ``read`` tool) must never do; so the others are
+#: reported ``unknown`` and a missing one surfaces as a scope problem on first use.
+SCOPES: tuple[tuple[Scope, bool, str], ...] = (
     (Scope.READ_STATUS, True, "Printers, their status, and the print history."),
     (Scope.MANAGE_LIBRARY, True, "Uploading 3MFs to the library, and its folders."),
     (Scope.MANAGE_QUEUE, True, "Queueing prints and running slicer pipelines."),
@@ -460,31 +464,8 @@ def _all_failed(error: ApiError) -> list[ScopeCheck]:
     status: ScopeStatus = "missing" if error.type == SCOPE_PROBLEM else "error"
     return [
         ScopeCheck(scope=scope, status=status, required=required, detail=error.detail)
-        for scope, required, _ in SCOPE_PROBES
+        for scope, required, _ in SCOPES
     ]
-
-
-async def _probe(client: BambuddyClient, scope: Scope) -> ScopeCheck:
-    required, what = next((r, w) for s, r, w in SCOPE_PROBES if s == scope)
-    try:
-        answer = await client.scope_granted(scope)
-    except ApiError as error:
-        return ScopeCheck(scope=scope, status="error", required=required, detail=error.detail)
-    if answer is None:
-        return ScopeCheck(
-            scope=scope,
-            status="unknown",
-            required=required,
-            detail=f"Bambuddy's answer did not say. Needed for: {what}",
-        )
-    if answer:
-        return ScopeCheck(scope=scope, status="ok", required=required, detail=what)
-    return ScopeCheck(
-        scope=scope,
-        status="missing",
-        required=required,
-        detail=f"The key does not have {scope}. Needed for: {what}",
-    )
 
 
 @router.get(

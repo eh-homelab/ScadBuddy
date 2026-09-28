@@ -123,6 +123,16 @@ describe('redact', () => {
   })
 })
 
+describe('settings tools pass every answer through redact (#322)', () => {
+  it.each([
+    ['get_bambuddy_status', '/api/v1/settings/bambuddy'],
+    ['get_remembered_choices', '/api/v1/settings/remembered'],
+  ])('%s hides a secret-looking field the backend might add later', async (name, path) => {
+    server.use(http.get(`${BACKEND}${path}`, () => HttpResponse.json({ version: '1.2.5.6', access_token: 't' })))
+    expect(firstText(await runTool(tool(name), {}, ctx()))).toEqual({ version: '1.2.5.6', access_token: '[redacted]' })
+  })
+})
+
 describe('render_model', () => {
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))

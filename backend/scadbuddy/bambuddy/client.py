@@ -80,18 +80,6 @@ DEFAULT_UPLOAD_TIMEOUT = 180.0
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 
-#: The write each non-read scope is probed with (#322), on a record that cannot exist.
-SCOPE_PROBES: dict[Scope, tuple[str, str, dict[str, str] | None]] = {
-    Scope.MANAGE_LIBRARY: ("PUT", "/library/folders/0", None),
-    Scope.MANAGE_QUEUE: ("PATCH", "/queue/0", None),
-    Scope.MANAGE_PROJECTS: ("PATCH", "/projects/0", None),
-    Scope.MANAGE_ARCHIVES: (
-        "POST",
-        "/archives/0/timelapse/select",
-        {"filename": "scadbuddy-scope-probe"},
-    ),
-}
-
 
 @dataclass(frozen=True)
 class BambuddyConfig:
@@ -687,33 +675,6 @@ class BambuddyClient:
         return QueueItem.model_validate(response.json())
 
     # --- the connection test (#322) -------------------------------------------
-
-    async def scope_granted(self, scope: Scope) -> bool | None:
-        """Whether the key carries ``scope``: ``False`` on a 401/403, ``None`` when
-        Bambuddy's answer says neither (a 5xx), ``True`` otherwise.
-
-        Each probe is a write naming a record that cannot exist (id 0), so nothing
-        changes whatever the answer. Bambuddy checks the scope in a route dependency,
-        before the handler looks the record up (Bambuddy v1.2.5.6 ``auth.py``
-        ``RequirePermissionIfAuthEnabled`` and ``require_ownership_permission``), so a
-        granted scope answers 404 or 422 and a missing one 403.
-        """
-        method, path, params = SCOPE_PROBES[scope]
-        try:
-            response = await self._http.request(
-                method,
-                self.config.url(path),
-                headers=self._headers,
-                params=params,
-                json={} if method != "POST" else None,
-            )
-        except httpx.HTTPError as error:
-            raise map_transport(error, what=f"check the {scope} scope") from error
-        if response.status_code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
-            return False
-        if response.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
-            return None
-        return True
 
     async def version(self) -> str:
         """``GET /api/v1/updates/version``, which Bambuddy serves without a key."""

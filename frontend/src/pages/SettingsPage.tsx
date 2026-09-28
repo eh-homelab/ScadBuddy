@@ -666,7 +666,13 @@ export function SettingsPage() {
                       <li key={check.scope} className="flex gap-2">
                         <span
                           aria-hidden
-                          className={check.status === 'ok' ? 'text-ok' : check.required ? 'text-warn' : 'text-muted'}
+                          className={
+                            check.status === 'ok'
+                              ? 'text-ok'
+                              : check.required && check.status !== 'unknown'
+                                ? 'text-warn'
+                                : 'text-muted'
+                          }
                         >
                           {check.status === 'ok' ? '✓' : check.status === 'missing' ? '✗' : '?'}
                         </span>
@@ -680,7 +686,7 @@ export function SettingsPage() {
                               : check.status === 'missing'
                                 ? 'missing. '
                                 : check.status === 'unknown'
-                                  ? 'unknown. '
+                                  ? 'not checked. '
                                   : 'could not check. '}
                             {check.detail}
                           </span>

@@ -47,8 +47,8 @@ export const settingsTools: Tool[] = [
     name: 'test_bambuddy_connection',
     description:
       'Check that Bambuddy is reachable and accepts the configured API key; lists the printers it can see ' +
-      'and, per Bambuddy scope ScadBuddy uses, whether the key has it (each write scope is probed on a ' +
-      'record that cannot exist, so nothing changes).',
+      'and each Bambuddy scope ScadBuddy uses. Only Read Status is checked; the write scopes are ' +
+      'reported as not checked, because telling them apart would take a write. Nothing is changed.',
     input: z.object({}),
     risk: 'read',
     bambuddyScope: ['Read Status'],
@@ -66,7 +66,7 @@ export const settingsTools: Tool[] = [
     bambuddyScope: ['Read Status'],
     routes: ['GET /api/v1/settings/bambuddy'],
     handler: async (_args, { backend }) =>
-      json(await ok(backend.GET('/api/v1/settings/bambuddy'), 'get Bambuddy status')),
+      json(redact(await ok(backend.GET('/api/v1/settings/bambuddy'), 'get Bambuddy status'))),
   }),
 
   defineTool({
@@ -79,7 +79,7 @@ export const settingsTools: Tool[] = [
     risk: 'read',
     routes: ['GET /api/v1/settings/remembered'],
     handler: async (_args, { backend }) =>
-      json(await ok(backend.GET('/api/v1/settings/remembered'), 'get remembered choices')),
+      json(redact(await ok(backend.GET('/api/v1/settings/remembered'), 'get remembered choices'))),
   }),
 
   defineTool({

@@ -229,14 +229,15 @@ describe('SettingsPage remembered choices (#322)', () => {
 })
 
 describe('SettingsPage connection and About (#322)', () => {
-  it('lists every scope the connection test checked', async () => {
+  it('lists every scope, the write scopes as not checked', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
     const scopes = await screen.findByRole('list', { name: 'Scopes' })
     expect(within(scopes).getAllByRole('listitem')).toHaveLength(5)
-    expect(scopes).toHaveTextContent('Manage Queue: granted.')
-    expect(scopes).toHaveTextContent('Manage Archives (optional): missing.')
+    expect(scopes).toHaveTextContent('Read Status: granted.')
+    expect(scopes).toHaveTextContent('Manage Queue: not checked.')
+    expect(scopes).toHaveTextContent('Manage Archives (optional): not checked.')
   })
 
   it('says Bambuddy takes no finish photo, with a link to turn it on', async () => {

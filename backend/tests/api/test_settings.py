@@ -157,11 +157,6 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
         json={"bambuddy_url": "https://bambuddy.test/", "bambuddy_api_key": "s3cret"},
     )
     route = respx.get(PRINTERS_URL).mock(return_value=httpx.Response(200, json=PRINTERS_BODY))
-    # The write scopes' probes (#322): each names a record that cannot exist.
-    respx.put("https://bambuddy.test/api/v1/library/folders/0").respond(404)
-    respx.patch("https://bambuddy.test/api/v1/queue/0").respond(404)
-    respx.patch("https://bambuddy.test/api/v1/projects/0").respond(404)
-    respx.post("https://bambuddy.test/api/v1/archives/0/timelapse/select").respond(404)
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is True
@@ -170,7 +165,12 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
     ]
     assert route.calls.last.request.headers["X-API-Key"] == "s3cret"
-    assert all(row["status"] == "ok" for row in body["scopes"])
+    assert body["scopes"][0] == {
+        "scope": "Read Status",
+        "status": "ok",
+        "required": True,
+        "detail": "Printers, their status, and the print history.",
+    }
 
 
 @respx.mock

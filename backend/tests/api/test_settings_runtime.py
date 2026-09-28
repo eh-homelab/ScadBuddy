@@ -273,15 +273,9 @@ def test_the_default_project_is_a_setting(client: TestClient) -> None:
 # -- connection test, per scope; Bambuddy's own status ---------------------------------
 
 
-def _probe_scopes(*, archives: int = 404, projects: int = 404, library: int = 422) -> None:
+def _printers() -> None:
     respx.get(f"{BAMBUDDY}/printers/").mock(
         return_value=httpx.Response(200, json=[{"id": 1, "name": "3DP-31B-598"}])
-    )
-    respx.put(f"{BAMBUDDY}/library/folders/0").mock(return_value=httpx.Response(library))
-    respx.patch(f"{BAMBUDDY}/queue/0").mock(return_value=httpx.Response(404))
-    respx.patch(f"{BAMBUDDY}/projects/0").mock(return_value=httpx.Response(projects))
-    respx.post(f"{BAMBUDDY}/archives/0/timelapse/select").mock(
-        return_value=httpx.Response(archives)
     )
 
 
@@ -290,40 +284,34 @@ def _scopes(body: dict[str, Any]) -> dict[str, tuple[str, bool]]:
 
 
 @respx.mock
-def test_the_connection_test_checks_every_scope(client: TestClient) -> None:
+def test_the_connection_test_only_reads(client: TestClient) -> None:
+    """Bambuddy offers no read-only way to ask what a key carries, so only Read Status
+    is checked (by the printer list); the write scopes are reported unchecked, and no
+    write is ever sent. ``respx.mock`` refuses any request not mocked here."""
     _connect(client)
-    _probe_scopes()
+    _printers()
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is True
     assert _scopes(body) == {
         "Read Status": ("ok", True),
-        "Manage Library": ("ok", True),
-        "Manage Queue": ("ok", True),
-        "Manage Projects": ("ok", False),
-        "Manage Archives": ("ok", False),
+        "Manage Library": ("unknown", True),
+        "Manage Queue": ("unknown", True),
+        "Manage Projects": ("unknown", False),
+        "Manage Archives": ("unknown", False),
     }
-    # Nothing was changed on Bambuddy: every write probe names a record that cannot exist.
-    probe = respx.calls[-1].request
-    assert probe.url.path == "/api/v1/archives/0/timelapse/select"
+    assert {call.request.method for call in respx.calls} == {"GET"}
+    unchecked = next(row for row in body["scopes"] if row["scope"] == "Manage Library")
+    assert "Not checked" in unchecked["detail"]
 
 
 @respx.mock
-def test_a_missing_optional_scope_is_a_warning_and_a_required_one_a_failure(
-    client: TestClient,
-) -> None:
+def test_a_refused_printer_list_marks_every_scope(client: TestClient) -> None:
     _connect(client)
-    _probe_scopes(archives=403, projects=401)
+    respx.get(f"{BAMBUDDY}/printers/").mock(return_value=httpx.Response(403))
     body = client.post("/api/v1/settings/test").json()
-    assert body["ok"] is True
-    scopes = _scopes(body)
-    assert scopes["Manage Archives"] == ("missing", False)
-    assert scopes["Manage Projects"] == ("missing", False)
-
-    respx.put(f"{BAMBUDDY}/library/folders/0").mock(return_value=httpx.Response(403))
-    failed = client.post("/api/v1/settings/test").json()
-    assert failed["ok"] is False
-    assert _scopes(failed)["Manage Library"] == ("missing", True)
-    assert "Manage Library" in failed["detail"]
+    assert body["ok"] is False
+    assert _scopes(body)["Read Status"] == ("missing", True)
+    assert {call.request.method for call in respx.calls} == {"GET"}
 
 
 @respx.mock
