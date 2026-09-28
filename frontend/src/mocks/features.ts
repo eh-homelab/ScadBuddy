@@ -33,5 +33,8 @@ const modules = import.meta.glob(['./features/**/*.ts', '!./features/**/*.test.t
   eager: true,
 })
 
-/** Every feature module, in file-path order. */
+/**
+ * Every feature module, in file-path order. That order is not meant to decide which
+ * mock answers: `features.test.ts` fails if two modules declare the same route.
+ */
 export const features: MockFeature[] = toFeatures(modules)

@@ -14,6 +14,18 @@ describe('mock features', () => {
     }
   })
 
+  it('never has two feature modules answer the same route', () => {
+    const owner = new Map<string, number>()
+    features.forEach((feature, index) => {
+      for (const handler of feature.handlers) {
+        const info = 'info' in handler ? (handler.info as { method?: unknown; path?: unknown }) : {}
+        const route = `${String(info.method ?? 'WS')} ${String(info.path ?? handler)}`
+        expect(owner.get(route) ?? index, route).toBe(index)
+        owner.set(route, index)
+      }
+    })
+  })
+
   it('names the file when a feature module does not export handlers', () => {
     expect(() => toFeatures({ './features/broken.ts': { reset: () => {} } })).toThrow(
       './features/broken.ts',
