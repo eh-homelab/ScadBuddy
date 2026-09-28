@@ -290,7 +290,7 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
     """The silk spool has ~965 g left: plate 1's 600 g fits, both plates' 1200 g do not,
     as the print dialog's filament step sums them for "All plates" (#198)."""
     configure(client)
-    bambuddy_routes()
+    routes = bambuddy_routes()
     output_id = make_output(client, model)
     [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
     add_plate(path, 2)
@@ -311,21 +311,32 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
         )
 
     respx.get(f"{API}/library/files/41/filament-requirements").mock(side_effect=requirements)
-    respx.get(f"{API}/inventory/assignments").mock(
-        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
-    )
-    respx.get(f"{API}/printers/1").mock(
-        return_value=httpx.Response(200, json=recording("printer.json"))
-    )
-    respx.get(f"{API}/printers/1/inventory-remain").mock(
-        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
-    )
+    shared = {
+        "spools": routes["spools"],
+        "assignments": respx.get(f"{API}/inventory/assignments").mock(
+            return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+        ),
+        "printer": respx.get(f"{API}/printers/1").mock(
+            return_value=httpx.Response(200, json=recording("printer.json"))
+        ),
+        "remain": respx.get(f"{API}/printers/1/inventory-remain").mock(
+            return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+        ),
+    }
 
     report = _run(
         client, output_id, request={**SILK_REQUEST, "all_plates": all_plates}, detail="advanced"
     )
     found = {row["key"]: row for row in report["diagnostics"]}
     assert sorted(plates) == ([1, 2] if all_plates else [1])
+    # Only the slots are a plate's own: the inventory is read once for every plate
+    # (the spools twice, once more for the filaments input's own read of the plan).
+    assert {name: route.call_count for name, route in shared.items()} == {
+        "spools": 2,
+        "assignments": 1,
+        "printer": 1,
+        "remain": 1,
+    }
     assert ("SB3002:slot-1" in found) is short
     if short:
         evidence = {e["label"]: e["value"] for e in found["SB3002:slot-1"]["evidence"]}
