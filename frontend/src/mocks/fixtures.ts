@@ -760,6 +760,11 @@ export const TEMPLATE_NOTES = [
   'modules are 0.59 mm; below about 0.8 mm a 0.4 mm nozzle cannot print them cleanly',
 ]
 
+/** #383 — a name the mock renders fine but with one of ScadBuddy's own job warnings. */
+export const WARNED_NAME = 'nopic'
+
+export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
+
 export const OPENSCAD_LOG_TAIL = [
   'Compiling design (CSG Tree generation)...',
   'ERROR: Parser error: syntax error in file model.scad, line 42',

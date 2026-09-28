@@ -10,19 +10,22 @@ import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import (
     DUPLICATE_STAGING_MAX_AGE,
     DUPLICATE_STAGING_PREFIX,
     Catalogue,
     ModelMeta,
 )
-from scadbuddy.library.history import GitTimeoutError, ModelHistory
+from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNotFoundError
+from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES, wait_for_job
@@ -332,6 +335,27 @@ def test_a_copy_deleted_right_after_its_commit_is_a_404_naming_the_copy(
     assert client.get(f"/api/v1/models/{BUILTIN}").status_code == 200
 
 
+def test_an_upstream_deleted_mid_copy_is_a_404_naming_the_upstream(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upstream goes between the route's check and the copy: the 404 names it,
+    not the copy that was never made (#392)."""
+    mine = _duplicate(client, BUILTIN, "Mine")["slug"]
+
+    def export(self: ModelHistory, slug: str, commit: str, dest: Path) -> None:
+        shutil.rmtree(paths.model_dir(mine))
+        raise RevisionNotFoundError(f"{slug!r} does not exist at {commit}")
+
+    monkeypatch.setattr(ModelHistory, "export", export)
+
+    response = client.post(f"/api/v1/models/{mine}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == f"no model named {mine!r}"
+    assert not paths.model_dir("copy").exists()
+    assert _no_staging_left(paths)
+
+
 def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataPaths) -> None:
     """A duplicate killed mid-copy leaves its staging folder; the next boot clears it,
     and leaves the rest of the cache alone (#212)."""
@@ -411,6 +435,50 @@ def test_the_boot_leaves_a_fresh_duplicate_staging_alone(app: FastAPI, paths: Da
         pass
 
     assert staged.is_dir()
+
+
+def test_a_failed_boot_sweep_of_duplicate_staging_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch.object(Catalogue, "sweep_duplicate_staging", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not sweep duplicate staging folders" in caplog.text
+
+
+def _stage(paths: DataPaths, name: str, age: float) -> Path:
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
+    staged.mkdir(parents=True)
+    then = time.time() - age
+    os.utime(staged, (then, then))
+    return staged
+
+
+def test_the_staging_max_age_is_the_setting(settings: Settings, paths: DataPaths) -> None:
+    """SCADBUDDY_DUPLICATE_STAGING_MAX_AGE moves the line between crashed and in flight."""
+    older = _stage(paths, "older", 120)
+    newer = _stage(paths, "newer", 30)
+
+    with TestClient(create_app(settings.model_copy(update={"duplicate_staging_max_age": 60}))):
+        pass
+
+    assert not older.exists()
+    assert newer.is_dir()
+
+
+def test_the_periodic_sweep_clears_old_duplicate_staging(
+    settings: Settings, paths: DataPaths
+) -> None:
+    """Without waiting for the next boot or duplicate (#397)."""
+    periodic = settings.model_copy(update={"asset_sweep_interval": 0.05})
+    with TestClient(create_app(periodic)):
+        staged = _stage(paths, "late", DUPLICATE_STAGING_MAX_AGE + 60)
+        deadline = time.monotonic() + 10
+        while staged.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not staged.exists()
 
 
 def test_a_git_failure_reading_the_base_fails_the_duplicate(
