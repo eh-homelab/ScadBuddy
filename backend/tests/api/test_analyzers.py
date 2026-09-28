@@ -307,6 +307,22 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
         components.override(DECISIONS, built)
 
 
+def test_recording_a_decision_without_a_database_is_a_503(client: TestClient, app: FastAPI) -> None:
+    # What `_build` gives when SCADBUDDY_DATABASE_URL is not set.
+    components = getattr(app.state, STATE_ATTR).components
+    built = components.get(DECISIONS)
+    components.override(DECISIONS, None)
+    try:
+        decision = {"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}}
+        problem = _ok(client.post("/api/v1/analyzers/decisions", json=decision), 503)
+        assert problem["type"].endswith("/database-required")
+        assert problem["detail"] == (
+            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set"
+        )
+    finally:
+        components.override(DECISIONS, built)
+
+
 @respx.mock
 def test_without_choices_the_models_remembered_ones_and_printer_are_used(
     client: TestClient, model: str
