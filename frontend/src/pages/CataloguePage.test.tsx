@@ -86,6 +86,27 @@ describe('CataloguePage filters (#276)', () => {
     expect(names()).toHaveLength(4)
   })
 
+  it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
+    const { user } = renderCatalogue()
+    const tags = within(await screen.findByRole('group', { name: 'Tags' }))
+    expect(tags.getByRole('button', { name: 'template 1' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Mine' }))
+    expect(tags.queryByRole('button', { name: /^template/ })).not.toBeInTheDocument()
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'coaster')
+    await waitFor(() => expect(names()).toEqual(['Crème Coaster']))
+    expect(tags.getByRole('button', { name: 'kitchen 1' })).toBeInTheDocument()
+    expect(tags.queryByRole('button', { name: /^keychain/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps a selected tag that nothing matches any more, so it can be unselected', async () => {
+    const { user } = renderCatalogue('/?tag=template&origin=mine')
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'template 0' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?origin=mine')
+  })
+
   it('shows no filters over an empty catalogue', async () => {
     server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
     renderCatalogue()

@@ -130,6 +130,13 @@ describe('tagCounts', () => {
       { tag: 'two-colour', count: 1 },
     ])
   })
+
+  it('keeps a selected tag no model carries, at zero, so it can be unselected', () => {
+    expect(tagCounts([], ['template'])).toEqual([{ tag: 'template', count: 0 }])
+    expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(
+      expect.objectContaining({ tag: 'KEYCHAIN' }),
+    )
+  })
 })
 
 describe('clearFilters', () => {

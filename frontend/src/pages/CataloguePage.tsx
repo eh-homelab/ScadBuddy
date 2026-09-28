@@ -35,7 +35,8 @@ export function CataloguePage() {
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
-  const tags = useMemo(() => tagCounts(data ?? []), [data])
+  // Counted over what the other filters leave, so a chip's count is what clicking it shows.
+  const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
     setParams(toParams(next), options)

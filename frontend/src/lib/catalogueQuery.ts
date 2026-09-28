@@ -85,12 +85,21 @@ export function filterModels(models: ModelSummary[], query: CatalogueQuery): Mod
   )
 }
 
-/** Every tag in `models` with how many models carry it: most used first, then by name. */
-export function tagCounts(models: ModelSummary[]): Array<{ tag: string; count: number }> {
+/**
+ * Every tag in `models` with how many models carry it: most used first, then by name.
+ * A `selected` tag none of them carry is listed at zero, so its chip can still be
+ * unselected.
+ */
+export function tagCounts(
+  models: ModelSummary[],
+  selected: string[] = [],
+): Array<{ tag: string; count: number }> {
   const counts = new Map<string, number>()
   for (const model of models) {
     for (const tag of new Set(model.tags ?? [])) counts.set(tag, (counts.get(tag) ?? 0) + 1)
   }
+  const present = new Set([...counts.keys()].map(fold))
+  for (const tag of selected) if (!present.has(fold(tag))) counts.set(tag, 0)
   return [...counts]
     .map(([tag, count]) => ({ tag, count }))
     .sort(
