@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -171,7 +172,10 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
         return folder.id
     view = await ensure_project(client, ProjectRequest(project_id=project_id))
     if view.folder_id is None:  # pragma: no cover - ensure_project always links one
-        raise ApiError(502, f"Bambuddy did not link a library folder to project {project_id}")
+        raise ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Bambuddy did not link a library folder to project {project_id}",
+        )
     return view.folder_id
 
 
