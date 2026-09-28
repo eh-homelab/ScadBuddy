@@ -276,12 +276,6 @@ class PostgresJobStore:
             name="scadbuddy-jobs",
         )
 
-    @property
-    def pool(self) -> ConnectionPool[Connection[DictRow]]:
-        """The connections, shared with the other Postgres stores (`template_media`).
-        Opened, and the migrations applied, by :meth:`open`."""
-        return self._pool
-
     def open(self) -> None:
         self._pool.open(wait=True, timeout=self.connect_timeout)
         with self._pool.connection() as conn:
@@ -291,6 +285,13 @@ class PostgresJobStore:
 
     def close(self) -> None:
         self._pool.close()
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The process's one pool, shared with the other Postgres stores
+        (`bambuddy.uploads.BambuddyUploadStore`, `template_media`). Opened and migrated
+        by `open`."""
+        return self._pool
 
     def listener(
         self,

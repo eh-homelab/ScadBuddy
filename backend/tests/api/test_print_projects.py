@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -69,6 +70,7 @@ def test_scadbuddy_keeps_no_model_to_project_relationship(client: TestClient) ->
     ).status_code in (404, 405)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_send_to_a_project_uploads_into_that_projects_folder(
     client: TestClient, model: str
@@ -94,17 +96,24 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
     assert uploaded.calls.last.request.url.params["folder_id"] == "9"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
-def test_an_already_uploaded_output_is_moved_into_the_project_folder(
+def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder(
     client: TestClient, model: str
 ) -> None:
     """The second run is the one that bites. An output uploaded before a project was
-    chosen keeps its library file — re-uploading would make a second copy — so it is
-    Bambuddy's own move route that puts it where `folder_id` says it is. Without this
-    the response reports a folder the file is not in."""
+    chosen has a copy in the inbox, and the project gets a copy of its own rather than
+    that one being moved (#316): a moved file would leave whatever printed from it
+    pointing at a folder it is no longer in. Without the upload the response would
+    report a folder the file is not in."""
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
-    uploaded = upload_route()
+    uploaded = respx.post(f"{API}/library/files").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
+            for file_id in (41, 42)
+        ]
+    )
     run_routes()
     slice_routes()
     queue_route()
@@ -118,18 +127,17 @@ def test_an_already_uploaded_output_is_moved_into_the_project_folder(
     # First run, no project: the 3MF lands in the folder from Settings.
     client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
     assert uploaded.call_count == 1
-    assert not moved.called
 
     # Second run, this time filed under a project.
     body = client.post(
         f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7)
     ).json()
-    assert body["folder_id"] == 9
-    # Not re-uploaded, and not left behind either.
-    assert uploaded.call_count == 1
-    assert json.loads(moved.calls.last.request.content)["folder_id"] == 9
+    assert (body["library_file_id"], body["folder_id"]) == (42, 9)
+    assert uploaded.calls.last.request.url.params["folder_id"] == "9"
+    assert not moved.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_queue_route_files_the_item_under_the_project_with_no_race(
     client: TestClient, model: str

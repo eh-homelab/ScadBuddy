@@ -42,6 +42,10 @@ from tests.api.test_send import (
 from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 
+# A run and the dialog both read or record the output's upload copies (#316), which
+# live in Postgres.
+pytestmark = pytest.mark.requires_postgres
+
 API = f"{BASE}/api/v1"
 
 

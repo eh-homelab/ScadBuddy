@@ -58,6 +58,7 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type LibraryCopy = Schemas['LibraryCopy']
 export type EditTarget = Schemas['EditTarget']
 
 /** Named parameter sets per template: shipped with it (`template`) or saved (`mine`). */
