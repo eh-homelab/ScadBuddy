@@ -63,6 +63,11 @@ def test_a_module_is_served_as_javascript(client: TestClient, model: str, paths:
         "page.html",
         "missing.js",
         ".hidden.js",
+        # A NUL byte makes `Path.resolve` raise, and a segment past NAME_MAX makes the
+        # stat raise: each the same 404, not a 500.
+        "%00.js",
+        "a%00.js",
+        "x" * 290 + ".js",
     ],
 )
 def test_ui_paths_never_leave_ui(
@@ -134,6 +139,28 @@ def test_a_pinned_revision_serves_its_own_module_graph(
     assert current.status_code == 200
     assert current.text == "// two\n"
     assert current.headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.requires_git
+def test_a_missing_library_checkout_does_not_stop_the_ui(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The UI's files need no library: a pin whose checkout is missing, and cannot be
+    fetched (no route to the git host), must not stop the pinned route serving them."""
+    _with_ui(paths, model, {"index.js": b"// one\n"})
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["libraries"] = [
+        {"name": "Gone", "url": "https://git.invalid/gone.git", "ref": "main", "commit": "0" * 40}
+    ]
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    first = _commit(paths, "ui one")
+    _with_ui(paths, model, {"index.js": b"// two\n"})
+    head = _commit(paths, "ui two")
+    for commit, body in ((first, "// one\n"), (head, "// two\n")):
+        response = client.get(f"/api/v1/models/{model}/versions/{commit}/ui/index.js")
+        assert response.status_code == 200, response.text
+        assert response.text == body
+    assert not (paths.libraries / "Gone").exists()
 
 
 def test_the_page_carries_the_csp() -> None:
