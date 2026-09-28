@@ -37,8 +37,9 @@ changes what a reading means:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -512,33 +513,6 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
     return QueueFilaments(filament_overrides=overrides, required_filament_types=types)
 
 
-class InventoryReads(BaseModel):
-    """What Bambuddy answers the same for every plate of a file: the spool inventory,
-    where each spool is loaded, and the chosen printer with its reconciled remaining
-    weights. Only the slots a plate needs are the plate's own."""
-
-    spools: list[Spool]
-    assignments: list[SpoolAssignment]
-    printer: Printer | None = None
-    slot_materials: list[SlotMaterial] = Field(default_factory=list)
-
-
-async def gather_inventory(
-    client: BambuddyClient, *, printer_id: int | None = None
-) -> InventoryReads:
-    """The plate-invariant part of :func:`gather_options`, read once."""
-    spools = await client.spools()
-    assignments = await client.spool_assignments()
-    printer = None
-    slot_materials: list[SlotMaterial] = []
-    if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
-    return InventoryReads(
-        spools=spools, assignments=assignments, printer=printer, slot_materials=slot_materials
-    )
-
-
 async def gather_options(
     client: BambuddyClient,
     *,
@@ -547,30 +521,72 @@ async def gather_options(
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
-    inventory: InventoryReads | None = None,
 ) -> FilamentOptions:
     """Read Bambuddy once for everything the filament step needs.
 
     ``own_colours`` replace the colors the file reports, slot by slot: the file was
     recolored for a run's spools (#457), and the step shows the model's.
-
-    ``inventory`` is a :func:`gather_inventory` already made: an all-plates read asks
-    for each plate's slots on top of the one inventory instead of re-reading it per
-    plate. Without it, it is read here for ``printer_id``.
     """
-    if inventory is None:
-        inventory = await gather_inventory(client, printer_id=printer_id)
-    requirements = await _requirements(
-        client, library_file_id, plate_id, fallback_colours, own_colours
-    )
-    return build_options(
+    (options,) = await gather_plate_options(
+        client,
         library_file_id=library_file_id,
-        spools=inventory.spools,
-        assignments=inventory.assignments,
-        requirements=requirements,
-        printer=inventory.printer,
-        slot_materials=inventory.slot_materials,
+        printer_id=printer_id,
+        plate_ids=[plate_id],
+        fallback_colours=fallback_colours,
+        own_colours=own_colours,
     )
+    return options
+
+
+async def gather_plate_options(
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    printer_id: int | None = None,
+    plate_ids: Sequence[int | None],
+    fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
+) -> list[FilamentOptions]:
+    """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
+
+    The spools, assignments and printer are the same for every plate, so they are read
+    once (#480); only each plate's slots are read per plate, concurrently. The reads
+    keep the single-plate order, spools, assignments, the plates, then the printer and
+    its inventory-remain, so the same failure surfaces either way: a plate's error beats
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
+    spools = await client.spools()
+    assignments = await client.spool_assignments()
+
+    answers = await asyncio.gather(
+        *(
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            for plate in plate_ids
+        ),
+        return_exceptions=True,
+    )
+    per_plate: list[list[SlotNeed]] = []
+    for answer in answers:
+        if isinstance(answer, BaseException):
+            raise answer
+        per_plate.append(answer)
+
+    printer = None
+    slot_materials: list[SlotMaterial] = []
+    if printer_id is not None:
+        printer = await client.printer(printer_id)
+        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+
+    return [
+        build_options(
+            library_file_id=library_file_id,
+            spools=spools,
+            assignments=assignments,
+            requirements=requirements,
+            printer=printer,
+            slot_materials=slot_materials,
+        )
+        for requirements in per_plate
+    ]
 
 
 async def _requirements(
