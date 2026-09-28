@@ -27,6 +27,12 @@ describe('detectLibraries', () => {
     expect(detectLibraries(source, CATALOGUE)).toEqual([])
   })
 
+  it('treats everything after an unterminated block comment as commented', () => {
+    const source = 'use <dotSCAD/a.scad>\n/* half-typed\nuse <BOSL2/std.scad>\n'
+
+    expect(detectLibraries(source, CATALOGUE)).toEqual(['dotSCAD'])
+  })
+
   it('reads spacing and several statements on one line', () => {
     const source = 'use < BOSL2/std.scad >  include<dotSCAD/a.scad>'
 

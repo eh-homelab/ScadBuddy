@@ -206,6 +206,27 @@ describe('NewModelPage', () => {
       expect(bodies.map((body) => body.libraries)).toEqual([['BOSL2']])
     })
 
+    it('suggests nothing, and still saves, when the catalogue cannot be fetched', async () => {
+      server.use(
+        http.get('*/api/v1/libraries', () =>
+          HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'boom' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const bodies = watchCreates()
+      const { user } = renderNew()
+      await user.type(screen.getByLabelText('Name'), 'Bolted')
+      await paste(user, BOLTED)
+      await screen.findByText(/^Parses cleanly/)
+
+      expect(screen.queryByTestId('detected-libraries')).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Save and customize' }))
+      expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+      expect(bodies.map((body) => body.libraries)).toEqual([[]])
+    })
+
     it('leaves out a suggestion that was unticked', async () => {
       const bodies = watchCreates()
       const { user } = renderNew()

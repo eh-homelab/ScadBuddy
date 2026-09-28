@@ -174,8 +174,6 @@ async def _pin(
             f"{slug!r}'s {name!r} was changed or removed while this re-pin ran; "
             "nothing was recorded",
         ) from None
-    except LibraryError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None

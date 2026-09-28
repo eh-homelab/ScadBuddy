@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator, Sequence
 
 from fastapi import status
@@ -16,6 +17,7 @@ from fastapi import status
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.libraries import (
+    NAME_PATTERN,
     CheckoutGate,
     LibraryError,
     LibraryFetchError,
@@ -70,6 +72,14 @@ async def pinned_at_create(
     wanted = [
         name for name in dict.fromkeys(names) if all(pin.name != name for pin in meta.libraries)
     ]
+    # The pattern the JSON body's field holds each name to, for the multipart form's.
+    malformed = [name for name in wanted if not re.fullmatch(NAME_PATTERN, name)]
+    if malformed:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"not a usable library name: {', '.join(repr(name) for name in malformed)}",
+            libraries=malformed,
+        )
     if not wanted:
         yield meta
         return

@@ -111,6 +111,23 @@ def test_a_create_naming_something_that_is_not_a_library_name_is_a_422(
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
+def test_an_upload_naming_something_that_is_not_a_library_name_is_a_422(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """The form field is held to the pattern the JSON body's is, before any clone."""
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post(
+            "/api/v1/models",
+            files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+            data={"libraries": ["BOSL2", "../etc"]},
+        )
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["libraries"] == ["../etc"]
+    resolve.assert_not_called()
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
 def test_a_create_whose_library_cannot_be_fetched_is_a_502_and_creates_nothing(
     lib_client: TestClient, libraries_app: FastAPI
 ) -> None:

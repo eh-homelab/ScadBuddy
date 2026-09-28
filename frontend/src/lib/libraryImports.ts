@@ -1,5 +1,6 @@
-/** Comments, so a commented-out `use` suggests nothing. */
-const COMMENTS = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/g
+/** Comments, so a commented-out `use` suggests nothing. An unterminated block comment
+ * comments out everything after it. */
+const COMMENTS = /\/\*[\s\S]*?(?:\*\/|$)|\/\/[^\n]*/g
 
 /** The first path segment of a `use <DIR/...>` or `include <DIR/...>`. */
 const IMPORT = /\b(?:use|include)\s*<\s*([^>/\s]+)\//g
