@@ -143,6 +143,21 @@ def _fits(rows: list[PresetChoice], prefix: str, printer: str) -> PresetRef | No
     )
 
 
+def _override_problem(
+    ref: PresetRef, rows: list[PresetChoice], printer: str, size: str
+) -> str | None:
+    """Why an Advanced override cannot slice, or ``None`` when it can. An empty
+    ``compatible_printers`` declares no restriction (see :class:`PresetChoice`)."""
+    matches = [row for row in rows if row.ref == ref]
+    if not matches:
+        return "isn't one Bambuddy has any more"
+    if not any(
+        not row.compatible_printers or printer in row.compatible_printers for row in matches
+    ):
+        return f"doesn't fit a {size} mm nozzle"
+    return None
+
+
 def resolve(
     options: FilamentOptions,
     plan: FilamentPlan,
@@ -216,7 +231,22 @@ def resolve(
             )
             continue
         ref = choices.filament_overrides.get(slot.slot_id)
-        if ref is None:
+        if ref is not None:
+            # Checked like every other preset (PR #335 review 2): an override left from
+            # an earlier nozzle size, or since deleted in Bambuddy, would otherwise only
+            # fail as an opaque error from Bambuddy's own slice.
+            problem = _override_problem(ref, catalogue.filament, printer, size)
+            if problem is not None:
+                errors.append(
+                    FilamentWarning(
+                        kind="no-preset",
+                        slot_id=slot.slot_id,
+                        message=f"The preset chosen for slot {slot.slot_id} {problem}. "
+                        "Pick another under Advanced.",
+                    )
+                )
+                continue
+        else:
             own = [
                 row.slicer_filament
                 for row in spool_presets.get(option.spool_id, [])

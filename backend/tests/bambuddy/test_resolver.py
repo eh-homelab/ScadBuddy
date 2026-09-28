@@ -200,6 +200,8 @@ def test_a_spools_own_per_nozzle_row_wins_over_everything_but_an_override() -> N
 
 
 def test_an_advanced_override_wins() -> None:
+    """``GFSL99_22`` is Generic PLA for a 0.2 nozzle: in the catalogue and fitting the
+    chosen size, so it beats the spool's own ``GFSA00_23``."""
     override = PresetRef(source="cloud", id="GFSL99_22")
     resolved = resolve(
         options(BASIC),
@@ -209,6 +211,45 @@ def test_an_advanced_override_wins() -> None:
         {},
     )
     assert resolved.filament_presets == [override]
+    assert resolved.errors == []
+
+
+def test_an_override_bambuddy_does_not_have_is_a_slot_error() -> None:
+    """PR #335 review 2: a preset since deleted in Bambuddy is refused here, naming the
+    slot, rather than failing opaquely inside Bambuddy's slice."""
+    resolved = resolve(
+        options(BASIC, PETG),
+        plan(1, 2),
+        PrintChoices(
+            nozzles=[NozzleChoice(size="0.2")],
+            filament_overrides={2: PresetRef(source="cloud", id="GONE404")},
+        ),
+        recorded(),
+        {},
+    )
+    assert [(e.kind, e.slot_id) for e in resolved.errors] == [("no-preset", 2)]
+    assert resolved.errors[0].message == (
+        "The preset chosen for slot 2 isn't one Bambuddy has any more. Pick another under Advanced."
+    )
+
+
+def test_an_override_for_another_nozzle_size_is_a_slot_error() -> None:
+    """A stale override left from an earlier size: ``GFSG99_18`` is Generic PETG for a
+    0.4 nozzle, so it cannot slice for a 0.2."""
+    resolved = resolve(
+        options(PETG),
+        plan(2),
+        PrintChoices(
+            nozzles=[NozzleChoice(size="0.2")],
+            filament_overrides={1: PresetRef(source="cloud", id="GFSG99_18")},
+        ),
+        recorded(),
+        {},
+    )
+    assert [(e.kind, e.slot_id) for e in resolved.errors] == [("no-preset", 1)]
+    assert resolved.errors[0].message == (
+        "The preset chosen for slot 1 doesn't fit a 0.2 mm nozzle. Pick another under Advanced."
+    )
 
 
 def test_with_nothing_of_its_own_a_spool_falls_back_to_generic_for_its_material() -> None:
