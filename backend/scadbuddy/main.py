@@ -29,6 +29,7 @@ from scadbuddy.api import (
     upstream,
     versions,
 )
+from scadbuddy.api.agent_actor import AgentActorGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
@@ -349,6 +350,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
+    # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
+    # refused on the method, path and marker header alone, before any body is read.
+    app.add_middleware(AgentActorGate)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
