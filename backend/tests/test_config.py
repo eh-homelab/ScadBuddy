@@ -228,3 +228,23 @@ def test_temporal_settings_reach_the_config() -> None:
     assert config.temporal_namespace == "scadbuddy"
     assert config.temporal_task_queue_render == "render"
     assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
+
+
+def test_the_store_caps_reach_the_config_from_either_source(tmp_path: Path) -> None:
+    env = {
+        "SCADBUDDY_STORE_MAX_TOTAL_BYTES": "0",
+        "SCADBUDDY_STORE_MAX_COUNT": "5",
+        "SCADBUDDY_WORKER_CACHE_MAX_BYTES": "1024",
+    }
+    loaded = load_config(env)
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        store_max_total_bytes=0,
+        store_max_count=5,
+        worker_cache_max_bytes=1024,
+    ).to_config()
+    for config in (loaded, settings):
+        assert (config.store_max_total_bytes, config.store_max_count) == (0, 5)
+        assert config.worker_cache_max_bytes == 1024
