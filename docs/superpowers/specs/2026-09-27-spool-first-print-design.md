@@ -35,6 +35,14 @@ and changed it went with the picker.
 Converting the send bar to spool-first is tracked as its own follow-up,
 eh-homelab/ScadBuddy#312.
 
+**Superseded by #312 (2026-09-28): the send bar no longer queues.** `POST
+/outputs/{id}/send` only uploads the 3MF to the library, laid out for the Settings
+printer, and attaches the edit link. Its queue mode, copies and print options are gone,
+and so are Settings' default pipeline, the raw slicer-preset settings, the pipeline
+progress route and ScadBuddy's Bambuddy pipeline client calls. The print dialog's run
+(§4) is the only path that prints. The amendment 2 paragraph above describes the state
+before #312.
+
 ## 1. Scope
 
 This is project 1 of 3:
