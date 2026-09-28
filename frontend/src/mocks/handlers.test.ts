@@ -656,6 +656,24 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
     ).rejects.toMatchObject({ status: 422 })
   })
 
+  it('keys presets without an id as the server does: suffixed on a clash, by position without a slug', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [
+        { name: 'Bag tag' },
+        { id: 'bag-tag-2', name: 'Other' },
+        { name: 'Bag  Tag!' },
+        { name: '🎄' },
+      ],
+    })
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-bag-tag',
+      'template-bag-tag-2',
+      'template-bag-tag-3',
+      'template-preset-4',
+    ])
+  })
+
   it('refuses what the server refuses: a stale dropdown value, a wrong type, a repeated id, too many', async () => {
     const refused = (presets: ModelPatch['presets']) =>
       expect(api.updateModel('name-keychain', { presets })).rejects.toMatchObject({ status: 422 })
@@ -666,6 +684,9 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
       { id: 'same', name: 'Two' },
     ])
     await refused(Array.from({ length: MAX_PRESETS + 1 }, (_, n) => ({ name: `Preset ${n}` })))
+    await refused([{ id: 'Not A Slug', name: 'X' }])
+    await refused([{ name: '   ' }])
+    await refused([{ name: 'x'.repeat(MAX_PRESET_NAME + 1) }])
     // Nothing was written by any of them.
     const presets = await api.listPresets('name-keychain')
     expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([

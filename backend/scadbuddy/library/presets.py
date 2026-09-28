@@ -272,6 +272,10 @@ class PresetStore:
             ):
                 if preset.id not in keys and preset.name.casefold() not in names:
                     defined.append(preset)
+        # Keyed again over the merged list, not with the keys above: those only decide
+        # which legacy entries are new. The legacy ones arrive with their keys written
+        # in as ids (`with_keys`), so this second pass keeps them, and keeps every
+        # model.json key, and is what guarantees the final ids are unique together.
         return [
             ParamPreset(
                 id=f"{TEMPLATE_ID_PREFIX}{key}",

@@ -501,6 +501,23 @@ export const MAX_PRESET_NAME = 80
 export const MAX_PRESETS = 200
 
 /**
+ * `template_preset_keys` in `library/presets.py`: a preset's explicit id, else its name
+ * as a slug with `-2`, `-3` on a clash, else `preset-<n>` when the name has no slug
+ * characters. An explicit id is never reused by a derived key.
+ */
+function templatePresetKeys(presets: { id?: string | null; name: string }[]): string[] {
+  const taken = new Set(presets.flatMap((preset) => (preset.id ? [preset.id] : [])))
+  return presets.map((preset, index) => {
+    if (preset.id) return preset.id
+    const base = slugify(preset.name) || `preset-${index + 1}`
+    let key = base
+    for (let suffix = 2; taken.has(key); suffix++) key = `${base}-${suffix}`
+    taken.add(key)
+    return key
+  })
+}
+
+/**
  * Why a preset's values are refused, as `require_valid_preset_params` words it, or
  * undefined: an unknown parameter, then each value's type as `build_defines` checks
  * it, then a dropdown value that is not one of its options.
@@ -1002,13 +1019,26 @@ export const handlers = [
       }
       const names = new Set<string>()
       const ids = new Set<string>()
+      const cleaned: typeof defined = []
       for (const preset of defined) {
-        const folded = preset.name.toLowerCase()
+        const name = preset.name.trim().replace(/\s+/g, ' ')
+        if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+        if (preset.name.length > MAX_PRESET_NAME) {
+          return problem(
+            422,
+            'Unprocessable Content',
+            `a preset name is at most ${MAX_PRESET_NAME} characters`,
+          )
+        }
+        const folded = name.toLowerCase()
         if (names.has(folded)) {
-          return problem(422, 'Unprocessable Content', `two presets are named '${preset.name}'`)
+          return problem(422, 'Unprocessable Content', `two presets are named '${name}'`)
         }
         names.add(folded)
-        if (preset.id) {
+        if (preset.id !== undefined && preset.id !== null) {
+          if (!/^[a-z0-9][a-z0-9-]*$/.test(preset.id) || preset.id.length > 100) {
+            return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
+          }
           if (ids.has(preset.id)) {
             return problem(422, 'Unprocessable Content', `two presets have the id '${preset.id}'`)
           }
@@ -1016,9 +1046,11 @@ export const handlers = [
         }
         const refused = valueRefusal(slug, preset.params ?? {})
         if (refused) return refused
+        cleaned.push({ ...preset, name })
       }
-      const shipped: ParamPreset[] = defined.map((preset) => ({
-        id: `template-${preset.id ?? slugify(preset.name)}`,
+      const keys = templatePresetKeys(cleaned)
+      const shipped: ParamPreset[] = cleaned.map((preset, index) => ({
+        id: `template-${keys[index]}`,
         name: preset.name,
         origin: 'template',
         params: preset.params ?? {},
