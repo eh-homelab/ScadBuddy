@@ -16,12 +16,16 @@ from typing import Any
 import numpy as np
 import psycopg
 import pytest
+from psycopg import Connection
 from psycopg.conninfo import make_conninfo
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import load_config
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render.pg_store import migrate
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -142,6 +146,36 @@ def pg_conninfo() -> Iterator[str]:
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+
+
+PgPool = ConnectionPool[Connection[DictRow]]
+
+
+def open_pg_pool(conninfo: str, *, size: int = 4) -> PgPool:
+    """A migrated pool on ``conninfo``, shaped as the render queue's (autocommit, dict
+    rows): what the stores that keep no pool of their own are given."""
+    pool: PgPool = ConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=size,
+        open=False,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    pool.open(wait=True, timeout=30)
+    with pool.connection() as conn:
+        migrate(conn)
+    return pool
+
+
+@pytest.fixture
+def pg_pool(pg_conninfo: str) -> Iterator[PgPool]:
+    """`open_pg_pool` on the test's throwaway schema, closed afterwards."""
+    pool = open_pg_pool(pg_conninfo)
+    try:
+        yield pool
+    finally:
+        pool.close()
 
 
 @pytest.fixture(autouse=True)

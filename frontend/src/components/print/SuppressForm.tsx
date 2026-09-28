@@ -1,7 +1,7 @@
 import { useId, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { AnalyzerDiagnostic, ScopeRef } from '../../api/types'
-import { scopeLabel, widerThanTemplate } from '../../lib/analyzers'
+import { atOrNarrower, sameScope, scopeLabel, widerThanTemplate } from '../../lib/analyzers'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
 
@@ -33,16 +33,28 @@ interface Props {
  * finding suppressed wider than the template needs a confirmation, since the backend
  * asks for one only when the decision is enforced.
  *
+ * A finding with an accepted fix is still listed, and the backend takes the narrowest
+ * decision (`decisions.resolve`): a suppression wider than the acceptance would be
+ * stored and never apply. So only the acceptance's scope and narrower ones are offered,
+ * and at the acceptance's own scope the suppression is about this finding, as the
+ * acceptance is (`post_apply` stores `instance=diagnostic.key`), so it replaces it
+ * rather than losing to it.
+ *
  * Not offered: `enforced` (a broad decision overriding narrower ones, which for an
  * `error` rule also needs a confirmation) and `ignore`, which records no reason.
  */
-export function SuppressForm({ diagnostic, scopes, onDone, onCancel }: Props) {
+export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: Props) {
   const id = useId()
+  const applied = diagnostic.decision
+  const accepted = applied?.decision.kind === 'accept' && !applied.stale ? applied.decision : undefined
+  const scopes = accepted ? atOrNarrower(offered, accepted.scope) : offered
   const [choice, setChoice] = useState<string | undefined>(undefined)
   const scope = scopes.find((row) => scopeValue(row) === choice) ?? scopes.at(-1)
   const [confirmed, setConfirmed] = useState(false)
   const needsConfirm = diagnostic.severity === 'error' && scope !== undefined && widerThanTemplate(scope)
-  const [everyInstance, setEveryInstance] = useState(false)
+  const [everyInstanceChosen, setEveryInstance] = useState(false)
+  const replacesAccepted = accepted !== undefined && scope !== undefined && sameScope(scope, accepted.scope)
+  const everyInstance = everyInstanceChosen && !replacesAccepted
   const [reason, setReason] = useState('')
   const [saving, setSaving] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
@@ -98,10 +110,18 @@ export function SuppressForm({ diagnostic, scopes, onDone, onCancel }: Props) {
           ))}
         </select>
       </div>
+      {accepted && (
+        <p className="text-[12px] text-muted">
+          {replacesAccepted
+            ? `This replaces the fix accepted for ${scopeLabel(accepted.scope).toLowerCase()}, so it is about this finding only.`
+            : `A fix is accepted for ${scopeLabel(accepted.scope).toLowerCase()}; a wider suppression would not apply, so only that scope and narrower ones are offered.`}
+        </p>
+      )}
       <label className="flex items-center gap-2 text-[12px] text-muted">
         <input
           type="checkbox"
           checked={everyInstance}
+          disabled={replacesAccepted}
           onChange={(event) => setEveryInstance(event.target.checked)}
           className="accent-[var(--sb-accent)]"
         />

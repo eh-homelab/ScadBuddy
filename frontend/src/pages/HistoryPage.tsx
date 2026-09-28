@@ -243,10 +243,9 @@ function DeleteOutputDialog({
 }
 
 /**
- * A recorded Bambuddy id, linked to the page it means something on (#89). Bambuddy has
- * no page per pipeline run — its copies land in the queue — so a run links to the queue
- * itself rather than to an invented path. `target=_blank` because ScadBuddy renders
- * inside Bambuddy's sandboxed iframe (spec §1).
+ * A recorded Bambuddy id, linked to the page it means something on (#89). A queue item
+ * links to its own page, and a library file to the library. `target=_blank` because
+ * ScadBuddy renders inside Bambuddy's sandboxed iframe (spec §1).
  */
 function BambuddyId({
   href,
@@ -319,12 +318,7 @@ function OutputRow({
                 queued #{output.queue_item_id}
               </BambuddyId>
             )}
-            {!output.queue_item_id && output.pipeline_run_id && (
-              <BambuddyId className="ml-2 text-ok" href={bambuddyUrl && `${bambuddyUrl}/queue`}>
-                pipeline run #{output.pipeline_run_id}
-              </BambuddyId>
-            )}
-            {!output.queue_item_id && !output.pipeline_run_id && lastCopy(output) && (
+            {!output.queue_item_id && lastCopy(output) && (
               <BambuddyId className="ml-2 text-muted" href={bambuddyUrl && `${bambuddyUrl}/library`}>
                 in library #{lastCopy(output)?.id}
               </BambuddyId>

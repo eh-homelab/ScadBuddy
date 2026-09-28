@@ -7,6 +7,8 @@ the print routes' tests do. Nothing here posts to Bambuddy: the analyzers only r
 from __future__ import annotations
 
 import asyncio
+import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -328,6 +330,52 @@ def test_an_all_plates_print_is_judged_on_every_plates_filament(
     if short:
         evidence = {e["label"]: e["value"] for e in found["SB3002:slot-1"]["evidence"]}
         assert evidence["needed per copy"] == 1200
+
+
+def _strip_plater_id(path: Path, index: int) -> None:
+    """Plate ``index`` loses its ``plater_id``, which ``plates_of`` refuses (bambu3mf.py)."""
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    line = f'  <metadata key="plater_id" value="{index}"/>\n'
+    assert line in config
+    entries["Metadata/model_settings.config"] = config.replace(line, "").encode("utf-8")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_an_all_plates_print_whose_plates_cannot_be_listed_says_so(
+    client: TestClient, model: str, app: FastAPI, paths: DataPaths
+) -> None:
+    """A 3MF ``plates_of`` refuses leaves the inventory unavailable with the reason, as
+    every other unreadable input does, rather than failing the whole run."""
+    configure(client)
+    bambuddy_routes()
+    output_id = make_output(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    _strip_plater_id(path, 2)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
+    requirements = respx.get(f"{API}/library/files/41/filament-requirements").mock(
+        return_value=httpx.Response(200, json={"file_id": 41, "plate_id": 1, "filaments": []})
+    )
+
+    request = {**SILK_REQUEST, "all_plates": True}
+    report = _run(client, output_id, request=request, detail="advanced")
+    inputs = {row["name"]: row for row in report["inputs"]}
+    assert inputs["inventory"] == {
+        "name": "inventory",
+        "available": False,
+        "reason": "the 3MF's plates cannot be read: a <plate> in the 3MF's model settings "
+        "has no plater_id",
+    }
+    assert not requirements.called
+    skipped = {row["id"]: row for row in report["skipped"]}
+    assert [row["name"] for row in skipped["SB3002"]["missing"]] == ["inventory"]
 
 
 def test_a_database_that_cannot_be_reached_degrades_to_a_503(

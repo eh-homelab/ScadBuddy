@@ -1,12 +1,5 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
-  AnalysisRun,
-  AnalyzerDecision,
-  AnalyzerDiagnostic,
-  DecisionCreate,
-  FixApply,
-  FixPreview,
-  FixRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -51,7 +44,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -63,15 +56,6 @@ import {
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
-import {
-  analysisReport,
-  analysisScopes,
-  scopesFor,
-  fixDigest,
-  fixFingerprint,
-  openEdgesDiagnostic,
-  overhangDiagnostic,
-} from './analyzers'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -119,7 +103,7 @@ const state = {
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
@@ -145,59 +129,6 @@ const state = {
    * it and a later read has it (`landPreviews`).
    */
   pendingPreviews: new Set<string>(),
-  /** #284 — the `analyzer_decisions` table: accepts, ignores and suppressions at a scope. */
-  analyzerDecisions: [] as AnalyzerDecision[],
-  /** #284 — what the analyzers find on every output; a test can swap it. */
-  analyzerDiagnostics: [overhangDiagnostic, openEdgesDiagnostic] as AnalyzerDiagnostic[],
-}
-
-/** #284 — what every mock analyzer run finds, so run, preview and apply agree. */
-export function setMockAnalyzerDiagnostics(diagnostics: AnalyzerDiagnostic[]): void {
-  state.analyzerDiagnostics = diagnostics
-}
-
-/** #284 — `analyzer.decision` on the `analyzers` topic, ids only (`core/events.py`). */
-function announceDecision(decision: AnalyzerDecision, action: 'recorded' | 'removed'): void {
-  emitRealtime('analyzer.decision', ['analyzers'], {
-    decision_id: decision.id,
-    diagnostic_id: decision.diagnostic_id,
-    scope: decision.scope.kind,
-    scope_key: decision.scope.key,
-    action,
-  })
-}
-
-/**
- * The diagnostic and fix a preview or apply names, at the scope it asks for (default the
- * narrowest), or the backend's refusal: 404 for a finding or fix not reported, 422 for a
- * scope this print is not in (`_find_fix`, `_fix_scope`).
- */
-function findFix(body: FixRequest) {
-  const output = state.outputs.find((o) => o.id === body.target.output_id)
-  if (!output) return { refusal: problem(404, 'Output not found') }
-  const analysis = body.request ?? { plate_id: 1, all_plates: false }
-  const diagnostic = state.analyzerDiagnostics.find((row) => row.key === body.diagnostic_key)
-  if (!diagnostic) {
-    return {
-      refusal: problem(404, 'Not Found', `${body.diagnostic_key} is not reported for this print (any more)`),
-    }
-  }
-  const fix = diagnostic.fixes?.find((row) => row.id === body.fix_id)
-  if (!fix) {
-    return { refusal: problem(404, 'Not Found', `${body.diagnostic_key} offers no fix '${body.fix_id}'`) }
-  }
-  const scopes = scopesFor(analysisScopes(output, analysis), diagnostic.slots ?? [])
-  const scope = body.scope ?? scopes[scopes.length - 1]!
-  if (!scopes.some((row) => row.kind === scope.kind && row.key === scope.key)) {
-    return {
-      refusal: problem(
-        422,
-        'Unprocessable Content',
-        `${diagnostic.key} on this print is not in the ${scope.kind} scope '${scope.key}'`,
-      ),
-    }
-  }
-  return { diagnostic, fix, scope, output, analysis }
 }
 
 /** Milliseconds a mock render spends pending, then running. */
@@ -305,9 +236,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  state.analyzerDecisions = []
-  state.analyzerDiagnostics = [overhangDiagnostic, openEdgesDiagnostic]
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -368,6 +297,11 @@ export function setMockUploadLimit(bytes: number): void {
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -662,7 +596,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
@@ -675,9 +609,9 @@ function problem(status: number, title: string, detail?: string, extensions: obj
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -1032,8 +966,9 @@ export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
   ...aiPluginHandlers,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // Each feature's own mocks (`features/`), then the agent service's MCP OIDC routes;
+  // the rest of this list is the backend.
+  ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
@@ -2164,35 +2099,20 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
+  http.post(`${base}/outputs/:id/send`, async ({ params }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
     if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
+    // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
     const libraryFileId = copyIn(output, null)
-    const queued = body.mode === 'queue'
-    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
-    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
-    state.outputs = state.outputs.map((o) =>
-      o.id === id
-        ? {
-            ...o,
-            pipeline_run_id: pipelineRunId,
-            queue_item_id: queueItemId,
-          }
-        : o,
-    )
     const result: SendResult = {
-      mode: body.mode,
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
-      pipeline_run_id: pipelineRunId,
-      queue_item_id: queueItemId,
-      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
         ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
         : null,
@@ -2308,7 +2228,7 @@ export const handlers = [
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -2334,168 +2254,6 @@ export const handlers = [
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     } satisfies PrintRunResult)
-  }),
-
-  // --- #284 print analyzers (#461) ---------------------------------------------------
-
-  /**
-   * `POST /analyzers/run` on an output: the keychain's two findings (`mocks/analyzers.ts`).
-   * A configuration target (`slug` + `params`) is not something the dialog sends.
-   */
-  http.post(`${base}/analyzers/run`, async ({ request }) => {
-    const body = (await request.json()) as AnalysisRun
-    const output = state.outputs.find((o) => o.id === body.target.output_id)
-    if (!output) return problem(404, 'Output not found')
-    return HttpResponse.json(
-      analysisReport(
-        output,
-        body.request ?? { plate_id: 1, all_plates: false },
-        state.analyzerDiagnostics,
-        state.analyzerDecisions,
-      ),
-    )
-  }),
-
-  /** `POST /analyzers/fixes/preview`: the diff and the fingerprint an apply carries back. */
-  http.post(`${base}/analyzers/fixes/preview`, async ({ request }) => {
-    const body = (await request.json()) as FixRequest
-    const found = findFix(body)
-    if ('refusal' in found) return found.refusal
-    const { diagnostic, fix, scope, output, analysis } = found
-    const blockers = [
-      ...new Set(
-        fix.changes.flatMap((row) => (!row.verified && row.to_verify ? [row.to_verify] : [])),
-      ),
-    ]
-    return HttpResponse.json({
-      diagnostic_id: diagnostic.id,
-      diagnostic_key: diagnostic.key,
-      fix,
-      scope,
-      fingerprint: fixFingerprint(output.id, diagnostic.key, fix, scope, analysis),
-      outward: fix.changes.some((row) => row.outward),
-      applicable: blockers.length === 0,
-      blockers,
-      summary: fix.changes
-        .map((row) => `${row.setting}: ${row.base_known ? JSON.stringify(row.base) : 'unknown'} → ${JSON.stringify(row.proposed)} [${row.target}]`)
-        .join('; '),
-      route_note:
-        'Applying records this diff as a decision at its scope; nothing sends it yet.',
-    } satisfies FixPreview)
-  }),
-
-  /**
-   * `POST /analyzers/fixes/apply`, refusing in the backend's order: a moved fingerprint
-   * (409 stale), an unverified target (409 with `to_verify`), no `confirm` (428).
-   */
-  http.post(`${base}/analyzers/fixes/apply`, async ({ request }) => {
-    const body = (await request.json()) as FixApply
-    const found = findFix(body)
-    if ('refusal' in found) return found.refusal
-    const { diagnostic, fix, scope, output, analysis } = found
-    if (fixFingerprint(output.id, diagnostic.key, fix, scope, analysis) !== body.fingerprint) {
-      return problem(
-        409,
-        'Conflict',
-        'the diff, its scope, the print or its base differ from the preview; preview it again',
-        { type: 'https://scadbuddy.dev/problems/analyzer-fix-stale' },
-      )
-    }
-    const blockers = fix.changes.flatMap((row) =>
-      !row.verified && row.to_verify ? [row.to_verify] : [],
-    )
-    if (blockers.length > 0) {
-      return problem(
-        409,
-        'Conflict',
-        'this fix cannot be applied until where its settings land is verified',
-        { type: 'https://scadbuddy.dev/problems/analyzer-fix-unverified', to_verify: blockers },
-      )
-    }
-    if (body.confirm !== true) {
-      return problem(428, 'Precondition Required', 'confirm the previewed diff to record it', {
-        type: 'https://scadbuddy.dev/problems/confirmation-required',
-      })
-    }
-    state.seq += 1
-    const decision: AnalyzerDecision = {
-      id: state.seq.toString(16).padStart(32, '0'),
-      diagnostic_id: diagnostic.id,
-      instance: diagnostic.key,
-      kind: 'accept',
-      scope,
-      reason: body.reason ?? null,
-      enforced: false,
-      fix_id: fix.id,
-      fingerprint: body.fingerprint,
-      diff_digest: fixDigest(fix),
-      changes: fix.changes,
-      created_at: new Date().toISOString(),
-    }
-    const replaced = state.analyzerDecisions.filter(
-      (row) =>
-        row.diagnostic_id === decision.diagnostic_id &&
-        row.instance === decision.instance &&
-        row.scope.kind === scope.kind &&
-        row.scope.key === scope.key,
-    )
-    state.analyzerDecisions = [
-      ...state.analyzerDecisions.filter((row) => !replaced.includes(row)),
-      decision,
-    ]
-    for (const row of replaced) announceDecision(row, 'removed')
-    announceDecision(decision, 'recorded')
-    return HttpResponse.json(decision)
-  }),
-
-  /**
-   * Ignore or suppress at a scope (`post_decision`): a suppression without a reason is
-   * refused as the backend's validator refuses it, and a decision about the same rule
-   * and instance at the same scope is replaced, each announced on `analyzers`.
-   */
-  http.post(`${base}/analyzers/decisions`, async ({ request }) => {
-    const body = (await request.json()) as DecisionCreate
-    if (body.kind === 'suppress' && !body.reason?.trim()) {
-      return problem(
-        422,
-        'Unprocessable Content',
-        'Value error, a suppression needs a reason, as #pragma warning disable does',
-      )
-    }
-    const instance = body.instance ?? null
-    const replaced = state.analyzerDecisions.filter(
-      (row) =>
-        row.diagnostic_id === body.diagnostic_id &&
-        (row.instance ?? null) === instance &&
-        row.scope.kind === body.scope.kind &&
-        row.scope.key === body.scope.key,
-    )
-    state.seq += 1
-    const decision: AnalyzerDecision = {
-      id: state.seq.toString(16).padStart(32, '0'),
-      diagnostic_id: body.diagnostic_id,
-      instance,
-      kind: body.kind,
-      scope: body.scope,
-      reason: body.reason?.trim() ?? null,
-      enforced: body.enforced ?? false,
-      created_at: new Date().toISOString(),
-    }
-    state.analyzerDecisions = [
-      ...state.analyzerDecisions.filter((row) => !replaced.includes(row)),
-      decision,
-    ]
-    for (const row of replaced) announceDecision(row, 'removed')
-    announceDecision(decision, 'recorded')
-    return HttpResponse.json(decision, { status: 201 })
-  }),
-
-  http.delete(`${base}/analyzers/decisions/:id`, ({ params }) => {
-    const gone = state.analyzerDecisions.find((row) => row.id === params['id'])
-    if (!gone) return problem(404, 'Not Found', `no decision with id '${String(params['id'])}'`)
-    state.analyzerDecisions = state.analyzerDecisions.filter((row) => row !== gone)
-    announceDecision(gone, 'removed')
-    return new HttpResponse(null, { status: 204 })
   }),
 
   // --- #79 projects -----------------------------------------------------------------
@@ -2567,12 +2325,6 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    if (output.pipeline_run_id) {
-      return HttpResponse.json({
-        ...fixtures.pipelineProgress,
-        pipeline_run_id: output.pipeline_run_id,
-      } satisfies PrintProgress)
-    }
     if (output.queue_item_id) {
       return HttpResponse.json({
         ...fixtures.queuedSliceProgress,
@@ -2703,7 +2455,6 @@ export const handlers = [
       bambuddy_api_key?: string
       public_url?: string | null
       library_folder_id?: number | null
-      pipeline_id?: number | null
       printer_id?: number | null
       display_unit?: Settings['display_unit'] | null
     }

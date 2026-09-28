@@ -353,28 +353,6 @@ async def test_without_a_sliced_file_there_is_nothing_to_scan_for(
 
 
 @respx.mock
-async def test_a_pipeline_run_links_through_its_jobs_queue_entries(
-    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
-) -> None:
-    run = recording("pipeline-run.json")
-    run["jobs"] = [
-        {**run["jobs"][0], "queue_entry_id": 90, "status": "completed"},
-        {**run["jobs"][0], "id": 99, "queue_entry_id": None, "status": "pending"},
-    ]
-    respx.get(f"{API}/pipeline-runs/1").mock(return_value=httpx.Response(200, json=run))
-    item = respx.get(f"{API}/queue/90").mock(
-        return_value=httpx.Response(200, json=queue_item(90, status="completed", archive_id=32))
-    )
-    printed = meta(print_route="pipeline", pipeline_run_id=1)
-
-    await progress_for(bambuddy, printed, uploads=uploads, links=links)
-    await progress_for(bambuddy, printed, uploads=uploads, links=links)
-
-    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [32]
-    assert item.call_count == 1, "a linked queue entry is not read again"
-
-
-@respx.mock
 async def test_attaching_to_a_project_records_the_archives_it_found(
     bambuddy: BambuddyClient, links: PrintLinkStore
 ) -> None:
@@ -409,27 +387,6 @@ async def test_attaching_links_nothing_the_output_does_not_own(
 
     assert result.archive_ids == [77], "still filed under the project"
     assert await links.for_output(OUTPUT) == []
-
-
-@respx.mock
-async def test_a_pipeline_entry_gone_before_it_was_linked_is_found_by_hash(
-    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
-) -> None:
-    await _sliced(uploads)
-    await uploads.record_slice_hash(OUTPUT, 80, HASH)
-    run = recording("pipeline-run.json")
-    run["jobs"] = [{**run["jobs"][0], "queue_entry_id": 90, "status": "completed"}]
-    respx.get(f"{API}/pipeline-runs/1").mock(return_value=httpx.Response(200, json=run))
-    respx.get(f"{API}/queue/90").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
-    scan = archives_page(archive_row(31, "other"), archive_row(32, HASH))
-    printed = meta(print_route="pipeline", pipeline_run_id=1)
-
-    await progress_for(bambuddy, printed, uploads=uploads, links=links)
-    await progress_for(bambuddy, printed, uploads=uploads, links=links)
-
-    [link] = await links.for_output(OUTPUT)
-    assert (link.archive_id, link.matched_by) == (32, "content_hash")
-    assert scan.call_count == 1, "throttled like the slice-and-queue route's scan"
 
 
 @respx.mock
