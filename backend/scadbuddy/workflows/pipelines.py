@@ -53,7 +53,7 @@ def _openscad_timeout() -> timedelta:
 
 def _waiter_recheck() -> timedelta:
     # Three attempts of a piece's worst case (two openscad activities plus two short
-    # ones), so a live piece is never re-checked mid-render but a gone one is noticed.
+    # ones): a live piece is rarely re-checked, and harmlessly (the re-signal is idempotent).
     return 3 * (2 * _openscad_timeout() + 2 * SHORT)
 
 
@@ -185,6 +185,8 @@ class TemplatePipeline:
         Neither a cancelled job nor its closing touches the piece (ABANDON twice)."""
         piece_id = f"piece-{req.piece_key}"
         while True:
+            if self._outcome is not None:
+                return self._outcome  # arrived between waits
             try:
                 child = await workflow.start_child_workflow(
                     RenderPiece.run,
