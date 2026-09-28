@@ -25,7 +25,6 @@ from scadbuddy.core.events import (
     PG_CHANNEL,
     BusResync,
     Event,
-    InProcessEventBus,
     JobEvent,
     ModelEvent,
     Subscription,
@@ -43,9 +42,10 @@ from scadbuddy.core.pg_events import (
 )
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.render.job_store import JobStore, render_key
+from scadbuddy.render.job_store import render_key
 from scadbuddy.render.jobs import Job, JobResult, QueueFullError, RenderQueue
 from scadbuddy.render.pg_store import PostgresJobStore, migrate
+from tests.conftest import UNUSED_DATABASE_URL
 
 #: Well inside this, or it is not "at once".
 PROMPTLY = 5.0
@@ -579,16 +579,6 @@ def test_retention_settings_are_validated_by_name(field: str) -> None:
 def test_retention_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_SECONDS", "120")
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_ROWS", "0")
-    settings = Settings()
+    settings = Settings(database_url=UNUSED_DATABASE_URL)
     assert settings.event_log_retention_seconds == 120
     assert settings.event_log_retention_rows == 0
-
-
-def test_without_a_database_the_bus_stays_in_process(tmp_path: Path) -> None:
-    """#266's "without the database": no Postgres, the UI's bus is the in-process one
-    and the render queue publishes every job event itself, as before."""
-    state = build_state(Settings(data_dir=tmp_path))
-    assert isinstance(state.events, InProcessEventBus)
-    assert isinstance(state.queue.store, JobStore)
-    assert not state.queue.store.announces_jobs
-    assert state.queue.events is state.events

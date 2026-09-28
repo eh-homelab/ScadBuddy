@@ -80,7 +80,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.outputs import OutputStore
-from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
+from scadbuddy.library.presets import PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -583,20 +583,11 @@ def _require_pins(libraries: Any) -> None:
     """A dropped model.json's ``libraries`` (#93, #179): pins, as ScadBuddy writes
     them, or nothing. Checked here because the metadata itself reads them leniently
     -- a model on disk must still list -- and an upload must not lose one quietly:
-    OpenSCAD only WARNs on a missing ``use``. A bare name, from before pins moved
-    into each model, has nothing left to resolve it against."""
+    OpenSCAD only WARNs on a missing ``use``."""
     try:
-        declared = parse_declaration({"libraries": libraries})
+        parse_declaration({"libraries": libraries})
     except LibraryDeclarationError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    names = [entry for entry in declared if isinstance(entry, str)]
-    if names:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"the model.json names libraries without a pin: {', '.join(names)}; "
-            "pin them to the model once it is created",
-            libraries=names,
-        )
 
 
 def _require_png(payload: bytes) -> bytes:
@@ -888,8 +879,6 @@ async def patch_model(
             f"{slug!r} already has a saved preset named {name!r}",
             name=name,
         ) from None
-    except InvalidPresetsFileError as error:
-        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
@@ -1332,7 +1321,7 @@ def delete_readme(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) ->
 
 def install_model_handlers(app: FastAPI) -> None:
     """A model whose model.json on disk cannot be read is a 409 from every route that
-    reads it, as a hand-broken `libraries.lock` is: the model is in a state only an
+    reads it, as a hand-broken `libraries` entry is: the model is in a state only an
     edit of that file fixes, and naming the file beats the bare 500 it would be."""
 
     @app.exception_handler(InvalidModelMetaError)

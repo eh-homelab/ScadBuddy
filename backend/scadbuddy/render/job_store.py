@@ -74,6 +74,9 @@ class Submitted:
     job: Job
     #: Answered with a job already waiting, rather than a new one.
     coalesced: bool = False
+    #: Recorded already done, from a finished render kept under the template
+    #: (`render_cache`): no worker will see it.
+    cached: bool = False
     #: The job this submit replaced and dropped, if it did.
     superseded: Job | None = None
 
@@ -109,7 +112,8 @@ class JobBackend(Protocol):
     @property
     def announces_jobs(self) -> bool:
         """True when the store publishes the ``job.*`` events of its own changes --
-        submit (pending, superseded), reap (pending, failed) and finish -- inside the
+        submit (pending, superseded, and done when answered from a kept render),
+        reap (pending, failed) and finish -- inside the
         transaction that makes them (Postgres with an event bus attached). The
         render queue then leaves those to it, and sends ``job.running`` through
         `announce` so that it cannot overtake the ``job.done`` behind it."""
@@ -167,7 +171,11 @@ class JobBackend(Protocol):
 
         ``max_pending`` > 0 refuses a NEW job with `QueueFullError` once that many
         wait, counted after the supersede frees its place. A submit answered by
-        coalescing takes no place and is never refused. 0 accepts everything."""
+        coalescing takes no place and is never refused. 0 accepts everything.
+
+        A ``job`` that arrives already ``done`` -- the queue found its render kept
+        under the template -- is recorded as it is, after the supersede and outside
+        the limit: nothing waits for it. `Submitted.cached` says so."""
         ...
 
     def claim(self) -> Job | None:
@@ -327,6 +335,10 @@ class JobStore:
                 previous = None
             if previous is not None and previous.key == key:
                 return Submitted(previous.job, coalesced=True)
+            if job.state == "done":
+                superseded = self._release(previous.job.id) if previous is not None else None
+                self.write(job)
+                return Submitted(job, cached=True, superseded=superseded)
             if max_pending and key not in self._by_key:
                 # Decided before anything changes, so a refusal supersedes nothing.
                 frees = previous is not None and previous.claims == 1
