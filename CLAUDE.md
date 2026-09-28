@@ -113,7 +113,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
   `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes now; `/mcp` and the agent's own sockets later) uses the one allowlist in
+  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
@@ -121,7 +121,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
   `PreToolUse` hook; outward → denied as "needs approval" until #258);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`.
+  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
+  auth in `src/auth/`); every `/api/v1` operation needs a tool or a
+  `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables. Schema changes are appended to
     `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
     start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
@@ -200,8 +203,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
   `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
-  `frontend/pnpm-workspace.yaml` must be copied into the Docker build (it holds
-  `allowBuilds`); `agent/` has none because no dependency has an install script.
+  `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
+  the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
   Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.

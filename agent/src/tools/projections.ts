@@ -1,0 +1,112 @@
+import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { Principal } from '../auth/principal.js'
+import { errorResult, type Progress, runTool, type Tool, type ToolServices } from './registry.js'
+
+// The two projections of the registry (spec §5.1, D3). Both hand every call to
+// `runTool`, with the same names, descriptions, input shapes and annotations;
+// test/projections.test.ts asserts the two tool lists are identical.
+
+export const SERVER_NAME = 'scadbuddy'
+export const SERVER_VERSION = '0.1.0'
+
+type ExtraLike = {
+  signal?: AbortSignal
+  _meta?: { progressToken?: string | number }
+  sendNotification?: (notification: {
+    method: 'notifications/progress'
+    params: { progressToken: string | number; progress: number; total?: number; message?: string }
+  }) => Promise<void>
+  authInfo?: { extra?: Record<string, unknown> }
+}
+
+/**
+ * `notifications/progress` for the call's progress token, per the MCP spec's
+ * progress utility; a no-op when the caller sent none. Both projections pass
+ * the MCP SDK's request `extra`, so this reads the same fields for each.
+ */
+export function progressFrom(extra: unknown): Progress {
+  const e = (extra ?? {}) as ExtraLike
+  const token = e._meta?.progressToken
+  const send = e.sendNotification
+  if (token === undefined || !send) return async () => {}
+  return async (progress, total, message) => {
+    await send({
+      method: 'notifications/progress',
+      params: {
+        progressToken: token,
+        progress,
+        ...(total !== undefined ? { total } : {}),
+        ...(message !== undefined ? { message } : {}),
+      },
+    })
+  }
+}
+
+function signalFrom(extra: unknown): AbortSignal {
+  return (extra as ExtraLike | undefined)?.signal ?? new AbortController().signal
+}
+
+/**
+ * Harness projection: an in-process SDK MCP server, so the tools reach Claude
+ * as `mcp__scadbuddy__<name>` (custom tools,
+ * https://code.claude.com/docs/en/agent-sdk/custom-tools). The principal is the
+ * session's own (the browser user, or a flow's declared permissions, spec §8.1).
+ */
+export function createHarnessServer(
+  tools: readonly Tool[],
+  services: ToolServices,
+  principal: Principal,
+): McpSdkServerConfigWithInstance {
+  return createSdkMcpServer({
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+    tools: tools.map((t) =>
+      sdkTool(
+        t.name,
+        t.description,
+        t.shape,
+        (args, extra) =>
+          runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: signalFrom(extra) }),
+        { annotations: t.annotations },
+      ),
+    ),
+  })
+}
+
+/** The principal `/mcp` attached to this request's `authInfo` (see ../mcp/http.ts). */
+export function principalFrom(extra: unknown): Principal | undefined {
+  const principal = (extra as ExtraLike | undefined)?.authInfo?.extra?.principal
+  return principal as Principal | undefined
+}
+
+/**
+ * External projection: one MCP server per `/mcp` session (an `McpServer`
+ * connects to exactly one transport). The principal is re-read from every
+ * request's auth, so a token revoked mid-session stops working at once.
+ */
+export function createExternalServer(tools: readonly Tool[], services: ToolServices): McpServer {
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    {
+      capabilities: { logging: {} },
+      instructions:
+        'ScadBuddy: an OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. Outward tools ' +
+        '(send, print, delete, settings writes) return a pending action for a human to approve in the ' +
+        'ScadBuddy UI instead of acting.',
+    },
+  )
+  for (const t of tools) {
+    server.registerTool(
+      t.name,
+      { description: t.description, inputSchema: t.shape, annotations: t.annotations },
+      async (args, extra): Promise<CallToolResult> => {
+        const principal = principalFrom(extra)
+        if (!principal) return errorResult('unauthenticated')
+        return runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: extra.signal })
+      },
+    )
+  }
+  return server
+}
