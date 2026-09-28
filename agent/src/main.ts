@@ -218,7 +218,7 @@ const app = createApp({
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
-  origins: originPolicy(config.publicUrl, config.trustedProxies),
+  origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals } : {}),
   remoteAddress: (c) => {
     try {
