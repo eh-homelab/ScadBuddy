@@ -17,6 +17,7 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import link_by_hash
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
@@ -34,6 +35,14 @@ OUTPUT = "0" * 32
 HASH = "f0744d1ee745" + "0" * 52
 
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture(autouse=True)
+def _no_recent_scans() -> Iterator[None]:
+    """Each test starts with no output scanned by hash lately."""
+    progress_module._last_hash_scan.clear()
+    yield
+    progress_module._last_hash_scan.clear()
 
 
 @pytest.fixture
@@ -146,6 +155,45 @@ async def test_a_settled_print_is_not_scanned_for_again_once_it_is_linked(
 
     assert scan.call_count == 1
     assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+
+
+@respx.mock
+async def test_one_plates_link_does_not_keep_another_plates_archive_from_being_found(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore
+) -> None:
+    """Plate 1's item was linked before it went; plate 2's never was. Both are gone,
+    and the read still scans for plate 2's archive, whichever plate is read first."""
+    await _sliced(uploads)
+    await links.record(
+        OUTPUT, PrintLink(archive_id=17, matched_by="queue_item", queue_item_id=51, plate_id=1)
+    )
+    for entry in (51, 52):
+        respx.get(f"{API}/queue/{entry}").mock(
+            return_value=httpx.Response(404, json={"detail": "gone"})
+        )
+    for job in (9, 10):
+        respx.get(f"{API}/slice-jobs/{job}").mock(
+            return_value=httpx.Response(200, json={"id": job, "status": "completed"})
+        )
+    respx.get(f"{API}/library/files/80").mock(
+        return_value=httpx.Response(
+            200, json={"id": 80, "filename": "name-keychain.gcode.3mf", "file_hash": HASH}
+        )
+    )
+    archives_page(archive_row(17, "other"), archive_row(18, HASH))
+    plates = meta(
+        print_route="slice_queue",
+        queue_item_id=52,
+        slice_job_id=10,
+        plates=[
+            {"plate_id": 1, "queue_item_id": 51, "slice_job_id": 9},
+            {"plate_id": 2, "queue_item_id": 52, "slice_job_id": 10},
+        ],
+    )
+
+    await progress_for(bambuddy, plates, uploads=uploads, links=links)
+
+    assert sorted(link.archive_id for link in await links.for_output(OUTPUT)) == [17, 18]
 
 
 @respx.mock

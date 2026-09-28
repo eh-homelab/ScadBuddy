@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections import OrderedDict
 from typing import Literal
 
@@ -254,6 +255,12 @@ def from_queue(
     )
 
 
+#: How long after an output's archive scan by hash (#306) a later progress read skips
+#: it. Kept in memory: after a restart the next read scans once more, which is harmless.
+HASH_SCAN_INTERVAL = 600.0
+_last_hash_scan: dict[str, float] = {}
+
+
 class _Linker:
     """Records the archives a progress read comes across (#306): the one a queue item
     reports, or, when an item is gone, those found by the sliced file's hash."""
@@ -275,19 +282,22 @@ class _Linker:
         await link_item(self.links, self.meta.id, item, plate_id=plate_id)
 
     async def gone(self, queue_item_id: int) -> None:
-        # Once per read, however many plates' items are gone: one scan covers them all.
         if self._searched:
             return
-        self._searched = True
-        # A settled print is polled again whenever its dialog opens. The archive list is
-        # scanned only while the output has no link to show for the item: not one read
-        # off the item before it went, and not one an earlier scan already found.
+        # An item linked before it went needs nothing; another plate's gone item still
+        # may, so this item's own link must not spend the read's one scan (#522 review).
         known = await self.links.for_output(self.meta.id)
-        if any(
-            link.queue_item_id == queue_item_id or link.matched_by == "content_hash"
-            for link in known
-        ):
+        if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
             return
+        # Once per read, however many plates' items are gone: one scan covers them all.
+        self._searched = True
+        # And at most once per output every HASH_SCAN_INTERVAL: a settled print is read
+        # again whenever its dialog opens, and each scan pages Bambuddy's archive list.
+        now = time.monotonic()
+        last = _last_hash_scan.get(self.meta.id)
+        if last is not None and now - last < HASH_SCAN_INTERVAL:
+            return
+        _last_hash_scan[self.meta.id] = now
         await link_by_hash(self.client, self.uploads, self.links, self.meta)
 
     async def run(self, run: PipelineRun) -> None:
