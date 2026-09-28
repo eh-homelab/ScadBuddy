@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -116,12 +116,134 @@ class Archive(BambuddyModel):
 
     id: int
     printer_id: int | None = None
+    project_id: int | None = None
+    plate_id: int | None = None
     status: str | None = None
     bed_type: str | None = None
     print_name: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime | None = None
+    #: SHA-256 of the file that was printed. The same bytes as the sliced library
+    #: file, whose ``file_hash`` it therefore equals (#305 plan, L6).
+    content_hash: str | None = None
+
+
+#: The prefix Bambuddy gives the photo it captures when a print finishes
+#: (``main.py:5346`` at v1.2.5.6). An uploaded photo is ``uuid[:8] + ext``.
+FINISH_PHOTO_PREFIX = "finish_"
+
+
+class ArchiveDetail(Archive):
+    """``GET /api/v1/archives/{id}`` (``ArchiveResponse``), as far as print history
+    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them."""
+
+    filename: str | None = None
+    file_size: int | None = None
+    thumbnail_path: str | None = None
+    timelapse_path: str | None = None
+    #: The slicer's project 3MF, when one was attached; served at ``/source``.
+    source_3mf_path: str | None = None
+    print_time_seconds: int | None = None
+    actual_time_seconds: int | None = None
+    filament_used_grams: float | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    layer_height: float | None = None
+    nozzle_diameter: float | None = None
+    cost: float | None = None
+    notes: str | None = None
+    tags: str | None = None
+    photos: list[str] = Field(default_factory=list)
+    failure_reason: str | None = None
+    quantity: int = 1
+    run_count: int = 0
+    successful_run_count: int = 0
+    failed_run_count: int = 0
+    last_run_at: datetime | None = None
+
+    @field_validator("photos", mode="before")
+    @classmethod
+    def _no_photos(cls, value: Any) -> Any:
+        # `ArchiveResponse.photos` is `list | None`.
+        return value if value is not None else []
+
+    @property
+    def finish_photo(self) -> str | None:
+        """The photo Bambuddy took when the print finished, if it took one."""
+        return next((name for name in self.photos if name.startswith(FINISH_PHOTO_PREFIX)), None)
+
+
+class ArchiveRun(BambuddyModel):
+    """One run of an archive (``PrintLogEntrySchema``): a reprint is another run."""
+
+    id: int
+    archive_id: int | None = None
+    printer_id: int | None = None
+    printer_name: str | None = None
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: int | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    filament_used_grams: float | None = None
+    cost: float | None = None
+    failure_reason: str | None = None
+
+
+class ArchiveRunList(BambuddyModel):
+    items: list[ArchiveRun] = Field(default_factory=list)
+    total: int = 0
+
+
+class TimelapseInfo(BambuddyModel):
+    duration: float
+    width: int
+    height: int
+    fps: float
+    codec: str
+    file_size: int
+    has_audio: bool = False
+
+
+class TimelapseThumbnails(BambuddyModel):
+    """Poster frames. Inline base64 JPEGs, not URLs."""
+
+    thumbnails: list[str] = Field(default_factory=list)
+    timestamps: list[float] = Field(default_factory=list)
+
+
+class LocalTimelapse(BambuddyModel):
+    name: str
+    size: int = 0
+
+
+class PrinterMediaFile(BambuddyModel):
+    name: str
+    path: str
+    size: int = 0
+    mtime: datetime | None = None
+    #: ``timelapse`` or ``ipcam``.
+    kind: str
+
+
+class PrinterMedia(BambuddyModel):
+    """``GET /archives/{id}/printer-media``. Without ``can_control_printer`` the printer
+    is not listed and ``warnings`` carries ``printer_files_forbidden``."""
+
+    archive_id: int
+    printer_id: int | None = None
+    local_timelapse: LocalTimelapse | None = None
+    remote_files: list[PrinterMediaFile] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ArchivePhotoUpload(BambuddyModel):
+    status: str
+    #: The name Bambuddy gave the photo, not the one it was uploaded under.
+    filename: str
+    photos: list[str] = Field(default_factory=list)
 
 
 class NozzleInfo(BambuddyModel):

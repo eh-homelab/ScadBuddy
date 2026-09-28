@@ -23,6 +23,7 @@ from scadbuddy.api import (
     plates,
     presets,
     printing,
+    prints,
     realtime,
     settings,
     upstream,
@@ -58,6 +59,7 @@ def _api_router() -> APIRouter:
     router.include_router(assets.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
+    router.include_router(prints.router)
     router.include_router(settings.router)
     router.include_router(fonts.router)
     router.include_router(plates.router)

@@ -24,6 +24,7 @@ import logging
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import date
 from types import TracebackType
 from typing import Any, Self
 
@@ -33,6 +34,9 @@ from fastapi import status
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
     Archive,
+    ArchiveDetail,
+    ArchivePhotoUpload,
+    ArchiveRunList,
     AvailableFilament,
     EligibilityReport,
     EligibilityRequest,
@@ -51,6 +55,7 @@ from scadbuddy.bambuddy.models import (
     PipelineRunRequest,
     PresetCatalogue,
     Printer,
+    PrinterMedia,
     PrinterStatus,
     Project,
     ProjectCreate,
@@ -62,6 +67,8 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
     SpoolFilamentPreset,
+    TimelapseInfo,
+    TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -339,18 +346,149 @@ class BambuddyClient:
         )
         return FilamentRequirements.model_validate(response.json())
 
-    async def archives(self, *, printer_id: int, limit: int = 20) -> list[Archive]:
-        """This printer's recent archives. Bambuddy's order is not documented, so callers
-        sort; ``limit`` keeps the read small."""
+    async def archives(
+        self,
+        *,
+        printer_id: int,
+        limit: int = 20,
+        offset: int = 0,
+        date_from: date | None = None,
+        date_to: date | None = None,
+    ) -> list[Archive]:
+        """This printer's archives, optionally within a date window. Bambuddy's order is
+        not documented, so callers sort; ``limit`` keeps the read small. There is no
+        filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
+        params: dict[str, Any] = {"printer_id": printer_id, "limit": limit}
+        if offset:
+            params["offset"] = offset
+        if date_from is not None:
+            params["date_from"] = date_from.isoformat()
+        if date_to is not None:
+            params["date_to"] = date_to.isoformat()
         response = await self._send(
-            "GET",
-            "/archives/",
-            scope=Scope.READ_STATUS,
-            what=what,
-            params={"printer_id": printer_id, "limit": limit},
+            "GET", "/archives/", scope=Scope.READ_STATUS, what=what, params=params
         )
         return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def archive(self, archive_id: int) -> ArchiveDetail:
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}",
+            scope=Scope.READ_STATUS,
+            what=f"read archive {archive_id}",
+        )
+        return ArchiveDetail.model_validate(response.json())
+
+    async def archive_runs(self, archive_id: int) -> ArchiveRunList:
+        """Every run of the archive; a reprint inside Bambuddy is a run, not an archive."""
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}/runs",
+            scope=Scope.READ_STATUS,
+            what=f"list the runs of archive {archive_id}",
+        )
+        return ArchiveRunList.model_validate(response.json())
+
+    async def timelapse_info(self, archive_id: int) -> TimelapseInfo:
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}/timelapse/info",
+            scope=Scope.READ_STATUS,
+            what=f"read the timelapse of archive {archive_id}",
+        )
+        return TimelapseInfo.model_validate(response.json())
+
+    async def timelapse_thumbnails(self, archive_id: int) -> TimelapseThumbnails:
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}/timelapse/thumbnails",
+            scope=Scope.READ_STATUS,
+            what=f"read the timelapse frames of archive {archive_id}",
+        )
+        return TimelapseThumbnails.model_validate(response.json())
+
+    async def printer_media(self, archive_id: int) -> PrinterMedia:
+        """Timelapses and camera recordings for this print, including any still on the
+        printer. Listing the printer needs ``can_control_printer`` as well; without it
+        Bambuddy answers with the local timelapse only and a warning."""
+        response = await self._send(
+            "GET",
+            f"/archives/{archive_id}/printer-media",
+            scope=Scope.READ_STATUS,
+            what=f"list the printer media of archive {archive_id}",
+        )
+        return PrinterMedia.model_validate(response.json())
+
+    async def select_timelapse(self, archive_id: int, filename: str) -> None:
+        """Pull ``filename`` off the printer and attach it to the archive. Only on an
+        explicit request: it downloads over FTP, as Bambuddy's own UI does."""
+        await self._send(
+            "POST",
+            f"/archives/{archive_id}/timelapse/select",
+            scope=Scope.MANAGE_ARCHIVES,
+            what=f"attach a timelapse to archive {archive_id}",
+            params={"filename": filename},
+            timeout=self.config.upload_timeout,
+        )
+
+    async def upload_archive_photo(
+        self, archive_id: int, filename: str, content: bytes
+    ) -> ArchivePhotoUpload:
+        """Bambuddy takes only ``.jpg``, ``.jpeg``, ``.png`` and ``.webp`` here, and
+        renames the file; the answer's ``filename`` is the name to keep."""
+        response = await self._send(
+            "POST",
+            f"/archives/{archive_id}/photos",
+            scope=Scope.MANAGE_ARCHIVES,
+            what=f"add a photo to archive {archive_id}",
+            files={"file": (filename, content)},
+            timeout=self.config.upload_timeout,
+        )
+        return ArchivePhotoUpload.model_validate(response.json())
+
+    async def delete_archive_photo(self, archive_id: int, filename: str) -> None:
+        await self._send(
+            "DELETE",
+            f"/archives/{archive_id}/photos/{filename}",
+            scope=Scope.MANAGE_ARCHIVES,
+            what=f"delete a photo of archive {archive_id}",
+        )
+
+    @asynccontextmanager
+    async def stream(
+        self,
+        path: str,
+        *,
+        what: str,
+        range_header: str | None = None,
+        if_range: str | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """``GET path`` without reading the body, for the media proxy (#307).
+
+        ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
+        a seek with a ``206`` and only those bytes. The response is open for the
+        duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
+        as every other call's is, once its (small) body has been read.
+        """
+        headers = dict(self._headers)
+        if range_header is not None:
+            headers["Range"] = range_header
+        if if_range is not None:
+            headers["If-Range"] = if_range
+        request = self._http.build_request("GET", self.config.url(path), headers=headers)
+        try:
+            response = await self._http.send(request, stream=True)
+        except httpx.HTTPError as error:
+            logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+            raise map_transport(error, what=what) from error
+        try:
+            if not response.is_success:
+                await response.aread()
+                raise map_response(response, scope=Scope.READ_STATUS, what=what)
+            yield response
+        finally:
+            await response.aclose()
 
     # --- library -------------------------------------------------------------
 
