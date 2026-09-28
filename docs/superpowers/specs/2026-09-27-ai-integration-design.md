@@ -145,6 +145,26 @@ dependency of `agent/`.
   request. Claude does not see the tool and cannot attempt it." Tool-name globs work in
   deny rules. An allow rule only pre-approves; "Auto-approved tools never reach
   `canUseTool`". [Permissions][sdk-permissions]
+- Read and measured in #258 on SDK 0.3.283 (moved up from §3.2): **`canUseTool` can
+  park a tool call on an asynchronous human decision, with no deadline of its own.**
+  `sdk.d.ts` on `CanUseTool`: "permission prompts have no park deadline"; the
+  `dialogExpiry` setting (default 5 minutes) is for a dialog "forwarded to a remote
+  client", and "Local-only permission prompts (no remote client) are unaffected".
+  Measured against the local fake endpoint (`agent/test/approvals.sdk.test.ts`): a call
+  parked for 5 s with that remote deadline forced down to 1 s
+  (`CLAUDE_CODE_USER_DIALOG_TIMEOUT_MS=1000`), and once for 5.5 minutes with the
+  default left in place, still waited; the model was sent nothing meanwhile; on
+  approval the tool ran with the `updatedInput` the callback returned, and on denial
+  the callback's `message` reached the model as the tool's error result. A
+  `PreToolUse` hook answering `ask` hands the call to `canUseTool` ("With a permission
+  prompt surface (stdio/SDK canUseTool), the 'ask' path surfaces via a
+  can_use_tool control_request", `sdk.d.ts`). Aborting the query while a call is
+  parked fails that call ("Tool permission request failed: AbortError: Tool
+  permission stream closed before response received"); Claude Code may still send
+  that to the model and yield a `result` before it exits
+  (`agent/test/approvals.e2e.test.ts`), and the tool does not run. #258 therefore
+  parks (§8.2), and uses deny-then-resume only for an approval whose turn is gone
+  after a restart.
 
 **Playwright plugin and `@playwright/mcp`** (#349; the `@playwright/mcp` items were read
 from the **0.0.82** npm tarball's `README.md`, the `latest` dist-tag on 2026-09-27,
@@ -210,7 +230,6 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 
 | Item | Where it matters | Verified by |
 |---|---|---|
-| Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
@@ -497,8 +516,19 @@ including `disabled`. Where it is enforced:
 - **Harness:** the SDK permission callback and a `PreToolUse` hook
   ([permissions][sdk-permissions], [hooks][sdk-hooks]). The session goes to
   `waiting_approval`, the UI shows a confirmation card, and the decision resumes it.
-  Whether the callback can wait on an asynchronous human decision, or the hook must deny
-  and the session be resumed afterwards, is in §3.2.
+  The callback parks the call until the decision (§3.1, #258). Approvals live in
+  `ai_approvals`, so a pending one survives a restart; approving one whose turn is gone
+  resumes the session with a turn that repeats the call. The approval is bound to that
+  turn and used once, by a call with the same tool and input hash; if the session cannot
+  resume, the approval is voided and the session is told. Resuming one of several such
+  approvals of a session cancels the others. A decision binds to the input hash (an
+  HMAC under a key derived from the key-encryption key); a changed input needs a new
+  approval. Only the browser user decides, or another principal with a per-token grant
+  (§6), and never for its own calls or sessions. Interrupt, handoff and a new turn
+  cancel a pending approval and void an approved one that was not used yet, as does
+  the end of the turn it belongs to; one that nobody decides expires
+  (`approval_expiry_seconds` in `ai_settings`). The code is
+  `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
   approval.
@@ -570,6 +600,7 @@ agent service:
 - plugins: source, pinned commit, enabled parts, endpoint credentials (encrypted), and
   tier map;
 - sessions (§6), MCP subscriptions, and the resumability event log;
+- approvals of outward actions (§8.2, `ai_approvals`);
 - the audit log.
 
 There are **no AI-*configuration* env vars**: providers, credentials, auth mode,

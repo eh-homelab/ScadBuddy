@@ -199,7 +199,10 @@ Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
 database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
-`events` log). The event log's retention
+`events` log, and
+`20260928T0724Z_analyzer_decisions.sql` the print analyzers' `analyzer_decisions`;
+without a database those analyzers still run, but their decisions cannot be
+recorded). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
@@ -348,9 +351,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   no files) and managed through `/api/v1/ai/plugins` (below). The session
   manager takes enabled plugins for each turn (`remotePlugins`), as
   Streamable HTTP MCP servers named after the plugin, so their tools reach
-  the model as `mcp__<name>__<tool>`. **Not live yet:** `main.ts` builds no
-  `SessionManager` on this branch (#471 adds one); until that wiring passes
-  `forwardForRun(loadEnabledPlugins(…))`, only the connection test reaches a
+  the model as `mcp__<name>__<tool>` (`main.ts` passes
+  `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
+  plugin tool parks for approval like any other, #258). Nothing starts a
+  session over HTTP yet, so for now the connection test is what reaches a
   plugin. Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
     host resolves to is loopback. Link-local and cloud metadata hosts are
@@ -495,7 +499,8 @@ what makes the running image knowable.
   `frontend/public/mockServiceWorker.js` is committed and checked against
   msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.

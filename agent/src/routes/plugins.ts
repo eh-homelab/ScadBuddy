@@ -126,11 +126,14 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   }
 
   app.on(['POST', 'PATCH', 'PUT', 'DELETE'], [base, `${base}/*`], async (c, next) => {
-    const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, {
-      subject: 'plugin changes',
-      jsonMethods: ['PUT', 'PATCH', ...(c.req.path.endsWith('/test') ? [] : ['POST'])],
-    })
+    const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'plugin changes')
     if (problem) return c.json({ detail: problem }, 403)
+    // guard.ts checks the body type of PUT only; these routes also read POST
+    // and PATCH bodies, so a cross-origin HTML form (which cannot send JSON
+    // without a preflight) is refused here too. POST .../test reads no body.
+    const readsBody = c.req.method === 'PATCH' || (c.req.method === 'POST' && !c.req.path.endsWith('/test'))
+    const type = c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase()
+    if (readsBody && type !== 'application/json') return c.json({ detail: 'request body must be application/json' }, 403)
     await next()
   })
 
