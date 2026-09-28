@@ -124,7 +124,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
-  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
+  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  a session they are denied as "needs approval");
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
@@ -178,9 +180,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image `openscad/openscad:dev` is a rolling nightly. The Dockerfile asserts
-  `OPENSCAD_VERSION` (currently 2026.09.23) and fails the build on drift. When it
-  fires, re-verify spec §3 against the new build and bump it in the same commit.
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+  (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  deliberately: re-verify spec §3 against the new build, then change the tag,
+  digest and `OPENSCAD_VERSION` in the same commit.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv
   provides 3.12. Do not switch to a Python base with OpenSCAD installed beside it —
   the facts below were measured on this exact image.

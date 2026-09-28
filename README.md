@@ -199,7 +199,10 @@ Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
 database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
-`events` log). The event log's retention
+`events` log, and
+`20260928T0724Z_analyzer_decisions.sql` the print analyzers' `analyzer_decisions`;
+without a database those analyzers still run, but their decisions cannot be
+recorded). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
@@ -414,7 +417,8 @@ what makes the running image knowable.
   `frontend/public/mockServiceWorker.js` is committed and checked against
   msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.
