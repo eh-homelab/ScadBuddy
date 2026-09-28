@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
-import { useLatest } from '../../agent/useAgentHandlers'
+import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
 import type { Output, PrintSummary } from '../../api/types'
 import {

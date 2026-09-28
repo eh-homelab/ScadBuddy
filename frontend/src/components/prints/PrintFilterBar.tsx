@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLatest } from '../../agent/useAgentHandlers'
+import { useLatest } from '../../lib/useLatest'
 import { clearPrintFilters, isFiltered, type PrintsQuery, type PrintsView } from '../../lib/printsQuery'
 import { Button } from '../ui/Button'
 import { printerLabel } from './prints'
