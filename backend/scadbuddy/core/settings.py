@@ -140,16 +140,6 @@ class Settings(BaseSettings):
     # scadbuddy.worker` as its own Deployment and leaves this off.
     temporal_worker_inprocess: bool = False
 
-    # SCADBUDDY_BAMBUDDY_RENDER_API_KEY: the Manage-Library-only key render workers
-    # hold (spec §9). Unset, they fall back to `bambuddy_api_key` and /healthz says so.
-    bambuddy_render_api_key: str | None = None
-
-    def render_bambuddy_key(self) -> tuple[str | None, bool]:
-        """The key render workers use, and whether it is the full key by fallback."""
-        if self.bambuddy_render_api_key:
-            return self.bambuddy_render_api_key, False
-        return self.bambuddy_api_key, True
-
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.

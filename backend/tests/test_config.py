@@ -228,13 +228,3 @@ def test_temporal_settings_reach_the_config() -> None:
     assert config.temporal_namespace == "scadbuddy"
     assert config.temporal_task_queue_render == "render"
     assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
-
-
-def test_the_render_key_falls_back_to_the_full_key_and_says_so() -> None:
-    settings = Settings(
-        _env_file=None,  # type: ignore[call-arg]
-        bambuddy_api_key="full",
-    )
-    assert settings.render_bambuddy_key() == ("full", True)
-    with_own = settings.model_copy(update={"bambuddy_render_api_key": "narrow"})
-    assert with_own.render_bambuddy_key() == ("narrow", False)
