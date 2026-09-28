@@ -83,16 +83,19 @@ def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamVal
 
 def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
     """422 unless ``params`` would render as they are *and* every dropdown value is one
-    of its options.
+    of its options or a value the template retired.
 
     Stricter than a render, which takes any value of the right type: a preset is kept
-    and replayed, so it holds only what the dropdown itself could pick.
+    and replayed, so it holds only what the dropdown itself could pick, or picked
+    before the option was renamed (`// retired`, #432; `render/runner.py` accepts the
+    same values).
     """
     require_valid_params(schema, params)
     by_name = {parameter.name: parameter for parameter in schema.parameters}
     for name, value in params.items():
-        options = [option.value for option in by_name[name].options]
-        if options and value not in options:
+        parameter = by_name[name]
+        options = [option.value for option in parameter.options]
+        if options and value not in (*options, *parameter.retired):
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"{value!r} is not one of the options of {name!r}",
