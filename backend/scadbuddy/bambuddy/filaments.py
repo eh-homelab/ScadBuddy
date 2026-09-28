@@ -72,6 +72,7 @@ WarningKind = Literal[
     "not-installed",
     "plate-differs",
     "hf-unsupported",
+    "side-unknown",
 ]
 
 
@@ -106,6 +107,11 @@ class SpoolOption(BaseModel):
     remaining_g: float | None = None
     storage_location: str | None = None
     loaded: LoadedAt | None = None
+    #: The physical extruder this spool feeds on the chosen printer — 0 right, 1 left —
+    #: and the letter for it (#469). ``None`` when the spool is not loaded there or the
+    #: printer does not say; the picker compares it with the nozzle mounted on that side.
+    extruder: int | None = None
+    side: Literal["L", "R"] | None = None
 
 
 class SlotNeed(BaseModel):
