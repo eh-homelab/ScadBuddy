@@ -7,6 +7,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -22,8 +23,10 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, now
+from scadbuddy.render.job_store import JobNotFoundError, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
@@ -397,3 +400,51 @@ async def test_a_reconciled_start_that_can_never_succeed_fails_the_job(
     stored = await asyncio.to_thread(projection.read, job.id)
     assert stored.state == "failed"
     assert stored.error is not None and "not found" in stored.error
+
+
+async def test_settled_jobs_past_their_ttl_are_pruned_without_a_restart(
+    projection: JobProjection, deps: WorkerDeps
+) -> None:
+    old = _job_row(finished_ago=timedelta(days=2))
+    projection.submit(old, render_key(old.slug, old.params, None))
+    old.state, old.finished_at = "done", now() - timedelta(days=2)
+    assert projection.finish(old)
+    fresh = _job_row(finished_ago=timedelta(0))
+    projection.submit(fresh, render_key(fresh.slug, fresh.params, None))
+
+    async with temporal_client() as client:
+        service = RenderService(
+            projection=projection,
+            client=client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            config=replace(deps.config, job_ttl=86400.0),
+            paths=deps.paths,
+            metrics=Metrics(),
+            reconcile_after=3600.0,
+            reconcile_interval=0.05,
+            prune_interval=0.0,
+        )
+        await service.start()
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    try:
+                        await asyncio.to_thread(projection.read, old.id)
+                    except JobNotFoundError:
+                        break
+                    await asyncio.sleep(0.05)
+        finally:
+            await service.aclose()
+
+    assert (await asyncio.to_thread(projection.read, fresh.id)).state == "pending"
+
+
+def _job_row(*, finished_ago: timedelta) -> Job:
+    params: dict[str, ParamValue] = {"width": uuid.uuid4().int % 1000}
+    return Job(
+        id=uuid.uuid4().hex,
+        slug=SLUG,
+        params=params,
+        inputs={"params": params},
+        created_at=now() - finished_ago,
+    )

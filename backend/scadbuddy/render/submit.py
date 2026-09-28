@@ -32,9 +32,9 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.job_store import QueueFullError, render_key
-from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE
+from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
 from scadbuddy.render.projection import JobProjection, workflow_id_for
-from scadbuddy.render.render_cache import cached_render
+from scadbuddy.render.render_cache import cached_render, prune_render_cache
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
@@ -70,6 +70,7 @@ class RenderService:
         metrics: Metrics,
         reconcile_after: float = 5.0,
         reconcile_interval: float = 5.0,
+        prune_interval: float = 300.0,
     ) -> None:
         self.store = projection
         self.client = client
@@ -79,6 +80,9 @@ class RenderService:
         self.metrics = metrics
         self.reconcile_after = reconcile_after
         self.reconcile_interval = reconcile_interval
+        #: How often the reconciler also prunes: the legacy queue does it after every
+        #: job, and settled rows hold their blobs' refs until they go.
+        self.prune_interval = prune_interval
         self._reconciler: asyncio.Task[None] | None = None
         self._listened_before = False
         metrics.store_info.labels(projection.backend).set(1)
@@ -218,6 +222,14 @@ class RenderService:
             )
         return len(started)
 
+    async def prune(self) -> None:
+        """What `RenderQueue._prune` does: settled jobs past `job_ttl` (and their blob
+        refs), revision exports and kept renders."""
+        ttl = self.config.job_ttl
+        await asyncio.to_thread(self.store.prune, ttl)
+        await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
+        await asyncio.to_thread(prune_render_cache, self.paths, ttl)
+
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
         for the slug joins the first run. Past ``timeout`` the run is cancelled, so a
@@ -298,12 +310,20 @@ class RenderService:
             logger.debug("no workflow to cancel", extra={"job_id": job.id})
 
     async def _reconcile_forever(self) -> None:
+        loop = asyncio.get_running_loop()
+        pruned = loop.time()
         while True:
             await asyncio.sleep(self.reconcile_interval)
             try:
                 await self.reconcile_once()
             except Exception:
                 logger.exception("the render reconciler's pass failed")
+            if loop.time() - pruned >= self.prune_interval:
+                pruned = loop.time()
+                try:
+                    await self.prune()
+                except Exception:
+                    logger.exception("could not prune settled render jobs")
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
         self.metrics.render_finished.labels(outcome).inc()

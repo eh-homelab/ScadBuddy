@@ -28,10 +28,9 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.render.jobs import RenderQueue, prune_revision_exports
+from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.projection import LEGACY_INTERRUPTED_ERROR
-from scadbuddy.render.render_cache import prune_render_cache
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import sweep_blobs
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -285,7 +284,7 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
     the projection again, as a failed `RenderQueue.start` releases its store."""
     projection = state.projection
     assert projection is not None
-    settings, config = state.settings, state.config
+    settings = state.settings
     await asyncio.to_thread(projection.open)
     try:
         await _prepare_catalogue(state)
@@ -300,9 +299,7 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
                 "failed the renders the legacy queue was running",
                 extra={"job_ids": [job.id for job in interrupted]},
             )
-        await asyncio.to_thread(projection.prune, config.job_ttl)
-        await asyncio.to_thread(prune_revision_exports, state.paths, config.job_ttl)
-        await asyncio.to_thread(prune_render_cache, state.paths, config.job_ttl)
+        await service.prune()
         await service.start()
     except BaseException:
         await asyncio.to_thread(projection.close)
