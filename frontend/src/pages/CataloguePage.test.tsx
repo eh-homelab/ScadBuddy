@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes } from 'react-router'
+import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
@@ -8,6 +8,91 @@ import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
+
+function Search() {
+  const { search } = useLocation()
+  return <p data-testid="search">{search}</p>
+}
+
+function renderCatalogue(route = '/') {
+  return renderPage(
+    <>
+      <CataloguePage />
+      <Search />
+    </>,
+    { route },
+  )
+}
+
+function names(): string[] {
+  return screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent ?? '')
+}
+
+describe('CataloguePage filters (#276)', () => {
+  it('filters by a debounced search, folding accents, and puts it in the URL', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
+    expect(names()).toEqual(['Crème Coaster'])
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 4')
+  })
+
+  it('adds a card tag to the filter from the URL-encoded chip', async () => {
+    const { user } = renderCatalogue()
+    const coaster = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+      'li',
+    ) as HTMLElement
+
+    await user.click(within(coaster).getByRole('button', { name: 'Filter by Tea & Coffee' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=Tea+%26+Coffee')
+    expect(names()).toEqual(['Crème Coaster'])
+    expect(screen.getByRole('button', { name: 'Tea & Coffee 1' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    // The chip is a button beside the card's link, not inside it.
+    expect(within(coaster).getByRole('link').contains(within(coaster).getByRole('button', {
+      name: 'Filter by kitchen',
+    }))).toBe(false)
+  })
+
+  it('reads a deep link: several tags, origin and sort', async () => {
+    renderCatalogue('/?tag=keychain&origin=builtin')
+    expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
+    expect(names()).toEqual(['Keychain Template'])
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 4')
+  })
+
+  it('sorts by name', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(names()[0]).toBe('Name Keychain')
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
+    expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
+    expect(names()).toEqual(['Crème Coaster', 'Gridfinity Bin', 'Keychain Template', 'Name Keychain'])
+  })
+
+  it('says when nothing matches, apart from an empty catalogue, and clears back', async () => {
+    const { user } = renderCatalogue('/?q=nothing-like-this&sort=name')
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'No models yet' })).not.toBeInTheDocument()
+
+    await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
+    expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
+    expect(screen.getByRole('searchbox')).toHaveValue('')
+    expect(names()).toHaveLength(4)
+  })
+
+  it('shows no filters over an empty catalogue', async () => {
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    renderCatalogue()
+    await screen.findByRole('heading', { name: 'No models yet' })
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+  })
+})
 
 describe('CataloguePage', () => {
   it('lists every model with its tags and when it last changed', async () => {

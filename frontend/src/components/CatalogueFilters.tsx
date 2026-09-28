@@ -1,0 +1,177 @@
+import { useEffect, useRef, useState } from 'react'
+import { useLatest } from '../agent/useAgentHandlers'
+import {
+  clearFilters,
+  type CatalogueOrigin,
+  type CatalogueQuery,
+  type CatalogueSort,
+} from '../lib/catalogueQuery'
+import { Button } from './ui/Button'
+
+const SEARCH_DEBOUNCE_MS = 250
+
+const ORIGINS: Array<{ value: CatalogueOrigin; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'builtin', label: 'Built-in' },
+  { value: 'mine', label: 'Mine' },
+]
+
+const SORTS: Array<{ value: CatalogueSort; label: string }> = [
+  { value: 'updated', label: 'Recently updated' },
+  { value: 'name', label: 'Name' },
+]
+
+interface Props {
+  query: CatalogueQuery
+  /** `replace` is set for search keystrokes, so typing does not fill the history. */
+  onChange: (next: CatalogueQuery, options?: { replace?: boolean }) => void
+  tags: Array<{ tag: string; count: number }>
+  shown: number
+  total: number
+}
+
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+}
+
+function chipClass(selected: boolean): string {
+  return `rounded-full border px-2.5 py-0.5 text-[12px] transition-colors ${
+    selected ? 'border-accent bg-accent/15 text-ink' : 'border-line text-muted hover:text-ink'
+  }`
+}
+
+/** #276 — search, tag chips, origin and sort above the catalogue. */
+export function CatalogueFilters({ query, onChange, tags, shown, total }: Props) {
+  const [text, setText] = useState(query.q)
+  const sent = useRef(query.q)
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const latest = useLatest(query)
+  const input = useRef<HTMLInputElement>(null)
+
+  // A search that changed from outside (Clear filters, back/forward) replaces the text.
+  useEffect(() => {
+    if (query.q === sent.current) return
+    clearTimeout(timer.current)
+    sent.current = query.q
+    setText(query.q)
+  }, [query.q])
+
+  useEffect(() => () => clearTimeout(timer.current), [])
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.defaultPrevented || isTyping(event.target)) return
+      event.preventDefault()
+      input.current?.focus()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  function search(value: string) {
+    setText(value)
+    clearTimeout(timer.current)
+    timer.current = setTimeout(() => {
+      sent.current = value
+      onChange({ ...latest.current, q: value }, { replace: true })
+    }, SEARCH_DEBOUNCE_MS)
+  }
+
+  function toggleTag(tag: string) {
+    const tags = query.tags.includes(tag)
+      ? query.tags.filter((t) => t !== tag)
+      : [...query.tags, tag]
+    onChange({ ...query, tags })
+  }
+
+  const filtered = query.q.trim() !== '' || query.tags.length > 0 || query.origin !== 'all'
+
+  return (
+    <div className="mb-4 space-y-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          ref={input}
+          type="search"
+          aria-label="Search models"
+          placeholder="Search models  /"
+          value={text}
+          onChange={(event) => search(event.target.value)}
+          className="sb-field h-8 min-w-48 flex-1"
+        />
+        <div
+          role="group"
+          aria-label="Origin"
+          className="flex rounded-[6px] border border-line bg-surface p-0.5"
+        >
+          {ORIGINS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={query.origin === option.value}
+              onClick={() => onChange({ ...query, origin: option.value })}
+              className={`h-6 rounded-[4px] px-2.5 text-[12px] transition-colors ${
+                query.origin === option.value
+                  ? 'bg-surface-3 text-ink'
+                  : 'text-muted hover:text-ink'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <label className="flex items-center gap-1.5 text-[12px] text-muted">
+          Sort
+          <select
+            value={query.sort}
+            onChange={(event) =>
+              onChange({ ...query, sort: event.target.value as CatalogueSort })
+            }
+            className="sb-field h-8 w-auto cursor-pointer"
+          >
+            {SORTS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {tags.length > 0 && (
+        <div role="group" aria-label="Tags" className="flex flex-wrap gap-1.5">
+          {tags.map(({ tag, count }) => {
+            const selected = query.tags.includes(tag)
+            return (
+              <button
+                key={tag}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => toggleTag(tag)}
+                className={chipClass(selected)}
+              >
+                {tag} <span className="sb-num text-faint">{count}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="flex items-center gap-3 text-[12px] text-faint">
+        <p data-testid="result-count" className="sb-num">
+          {shown} of {total}
+        </p>
+        {filtered && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onChange(clearFilters(query))}
+          >
+            Clear filters
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
