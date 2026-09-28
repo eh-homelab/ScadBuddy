@@ -14,12 +14,11 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //     or a ```` ```! ```` block, is run by a shell "before the skill content is
 //     sent to Claude" (https://code.claude.com/docs/en/skills, dynamic context
 //     injection), in the harness's environment, which holds the Claude
-//     credential. Measured on CLI 2.1.283, the harness already denies it
-//     ("Permission to use Bash has been denied", even with `allowed-tools:
-//     Bash(...)`; test/pluginPackages.e2e.test.ts), and every query sets
-//     `disableSkillShellExecution` (harness/options.ts). Refused here as well,
-//     in every Markdown file, so no review shows a package that relies on a
-//     shell.
+//     credential. Every query sets `disableSkillShellExecution`
+//     (harness/options.ts), so the CLI puts a placeholder in place of both
+//     forms (measured on CLI 2.1.283, test/pluginPackages.e2e.test.ts; before
+//     that, the harness denied the Bash call). Refused here as well, in every
+//     Markdown file, so no review shows a package that relies on a shell.
 //   - Frontmatter `hooks` (skills register hooks "when the skill is invoked",
 //     same page, frontmatter fields), `mcpServers` and `permissionMode`
 //     (subagent frontmatter): refused, so every hook and MCP server is in

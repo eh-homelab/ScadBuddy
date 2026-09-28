@@ -440,13 +440,22 @@ not caught; such a process already controls the pod.
 **Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
 is refused, with every problem listed, if it has any of the following:
 
-- **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block) in any Markdown
-  file. These run a shell "before the skill content is sent to Claude"
-  ([skills](https://code.claude.com/docs/en/skills)). Measured on CLI 2.1.283, the
-  harness already denies it ("Permission to use Bash has been denied", even with
-  `allowed-tools: Bash(...)`; `test/pluginPackages.e2e.test.ts`).
+- **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block, anywhere in a
+  line, as the CLI matches it) in any Markdown file. These run a shell "before the
+  skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
+  Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
+  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
+  them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
+  resulting Bash call.
 - **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
-  in the vetted files and in the review.
+  in the vetted files and in the review. So that no key can hide from this check,
+  frontmatter must be plain YAML (`frontmatter()`): the block is cut where the CLI cuts
+  it (at the first `---`, even mid-line), and a block that is unterminated or ends on a
+  `---` that is not a line of its own is refused. It must be one block mapping of plain
+  keys at column 0. Quoted, explicit (`?`) and merge (`<<`) keys, flow mappings,
+  anchors, aliases, tags, directives, a second document, and invalid or duplicate-key
+  YAML are all refused. Those are the forms where our parser and the CLI's could read
+  different keys.
 - **Tools outside the allowlist.** `allowed-tools` and a subagent's `tools` may name MCP
   tools only (`mcp__…`). The tier seam decides each MCP tool's tier, and an unknown
   plugin tool is `outward`. Built-ins such as `Bash(...)` or `Write` are refused.
@@ -460,7 +469,14 @@ is refused, with every problem listed, if it has any of the following:
   does not say their call is permission-checked. `http` hooks may not use `$` or
   `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
   hooks. There is deliberately no switch to allow one, because it would inherit the
-  credential env (above).
+  credential env (above). Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
+  `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
+  `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
+  `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
+  type is refused. In CLI 2.1.283 it races the host's `can_use_tool` answer, and its
+  `behavior: "allow"` wins, so it would approve an outward tool before a human could
+  (spec §8.2). `PreToolUse` is refused too (`permissionDecision`, `updatedInput`), and so
+  is any event not on the list, including one a later CLI adds.
 - **Manifest fields** that a headless run cannot honour: `dependencies`, `userConfig`,
   `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
   agent), and `workflows` (JavaScript).
