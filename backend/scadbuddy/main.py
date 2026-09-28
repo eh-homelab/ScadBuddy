@@ -32,7 +32,7 @@ from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
-from scadbuddy.core.paths import MODEL_META_NAME
+from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
@@ -109,8 +109,14 @@ def _sweep_checkouts(state: AppState) -> list[str]:
     """The thread half of :func:`sweep_library_checkouts`."""
     # Every id any revision of any model.json -- live or deleted model, mine or a
     # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
-    # puts a revision's pins back, so each of them is still a pin.
-    named = state.history.object_ids_in(f"*/{MODEL_META_NAME}", LOCKFILE_NAME)
+    # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
+    # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
+    # no file of that name inside a model's folder.
+    named = state.history.object_ids_in(
+        f":(glob)*/{MODEL_META_NAME}",
+        f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
+        f":(literal){LOCKFILE_NAME}",
+    )
     lock = read_lock(state.paths)
     if lock is not None:
         named |= {pin.commit for pin in lock.pins.values()}

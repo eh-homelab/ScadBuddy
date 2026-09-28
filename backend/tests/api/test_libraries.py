@@ -32,7 +32,7 @@ from scadbuddy.api.deps import (
     AppState,
     get_libraries,
 )
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
@@ -1187,6 +1187,32 @@ def test_boot_sweeps_checkouts_no_revision_pins(app: FastAPI, paths: DataPaths) 
     with TestClient(app):
         pass
 
+    assert in_history.is_dir()
+    assert not unpinned.exists()
+
+
+def test_the_sweep_keeps_a_checkout_an_old_builtin_revision_pins(
+    app: FastAPI, paths: DataPaths
+) -> None:
+    """A built-in's model.json is two levels deep (`_builtin/<slug>/model.json`);
+    restoring its old revision must not need a checkout the sweep removed."""
+    state: AppState = getattr(app.state, STATE_ATTR)
+    builtin = "builtin:gizmo"
+    pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
+    paths.model_dir(builtin).mkdir(parents=True)
+    paths.model_source(builtin).write_text(SOURCE, encoding="utf-8")
+    paths.model_meta(builtin).write_text(
+        json.dumps({"name": "Gizmo", "libraries": [pinned]}), encoding="utf-8"
+    )
+    state.history.ensure_repo()  # records it as the first revision
+    paths.model_meta(builtin).write_text(json.dumps({"name": "Gizmo"}), encoding="utf-8")
+    assert state.history.commit("unpin", model_path(builtin)) is not None
+    in_history = _fake_checkout(paths, "BOSL2", "a" * 40)
+    unpinned = _fake_checkout(paths, "BOSL2", "b" * 40)
+
+    removed = asyncio.run(sweep_library_checkouts(replace(state, checkouts=CheckoutGate())))
+
+    assert removed == [f"BOSL2@{'b' * 40}"]
     assert in_history.is_dir()
     assert not unpinned.exists()
 

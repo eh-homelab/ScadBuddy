@@ -140,6 +140,46 @@ def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
         pytest.fail("the oversized clone's writer is still running")
 
 
+def test_checking_out_a_refetched_commit_is_held_to_the_size_cap(
+    paths: DataPaths, tmp_path: Path
+) -> None:
+    """The pinned ref moved on, so the commit is fetched and checked out: that
+    checkout writes the tree and is killed once it goes over the cap, as the clone is."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    # clone and fetch succeed; rev-parse names another commit; checkout never ends.
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'for arg; do case "$arg" in\n'
+        '  clone) for last; do :; done; mkdir -p "$last"; exit 0;;\n'
+        f"  rev-parse) echo {'b' * 40}; exit 0;;\n"
+        "  fetch) exit 0;;\n"
+        "  checkout) break;;\n"
+        "esac; done\n"
+        'while [ "$1" != -C ]; do shift; done\n'
+        '(while :; do head -c 65536 /dev/zero >> "$2/blob"; sleep 0.01; done) &\n'
+        f"echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    store = LibraryStore(paths, catalogue=(), git=str(fake_git), timeout=60, max_bytes=1_000_000)
+
+    started = time.monotonic()
+    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ MB, over the 1 MB"):
+        store._clone("Big", "https://git.example/o/big.git", "main", commit="a" * 40)
+
+    assert time.monotonic() - started < 30
+    assert list(paths.libraries.iterdir()) == []
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _running(pid):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the oversized checkout's writer is still running")
+
+
 def test_measuring_a_clone_stops_once_it_is_past_the_cap(tmp_path: Path) -> None:
     """A tree already too large is not walked to the end: the poll that finds it
     over kills the clone that much sooner (#247)."""

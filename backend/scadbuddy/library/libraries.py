@@ -954,7 +954,7 @@ class LibraryStore:
                 commit,
                 watch=staging,
             )
-            self._git("-C", clone, "checkout", "--quiet", "--detach", commit)
+            self._git("-C", clone, "checkout", "--quiet", "--detach", commit, watch=staging)
         except LibraryFetchError as error:
             raise LibraryFetchError(f"could not fetch {commit[:7]} from {url}: {error}") from error
         except LibraryTooLargeError as error:
