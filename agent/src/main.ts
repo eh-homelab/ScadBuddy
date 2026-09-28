@@ -19,6 +19,7 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
@@ -192,7 +193,12 @@ const app = createApp({
   mcp: {
     tools: ALL_TOOLS,
     resources,
-    services: toolServices,
+    services: {
+      ...toolServices,
+      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
+      // database, an in-memory store whose actions are never confirmed.
+      pending: sessions ? new ApprovalActions(sessions.approvals) : toolServices.pending,
+    },
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.

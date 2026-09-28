@@ -29,7 +29,7 @@ test.describe('pasted source', () => {
     await page.goto('/')
     await page.getByRole('button', { name: 'Paste source' }).click()
 
-    await page.getByLabel('Name').fill('Pasted Keychain')
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Pasted Keychain')
     await typeSource(page, SOURCE)
 
     // The Monarch language is live: `cube` is tokenized as a builtin, not an identifier.
@@ -52,7 +52,7 @@ test.describe('pasted source', () => {
 
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
     await page.goto('/new')
-    await page.getByLabel('Name').fill('Half Cube')
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Half Cube')
     await typeSource(page, BROKEN)
 
     const report = page.getByTestId('check-report')
