@@ -17,6 +17,7 @@ import { fitLabel, fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
+import { useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
@@ -75,6 +76,8 @@ export function ActionBar({
    */
   const [projectId, setProjectId] = useState<number | null>(null)
   const [project, setProject] = useState<ProjectView | null>(null)
+  /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
+  const projects = useProjectList(setProjectId)
   const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
     null,
   )
@@ -236,7 +239,7 @@ export function ActionBar({
             inline
             value={projectId}
             onChange={chooseProject}
-            onLoaded={setProjectId}
+            list={projects}
             onProject={setProject}
           />
           <Button
@@ -283,7 +286,7 @@ export function ActionBar({
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
-        project={{ value: projectId, onChange: chooseProject }}
+        project={{ value: projectId, onChange: chooseProject, list: projects }}
       />
     </>
   )

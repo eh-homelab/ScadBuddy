@@ -26,6 +26,7 @@ import { PlateStep } from './print/PlateStep'
 import { QualityStep } from './print/QualityStep'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { PrintProgressPanel } from './PrintProgressPanel'
+import type { ProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -78,7 +79,12 @@ interface Props {
    * #317 — the project chosen on the Customize page. Given, the dialog's picker shows and
    * moves that one choice rather than a copy of its own, so the two never disagree.
    */
-  project?: { value: number | null; onChange: (projectId: number | null) => void }
+  project?: {
+    value: number | null
+    onChange: (projectId: number | null) => void
+    /** The page's project list, so the dialog does not fetch it a second time. */
+    list?: ProjectList
+  }
 }
 
 export function PrintPicker({
@@ -762,7 +768,7 @@ export function PrintPicker({
 
               {/* #79 — a send to a project uploads into that project's folder. */}
               {project ? (
-                <ProjectPicker value={project.value} onChange={project.onChange} />
+                <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
               ) : (
                 <ProjectPicker
                   value={ownProjectId}

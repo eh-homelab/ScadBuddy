@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
-import type { ProjectChoices, ProjectRequest, ProjectView } from '../api/types'
+import type { ProjectRequest, ProjectView } from '../api/types'
+import { type ProjectList, useProjectList } from '../lib/projects'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
@@ -15,9 +16,11 @@ import { Spinner } from './ui/Spinner'
  * and linking a project that has none creates one — so a project chosen here is somewhere
  * the 3MF can actually land.
  *
- * The control fetches its own list and owns the "remember" write, so the parent needs to
- * know nothing but the chosen id: it passes that as `project_id` on the run, and the
- * backend resolves the folder from it. Attaching the resulting queue entries and archives
+ * The control fetches its own list, unless the parent passes one from
+ * {@link useProjectList} (#317: the Customize page's picker and the print dialog's share
+ * one list rather than each fetching it), so the parent needs to know nothing but the
+ * chosen id: it passes that as `project_id` on the run, and the backend resolves the
+ * folder from it. Attaching the resulting queue entries and archives
  * is deliberately *not* here — neither id exists when a print starts (#89).
  */
 
@@ -46,6 +49,11 @@ interface Props {
    */
   onLoaded?: (projectId: number | null) => void
   /**
+   * #317 — a list the parent shares between pickers. Given, this picker fetches nothing
+   * and `onLoaded` is the parent's business (it passed it to {@link useProjectList}).
+   */
+  list?: ProjectList
+  /**
    * #317 — the chosen project's row, whenever it changes, so the parent can name it
    * ("Saved to Kids' room") without fetching the list a second time.
    */
@@ -61,50 +69,27 @@ export function ProjectPicker({
   value,
   onChange,
   onLoaded,
+  list,
   onProject,
   id = 'print-project',
   testId = 'project-select',
   inline = false,
 }: Props) {
-  const [choices, setChoices] = useState<ProjectChoices | null>(null)
+  const own = useProjectList(onLoaded, list === undefined)
+  const { choices, loading, error: listError, reload, add } = list ?? own
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [colour, setColour] = useState('')
 
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const error = createError ?? listError
 
-  /**
-   * Held in a ref because it is a notification, not an input to the load: a parent that
-   * passes an inline arrow would otherwise change `load`'s identity on every render and
-   * re-fetch the list forever.
-   */
-  const report = useRef(onLoaded)
   const reportProject = useRef(onProject)
   useEffect(() => {
-    report.current = onLoaded
     reportProject.current = onProject
   })
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const next = await api.getProjects()
-      setChoices(next)
-      report.current?.(next.last_project_id ?? null)
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load])
 
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)
@@ -116,15 +101,16 @@ export function ProjectPicker({
   /**
    * #317 — the other picker on the page may have just created the project in view, which
    * this one's list predates. Re-read once per such id, so a project deleted in Bambuddy
-   * does not re-fetch forever.
+   * does not re-fetch forever. The re-read only refreshes the list: `value` is the
+   * parent's, and the remembered `last_project_id` may still be the old project.
    */
   const missing = choices !== null && value !== null && current === undefined ? value : null
   const reread = useRef<number | null>(null)
   useEffect(() => {
     if (missing === null || reread.current === missing) return
     reread.current = missing
-    void load()
-  }, [missing, load])
+    void reload()
+  }, [missing, reload])
 
   async function create() {
     const body: ProjectRequest = {
@@ -133,21 +119,17 @@ export function ProjectPicker({
       colour: colour.trim() || null,
     }
     setSaving(true)
-    setError(null)
+    setCreateError(null)
     try {
       const created = await api.createProject(body)
-      // The POST answers with the whole view, folder included, so re-listing would only
-      // fetch back what is already in hand.
-      setChoices((choice) =>
-        choice ? { ...choice, projects: [created, ...(choice.projects ?? [])] } : choice,
-      )
+      add(created)
       setCreating(false)
       setName('')
       setDescription('')
       setColour('')
       onChange(created.id)
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
+      setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
     } finally {
       setSaving(false)
     }

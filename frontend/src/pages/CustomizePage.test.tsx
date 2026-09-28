@@ -1315,6 +1315,41 @@ describe('CustomizePage, project file (#317)', () => {
     expect(pagePicker()).toHaveValue('1')
   })
 
+  it('keeps a project created in the dialog while the remembered one is still the old one', async () => {
+    // The list keeps answering with the old project as the last one, as it does while
+    // the PUT that remembers the new choice has not landed (it never answers here).
+    withLastProject(1)
+    server.use(http.put('/api/v1/print/projects/last', () => new Promise<never>(() => undefined)))
+    let listed = 0
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/print/projects') {
+        listed += 1
+      }
+    })
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const dialogPicker = await within(dialog).findByTestId<HTMLSelectElement>('project-select')
+    await user.selectOptions(dialogPicker, 'new')
+    await user.type(within(dialog).getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(within(dialog).getByTestId('create-project'))
+
+    await waitFor(() => expect(dialogPicker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    const created = dialogPicker.value
+    expect(created).not.toBe('1')
+    expect(pagePicker()).toHaveValue(created)
+    // Neither picker snaps back to the remembered project on a later re-read.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(pagePicker()).toHaveValue(created)
+    expect(dialogPicker).toHaveValue(created)
+    // One list for the page and the dialog, not one each.
+    expect(listed).toBe(1)
+  })
+
   it('prints with "No project" even while remembering it has not landed', async () => {
     withLastProject(1)
     // The PUT that remembers the choice never answers: the run alone must carry it.
