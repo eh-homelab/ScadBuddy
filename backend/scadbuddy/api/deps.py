@@ -21,6 +21,7 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
@@ -56,6 +57,8 @@ class AppState:
     settings_store: SettingsStore
     fonts: FontService
     libraries: LibraryStore
+    #: Uploads for `// file` parameters, with their caps (#296).
+    assets: AssetStore
     queue: RenderQueue
     #: Where every state change is published (spec §7). In-process today; the
     #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
@@ -146,6 +149,11 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
+        assets=AssetStore(
+            paths.assets,
+            max_total_bytes=config.asset_max_total_bytes,
+            max_count=config.asset_max_count,
+        ),
         queue=RenderQueue(
             config,
             paths,
@@ -229,6 +237,10 @@ def get_libraries(state: StateDep) -> LibraryStore:
     return state.libraries
 
 
+def get_assets(state: StateDep) -> AssetStore:
+    return state.assets
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
@@ -262,6 +274,7 @@ PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
+AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]

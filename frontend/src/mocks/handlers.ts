@@ -1,6 +1,7 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
   BoundingBox,
   CatalogueFont,
@@ -1330,6 +1331,17 @@ export const handlers = [
     return stored
       ? HttpResponse.json(stored, { status: 201 })
       : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
+  }),
+
+  // #296 — the server's defaults for the caps.
+  http.get(`${base}/assets/usage`, () => {
+    const metas = [...state.assets.values()].map((asset) => asset.meta)
+    return HttpResponse.json({
+      count: metas.length,
+      bytes: metas.reduce((total, meta) => total + meta.size, 0),
+      max_count: 10_000,
+      max_total_bytes: 1_000_000_000,
+    } satisfies AssetUsage)
   }),
 
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
