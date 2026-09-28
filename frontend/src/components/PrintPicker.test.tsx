@@ -180,6 +180,32 @@ describe('PrintPicker', () => {
     expect(bodies[0]).toMatchObject({ choices: { filament_overrides: {} } })
   })
 
+  it('drops a per-slot preset override when the output changes under an open dialog', async () => {
+    const first = fixtures.outputs[0] as Output
+    const second = fixtures.outputs[1] as Output
+    const { bodies } = watch('POST', '/run')
+    const { user, rerender } = renderPage(
+      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
+
+    rerender(
+      <MemoryRouter>
+        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+      </MemoryRouter>,
+    )
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    const body = bodies[0] as { choices: { filament_overrides: Record<string, unknown> } }
+    expect(body.choices.filament_overrides).toEqual({})
+  })
+
   it('shows the run’s warnings once the print is queued', async () => {
     vi.spyOn(api, 'runPrint').mockResolvedValue({
       ...queuedResult,

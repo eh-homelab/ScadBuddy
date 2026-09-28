@@ -198,6 +198,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     setOptions({})
     setPlate(1)
     setPlates([])
+    setOverrides({})
+    seeded.current = false
   }, [outputId])
 
   useEffect(() => {
@@ -275,7 +277,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     if (!open) return
     let live = true
     api
-      .getPrintOptions(slug)
+      .getPrintOptions()
       .then((view) => live && setRemembered(view))
       // Nothing to show is the pre-#145 behavior; the run still resolves it server-side.
       .catch(() => live && setRemembered(null))
