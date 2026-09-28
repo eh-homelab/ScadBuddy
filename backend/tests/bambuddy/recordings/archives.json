@@ -1,0 +1,52 @@
+[
+  {
+    "id": 35,
+    "printer_id": 1,
+    "status": "completed",
+    "bed_type": "Textured PEI Plate",
+    "started_at": "2026-09-27T04:09:36.529201",
+    "completed_at": "2026-09-27T05:56:53.660315",
+    "created_at": "2026-09-27T03:45:32.515537",
+    "print_name": "name-keychain"
+  },
+  {
+    "id": 34,
+    "printer_id": 1,
+    "status": "cancelled",
+    "bed_type": "Textured PEI Plate",
+    "started_at": "2026-09-27T03:41:23.772437",
+    "completed_at": "2026-09-27T03:59:09.226122",
+    "created_at": "2026-09-27T03:40:10.121905",
+    "print_name": "name-keychain"
+  },
+  {
+    "id": 32,
+    "printer_id": 1,
+    "status": "completed",
+    "bed_type": "Textured PEI Plate",
+    "started_at": "2026-09-27T02:03:31.338865",
+    "completed_at": "2026-09-27T02:50:28.242873",
+    "created_at": "2026-09-27T02:03:25.642057",
+    "print_name": "bag-clip"
+  },
+  {
+    "id": 27,
+    "printer_id": 1,
+    "status": "cancelled",
+    "bed_type": "Textured PEI Plate",
+    "started_at": "2026-09-27T10:24:45.495231",
+    "completed_at": "2026-09-27T12:00:25.816109",
+    "created_at": "2026-09-27T01:15:30.527900",
+    "print_name": "Flexi Fabric Fidget"
+  },
+  {
+    "id": 23,
+    "printer_id": 1,
+    "status": "completed",
+    "bed_type": "Textured PEI Plate",
+    "started_at": "2026-09-26T17:16:35.373174",
+    "completed_at": "2026-09-27T01:46:40.317418",
+    "created_at": "2026-09-26T17:16:17.973441",
+    "print_name": "Modular Spool & Silica Insert for YOOPAI Dry Box"
+  }
+]

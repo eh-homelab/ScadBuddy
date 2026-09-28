@@ -271,6 +271,9 @@ def restore_version(
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     announce_source_change(events, slug)
+    # Straight through the history, so the catalogue did not see it: the source, and
+    # whether the model has a thumbnail of its own, can both have changed.
+    catalogue.notify_change(slug)
     # The model's own latest revision: when nothing differed the restore made no
     # commit, and the repository HEAD may belong to another model.
     revisions = history.log(slug, limit=1)

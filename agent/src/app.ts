@@ -39,9 +39,10 @@ export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
 
 /**
  * `ai` is `enabled` only when every prerequisite holds; otherwise it names the
- * first one missing, in the order an operator has to fix them. The backend's
- * health report reads it to decide whether the UI shows AI (#261), and the CI
- * smoke test asserts the no-database string, so keep those strings stable.
+ * first one missing, in the order an operator has to fix them. Today only the
+ * CI smoke test reads it (.github/workflows/ci.yml asserts the no-database
+ * string); nothing in the backend or frontend does yet. Keep the strings stable
+ * for that test and for the UI gate #261 plans to build on them.
  */
 export type AiStatus =
   | 'enabled'
