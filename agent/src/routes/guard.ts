@@ -1,5 +1,13 @@
 import type { Context } from 'hono'
-import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
+import {
+  checkOrigin,
+  effectiveRequest,
+  isLoopbackPeer,
+  isSecureTransport,
+  type OriginPolicy,
+  type RequestFacts,
+  requestOrigin,
+} from '../http/origins.js'
 
 // Interim gate for OUTWARD-tier writes from Settings (spec §8.1: "outward (send,
 // print, delete, settings or credential writes)"). Spec §8.2 wants every
@@ -76,3 +84,39 @@ export function uiRequestProblem(
   }
   return undefined
 }
+
+/**
+ * The same check for a READ the UI makes (GET /api/v1/ai/approvals). A
+ * browser sends no `Origin` on a same-origin GET (Fetch standard), so here
+ * `Origin` is checked when present and otherwise the request's own origin
+ * (its Host, or a trusted proxy's `X-Forwarded-Host`) must be the UI's public
+ * origin, or loopback from a loopback peer; a `Sec-Fetch-Site` other than
+ * `same-origin` or `none` is refused. The transport rule is the same.
+ */
+export function uiReadProblem(
+  c: Context,
+  policy: OriginPolicy,
+  remoteAddress: RemoteAddress,
+  what: string,
+): string | undefined {
+  const facts = requestFacts(c, remoteAddress)
+  if (!isSecureTransport(facts, policy)) return `${what} must come through the HTTPS ingress`
+  if (facts.header('origin') !== undefined) {
+    return checkOrigin(facts, policy).ok ? undefined : `${what} must come from the ScadBuddy UI at its public URL`
+  }
+  const site = facts.header('sec-fetch-site')?.toLowerCase()
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
+    return `${what} must come from the ScadBuddy UI (Sec-Fetch-Site: ${site})`
+  }
+  const effective = effectiveRequest(facts, policy)
+  const target = effective.scheme ? requestOrigin(effective.scheme, effective.host) : undefined
+  const allowed =
+    target !== undefined &&
+    (policy.publicOrigins.has(target) ||
+      (!effective.viaTrustedProxy &&
+        isLoopbackPeer(facts.peer) &&
+        LOOPBACK_HOSTNAMES.has(new URL(target).hostname)))
+  return allowed ? undefined : `${what} must be addressed to the ScadBuddy UI at its public URL (SCADBUDDY_PUBLIC_URL)`
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])

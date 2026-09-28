@@ -11,6 +11,7 @@ import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { loadKek } from './secrets.js'
+import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 
@@ -86,6 +87,9 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // Input hashes are HMACs under a key derived from the KEK, so they
+        // compare across restarts (approvals/service.ts BINDING).
+        ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)

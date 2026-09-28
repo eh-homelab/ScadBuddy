@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { ApprovalError, type ApprovalRecord, type ApprovalService } from '../approvals/service.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { Owner } from '../sessions/protocol.js'
-import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 // /api/v1/ai/approvals (#258): the panel's and the tests' way to see and decide
 // approvals of outward tool calls until #266's socket carries the panel's
@@ -16,8 +16,9 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 //
 // The writes pass guard.ts first (the UI's origin, through the HTTPS ingress);
 // a request that passes is the browser user (spec §8.1: the browser user
-// "approves in the UI"). Reads are not guarded, like GET /credentials: they
-// return the scrubbed summary only, never a tool's full input. Error bodies use
+// "approves in the UI"). Reads pass guard.ts `uiReadProblem` (transport, and
+// the UI's origin as far as a same-origin GET shows it); they return the
+// scrubbed summary only, never a tool's full input. Error bodies use
 // `{ detail }`, the backend's FastAPI shape.
 
 /** The principal an HTTP request from the UI acts as. */
@@ -48,6 +49,8 @@ export type ApprovalView = {
   decided_at: string | null
   reason: string | null
   used: boolean
+  /** Approved but withdrawn before it was used. */
+  voided: boolean
 }
 
 export function approvalView(a: ApprovalRecord): ApprovalView {
@@ -67,6 +70,7 @@ export function approvalView(a: ApprovalRecord): ApprovalView {
     decided_at: a.decidedAt,
     reason: a.reason,
     used: a.consumedAt !== null,
+    voided: a.revokedAt !== null,
   }
 }
 
@@ -84,6 +88,8 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
   }
 
   app.get(base, async (c) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'approval reads')
+    if (problem) return c.json({ detail: problem }, 403)
     const approvals = await service()
     if (typeof approvals === 'string') return c.json({ detail: approvals }, 503)
     const session = c.req.query('session')

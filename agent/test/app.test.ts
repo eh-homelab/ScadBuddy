@@ -501,7 +501,8 @@ describe('/api/v1/ai/approvals (#258; the store is covered in test/approvals.pg.
 
   it('answers 503 without the database, and guards the writes first', async () => {
     const app = createApp(deps({ database: undefined, credentials: undefined }))
-    expect((await app.request('/api/v1/ai/approvals')).status).toBe(503)
+    expect((await app.request('/api/v1/ai/approvals')).status).toBe(403)
+    expect((await app.request('/api/v1/ai/approvals', { headers: UI })).status).toBe(503)
     const bare = await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST' })
     expect(bare.status).toBe(403)
     expect(await bare.json()).toEqual({ detail: 'approval decisions must come through the HTTPS ingress' })

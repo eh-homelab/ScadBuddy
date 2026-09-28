@@ -2,7 +2,7 @@ import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { ApprovalError, type ApprovalRecord, inputHash } from '../src/approvals/service.js'
+import { ApprovalError, type ApprovalRecord } from '../src/approvals/service.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
@@ -33,6 +33,7 @@ const skip = cliMissing ?? (TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL
 const TOKEN = 'gw-approvals-e2e-token-4444555566667777'
 const tiers: Record<string, RiskTier> = { mcp__stub__print: 'outward', mcp__stub__echo: 'read' }
 const RESUME_PHRASE = 'Make that same call again'
+const HASH_KEY = Buffer.alloc(32, 9)
 
 /** The UI through the TLS ingress (routes/guard.ts). */
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
@@ -82,6 +83,8 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
       tierOf: (name) => tiers[name],
       mcpServers: () => ({ stub: stubServer() }),
       approvalPollMs: 50,
+      // Replicas share the KEK, so they share the input-hash key (approvals/service.ts approvalHashKey).
+      approvalHashKey: HASH_KEY,
       ...extra,
     })
   }
@@ -135,7 +138,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     expect(fake.messageCalls()).toHaveLength(calls)
 
     const app = routes(m)
-    const list = (await (await app.request(`/api/v1/ai/approvals?session=${session.id}&pending=true`)).json()) as {
+    const list = (await (await app.request(`/api/v1/ai/approvals?session=${session.id}&pending=true`, { headers: UI })).json()) as {
       approvals: { id: string; tool: string; tool_use_id: string; input_summary: string; input_hash: string; decision: null }[]
     }
     expect(list.approvals).toHaveLength(1)
@@ -144,7 +147,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
       tool: 'mcp__stub__print',
       tool_use_id: toolUseId,
       input_summary: '{"job":"box.3mf"}',
-      input_hash: inputHash('mcp__stub__print', { job: 'box.3mf' }),
+      input_hash: m.approvals.hash('mcp__stub__print', { job: 'box.3mf' }),
       decision: null,
     })
 
@@ -210,7 +213,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
   }, 60_000)
 
-  it('only the browser user, or a principal with a grant, may decide', async () => {
+  it('only the browser user, or ANOTHER principal with a grant, may decide; never the requester itself', async () => {
     script = printing(() => 'box.3mf')
     const granted = new Set<string>()
     const m = await replica({ approvalGrants: (p) => Promise.resolve(granted.has(`${p.kind}:${p.id}`)) })
@@ -221,14 +224,18 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     await expect(m.approvals.decide(agentB, approvalId, true)).rejects.toMatchObject({ code: 'not_found' })
     const anonymous: Owner = { kind: 'anonymous', id: 'anonymous', label: 'Anonymous' }
     await expect(m.approvals.decide(anonymous, approvalId, true)).rejects.toBeInstanceOf(ApprovalError)
-    // Another agent WITH a grant still cannot decide in a session it cannot see.
-    granted.add(`${agentB.kind}:${agentB.id}`)
-    await expect(m.approvals.decide(agentB, approvalId, true)).rejects.toMatchObject({ code: 'not_found' })
+
+    // A grant never allows self-approval: the requester (session owner and creator) is refused.
+    granted.add(`${agentA.kind}:${agentA.id}`)
+    await expect(m.approvals.decide(agentA, approvalId, true)).rejects.toMatchObject({
+      code: 'forbidden',
+      message: expect.stringMatching(/its own outward actions/),
+    })
     expect((await m.approvals.get(approvalId, browser)).decision).toBeNull()
 
-    // With a per-token grant, the owner may.
-    granted.add(`${agentA.kind}:${agentA.id}`)
-    expect(await m.approvals.decide(agentA, approvalId, true)).toMatchObject({ decision: 'approved', decidedBy: agentA })
+    // Another agent with a grant may see and decide it.
+    granted.add(`${agentB.kind}:${agentB.id}`)
+    expect(await m.approvals.decide(agentB, approvalId, true)).toMatchObject({ decision: 'approved', decidedBy: agentB })
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(printed).toEqual(['box.3mf'])
     // Decided once: a second decision is a conflict.
@@ -239,13 +246,13 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     script = printing(() => 'box.3mf')
     const m = await replica()
     const { turn, approvalId } = await parked(m)
-    const other = inputHash('mcp__stub__print', { job: 'other.3mf' })
+    const other = m.approvals.hash('mcp__stub__print', { job: 'other.3mf' })
     await expect(m.approvals.decide(browser, approvalId, true, { inputHash: other })).rejects.toMatchObject({
       code: 'input_mismatch',
       status: 409,
     })
     expect((await m.approvals.get(approvalId, browser)).decision).toBeNull()
-    await m.approvals.decide(browser, approvalId, true, { inputHash: inputHash('mcp__stub__print', { job: 'box.3mf' }) })
+    await m.approvals.decide(browser, approvalId, true, { inputHash: m.approvals.hash('mcp__stub__print', { job: 'box.3mf' }) })
     expect(await turn.done).toMatchObject({ kind: 'result' })
     expect(printed).toEqual(['box.3mf'])
   }, 60_000)
@@ -326,6 +333,30 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     const all = (await allEvents(b, session.id)).map((e) => e.event)
     await expectPanelAccepts(all)
     expect(all).toContainEqual(expect.objectContaining({ type: 'user.turn', author: browser, text: expect.stringContaining(RESUME_PHRASE) }))
+  }, 90_000)
+
+  it('an approval that could not resume is not inherited: after a handoff, the new owner’s identical call asks again', async () => {
+    script = printing(() => 'box.3mf')
+    const a = await replica()
+    const { session, turn, approvalId } = await parked(a)
+    a.abortAll()
+    await turn.done
+    const b = await replica()
+    // Approved while another replica holds the session, so it cannot resume.
+    await db.sql`UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute' WHERE id = ${session.id}`
+    await b.approvals.decide(browser, approvalId, true)
+    await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
+    expect((await b.approvals.get(approvalId, browser)).revokedAt).not.toBeNull()
+
+    await b.handoff(session.id, agentA, agentB)
+    await b.send(session.id, agentB, 'print the box')
+    const events = await b.attach(session.id, agentB, { signal: stop.signal })
+    const seen = await collectUntil(events, (e) => e.event.type === 'approval.required' && e.event.id !== approvalId)
+    expect(seen.at(-1)!.event).toMatchObject({ type: 'approval.required', summary: expect.stringContaining('box.3mf') })
+    expect(printed).toEqual([])
+    await b.interrupt(session.id, browser)
+    await expect.poll(async () => (await b.get(session.id, agentB)).status, { timeout: 10_000 }).toBe('idle')
+    expect(printed).toEqual([])
   }, 90_000)
 
   it('after a restart, an approval does not cover a call with a different input', async () => {

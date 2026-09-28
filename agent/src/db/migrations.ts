@@ -162,8 +162,8 @@ export const MIGRATIONS: readonly Migration[] = [
         -- The input as the event log shows it: scrubbed (sessions/sdkEvents.ts
         -- scrubForLog). The full input is never stored here.
         input_summary      text NOT NULL,
-        -- sha256 of the tool name and the canonical JSON of the full input; a
-        -- decision applies to this exact input only.
+        -- HMAC-SHA256 (server-side key) of the tool name and the canonical
+        -- JSON of the full input; a decision applies to this exact input only.
         input_hash         text NOT NULL,
         tier               text NOT NULL CHECK (tier IN ('read', 'write', 'outward')),
         requested_by_kind  text NOT NULL,
@@ -176,12 +176,21 @@ export const MIGRATIONS: readonly Migration[] = [
         decided_by_id      text,
         decided_by_label   text,
         decided_at         timestamptz,
-        -- Why it was cancelled or expired, for the audit trail.
+        -- Why it was cancelled, expired or voided, for the audit trail.
         reason             text,
+        -- Approved: usable until then (the expiry window, from the decision).
+        usable_until       timestamptz,
+        -- Approved after its turn was gone: the resumed turn that may use it.
+        resume_turn_id     uuid,
         -- Set once the approved call ran: an approval is used at most once.
         consumed_at        timestamptz,
+        -- Approved but voided unused (interrupt, handoff, a new turn, its
+        -- turn ended, a failed resume).
+        revoked_at         timestamptz,
         CHECK ((decision IS NULL) = (decided_at IS NULL)),
-        CHECK (consumed_at IS NULL OR decision = 'approved')
+        CHECK ((decision = 'approved') = (usable_until IS NOT NULL)),
+        CHECK (consumed_at IS NULL OR decision = 'approved'),
+        CHECK (revoked_at IS NULL OR (decision = 'approved' AND consumed_at IS NULL))
       );
       CREATE INDEX ai_approvals_session ON ai_approvals (session_id, created_at);
       CREATE INDEX ai_approvals_pending ON ai_approvals (expires_at) WHERE decision IS NULL;

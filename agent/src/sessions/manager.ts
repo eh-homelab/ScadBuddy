@@ -12,7 +12,7 @@ import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
 import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
-import { type ApprovalRecord, ApprovalService, type GrantCheck } from '../approvals/service.js'
+import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
@@ -172,6 +172,8 @@ export type SessionManagerDeps = {
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
+  /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
+  approvalHashKey?: Buffer
   /** How often a parked turn polls its approval for a decision made on another replica. */
   approvalPollMs?: number
   leaseMs?: number
@@ -309,6 +311,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
       ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
     this.run = deps.run ?? runHarness
@@ -446,12 +449,14 @@ export class SessionManager {
    * Runs the turn that re-makes an approved call after its turn was lost
    * (#258: the approval was decided after a restart). Claims the session
    * like send() does, but for the decider rather than the owner: approving is
-   * what authorises it (approvals/service.ts `decide`). False when the
-   * session cannot start a turn now; the approval then stays usable until it
-   * expires, by the owner's next turn.
+   * what authorises it (approvals/service.ts `decide`). The approval is bound
+   * to the new turn, which alone may use it. Not resumed when the session
+   * cannot start a turn now, or the approval can no longer be used; the
+   * service then voids it and says so. A claim taken and then not used is
+   * released at once.
    */
-  async resumeApproved(approval: ApprovalRecord, by: Owner): Promise<boolean> {
-    if (!approval.sessionId) return false
+  async resumeApproved(approval: ApprovalRecord, by: Owner): Promise<ResumeResult> {
+    if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     const turnId = randomUUID()
     const [claimed] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_sessions
@@ -462,20 +467,47 @@ export class SessionManager {
        RETURNING ${COLUMNS}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
-    if (!claimed) return false
-    const prompt =
-      `${by.label} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
-      'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
-      'and is used once. If you no longer need it, say so instead.'
-    await this.startTurn(record(claimed), turnId, prompt, by)
-    return true
+    if (!claimed) {
+      return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
+    }
+    try {
+      if (!(await this.approvals.bindResume(approval.id, turnId))) {
+        await this.releaseClaim(approval.sessionId, turnId)
+        return { resumed: false, reason: 'the approval was already withdrawn, used or out of time' }
+      }
+      const prompt =
+        `${by.label} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
+        'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
+        'and is used once. If you no longer need it, say so instead.'
+      await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId })
+      return { resumed: true }
+    } catch (err) {
+      await this.releaseClaim(approval.sessionId, turnId)
+      return { resumed: false, reason: describe(err) }
+    }
   }
 
-  private async startTurn(session: SessionRecord, turnId: string, prompt: string, author: Owner): Promise<Turn> {
+  /** Gives back a claim no turn ran on (a resume that could not start). */
+  private async releaseClaim(id: string, turnId: string): Promise<void> {
+    const released = await this.deps.sql`
+      UPDATE ai_sessions SET status = 'idle', turn_id = NULL, lease_until = NULL, updated_at = now()
+      WHERE id = ${id} AND turn_id = ${turnId}`
+    if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
+  }
+
+  private async startTurn(
+    session: SessionRecord,
+    turnId: string,
+    prompt: string,
+    author: Owner,
+    options: { keepResumeTurn?: string } = {},
+  ): Promise<Turn> {
     const id = session.id
-    // A new turn supersedes approvals left pending by one that is gone
-    // (claiming proved no turn is live): their calls can no longer run.
-    await this.approvals.cancelPending(id, 'superseded by a new turn')
+    // A new turn supersedes approvals left pending, or approved and unused,
+    // by one that is gone (claiming proved no turn is live): their calls can
+    // no longer run. A resumed turn keeps the approval bound to it; its
+    // sibling orphans are cancelled with the rest (approvals/service.ts).
+    await this.approvals.cancelPending(id, 'superseded by a new turn', options)
     await this.events.append(id, [
       event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
@@ -641,9 +673,13 @@ export class SessionManager {
     // Tool permission stream closed before response received"), and Claude
     // Code may still reach the model and end with a `result` before it exits,
     // so either outcome below can follow. The tool never runs.
+    // Approved-but-unused approvals end with the turn in every case,
+    // including the one a resumed turn was bound to and did not use.
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
+    } else {
+      await this.approvals.revokeUnused(id, 'the turn ended')
     }
     if (result) {
       // `total_cost_usd` of a RESUMED query already includes the earlier
@@ -682,6 +718,12 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}`
     if (released.count === 0) return { kind: 'lost_claim' }
     await this.events.append(id, tail.map((e) => scrubForLog(e, secrets)))
+    // A decision that landed while this turn was finishing saw it still
+    // holding the session and took it for parked (approvals/service.ts
+    // decide), so nobody resumes for it: void an approval of this turn's
+    // that nothing used, and settle the status if nothing is pending now.
+    await this.approvals.revokeUnused(id, 'it was decided as its turn ended', { turnId })
+    await this.approvals.refreshStatus(id)
     return outcome
   }
 

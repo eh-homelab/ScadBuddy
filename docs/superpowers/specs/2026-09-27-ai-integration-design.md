@@ -476,12 +476,17 @@ including `disabled`. Where it is enforced:
   `waiting_approval`, the UI shows a confirmation card, and the decision resumes it.
   The callback parks the call until the decision (§3.1, #258). Approvals live in
   `ai_approvals`, so a pending one survives a restart; approving one whose turn is gone
-  resumes the session with a turn that repeats the call, and the approval is used once
-  by a call with the same tool and input hash. A decision binds to that hash; a changed
-  input needs a new approval. Only the browser user decides, or another principal with
-  a per-token grant (§6); interrupt, handoff and a new turn cancel a pending approval,
-  and one that nobody decides expires (`approval_expiry_seconds` in `ai_settings`).
-  The code is `agent/src/approvals/service.ts`.
+  resumes the session with a turn that repeats the call. The approval is bound to that
+  turn and used once, by a call with the same tool and input hash; if the session cannot
+  resume, the approval is voided and the session is told. Resuming one of several such
+  approvals of a session cancels the others. A decision binds to the input hash (an
+  HMAC under a key derived from the key-encryption key); a changed input needs a new
+  approval. Only the browser user decides, or another principal with a per-token grant
+  (§6), and never for its own calls or sessions. Interrupt, handoff and a new turn
+  cancel a pending approval and void an approved one that was not used yet, as does
+  the end of the turn it belongs to; one that nobody decides expires
+  (`approval_expiry_seconds` in `ai_settings`). The code is
+  `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
   approval.
