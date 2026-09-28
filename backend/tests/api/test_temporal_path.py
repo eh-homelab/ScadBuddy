@@ -68,7 +68,7 @@ def test_a_render_runs_on_temporal_and_the_routes_read_the_projection(
     assert ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX).ensure_repo() is not None
     app = create_app(cfg)
     state: AppState = getattr(app.state, STATE_ATTR)
-    service = state.queue
+    service = state.render
     assert isinstance(service, RenderService)
     service.reconcile_after = 0.5
     service.reconcile_interval = 0.1

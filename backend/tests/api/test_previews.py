@@ -518,7 +518,7 @@ def _failing_backfill(
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []
-    for name, part in (("previews", scheduler(booted)), ("queue", booted.queue)):
+    for name, part in (("previews", scheduler(booted)), ("queue", booted.render)):
         aclose = part.aclose
 
         async def recording(name: str = name, aclose: Any = aclose) -> None:
@@ -541,8 +541,8 @@ def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
         pass
 
     assert closed == ["previews", "queue"]
-    assert isinstance(booted.queue, RenderService)
-    assert booted.queue._reconciler is None
+    assert isinstance(booted.render, RenderService)
+    assert booted.render._reconciler is None
     assert booted.projection is not None and booted.projection.pool.closed
 
 

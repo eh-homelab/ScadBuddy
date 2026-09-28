@@ -65,7 +65,7 @@ class RenderService:
         self,
         *,
         projection: JobProjection,
-        client: Client | None,
+        client: Client,
         task_queue: str,
         config: Config,
         paths: DataPaths,
@@ -239,7 +239,6 @@ class RenderService:
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
         includes any wait for a free worker."""
-        assert self.client is not None
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
@@ -278,7 +277,6 @@ class RenderService:
         job: Job,
         conflict: WorkflowIDConflictPolicy = WorkflowIDConflictPolicy.USE_EXISTING,
     ) -> None:
-        assert self.client is not None
         await self.client.start_workflow(
             TemplatePipeline.run,
             job,
@@ -303,7 +301,6 @@ class RenderService:
             self._settled(job, "failed")
 
     async def _cancel_workflow(self, job: Job) -> None:
-        assert self.client is not None
         try:
             await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel(
                 rpc_timeout=RPC_TIMEOUT

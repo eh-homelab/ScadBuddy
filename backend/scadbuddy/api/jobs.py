@@ -18,7 +18,7 @@ from scadbuddy.api.deps import (
     HistoryDep,
     JobIdPath,
     PathsDep,
-    QueueDep,
+    RenderDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
@@ -32,7 +32,6 @@ from scadbuddy.library.history import (
     GitError,
     RevisionNotFoundError,
 )
-from scadbuddy.render.backend import RenderBackend
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
@@ -44,6 +43,7 @@ from scadbuddy.render.jobs import (
     QueueFullError,
 )
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
     MAX_VIEW_SIZE,
     MIN_VIEW_SIZE,
@@ -170,9 +170,9 @@ async def _resolve_version(history: HistoryDep, slug: str, version: str | None) 
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
-def require_job(queue: RenderBackend, job_id: str) -> Job:
+def require_job(render: RenderService, job_id: str) -> Job:
     try:
-        return queue.store.read(job_id)
+        return render.store.read(job_id)
     except JobNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
 
@@ -199,7 +199,7 @@ async def render_model(
     history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
-    queue: QueueDep,
+    render: RenderDep,
     assets: AssetsDep,
     fetcher: FetcherDep,
 ) -> RenderAccepted:
@@ -226,7 +226,7 @@ async def render_model(
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
     try:
-        job = await queue.submit(
+        job = await render.submit(
             slug, body.params, model_version=source.version, supersedes=body.supersedes
         )
     except QueueFullError as error:
@@ -240,8 +240,8 @@ async def render_model(
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus, summary="Render job state")
-def get_job(job_id: JobIdPath, request: Request, queue: QueueDep) -> JobStatus:
-    job = require_job(queue, job_id)
+def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus:
+    job = require_job(render, job_id)
     return _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
 
 
@@ -251,8 +251,8 @@ def get_job(job_id: JobIdPath, request: Request, queue: QueueDep) -> JobStatus:
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
 )
-def get_job_preview(job_id: JobIdPath, queue: QueueDep, paths: PathsDep) -> FileResponse:
-    job = require_job(queue, job_id)
+def get_job_preview(job_id: JobIdPath, render: RenderDep, paths: PathsDep) -> FileResponse:
+    job = require_job(render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
@@ -274,11 +274,11 @@ def get_job_preview(job_id: JobIdPath, queue: QueueDep, paths: PathsDep) -> File
     ),
 )
 async def get_model_diagnostics(
-    slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep
+    slug: SlugPath, catalogue: CatalogueDep, render: RenderDep
 ) -> ModelDiagnostics:
     require_model_exists(catalogue, slug)
     # Reads every job file on the PVC; off the loop.
-    job = await asyncio.to_thread(queue.store.latest_finished, slug)
+    job = await asyncio.to_thread(render.store.latest_finished, slug)
     if job is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no finished render of {slug!r} is on record")
     return ModelDiagnostics(
@@ -334,12 +334,12 @@ async def preview_view(
 async def get_job_view(
     job_id: JobIdPath,
     view: ViewName,
-    queue: QueueDep,
+    render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    job = require_job(queue, job_id)
+    job = require_job(render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"

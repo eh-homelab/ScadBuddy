@@ -565,7 +565,7 @@ def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     assert isinstance(state.events, PgNotifyEventBus)
     projection = state.projection
     assert isinstance(projection, JobProjection)
-    assert state.queue.store is projection
+    assert state.render.store is projection
     assert projection.events is state.events
     assert state.events.listener is projection.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)

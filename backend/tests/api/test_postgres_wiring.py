@@ -76,7 +76,7 @@ def test_a_bus_that_fails_to_start_releases_the_render_service_that_did(
     `finally` a failed start never reaches: the lifespan must close both itself."""
     app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
     state = app.state.scadbuddy
-    bus, service, projection = state.events, state.queue, state.projection
+    bus, service, projection = state.events, state.render, state.projection
     assert isinstance(bus, PgNotifyEventBus)
     assert isinstance(service, RenderService)
     assert isinstance(projection, JobProjection)

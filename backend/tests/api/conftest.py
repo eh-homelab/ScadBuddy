@@ -13,7 +13,7 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR, get_queue
+from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -111,7 +111,7 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
             queues["queue"] = queue
         return queues["queue"]
 
-    application.dependency_overrides[get_queue] = queue_override
+    application.dependency_overrides[get_render] = queue_override
     yield application
     # The workers die with the TestClient's loop; the thumbnail pool is threads, so
     # it is released here rather than left for interpreter exit.
