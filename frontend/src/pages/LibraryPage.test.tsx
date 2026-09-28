@@ -33,10 +33,11 @@ describe('LibraryPage', () => {
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
-    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const { user, container } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-folder-9'))
     await waitFor(() => expect(screen.getAllByTestId(/^library-file-/)).toHaveLength(300))
-    const images = screen.getAllByRole('img')
+    // The thumbnails are decorative (alt=""): the caption names the file.
+    const images = Array.from(container.querySelectorAll('img'))
     expect(images).toHaveLength(300)
     expect(images.every((image) => image.getAttribute('loading') === 'lazy')).toBe(true)
   })
