@@ -50,8 +50,9 @@ Goals
 - A template can define what one Generate does: any number of `openscad` runs over
   any of its files, results feeding later steps, arbitrary Python between them,
   arbitrary plates and extra output files.
-- Rendering runs as Temporal workflows. Steps are activities that may run on
-  different machines; a dead worker costs the step it was on, not the job.
+- Rendering runs as Temporal workflows. Steps are activities; a dead worker costs the
+  step it was on, not the job. Once the store lands (phase 3) steps may run on
+  different machines.
 - Everything a step reads or writes lives in a content-addressed store any worker
   can reach. The one backend implemented is Bambuddy's library; the store is a
   configurable interface.
@@ -111,8 +112,8 @@ fails unfinished jobs (Temporal resumes them). The Prometheus metric names in
 `core/metrics.py` are unchanged; `scadbuddy_render_jobs_running` is derived from the
 projection.
 
-Added: `workflow_id` (always `render-<job_id>`), `inputs` (jsonb), `revision`,
-`pipeline_version`.
+Added: `workflow_id` (always `render-<job_id>`), `kind` (`render` | `arrange`),
+`inputs` (jsonb), `revision`, `pipeline_version`, `started_at`.
 
 ### 3.3 Submit: insert, start, reconcile
 
@@ -135,18 +136,35 @@ must be atomic, and a `GET /jobs/{id}` between the start and the first activity 
 404. The row is the source of truth for *whether* a job exists; Temporal is the source
 of truth for *how far it got*.
 
-Superseding and cancelling: releasing the last claim marks the row `cancelled` and
-cancels the workflow; the workflow's cancellation handler writes the final projection.
+Superseding and cancelling. A request that names `supersedes` releases one claim on
+that job; releasing its last claim marks the row `cancelled` and cancels workflow
+`render-<that_id>`, whose cancellation handler writes the final projection. Because
+`start_workflow` follows the insert immediately, the superseded job is usually already
+running: cancellation stops its `TemplatePipeline` at the next activity boundary, and
+its `RenderPiece` children are left to finish (§3.4, `ABANDON`), so the request that
+superseded it — typically the same template with one changed input — finds the
+pieces it shares already rendered. The base spec's "dropped unrendered if no worker
+has taken it" becomes "cancelled at the next step".
 
 ### 3.4 Workflows
 
 All in `backend/scadbuddy/workflows/`, `temporalio` Python SDK.
 
 ```
-TemplatePipeline   id render-<job_id>          one per Generate
-  └─ RenderPiece   id piece-<render_key>        one per DISTINCT openscad render; USE_EXISTING
-Arrange            id arrange-<layout_id>       objects → plates (§7); also called as a child
+TemplatePipeline   id render-<job_id>          one per Generate (render_jobs.kind = 'render')
+  └─ RenderPiece   id piece-<piece_key>         one per DISTINCT openscad render; USE_EXISTING
+Arrange            id render-<job_id>          objects → plates (§7); render_jobs.kind = 'arrange'
 ```
+
+Two keys with two jobs: `render_jobs.render_key` is the **job** key (slug, revision,
+canonical inputs) that coalesces identical requests, as today. `piece_key =
+sha256(revision, file, canonical params)` names one `openscad` invocation and is
+what dedups `RenderPiece` children across jobs. They are never interchangeable.
+
+`Arrange` is submitted through the same insert → start → reconcile path as a render
+(§3.3), so `GET /jobs/{id}` works for it unchanged; the row's `kind` says which
+workflow `render-<job_id>` runs. A pipeline's `ctx.pack` calls Arrange's packing
+activity directly, not the workflow.
 
 `TemplatePipeline.run(job_id)`:
 
@@ -170,12 +188,17 @@ Arrange            id arrange-<layout_id>       objects → plates (§7); also c
 4. `openscad_render(file, params)` — the main 3MF; heartbeats.
 5. `openscad_solid(file, params, colour)` × N in parallel — the closed per-colour
    parts (`render/solids.py`); heartbeats.
-6. `build_piece` — split, GLB, bbox, echoes, colour slots → a **Part** stored as a
-   blob (§6) and returned by reference.
+6. `build_piece` — split, GLB, bbox, echoes, colour slots → a **Part** written to
+   the `BlobStore` (§6) and returned by reference. In phase 1 the store is the
+   `local` backend on the data volume, which is why phase 1 runs a single render
+   worker (§11).
 
-A `RenderPiece` is keyed by `render_key = sha256(revision, file, canonical params)`.
-Fourteen identical walls render once; two people building the same house share one
-child; changing the wallpaper re-renders walls but not floors or corner posts.
+A `RenderPiece` is keyed by `piece_key`. Fourteen identical walls render once; two
+people building the same house share one child; changing the wallpaper re-renders
+walls but not floors or corner posts. Children are started with
+`parent_close_policy=ABANDON`: cancelling a `TemplatePipeline` never cancels a piece
+another job may be sharing, and a Part nothing references is swept by the store's
+grace rule (§6.2).
 
 Activity defaults: `start_to_close` 10 min for `openscad_*`, heartbeat every 5 s,
 retry policy 3 attempts with backoff. `openscad` itself is killed at
@@ -299,7 +322,7 @@ class Ctx:
     plate: PlateGeometry                       # the selected/default printer's bed (#81)
     async def render(self, file: str, **params) -> Part        # child RenderPiece, deduped
     async def activity(self, name: str, *args, **kwargs) -> Any  # pipeline/activities.py:<name>
-    def pack(self, items: list[Part | tuple[Part, int]], *, goal: Goal = "fewest_plates") -> Layout
+    async def pack(self, items: list[Part | tuple[Part, int]], *, goal: Goal = "fewest_plates") -> Layout
     def plate_of(self, items, *, at: list[tuple[x, y, rot]] | None = None) -> Plate
     async def output(self, *, plates: Layout | list[Plate], name: str | None = None,
                      bom: list[BomEntry] | None = None, files: dict[str, bytes | Blob] = {}) -> OutputRef
@@ -314,7 +337,10 @@ class Ctx:
   and results are JSON plus `Blob` references; a template activity that needs a mesh
   gets it from the store. Heartbeat is automatic every 5 s; default 10 min
   `start_to_close`, overridable per call.
-- `pack` / `plate_of` build a `Layout` (§7); `output` writes it (multi-plate 3MF via
+- `pack` is the Arrange packing activity (§7) — `async`, because it reads footprints
+  from the store and, for filament-aware goals, spool state from Bambuddy.
+  `plate_of` is pure in-workflow construction of an explicit plate. Both yield a
+  `Layout`; `output` writes it (multi-plate 3MF via
   #289's writer, thumbnails, `bom`, extra `files`) to the store and records the
   output row. A pipeline may call `output` more than once (one 3MF per storey).
 - `bom` is structured, not a file: `[{piece, label, count, plates: [int], part: PartRef}]`,
@@ -331,7 +357,7 @@ A template with no `pipeline` runs:
 ```python
 async def run(ctx, inputs):
     part = await ctx.render("model.scad", **inputs["params"])
-    await ctx.output(plates=ctx.pack([part]), name=inputs.get("name"))
+    await ctx.output(plates=await ctx.pack([part]), name=inputs.get("name"))
 ```
 
 which is today's behaviour, including #289's `plates = N` echo handling inside
@@ -369,8 +395,8 @@ async def run(ctx, inputs):
     roof = await ctx.render("parts/roof.scad", span=span, pitch=inputs["pitch"], **common)
     halves = await ctx.activity("split_to_fit", roof, bed=ctx.plate)  # template Python
     guide = await ctx.activity("assembly_guide", house, list(parts))
-    await ctx.output(name=f"{len(inputs['rooms'])}-room house",
-                     plates=ctx.pack([*parts.values(), *[(h, 2) for h in halves]], goal="fewest_swaps"),
+    layout = await ctx.pack([*parts.values(), *[(h, 2) for h in halves]], goal="fewest_swaps")
+    await ctx.output(name=f"{len(inputs['rooms'])}-room house", plates=layout,
                      bom=house.bom(parts), files={"assembly.svg": guide})
 ```
 
@@ -430,8 +456,11 @@ re-puts of what already exists. Workers keep a local LRU cache by sha256 under
 `SCADBUDDY_WORKER_CACHE_DIR` (sticky scheduling is an optimisation, never a
 correctness requirement).
 
-`SCADBUDDY_STORE_BACKEND` selects the implementation. **Only `bambuddy` is
-implemented.** A `local` backend exists solely for tests and `verify.sh`.
+`SCADBUDDY_STORE_BACKEND` selects the implementation. **`bambuddy` is the one
+production backend.** A `local` backend (the data volume, today's layout) exists for
+tests, `verify.sh`, and the phase-1 deployment, where it is correct only with a
+single render worker on the same volume as the API; the interface lands in phase 1
+so that phase 3 swaps the backend without touching the workflows.
 
 ### 6.3 The Bambuddy backend
 
@@ -475,12 +504,14 @@ re-rendering; this makes that the rule.
   footprint, colour slots, count, provenance (template, revision, inputs, BOM entry).
 - A **Layout** is `[{plate: int, objects: [{part, at: (x, y, rot)}]}]` plus the plate
   geometry it was packed for. The 3MF is written *from* manifest + layout.
-- `Arrange` is a workflow (`arrange-<layout_id>`) taking objects from one or more
-  outputs (#314's build list), a filament assignment (spool per colour, read from
-  Bambuddy through the spool-first flow), and a `goal`:
+- `Arrange` is a workflow (a `render_jobs` row with `kind = 'arrange'`, §3.4) taking
+  objects from one or more outputs (#314's build list), a filament assignment — a
+  `FilamentPlan`, one chosen spool per slot, as the print-flow spec §1 defines it and
+  the Print dialog already collects — and a `goal`:
   `fewest_plates` | `fewest_swaps` | `by_colour` (single-colour plates skip the prime
   tower) | `keep_together` groups. It produces a new layout → 3MF in seconds, with no
-  re-render. `ctx.pack(goal=…)` in a pipeline calls the same activity.
+  re-render. `ctx.pack(goal=…)` in a pipeline awaits the same packing activity
+  (§5.2).
 - Heuristic, not a solver: group by colour signature, first-fit-decreasing 2D packing
   against `plate.py`'s exclusion zones and prime-tower rules, then order plates to
   minimise swaps. `Goal` is pluggable.
@@ -523,13 +554,20 @@ Containment is by reach, not by restriction:
   Queue* or *Manage Projects*, the agent's secret key file, or the API's settings
   store. Template code can render and store; it cannot print, queue, or read the
   Claude credential.
+- Provisioning the second key: Settings gains `bambuddy_render_api_key`, optional,
+  created by the operator in Bambuddy with *Manage Library* only and stored like the
+  existing `bambuddy_api_key` (same encryption, same rotation UI, §10). Render
+  workers read only that field. When it is unset they fall back to the full key and
+  the Settings page shows a persistent warning — "render workers hold the full
+  Bambuddy key; template code can print" — so the containment claim is either true
+  or visibly false, never silently false.
 - Printing activities run on the `bambuddy` task queue in a separate Deployment
   that holds the fuller key and runs no template code.
 - A URL-imported template (#174) that ships `ui/` or `pipeline/` is shown as such
   before its first Generate, with the file list; the operator confirms once per
   template revision.
 - The homelab Bambuddy currently runs with authentication disabled
-  (`bambuddy/errors.py:34`), so the scope split is real only once auth is on there.
+  (`bambuddy/errors.py:36`), so the scope split is real only once auth is on there.
   Stated, not hidden.
 
 ## 10. API changes
@@ -543,12 +581,14 @@ Containment is by reach, not by restriction:
   `pipeline`, `sample`, `preset`).
 - `GET /models/{slug}/ui/{path}?version=`.
 - `GET /outputs/{id}`: plus `inputs`, `bom`, `manifest`, `record` (§8.4), `files`.
-- `POST /outputs/arrange` `{objects: [{output_id, part, count}], goal, printer_id}` →
-  a job whose output is the new layout's 3MF.
+- `POST /outputs/arrange` `{objects: [{output_id, part, count}], goal, printer_id,
+  filament_plan?}` → a `render_jobs` row with `kind = 'arrange'`, polled with
+  `GET /jobs/{id}` like any render; its output is the new layout's 3MF.
 - Presets (`library/presets.py`): `params` → `inputs` with `v`; old files read as
   `{"params": …, "v": 0}`.
 - Settings: store usage replaces the asset-store line; Temporal address and namespace
-  shown read-only.
+  shown read-only; `bambuddy_render_api_key` beside `bambuddy_api_key`, with the
+  fallback warning of §9.
 
 Regenerate `backend/openapi.json`, `frontend/src/api/schema.d.ts`, `agent/src/api/schema.d.ts`
 per CLAUDE.md.
@@ -560,8 +600,11 @@ leaves every template working.
 
 1. **Temporal execution** (§3, §8.3). Replace the queue with `TemplatePipeline` +
    `RenderPiece` running only the default pipeline; projection; reconciler; worker
-   Deployment; worker versioning; `clusters` manifests. Visible change: none, except
-   a worker restart no longer loses a render.
+   Deployment at **one replica** sharing the API's data volume, with the `BlobStore`
+   interface over the `local` backend (§6.2); worker versioning; `clusters`
+   manifests; `bambuddy_render_api_key` in Settings (§9). Visible change: none,
+   except a worker restart no longer loses a render. Scaling render workers past one
+   waits for phase 3.
 2. **Template UI** (§4, §8.1). `ui` in `model.json`, served modules, `Host` v1,
    custom elements, the panel and page slots, inputs replacing params in presets and
    outputs. First user: `maze-puzzle` hides lid options; second: a `dollhouse-kit`
