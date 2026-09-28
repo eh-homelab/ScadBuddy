@@ -10,6 +10,7 @@ choose from here. Bambuddy's own slicer pipelines are still what the send bar ru
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -270,6 +271,7 @@ async def execute_run(
     settings: StoredSettings,
     request: PrintRunRequest,
     prepared: PreparedRun,
+    before_enqueue: Callable[[], Awaitable[None]] | None = None,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
 
@@ -280,6 +282,7 @@ async def execute_run(
     Runs after :func:`prepare_run`, in the background of a 202 (#470): it uploads,
     and waits on every slice. Every plate is resolved before any is sliced, so a slot
     error is a 422 with nothing on Bambuddy's queue, however many plates the print has.
+    ``before_enqueue`` is awaited before each plate's ``POST /queue/``.
     """
     plate_ids = prepared.plate_ids
     printer_id = prepared.printer_id
@@ -375,6 +378,7 @@ async def execute_run(
             copies=copies,
             project_id=project_id,
             options=print_options,
+            before_enqueue=before_enqueue,
         )
         sent = await _record_queued(
             store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent

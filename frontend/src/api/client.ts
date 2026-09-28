@@ -166,6 +166,10 @@ const seg = encodeURIComponent
 /** How often `runPrint` reads a running print run (#470); tests shorten it. */
 export const printRunPoll = { intervalMs: 1000 }
 
+/** Appended to a failed run that had already tried to queue (#470). */
+export const MAY_HAVE_QUEUED =
+  "The print may still have been queued: check Bambuddy's queue before printing again."
+
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
@@ -588,11 +592,18 @@ export const api = {
     }
     if (run.status === 'failed' || !run.result) {
       const error = run.error
+      const detail = error?.detail ?? 'The print run ended without a result.'
       throw new ApiError({
         ...error?.extensions,
         title: error?.title ?? 'Print failed',
         status: error?.status ?? 500,
-        detail: error?.detail ?? 'The print run ended without a result.',
+        // The run had already tried to queue (a queue call that timed out, or a later
+        // plate failing after an earlier one was queued): printing again repeats this
+        // run for ten minutes rather than queueing, so say where to look.
+        detail: run.may_have_queued && !detail.includes("Bambuddy's queue")
+          ? `${detail} ${MAY_HAVE_QUEUED}`
+          : detail,
+        may_have_queued: run.may_have_queued,
       })
     }
     return run.result

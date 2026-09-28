@@ -24,7 +24,8 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.pipelines import PrintRunRequest
-from scadbuddy.bambuddy.runs import LOST_DETAIL, run_key
+from scadbuddy.bambuddy.runs import LOST_DETAIL, LOST_UNQUEUED_DETAIL, run_key
+from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
     API,
@@ -34,6 +35,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
+from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -231,19 +233,90 @@ def test_a_failed_slice_is_the_runs_failure_in_bambuddys_words(
 
 
 @respx.mock
-def test_a_retry_after_a_failure_starts_a_new_run(client: TestClient, model: str) -> None:
+def test_a_retry_after_a_failure_before_any_enqueue_starts_a_new_run(
+    client: TestClient, model: str
+) -> None:
+    """Nothing was queued (a slot error comes before any slice), so the key is free."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
     request = {**body(), "filament_plan": {"slots": []}}
 
     first = start(client, output_id, request)
-    assert follow_run(client, first.json()["id"])["status"] == "failed"
+    failed = follow_run(client, first.json()["id"])
+    assert failed["status"] == "failed"
+    assert failed["may_have_queued"] is False
     second = start(client, output_id, request)
 
     assert second.status_code == 202
     assert second.json()["id"] != first.json()["id"]
     follow_run(client, second.json()["id"])
+
+
+@respx.mock
+def test_a_queue_call_that_timed_out_holds_the_key_so_a_retry_queues_nothing(
+    client: TestClient, model: str, gate: Gate
+) -> None:
+    """The ``POST /queue/`` timed out (a 504): Bambuddy may have created the item, so
+    the run says it may be queued and a retry answers with it instead of queueing."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    gated_slice_routes(gate)
+    gate.open()
+    queued = respx.post(f"{API}/queue/").mock(side_effect=httpx.ReadTimeout("slow"))
+
+    first = start(client, output_id, body())
+    failed = follow_run(client, first.json()["id"])
+    assert failed["status"] == "failed"
+    assert failed["error"]["status"] == 504
+    assert failed["may_have_queued"] is True
+
+    again = start(client, output_id, body())
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert again.json()["may_have_queued"] is True
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_later_plate_failing_after_an_earlier_one_queued_holds_the_key(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """All plates: plate 1 is queued, then plate 2's slice fails. A retry must not
+    queue plate 1 again."""
+    output_id = prepared(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    upload_route()
+    run_routes()
+    respx.route(method="POST", path__regex=r"/api/v1/library/files/\d+/slice").mock(
+        side_effect=[
+            httpx.Response(202, json={"job_id": 9, "status": "pending"}),
+            httpx.Response(202, json={"job_id": 10, "status": "pending"}),
+        ]
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.get(f"{API}/slice-jobs/10").mock(
+        return_value=httpx.Response(200, json={"id": 10, "status": "failed", "error": "no fit"})
+    )
+    queued = queue_route()
+    request = run_request(all_plates=True)
+
+    first = start(client, output_id, request)
+    failed = follow_run(client, first.json()["id"])
+    assert failed["status"] == "failed"
+    assert failed["error"]["status"] == 502
+    assert failed["may_have_queued"] is True
+
+    again = start(client, output_id, request)
+    assert again.status_code == 200, again.text
+    assert again.json()["id"] == first.json()["id"]
+    assert queued.call_count == 1
 
 
 @respx.mock
@@ -261,24 +334,27 @@ def test_a_refusal_the_choices_decide_is_still_answered_before_any_run(
     assert not uploaded.called
 
 
-def _insert_run(conninfo: str, output_id: str, key: str, heartbeat_age: str) -> str:
+def _insert_run(
+    conninfo: str, output_id: str, key: str, heartbeat_age: str, *, enqueued: bool = False
+) -> str:
     run_id = uuid.uuid4().hex
     with psycopg.connect(conninfo) as conn:
         conn.execute(
-            "INSERT INTO print_runs (id, output_id, idempotency_key, status, heartbeat_at)"
-            " VALUES (%s, %s, %s, 'running', now() - %s::interval)",
-            (run_id, output_id, key, heartbeat_age),
+            "INSERT INTO print_runs"
+            " (id, output_id, idempotency_key, status, heartbeat_at, enqueue_attempted)"
+            " VALUES (%s, %s, %s, 'running', now() - %s::interval, %s)",
+            (run_id, output_id, key, heartbeat_age, enqueued),
         )
     return run_id
 
 
 @respx.mock
-def test_a_run_whose_process_died_reads_as_failed_and_does_not_hold_its_key(
+def test_a_run_whose_process_died_before_queueing_reads_as_failed_and_frees_its_key(
     client: TestClient, model: str, pg_conninfo: str, gate: Gate
 ) -> None:
     """Nothing is touching this run's heartbeat any more (a restart, another replica
-    that died): it reads as failed rather than running for ever, and a retry is a new
-    run, not that one."""
+    that died): it reads as failed rather than running for ever. It had not tried to
+    queue, and now never can, so a retry is a new run, not that one."""
     output_id = prepared(client, model)
     request = body()
     key = run_key(output_id, PrintRunRequest.model_validate(request))
@@ -286,7 +362,8 @@ def test_a_run_whose_process_died_reads_as_failed_and_does_not_hold_its_key(
 
     run = client.get(f"/api/v1/print/runs/{lost}").json()
     assert run["status"] == "failed"
-    assert run["error"]["detail"] == LOST_DETAIL
+    assert run["error"]["detail"] == LOST_UNQUEUED_DETAIL
+    assert run["may_have_queued"] is False
     assert run["finished_at"] is not None
 
     upload_route()
@@ -298,6 +375,25 @@ def test_a_run_whose_process_died_reads_as_failed_and_does_not_hold_its_key(
     assert retry.status_code == 202
     assert retry.json()["id"] != lost
     follow_run(client, retry.json()["id"])
+
+
+def test_a_run_whose_process_died_while_queueing_holds_its_key(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """It had started queueing, so the print may be on Bambuddy's queue: the retry
+    answers with the lost run (no Bambuddy route is mocked, so nothing is called)."""
+    output_id = prepared(client, model)
+    request = body()
+    key = run_key(output_id, PrintRunRequest.model_validate(request))
+    lost = _insert_run(pg_conninfo, output_id, key, "10 minutes", enqueued=True)
+
+    retry = start(client, output_id, request)
+
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["id"] == lost
+    assert retry.json()["status"] == "failed"
+    assert retry.json()["error"]["detail"] == LOST_DETAIL
+    assert retry.json()["may_have_queued"] is True
 
 
 def test_a_live_run_found_by_its_key_is_returned_without_touching_bambuddy(

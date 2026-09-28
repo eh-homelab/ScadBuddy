@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { http, HttpResponse } from 'msw'
 import { server } from '../mocks/server'
-import { ApiError, api, printRunPoll } from './client'
+import { ApiError, MAY_HAVE_QUEUED, api, printRunPoll } from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -212,5 +212,31 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect((error as ApiError).status).toBe(502)
     expect((error as ApiError).message).toBe('Bambuddy failed to slice the plate: no support')
     expect((error as ApiError).problem).toMatchObject({ slice_job_id: 9 })
+  })
+
+  it('says a failed run that had tried to queue may be on the queue anyway', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: true,
+          error: {
+            status: 504,
+            title: 'Gateway Timeout',
+            detail: 'Bambuddy did not answer in time.',
+            extensions: {},
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(504)
+    expect((error as ApiError).detail).toBe(`Bambuddy did not answer in time. ${MAY_HAVE_QUEUED}`)
+    expect((error as ApiError).problem).toMatchObject({ may_have_queued: true })
   })
 })

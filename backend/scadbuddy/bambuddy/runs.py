@@ -16,16 +16,32 @@ Idempotency
 A run's key is the output plus the parsed request body (:func:`run_key`). Outputs are
 immutable, so the two together name exactly one print. A second POST with the same key
 returns the run it repeats, instead of starting another, while that run is in flight
-or for ``REPEAT_WINDOW`` after it succeeded. A failed run holds nothing: repeating
-it tries again. The key is looked up and the new row inserted under one advisory
-lock, so two POSTs that race get one run.
+or for ``REPEAT_WINDOW`` after it succeeded. The key is looked up and the new row
+inserted under one advisory lock, so two POSTs that race get one run.
+
+A run that failed before it tried to queue anything holds nothing: repeating it tries
+again. Once it has tried (``enqueue_attempted``, set by :meth:`PrintRunStore.
+start_enqueue` before the first ``POST /queue/``), the print may be on Bambuddy's queue
+even if the run then failed: that POST timed out (a 504 whose item Bambuddy may still
+have created), or plate 1 was queued before plate 2 failed. Such a run is
+``may_have_queued`` and keeps holding its key for ``REPEAT_WINDOW`` like a success, so
+a retry answers with it instead of queueing again.
 
 Lost runs
 ---------
 While a run is alive its task touches ``heartbeat_at`` every ``HEARTBEAT_INTERVAL``.
-A ``running`` row whose heartbeat is older than ``LOST_AFTER`` belonged to a process
-that died: it reads as failed (``LOST_DETAIL``) and no longer holds its key. A run
-this process is still running when it shuts down is failed the same way.
+A ``running`` row whose heartbeat is older than ``LOST_AFTER``, and that this process
+is not running itself, reads as failed: its process died, or is too slow to beat (a
+database blip, a saturated thread pool) and so cannot be told from a dead one. Every
+state change is a compare-and-set on ``status = 'running'``, which makes that safe:
+
+- expiry before the run's ``start_enqueue`` wins: the run cannot queue any more (its
+  ``start_enqueue`` finds the row failed and it stops), so the key is released and
+  the message says nothing was queued (``LOST_UNQUEUED_DETAIL``);
+- expiry after it keeps the key and says the print may be queued (``LOST_DETAIL``);
+- either way the slow run's own end no longer overwrites the row.
+
+A run this process is still running when it shuts down is failed the same way.
 """
 
 from __future__ import annotations
@@ -74,9 +90,16 @@ LOST_DETAIL = (
     "ScadBuddy restarted while it was preparing this print, so it cannot tell whether "
     "the print was queued. Check Bambuddy's queue before printing again."
 )
+LOST_UNQUEUED_DETAIL = (
+    "ScadBuddy stopped while it was preparing this print, before it queued anything. "
+    "Nothing was queued; print again to retry."
+)
 UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while preparing this print; see its logs."
 
-_COLUMNS = "id, output_id, status, created_at, finished_at, result, error"
+_COLUMNS = (
+    "id, output_id, status, created_at, finished_at, result, error,"
+    " (status = 'failed' AND enqueue_attempted) AS may_have_queued"
+)
 
 
 class PrintRunError(BaseModel):
@@ -107,12 +130,25 @@ class PrintRun(BaseModel):
     result: PrintRunResult | None = None
     #: Why not, once ``failed``.
     error: PrintRunError | None = None
+    #: A ``failed`` run that had already tried to queue the print: it may be on
+    #: Bambuddy's queue anyway, so check there before printing again. A repeat of the
+    #: request answers with this run rather than queueing again, for ``REPEAT_WINDOW``.
+    may_have_queued: bool = False
 
 
 #: A run whose process went away before it ended: lost to a restart, or shut down.
 LOST = PrintRunError(
     status=status.HTTP_500_INTERNAL_SERVER_ERROR, title="Internal Server Error", detail=LOST_DETAIL
 )
+#: The same, lost before it tried to queue anything.
+LOST_UNQUEUED = LOST.model_copy(update={"detail": LOST_UNQUEUED_DETAIL})
+
+
+class RunLostError(RuntimeError):
+    """The run was failed as lost while this process was still running it."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"print run {run_id} was failed as lost; it will not queue")
 
 
 def run_key(output_id: str, request: PrintRunRequest) -> str:
@@ -146,6 +182,9 @@ class PrintRunStore:
         self.lost_after = lost_after
         self.repeat_window = repeat_window
         self.retention = retention
+        #: The runs this process is running (:class:`PrintRuns` keeps it): never
+        #: expired here, however late their heartbeat.
+        self.live: set[str] = set()
 
     def _require(self) -> ConnectionPool[Connection[DictRow]]:
         if self._pool is None:
@@ -166,6 +205,10 @@ class PrintRunStore:
     async def heartbeat(self, run_id: str) -> None:
         await asyncio.to_thread(self._heartbeat, run_id)
 
+    async def start_enqueue(self, run_id: str) -> None:
+        """Record that the run is about to queue; :class:`RunLostError` if it was lost."""
+        await asyncio.to_thread(self._start_enqueue, run_id)
+
     async def succeed(self, run_id: str, result: PrintRunResult) -> None:
         await asyncio.to_thread(
             self._finish, run_id, "succeeded", "result", result.model_dump(mode="json")
@@ -179,11 +222,22 @@ class PrintRunStore:
     # The blocking bodies, run in a worker thread by the coroutines above.
 
     def _expire_lost(self, conn: Connection[DictRow], column: str, value: str) -> None:
-        """Fail every ``running`` row matching ``column = value`` whose process is gone."""
+        """Fail every ``running`` row matching ``column = value`` whose process is gone.
+
+        Not the runs this process is running, which are alive by definition.
+        """
         conn.execute(
-            "UPDATE print_runs SET status = 'failed', error = %s, finished_at = now()"
-            f" WHERE {column} = %s AND status = 'running' AND heartbeat_at < now() - %s",
-            (Jsonb(LOST.model_dump(mode="json")), value, self.lost_after),
+            "UPDATE print_runs SET status = 'failed', finished_at = now(),"
+            " error = CASE WHEN enqueue_attempted THEN %s ELSE %s END"
+            f" WHERE {column} = %s AND status = 'running' AND heartbeat_at < now() - %s"
+            " AND NOT (id = ANY(%s))",
+            (
+                Jsonb(LOST.model_dump(mode="json")),
+                Jsonb(LOST_UNQUEUED.model_dump(mode="json")),
+                value,
+                self.lost_after,
+                list(self.live),
+            ),
         )
 
     def _current(self, conn: Connection[DictRow], key: str) -> PrintRun | None:
@@ -191,7 +245,8 @@ class PrintRunStore:
         row = conn.execute(
             f"SELECT {_COLUMNS} FROM print_runs WHERE idempotency_key = %s"
             " AND (status = 'running'"
-            "  OR (status = 'succeeded' AND finished_at >= now() - %s))"
+            "  OR ((status = 'succeeded' OR (status = 'failed' AND enqueue_attempted))"
+            "      AND finished_at >= now() - %s))"
             " ORDER BY created_at DESC LIMIT 1",
             (key, self.repeat_window),
         ).fetchone()
@@ -232,18 +287,33 @@ class PrintRunStore:
                 (run_id,),
             )
 
+    def _start_enqueue(self, run_id: str) -> None:
+        # The compare-and-set that orders this against `_expire_lost`: if the run was
+        # expired first, its key is released and a retry may be running, so this one
+        # must not queue.
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "UPDATE print_runs SET enqueue_attempted = true, heartbeat_at = now()"
+                " WHERE id = %s AND status = 'running' RETURNING id",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise RunLostError(run_id)
+
     def _finish(self, run_id: str, state: RunStatus, column: str, value: dict[str, Any]) -> None:
-        # Unconditional: if this process was only slow (its heartbeat lapsed and the run
-        # read as lost meanwhile), what it actually did is still the truth to record.
+        # Only a run still `running`: one that was failed as lost meanwhile stays as the
+        # retries that read it saw it (see the module docstring).
         with self._require().connection() as conn:
             conn.execute(
-                f"UPDATE print_runs SET status = %s, {column} = %s,"
-                " finished_at = now(), heartbeat_at = now() WHERE id = %s",
+                f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now(),"
+                " heartbeat_at = now() WHERE id = %s AND status = 'running'",
                 (state, Jsonb(value), run_id),
             )
 
 
-Work = Callable[[], Awaitable[PrintRunResult]]
+#: Awaited by the work before each ``POST /queue/`` (:meth:`PrintRunStore.start_enqueue`).
+BeforeEnqueue = Callable[[], Awaitable[None]]
+Work = Callable[[BeforeEnqueue], Awaitable[PrintRunResult]]
 
 
 class PrintRuns:
@@ -272,7 +342,13 @@ class PrintRuns:
     def start(self, run: PrintRun, slug: str, work: Work) -> None:
         task = asyncio.create_task(self._run(run, slug, work), name=f"print-run-{run.id}")
         self._tasks[run.id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(run.id, None))
+        self.store.live.add(run.id)
+
+        def done(_: asyncio.Task[None]) -> None:
+            self._tasks.pop(run.id, None)
+            self.store.live.discard(run.id)
+
+        task.add_done_callback(done)
 
     async def aclose(self) -> None:
         """Fail every run still in progress: this process will not finish them."""
@@ -292,9 +368,18 @@ class PrintRuns:
 
     async def _run(self, run: PrintRun, slug: str, work: Work) -> None:
         beat = asyncio.create_task(self._beat(run.id), name=f"print-run-beat-{run.id}")
+        enqueuing = False
+
+        async def before_enqueue() -> None:
+            nonlocal enqueuing
+            if not enqueuing:
+                # Set first, so a cancel mid-write says "may be queued", never "nothing".
+                enqueuing = True
+                await self.store.start_enqueue(run.id)
+
         try:
             try:
-                result = await work()
+                result = await work(before_enqueue)
             except ApiError as error:
                 await self.store.fail(
                     run.id,
@@ -307,8 +392,13 @@ class PrintRuns:
                 )
             except asyncio.CancelledError:
                 with contextlib.suppress(Exception):
-                    await asyncio.shield(self.store.fail(run.id, LOST))
+                    await asyncio.shield(
+                        self.store.fail(run.id, LOST if enqueuing else LOST_UNQUEUED)
+                    )
                 raise
+            except RunLostError:
+                # Failed as lost (by another replica) before it queued; the row says so.
+                logger.warning("a print run was failed as lost", extra={"run_id": run.id})
             except Exception:
                 logger.exception("a print run failed", extra={"run_id": run.id})
                 await self.store.fail(

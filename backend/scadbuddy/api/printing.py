@@ -45,7 +45,7 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
 )
-from scadbuddy.bambuddy.runs import PrintRun, run_key
+from scadbuddy.bambuddy.runs import BeforeEnqueue, PrintRun, run_key
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 
@@ -121,8 +121,8 @@ def put_printer_bed_type(
     responses={
         status.HTTP_200_OK: {
             "model": PrintRun,
-            "description": "A repeat of a run in flight, or one that succeeded within "
-            "the last ten minutes: that run, and no new print.",
+            "description": "A repeat of a run in flight, or one that succeeded (or failed "
+            "after it tried to queue) within the last ten minutes: that run, and no new print.",
         },
     },
     summary="Slice this output with the dialog's choices and queue it, in the background",
@@ -155,8 +155,10 @@ async def post_run(
     answers, so that one is the run's ``failed`` with the same 422 and message.
 
     The same request for the same output again is the same run: while it is in flight,
-    or for ten minutes after it succeeded, this answers **200** with that run and
-    starts nothing, so a retry after a proxy timeout cannot queue the print twice.
+    or for ten minutes after it succeeded or failed once it had tried to queue
+    (``may_have_queued``: a queue call that timed out, or a later plate that failed
+    after an earlier one was queued), this answers **200** with that run and starts
+    nothing, so a retry after a proxy timeout cannot queue the print twice.
     """
     meta = require_output(outputs, output_id)
     key = run_key(meta.id, body)
@@ -173,9 +175,11 @@ async def post_run(
         response.status_code = status.HTTP_200_OK
         return run
 
-    async def work() -> PrintRunResult:
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:
-            result = await execute_run(client, outputs, uploads, meta, settings, body, prepared)
+            result = await execute_run(
+                client, outputs, uploads, meta, settings, body, prepared, before_enqueue
+            )
         observer.started(meta)
         await watcher.started(meta.id)
         return result
@@ -194,8 +198,9 @@ async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     """A run ``POST /print/outputs/{id}/run`` accepted, from any replica (#470).
 
     ``running`` until it ends as ``succeeded`` (with ``result``) or ``failed`` (with
-    ``error``). A run whose process went away before it ended reads as ``failed``: it
-    may have queued the print, and its message says to check Bambuddy's queue.
+    ``error``). A ``failed`` run with ``may_have_queued`` had tried to queue the print,
+    so it may be on Bambuddy's queue anyway. A run whose process went away reads as
+    ``failed``, and its message says whether it could have queued.
     Once ``succeeded``, the print itself is followed by ``/outputs/{id}/progress``.
     """
     run = await runs.store.get(run_id)

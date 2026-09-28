@@ -119,7 +119,11 @@ Follow `GET /api/v1/print/runs/{run_id}` until `status` is `succeeded` (its
 `result` is the `PrintRunResult` below) or `failed` (its `error` carries the
 `status` and `detail` of the refusal). The same request for the same output
 again answers **200** with that run while it is in flight, or for ten minutes
-after it succeeded, and queues nothing more (`backend/openapi.json`; #470).
+after it succeeded, and queues nothing more (`backend/openapi.json`; #470). A
+`failed` run with `may_have_queued: true` had already tried to queue (a queue
+call that timed out, or a later plate failing after an earlier one was queued):
+tell the user to check Bambuddy's queue, and do not retry, since the same request
+answers with that run for ten minutes too.
 
 - **Errors** are a 422 before anything is sliced, and name the slot or setting:
   mixed nozzle sizes, or a slot with no filament preset for the nozzle

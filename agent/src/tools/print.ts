@@ -60,8 +60,13 @@ async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
 function runOutcome(run: PrintRun) {
   if (run.status === 'failed') {
     const error = run.error
+    // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
+    // print_output with the same choices returns this run for ten minutes rather than queueing.
+    const queued = run.may_have_queued
+      ? " The print may still have been queued: check Bambuddy's queue before printing again."
+      : ''
     throw new ToolError(
-      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`,
+      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}${queued}`,
     )
   }
   if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })

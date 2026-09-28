@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.bambuddy.pipelines import PrintRunResult
-from scadbuddy.bambuddy.runs import LOST_DETAIL, PrintRuns, PrintRunStore
+from scadbuddy.bambuddy.runs import (
+    LOST_DETAIL,
+    LOST_UNQUEUED_DETAIL,
+    BeforeEnqueue,
+    PrintRuns,
+    PrintRunStore,
+)
 from scadbuddy.core.events import InProcessEventBus
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.pg_store import PostgresJobStore
@@ -57,7 +63,7 @@ async def test_a_run_this_process_is_still_running_at_shutdown_is_failed(
     run, _ = await store.claim(OUTPUT, "k")
     started = asyncio.Event()
 
-    async def work() -> PrintRunResult:
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         started.set()
         await asyncio.Event().wait()
         raise AssertionError("never reached")
@@ -68,7 +74,10 @@ async def test_a_run_this_process_is_still_running_at_shutdown_is_failed(
 
     ended = await store.get(run.id)
     assert ended is not None and ended.status == "failed"
-    assert ended.error is not None and ended.error.detail == LOST_DETAIL
+    # It never reached the queue, so it says nothing was queued and frees its key.
+    assert ended.error is not None and ended.error.detail == LOST_UNQUEUED_DETAIL
+    assert not ended.may_have_queued
+    assert await store.find("k") is None
     assert runs.running == frozenset()
 
 
@@ -78,7 +87,7 @@ async def test_a_live_run_keeps_its_heartbeat(jobs: PostgresJobStore) -> None:
     run, _ = await store.claim(OUTPUT, "k")
     release = asyncio.Event()
 
-    async def work() -> PrintRunResult:
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         await release.wait()
         return RESULT
 
@@ -89,3 +98,94 @@ async def test_a_live_run_keeps_its_heartbeat(jobs: PostgresJobStore) -> None:
     while run.id in runs.running:
         await asyncio.sleep(0.01)
     assert (await store.get(run.id)).status == "succeeded"  # type: ignore[union-attr]
+
+
+async def _until_ended(runs: PrintRuns, run_id: str) -> None:
+    while run_id in runs.running:
+        await asyncio.sleep(0.01)
+
+
+async def test_a_run_whose_heartbeat_lapsed_is_not_expired_by_its_own_process(
+    jobs: PostgresJobStore,
+) -> None:
+    """A database blip or a saturated thread pool stops the beats; the process that is
+    running the run knows it is alive and does not fail it."""
+    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    runs = PrintRuns(store, None, heartbeat_interval=3600)
+    run, _ = await store.claim(OUTPUT, "k")
+    release = asyncio.Event()
+
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
+        await release.wait()
+        await before_enqueue()
+        return RESULT
+
+    runs.start(run, "demo", work)
+    await asyncio.sleep(0.05)
+    assert (await store.get(run.id)).status == "running"  # type: ignore[union-attr]
+    again, created = await store.claim(OUTPUT, "k")
+    assert not created and again.id == run.id
+    release.set()
+    await _until_ended(runs, run.id)
+    assert (await store.get(run.id)).status == "succeeded"  # type: ignore[union-attr]
+
+
+async def test_a_lapsed_run_expired_by_another_replica_before_it_queues_never_queues(
+    jobs: PostgresJobStore,
+) -> None:
+    """Another replica cannot tell a slow run from a dead one and fails it, freeing the
+    key for a retry. The slow run then finds itself failed at its ``before_enqueue`` and
+    stops, so only the retry can queue; its own end does not flip the row back."""
+    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    runs = PrintRuns(store, None, heartbeat_interval=3600)
+    run, _ = await store.claim(OUTPUT, "k")
+    release = asyncio.Event()
+    enqueued: list[str] = []
+
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
+        await release.wait()
+        await before_enqueue()
+        enqueued.append(run.id)
+        return RESULT
+
+    runs.start(run, "demo", work)
+    await asyncio.sleep(0.05)
+    assert await other.find("k") is None  # expired there, and the key is free
+    release.set()
+    await _until_ended(runs, run.id)
+
+    ended = await store.get(run.id)
+    assert ended is not None and ended.status == "failed"
+    assert ended.error is not None and ended.error.detail == LOST_UNQUEUED_DETAIL
+    assert enqueued == []
+
+
+async def test_a_lapsed_run_expired_after_it_started_queueing_keeps_its_key(
+    jobs: PostgresJobStore,
+) -> None:
+    """Expired once it had begun queueing: the print may be on the queue, so a retry
+    on the other replica answers with this run, and the slow run's end stays out."""
+    store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    other = PrintRunStore(jobs.pool, lost_after=timedelta(0))
+    runs = PrintRuns(store, None, heartbeat_interval=3600)
+    run, _ = await store.claim(OUTPUT, "k")
+    queueing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
+        await before_enqueue()
+        queueing.set()
+        await release.wait()
+        return RESULT
+
+    runs.start(run, "demo", work)
+    await queueing.wait()
+    await asyncio.sleep(0.01)
+    held, created = await other.claim(OUTPUT, "k")
+    assert not created and held.id == run.id
+    assert held.status == "failed" and held.may_have_queued
+    assert held.error is not None and held.error.detail == LOST_DETAIL
+    release.set()
+    await _until_ended(runs, run.id)
+    assert (await store.get(run.id)).status == "failed"  # type: ignore[union-attr]

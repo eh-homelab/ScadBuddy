@@ -331,6 +331,15 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('(HTTP 422): Slot 2 has no spool chosen.')
+    expect(firstText(result)).not.toContain("Bambuddy's queue")
+  })
+
+  it('says a run that failed after it tried to queue may be on the queue anyway', async () => {
+    const failed = { status: 504, title: 'Gateway Timeout', detail: 'Bambuddy did not answer in time.' }
+    server.use(...capturedRun({}, { status: 'failed', error: failed, may_have_queued: true }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain("may still have been queued: check Bambuddy's queue")
   })
 
   it('hands back a run still slicing when the wait runs out', async () => {
