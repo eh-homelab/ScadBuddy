@@ -26,8 +26,7 @@ import type { Sql } from 'postgres'
 //     sealed by src/secrets.ts). Tokens that are only ever compared (MCP bearer
 //     tokens, #251) are stored hashed instead, per spec §8.1.
 //
-// Entry 2 is #300's sessions. #251's `ai_mcp_tokens` (PR #368) goes after
-// whatever is last on main when it merges (entry 3 if nothing else lands first).
+// Entry 2 is #300's sessions; entry 3 is #251's MCP bearer tokens.
 
 /** `pg_advisory_xact_lock` key ("SCADAGNT" in ASCII); distinct from the backend's "SCADBDDY". */
 export const MIGRATION_LOCK = 0x5343_4144_4147_4e54n
@@ -139,6 +138,24 @@ export const MIGRATIONS: readonly Migration[] = [
         event      text NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY (session_id, seq)
+      );
+    `,
+  },
+  {
+    // 3 — #251: MCP bearer tokens (spec §8.1, §8.3, §9). See src/auth/tokens.ts.
+    story: '#251',
+    sql: `
+      -- One row per token minted in Settings. The token itself is never stored:
+      -- only its SHA-256 (hex), which verify() looks up (spec §8.1 "stored hashed").
+      CREATE TABLE ai_mcp_tokens (
+        id           uuid PRIMARY KEY,
+        name         text NOT NULL,
+        tier         text NOT NULL CHECK (tier IN ('read', 'write', 'outward')),
+        token_hash   text NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+        created_at   timestamptz NOT NULL DEFAULT now(),
+        expires_at   timestamptz,
+        revoked_at   timestamptz,
+        last_used_at timestamptz
       );
     `,
   },
