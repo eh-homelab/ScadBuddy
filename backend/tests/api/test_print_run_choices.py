@@ -672,6 +672,22 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
+def test_the_all_plates_filament_read_reads_the_spools_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Two plates, one spool inventory: the spools are the same for every plate, so an
+    all-plates read asks for them once (#480)."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+    before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true")
+    reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    assert reads - before == 1
+
+
+@respx.mock
 def test_all_plates_with_no_spool_for_a_later_plates_slot_is_a_422_naming_it(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

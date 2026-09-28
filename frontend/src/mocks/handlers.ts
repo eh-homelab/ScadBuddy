@@ -1858,9 +1858,21 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, a later plate uses only some of the slots (here plate N
+    // uses slot N), and `all_plates` answers with the union of every plate's slots.
+    const plateId = Number(search.get('plate_id') ?? 1)
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true' || plateId <= 1
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),

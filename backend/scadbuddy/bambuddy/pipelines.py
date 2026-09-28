@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.filaments import (
     across_plates,
     check,
     every_plate,
-    gather_options,
+    gather_plate_options,
     normalise_colour,
     queue_filaments,
 )
@@ -165,16 +165,13 @@ async def filament_options_for_output(
         if all_plates
         else [plate_id]
     )
-    read = [
-        await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate,
-            fallback_colours=list(meta.colors),
-        )
-        for plate in plate_ids
-    ]
+    read = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+    )
     options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
@@ -286,14 +283,14 @@ async def run_for_output(
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
     planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     errors: list[str] = []
-    for plate_id in plate_ids:
-        options = await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate_id,
-            fallback_colours=list(meta.colors),
-        )
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+    )
+    for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
         for error in resolved.errors:
             message = (

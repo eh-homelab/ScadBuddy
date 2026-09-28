@@ -38,7 +38,7 @@ changes what a reading means:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -521,9 +521,30 @@ async def gather_options(
     fallback_colours: list[str] | None = None,
 ) -> FilamentOptions:
     """Read Bambuddy once for everything the filament step needs."""
+    (options,) = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=[plate_id],
+        fallback_colours=fallback_colours,
+    )
+    return options
+
+
+async def gather_plate_options(
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    printer_id: int | None = None,
+    plate_ids: Sequence[int | None],
+    fallback_colours: list[str] | None = None,
+) -> list[FilamentOptions]:
+    """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
+
+    The spools, assignments and printer are the same for every plate, so they are read
+    once; only each plate's slots are read per plate (#480)."""
     spools = await client.spools()
     assignments = await client.spool_assignments()
-    requirements = await _requirements(client, library_file_id, plate_id, fallback_colours)
 
     printer = None
     slot_materials: list[SlotMaterial] = []
@@ -531,14 +552,17 @@ async def gather_options(
         printer = await client.printer(printer_id)
         slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
-    return build_options(
-        library_file_id=library_file_id,
-        spools=spools,
-        assignments=assignments,
-        requirements=requirements,
-        printer=printer,
-        slot_materials=slot_materials,
-    )
+    return [
+        build_options(
+            library_file_id=library_file_id,
+            spools=spools,
+            assignments=assignments,
+            requirements=await _requirements(client, library_file_id, plate, fallback_colours),
+            printer=printer,
+            slot_materials=slot_materials,
+        )
+        for plate in plate_ids
+    ]
 
 
 async def _requirements(

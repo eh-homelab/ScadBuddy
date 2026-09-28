@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     colour_distance,
     gather_options,
+    gather_plate_options,
     normalise_colour,
     queue_filaments,
 )
@@ -357,6 +358,39 @@ async def test_gather_options_reads_every_source_once(bambuddy: BambuddyClient) 
     assert [slot.slot_id for slot in built.slots] == [1, 2]
     assert built.printer_name is not None
     assert {choice.slot_id for choice in built.suggested} == {1, 2}
+
+
+@respx.mock
+async def test_several_plates_read_the_spools_and_printer_once(bambuddy: BambuddyClient) -> None:
+    """An all-plates read asks Bambuddy for each plate's slots, and for the spools,
+    assignments and printer once, not once per plate (#480)."""
+    spools = respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    assignments = respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+    )
+    printer = respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+
+    built = await gather_plate_options(
+        bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3]
+    )
+    assert len(built) == 3
+    assert [call.request.url.params.get("plate_id") for call in requirements.calls] == [
+        "1",
+        "2",
+        "3",
+    ]
+    assert (spools.call_count, assignments.call_count) == (1, 1)
+    assert (printer.call_count, remain.call_count) == (1, 1)
 
 
 @respx.mock
