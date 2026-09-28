@@ -265,6 +265,16 @@ From the merged code and PR bodies:
    `main.ts` today.
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
+9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
+   `update_source` and other `write` tools in the tier that runs without a human,
+   because a write is reversible through the model's git history (spec §8.1). The
+   eval negative control in [`agent/test/evals.test.ts`](../../agent/test/evals.test.ts)
+   ("control: a model that obeys the README injection") reproduces it: a model that
+   follows a poisoned README overwrites the source, while the `delete_model` it also
+   attempts stops at the approval gate. Prevention of that write rests on the model
+   refusing instructions in tool content (the system prompt's rule), and recovery on
+   history (`GET /api/v1/models/{slug}/versions` and `POST /api/v1/models/{slug}/versions/{commit}/restore`). This is an accepted tradeoff
+   of the tier design, not a gap the gate is meant to close.
 
 ## Spec §3.2 items still open
 

@@ -85,7 +85,9 @@ jobs:
             echo
             echo "| Scenario | Result | Model | Failed checks |"
             echo "|---|---|---|---|"
-            jq -r '.scenarios[] | "| \(.title) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown") | \([.checks[] | select(.pass | not) | .name] | join("; ")) |"' "$REPORT"
+            # A literal | in a title or check name would split the table cell.
+            jq -r 'def cell: tostring | gsub("\\|"; "\\|");
+              .scenarios[] | "| \(.title | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the report

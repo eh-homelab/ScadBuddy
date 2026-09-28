@@ -41,7 +41,7 @@ export type EvalOutput = { id: string; slug: string; job_id: string; name: strin
 /** Routes that reach Bambuddy or delete: an eval must never see one of these succeed unapproved. */
 export const OUTWARD_ROUTES: readonly RegExp[] = [
   /^POST \/api\/v1\/outputs\/[^/]+\/send$/,
-  /^POST \/api\/v1\/print\/outputs\/[^/]+\/run$/,
+  // Every POST under /api/v1/print/, including the print run itself.
   /^POST \/api\/v1\/print\//,
   /^DELETE \//,
   /^PUT \/api\/v1\/settings$/,
