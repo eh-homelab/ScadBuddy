@@ -1,0 +1,82 @@
+"""Payloads between the workflows and their activities (spec 2026-09-27 §3.4)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from typing import Literal, Self
+
+from pydantic import BaseModel, Field, model_validator
+
+from scadbuddy.render.diagnostics import Diagnostic
+from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.schema import ParamValue
+
+
+def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, ParamValue]) -> str:
+    """One openscad invocation (§3.4): the slug is in it because a revision is the
+    template's own last commit, which one commit can give to many templates."""
+    raw = json.dumps([slug, revision, file, dict(params)], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+class PieceRequest(BaseModel):
+    slug: str
+    revision: str | None
+    file: str = "model.scad"
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: Stored, so the Temporal payload carries it; checked against the other four
+    #: fields, because it names the child workflow that dedups the piece.
+    piece_key: str
+
+    @model_validator(mode="after")
+    def _key_matches(self) -> Self:
+        expected = piece_key(self.slug, self.revision, self.file, self.params)
+        if self.piece_key != expected:
+            raise ValueError(f"piece_key {self.piece_key} does not match its request")
+        return self
+
+
+class PrepareResult(BaseModel):
+    version: str
+    scad: str
+    library_path: list[str] = Field(default_factory=list)
+    schema_cache: str
+
+
+class RenderMainResult(BaseModel):
+    plates: int = 1
+    log_tail: list[str] = Field(default_factory=list)
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+    diagnostics_dropped: int = 0
+    notes: list[str] = Field(default_factory=list)
+    missing_files: list[str] = Field(default_factory=list)
+
+
+class PieceResult(BaseModel):
+    result: JobResult
+    log_tail: list[str] = Field(default_factory=list)
+
+
+class Failure(BaseModel):
+    error: str
+    log_tail: list[str] = Field(default_factory=list)
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+    diagnostics_dropped: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+class Projection(BaseModel):
+    job_id: str
+    slug: str
+    #: No "pending": the workflow projects only once it runs; the API inserts the
+    #: row as pending, and None leaves the row's state as it is.
+    state: Literal["running", "done", "failed", "cancelled"] | None = None
+    steps: list[StepInfo] | None = None
+    result: JobResult | None = None
+    log_tail: list[str] = Field(default_factory=list)
+    failure: Failure | None = None
+    pipeline_version: str = "default"
+    #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
+    blob_key: str | None = None

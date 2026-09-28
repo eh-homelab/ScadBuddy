@@ -19,9 +19,10 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
   authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)) and, when
   enabled, OIDC access tokens (see [MCP OIDC](#mcp-oidc-access-tokens)). The
-  other tool paths are the harness's in-process MCP servers (none registered in
-  `main.ts`) and the browser bridge in the user's own tab
-  ([browser-bridge.md](browser-bridge.md)).
+  other tool paths are the harness's in-process `scadbuddy` server (every session's
+  queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
+  the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
+  Nothing starts a session over HTTP yet (#266, #300).
 
 ## MCP bearer tokens
 
@@ -182,6 +183,18 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   with no gate (outside a session) it is answered with a **deny**, whose message tells
   the model to explain rather than retry. An outward tool therefore never runs
   unattended. External MCP clients use prepare/confirm instead (below).
+- **The registry's tiers.** Sessions get `tierOf` from
+  [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts): each registry tool
+  under its harness name `mcp__scadbuddy__<name>` maps to its `risk`, and every other
+  name (a plugin's tool) stays unknown, so `outward`. An outward registry tool that the
+  gate approved runs at once: the harness projection passes `gate: 'harness'` to
+  `runTool()` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts)), which
+  skips the `/mcp` prepare step. That is safe only because the in-process server is
+  reachable from a harness query alone, whose seam has already stopped the call.
+- **The session's principal.** The tools run as the session owner
+  (`harnessPrincipal()` in [`agent/src/auth/principal.ts`](../../agent/src/auth/principal.ts)):
+  the browser user with every tier, any other owner with `read` only, until the
+  `sessions.*` MCP tools and flows pass the tiers of the token or flow behind it.
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -213,6 +226,27 @@ outside the gateway path").
 **Runaway limits.** Each query gets `maxTurns` (25) and `maxBudgetUsd` (1 USD), plus an
 abort signal (`run.ts`). Sessions spend one budget across all their turns, and any
 watcher can interrupt (PR #377 body, "Budget and turns", "Interrupt").
+
+## MCP auth mode
+
+Spec §8.3 makes the mode "a database setting", and §9 lists "MCP auth mode" with the
+AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts):
+
+- `mcp_auth_mode`: `"bearer"` (the default when unset) or `"disabled"`. `oidc` is on
+  while the OIDC configuration is enabled (see [MCP OIDC](#mcp-oidc-access-tokens)), and
+  then wins over this key, even over `"disabled"`; a stored `"oidc"` without it is
+  `bearer`;
+- `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
+  `"outward"` by default (spec §8.3, "full access by default").
+
+It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
+warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
+verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
+While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
+and again whenever the settings change, not on every request. Outward calls still stop
+at the approval gate in every mode. There is no Settings route or UI for these keys yet
+(#255); [operating.md](operating.md#10-mcp-auth-mode) shows how to set them.
 
 ## MCP prepare/confirm on the approval store
 
@@ -384,9 +418,13 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 [plugin manifest reference](https://code.claude.com/docs/en/plugins-reference) and the
 [hooks reference](https://code.claude.com/docs/en/hooks), cited in the file. `bin/` is
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
-`assertPluginAllowed()` for every `pluginPaths` entry. ScadBuddy's own plugin passes
-(PR #379, row 8). Fetching, pinning and reviewing user plugins (spec §10) is **not
-built** (open PR #464).
+`assertPluginAllowed()` for every `pluginPaths` entry.
+
+ScadBuddy's own plugin (`plugins/scadbuddy`) passes (PR #379, row 8), but `main.ts` does
+not load it: with `tools: []` there is no `Skill` or `Agent` tool to use its skills or
+subagents ([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)
+asserts that, with no other plugin enabled, the registry tools are the only ones
+offered). Plugin packages add the rules in the next section.
 
 **The one exception is the headless browser** (#349). Its plugin is not read from
 anyone's directory: `materializeHeadlessBrowser()` in
@@ -396,6 +434,105 @@ starts under `/usr/bin/env -i` and gets `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSER
 only, so the credential never reaches it or Chromium (measured from
 `/proc/<pid>/environ`). `assertHeadlessPlugin()` checks that file instead of
 `assertPluginAllowed()`, which would refuse it.
+
+## Plugin packages
+
+Packages (#297) are Claude plugins that ScadBuddy fetches from a git URL or a marketplace
+entry. They are someone else's code from the network, so they get more checks than the
+harness's own rules above. The code is in
+[`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
+[operating.md](operating.md#9-plugin-packages-297) describes the flow.
+
+**Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
+only fetches, vets and stores the pin with its review. Nothing loads until the admin
+approves that exact `commit_sha` and `content_hash` through
+`POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
+`CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
+until the admin approves the new one after seeing its file diff. The routes use the
+same UI guard as credential writes, with the same limitation (Known limitations, 1).
+
+**Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
+and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
+load. If it does not match, it is deleted and fetched again at the pinned commit, and the
+package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
+package is also vetted again at every load, so rules that have tightened since approval
+still apply. A process that writes the cache between the check and Claude Code's read is
+not caught; such a process already controls the pod.
+
+**Fetching** (`git.ts`):
+
+- The source URL must be https, or http to a loopback address. It may not carry
+  credentials, a query or `$` (`normaliseGitUrl()`, `source.ts`). It must pass the
+  egress check (`assertEndpointAllowed()`: no link-local or cloud-metadata address)
+  before git runs.
+- git gets an environment of its own: no database URL, no key path, no credential.
+  `GIT_ALLOW_PROTOCOL` is `https:http`, and no system or global config is read.
+  `http.followRedirects=false`, `core.hooksPath=/dev/null`, `transfer.fsckObjects` and
+  `GIT_TERMINAL_PROMPT=0` are set. The fetch is shallow, takes no tags or submodules,
+  and has a time limit.
+- Refs and paths are held to an alphabet that cannot start with `-` or contain `..`.
+- A symlink or submodule anywhere in the plugin's directory is refused, from `git
+  ls-tree`, before any file is used. `hashTree()` refuses any non-regular file again.
+  A package may have at most 2000 files and 20 MB.
+- Like the gateway check, this is point-in-time: git resolves the name again itself.
+
+**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
+is refused, with every problem listed, if it has any of the following:
+
+- **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block, anywhere in a
+  line, as the CLI matches it) in any Markdown file. These run a shell "before the
+  skill content is sent to Claude" ([skills](https://code.claude.com/docs/en/skills)).
+  Every query also sets `disableSkillShellExecution` (`harness/options.ts`); measured on
+  CLI 2.1.283, the CLI then puts a placeholder in place of both forms instead of running
+  them (`test/pluginPackages.e2e.test.ts`). Without the setting, the harness denied the
+  resulting Bash call.
+- **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
+  in the vetted files and in the review. So that no key can hide from this check,
+  frontmatter must be plain YAML (`frontmatter()`): the block is cut where the CLI cuts
+  it (at the first `---`, even mid-line), and a block that is unterminated or ends on a
+  `---` that is not a line of its own is refused. It must be one block mapping of plain
+  keys at column 0. Quoted, explicit (`?`) and merge (`<<`) keys, flow mappings,
+  anchors, aliases, tags, directives, a second document, and invalid or duplicate-key
+  YAML are all refused. Those are the forms where our parser and the CLI's could read
+  different keys.
+- **Tools outside the allowlist.** `allowed-tools` and a subagent's `tools` may name MCP
+  tools only (`mcp__…`). The tier seam decides each MCP tool's tier, and an unknown
+  plugin tool is `outward`. Built-ins such as `Bash(...)` or `Write` are refused.
+- **MCP servers** that are not `type: "http"`, that have a `headersHelper` (a command;
+  [MCP](https://code.claude.com/docs/en/mcp)), or that contain a `$` anywhere. `${...}`
+  resolves in an http server's `url` and `headers`
+  ([plugins reference](https://code.claude.com/docs/en/plugins-reference), "Where each
+  variable resolves"), which could send the credential to the plugin's server.
+- **Hooks.** `mcp_tool` hooks are refused: the
+  [hooks reference](https://code.claude.com/docs/en/hooks) ("MCP tool hook fields")
+  does not say their call is permission-checked. `http` hooks may not use `$` or
+  `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
+  hooks. There is deliberately no switch to allow one, because it would inherit the
+  credential env (above). Hook **events** are allowlisted (`PACKAGE_HOOK_EVENTS`):
+  `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse`,
+  `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`,
+  `SubagentStop`, `PreCompact` and `PostCompact`. A `PermissionRequest` hook of any
+  type is refused. In CLI 2.1.283 it races the host's `can_use_tool` answer, and its
+  `behavior: "allow"` wins, so it would approve an outward tool before a human could
+  (spec §8.2). `PreToolUse` is refused too (`permissionDecision`, `updatedInput`), and so
+  is any event not on the list, including one a later CLI adds.
+- **Manifest fields** that a headless run cannot honour: `dependencies`, `userConfig`,
+  `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
+  agent), and `workflows` (JavaScript).
+- **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
+  reserved. The name namespaces the skills (`/<name>:<skill>`).
+
+Every URL a package declares (MCP servers, http hooks) goes through the egress check at
+install and again at every load. A marketplace entry must have a git source: a relative
+path, `github`, `url` or `git-subdir`. `archive`, `npm` and `command` sources are
+refused, because they have no commit to pin or they run a command. An entry that
+declares components of its own is refused too
+([marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)).
+
+Not done yet:
+
+- per-part enabling. The review shows each part, but a package is enabled as a whole.
+- tier maps for a package's own MCP tools. They stay `outward`.
 
 ## Headless browser (#349)
 
@@ -497,8 +634,10 @@ From the merged code and PR bodies:
 4. **Secrets as JS strings** stay in the heap until garbage-collected (`secrets.ts`,
    "PLAINTEXT IN MEMORY").
 5. **Scrubbing is name-based.** A tool that takes a secret under a name
-   `SENSITIVE_KEY` does not match would log it. The registry must let such tools
-   declare it before #251/#258 wire in real outward tools (spec §6; seam comment in
+   `SENSITIVE_KEY` does not match would log it. No registry tool takes a secret
+   argument today (the inputs in [`agent/src/tools/`](../../agent/src/tools/)). A tool
+   that does must declare it to the registry, and `scrubForLog` must read that
+   declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
    - `SessionStore` is `@alpha` in SDK 0.3.283;
@@ -506,20 +645,35 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, never loaded in production.** No plugin path is passed in
-   `main.ts` today, and the headless browser is not wired in either.
+7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
+   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
+   packages and the headless browser's vendored plugin (when enabled, see
+   [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
+   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin
+   (`plugins/scadbuddy`) is not loaded (see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
+9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
+   `update_source` and other `write` tools in the tier that runs without a human,
+   because a write is reversible through the model's git history (spec §8.1). The
+   eval negative control in [`agent/test/evals.test.ts`](../../agent/test/evals.test.ts)
+   ("control: a model that obeys the README injection") reproduces it: a model that
+   follows a poisoned README overwrites the source, while the `delete_model` it also
+   attempts stops at the approval gate. Prevention of that write rests on the model
+   refusing instructions in tool content on its own judgement (a session appends no
+   system-prompt rule about tool content today), and recovery on
+   history (`GET /api/v1/models/{slug}/versions` and `POST /api/v1/models/{slug}/versions/{commit}/restore`). This is an accepted tradeoff
+   of the tier design, not a gap the gate is meant to close.
+10. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
    token introspection (RFC 7662), so an IdP that issues opaque access tokens is not
    supported, and revoking a session at the IdP does not stop a token already issued;
    keep access-token lifetimes short there. Turning OIDC off in Settings stops every
    JWT at the next request.
-10. **The OIDC settings write is gated, not approved.** `PUT /api/v1/ai/mcp/oidc` uses
+11. **The OIDC settings write is gated, not approved.** `PUT /api/v1/ai/mcp/oidc` uses
     the credential routes' interim gate (item 1). Someone who can reach Settings can
     point `/mcp` at an IdP they control, which is the "Stated plainly" caveat of spec
     §8.3.
-11. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
+12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
     without its sandbox** (see above).
 
 ## Spec §3.2 items still open
