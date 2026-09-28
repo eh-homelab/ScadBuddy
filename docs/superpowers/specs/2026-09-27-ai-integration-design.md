@@ -173,7 +173,7 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 |---|---|---|
 | Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
-| Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
+| ~~Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas~~ **Answered in #264:** only that every service connects to the primary. `LISTEN` and `NOTIFY` are refused on a hot standby ("`LISTEN`, `NOTIFY`" are among the commands not allowed, <https://www.postgresql.org/docs/current/hot-standby.html>), and CloudNativePG's `-rw` service "Points to the primary instance of the cluster" (<https://cloudnative-pg.io/docs/devel/service_management>), so `SCADBUDDY_DATABASE_URL` must name the `-rw` service, never `-ro` or `-r`. Any number of agent and backend replicas can then listen: a NOTIFY reaches every listening session (<https://www.postgresql.org/docs/current/sql-notify.html>). Measured on `postgres:17` by `agent/test/eventBus.pg.test.ts` | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
 | Which keys `filament_overrides` accepts on `PrintQueueItemCreate` (can it carry nozzle temperature and fan?) | §11 | #284 |
 | Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
@@ -372,6 +372,31 @@ print progress, Bambuddy printers, queue, inventory, history and stats, librarie
 settings, sessions, and the browser snapshot) use the same principal and tier checks as
 tools.
 
+Decided while building #264 (`agent/src/resources/`; MCP
+[resources][mcp-resources], protocol 2025-11-25 as `@modelcontextprotocol/sdk` 1.30.1
+implements it):
+
+- **Every resource is backed by a `read` tool of the registry**
+  (`catalog.ts` `RESOURCES`): reading `scadbuddy://models/{slug}/source` runs
+  `get_source`. So there is one typed backend client, one argument validation and one
+  redaction path, and the openapi coverage check needs no resource entries.
+- **Tiers.** A resource needs its tool's tier (`read`), raised to `write` for
+  `scadbuddy://settings`. `resources/list` and `resources/templates/list` leave out
+  what the caller may not read; `resources/read` and `resources/subscribe` refuse it.
+- **URIs** are RFC 6570 level-1 templates, one path segment per variable,
+  percent-encoded (`builtin:x` is `builtin%3Ax`); subscriptions and notifications use
+  that canonical spelling whichever one the client sent.
+- **Errors** follow the resources page: `-32002` for an unknown URI or a backend 404,
+  `-32602` for an argument the tool refuses, `-32603` otherwise.
+- **Binary** content is a base64 `blob`; above the tools' inline cap (8 MiB,
+  `tools/binary.ts`) the content is the same JSON note, with `application/json`.
+- **Completion** (`completion/complete`) offers slugs, and commits and output ids
+  for a slug given in `context.arguments`.
+- **Not built in #264**, for want of a backend route or event source on `main`: the
+  Bambuddy printers, queue, inventory, history and stats resources (print watcher,
+  #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
+  sessions (#300).
+
 ## 6. Sessions (#300)
 
 - **Storage.** A Postgres `SessionStore` adapter (§3.1) mirrors SDK transcripts, so any
@@ -418,8 +443,14 @@ Two independent consumers `LISTEN` on the channel, each on its own connection
   (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
   sockets under `/api/v1/ai/*`.
 
-The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). The
-UI socket does not replay: on every (re)subscribe the server confirms with
+The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). As
+built (`agent/src/events/pgListener.ts`), the agent LISTENs on a dedicated connection
+and keeps its place in the backend's `events` log by `seq`; when that connection drops
+and comes back, it replays the rows after its place, skipping event ids it has already
+delivered, and when the gap is larger than 1000 events or the log cannot be read it
+tells every subscriber to resync (each subscribed URI gets `resources/updated`, plus one
+`list_changed`). Resource notifications are coalesced to at most one per URI per 250 ms
+per session (`agent/src/resources/hub.ts`). The UI socket does not replay: on every (re)subscribe the server confirms with
 `subscribed` only once it is listening, and the client re-reads then, so a reconnect
 cannot leave a gap.
 
@@ -530,7 +561,15 @@ agent service:
 - MCP auth mode, tokens (hashed), and OIDC configuration;
 - plugins: source, pinned commit, enabled parts, endpoint credentials (encrypted), and
   tier map;
-- sessions (§6), MCP subscriptions, and the resumability event log;
+- sessions (§6);
+- ~~MCP subscriptions, and the resumability event log~~ (decided in #264: these live
+  with the MCP session, in memory on the replica that holds it. An MCP session is
+  in-memory state, so after a restart its id answers 404 and the transport spec
+  requires the client to start a new session ("When a client receives HTTP 404 in
+  response to a request containing an `MCP-Session-Id`, it MUST start a new session",
+  [Streamable HTTP][mcp-transport]), which re-subscribes. A durable copy would replay
+  into a session that no longer exists. What is durable is the backend's `events`
+  table, which covers the agent's own LISTEN gaps, §7);
 - the audit log.
 
 There are **no AI-*configuration* env vars**: providers, credentials, auth mode,
@@ -653,6 +692,8 @@ Each of these is in §3.2 until verified.
 [sdk-hooks]: https://code.claude.com/docs/en/agent-sdk/hooks
 [gateways]: https://code.claude.com/docs/en/llm-gateway
 [mcp-auth]: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+[mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
+[mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject
 [pw-plugin-mcp]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.mcp.json
 [pw-plugin-json]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.claude-plugin/plugin.json
