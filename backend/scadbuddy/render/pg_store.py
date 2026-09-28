@@ -11,6 +11,11 @@ One table, ``render_jobs``, is both the job record and the wait list:
 - **Leases.** A worker heartbeats the job it holds. `reap` requeues a running job
   whose heartbeat is older than the lease (the pod died mid-render), up to the
   attempt limit; `finish` only lands for the attempt that still holds the job.
+- **Wake-ups.** A new or requeued job sends ``NOTIFY scadbuddy_render_queue`` in the
+  transaction that queues it, so it is delivered on commit and never for a job that
+  was rolled back. Each process holds one `QueueListener` connection that wakes its
+  idle workers; their poll is only the fallback for a notification missed while
+  that connection was down.
 
 Schema changes go in `MIGRATIONS`, append-only, applied at `open` under an advisory
 lock so two starting pods cannot race each other.
@@ -18,12 +23,15 @@ lock so two starting pods cannot race each other.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 import shutil
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from psycopg import Connection
+from psycopg import AsyncConnection, Connection
 from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg.types.json import Jsonb
@@ -46,6 +54,12 @@ logger = logging.getLogger(__name__)
 
 #: `pg_advisory_xact_lock` key for applying migrations ("SCADBDDY" in ASCII).
 MIGRATION_LOCK = 0x5343_4144_4244_4459
+
+#: The channel a queued job is announced on. Channels are per database, not per
+#: schema: deployments sharing one database only wake each other's idle workers.
+QUEUE_CHANNEL = "scadbuddy_render_queue"
+#: How the listening connection shows in `pg_stat_activity`.
+LISTENER_APPLICATION_NAME = "scadbuddy-render-listener"
 
 #: Append-only: each entry is applied once, in order, and recorded by its position.
 MIGRATIONS: tuple[str, ...] = (
@@ -76,6 +90,15 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled ON render_jobs (finished_at)
         WHERE state IN ('done', 'failed');
     """,
+    # 2: what OpenSCAD reported, parsed (#252). On the row rather than only inside
+    # `result`, because a failed render has no result and is when they matter most.
+    """
+    ALTER TABLE render_jobs
+        ADD COLUMN diagnostics jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
+    CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
+        WHERE state IN ('done', 'failed');
+    """,
 )
 
 JOB_COLUMNS = (
@@ -90,6 +113,8 @@ JOB_COLUMNS = (
     "log_tail",
     "error",
     "result",
+    "diagnostics",
+    "diagnostics_dropped",
 )
 
 TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identical render is queued"
@@ -97,6 +122,13 @@ TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identica
 
 def _job(row: DictRow) -> Job:
     return Job.model_validate({column: row[column] for column in JOB_COLUMNS})
+
+
+def _notify(conn: Connection[Any]) -> None:
+    """Announce queued work. Called inside the transaction that queued it: Postgres
+    delivers it on commit, once the row is visible to the claim it prompts, and
+    drops it on a rollback."""
+    conn.execute("SELECT pg_notify(%s, '')", (QUEUE_CHANNEL,))
 
 
 def migrate(conn: Connection[Any]) -> list[int]:
@@ -134,6 +166,7 @@ class PostgresJobStore:
         connect_timeout: float = 30.0,
     ) -> None:
         self.paths = paths
+        self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             conninfo,
@@ -154,6 +187,21 @@ class PostgresJobStore:
 
     def close(self) -> None:
         self._pool.close()
+
+    def listener(
+        self,
+        *,
+        on_notify: Callable[[], None],
+        on_state: Callable[[bool], None],
+        check_interval: float,
+    ) -> QueueListener:
+        return QueueListener(
+            self.conninfo,
+            on_notify=on_notify,
+            on_state=on_state,
+            check_interval=check_interval,
+            connect_timeout=self.connect_timeout,
+        )
 
     def abandon_orphans(self) -> list[Job]:
         # Pending jobs are durable and still wanted; running ones are recovered by
@@ -185,7 +233,8 @@ class PostgresJobStore:
                         with conn.transaction():
                             back = conn.execute(
                                 "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                                " heartbeat_at = NULL WHERE id = %s RETURNING *",
+                                " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
+                                " diagnostics_dropped = 0 WHERE id = %s RETURNING *",
                                 (row["id"],),
                             ).fetchone()
                     except UniqueViolation:
@@ -201,6 +250,8 @@ class PostgresJobStore:
                 ).fetchone()
                 assert dead is not None
                 failed.append(_job(dead))
+            if requeued:
+                _notify(conn)
         return Reaped(requeued=requeued, failed=failed)
 
     def submit(
@@ -267,6 +318,9 @@ class PostgresJobStore:
                 ),
             ).fetchone()
             assert row is not None
+            if row["inserted"]:
+                # A coalesced submit queued nothing new, so no worker has more to do.
+                _notify(conn)
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
 
     def claim(self) -> Job | None:
@@ -297,7 +351,8 @@ class PostgresJobStore:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, started_at = %s, finished_at = %s,"
-                " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL"
+                " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL,"
+                " diagnostics = %s, diagnostics_dropped = %s"
                 " WHERE id = %s AND state = 'running' AND attempts = %s",
                 (
                     job.state,
@@ -306,6 +361,8 @@ class PostgresJobStore:
                     Jsonb(job.log_tail),
                     job.error,
                     Jsonb(job.result.model_dump(mode="json")) if job.result is not None else None,
+                    Jsonb([diagnostic.model_dump(mode="json") for diagnostic in job.diagnostics]),
+                    job.diagnostics_dropped,
                     job.id,
                     job.attempt,
                 ),
@@ -332,6 +389,15 @@ class PostgresJobStore:
                 (slug,),
             ).fetchone()
         return bool(row and row["unfinished"])
+
+    def latest_finished(self, slug: str) -> Job | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
+                (slug,),
+            ).fetchone()
+        return _job(row) if row is not None else None
 
     def counts(self) -> QueueCounts:
         with self._pool.connection() as conn:
@@ -363,3 +429,80 @@ class PostgresJobStore:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM render_jobs WHERE id = %s", (job_id,))
         shutil.rmtree(self.paths.job_work_dir(job_id), ignore_errors=True)
+
+
+class QueueListener:
+    """This process's ``LISTEN`` on `QUEUE_CHANNEL`, on one dedicated connection
+    outside the pool: a notification only reaches the session that listens, and a
+    pooled connection goes back to other callers between uses.
+
+    Every notification calls ``on_notify``, and so does every (re)connect: a job
+    queued while nothing listened sent a notification this process never saw. A
+    dropped or refused connection is retried after a capped exponential back-off
+    with jitter, so replicas do not all reconnect in step after a database restart.
+    An idle connection is checked every ``check_interval``, since a half-open TCP
+    connection delivers nothing and raises nothing until something is sent on it.
+    """
+
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        on_notify: Callable[[], None],
+        on_state: Callable[[bool], None],
+        check_interval: float,
+        connect_timeout: float = 30.0,
+        backoff: float = 0.5,
+        max_backoff: float = 30.0,
+    ) -> None:
+        self.conninfo = conninfo
+        self.on_notify = on_notify
+        self.on_state = on_state
+        self.check_interval = check_interval
+        self.connect_timeout = connect_timeout
+        self.backoff = backoff
+        self.max_backoff = max_backoff
+        #: Times a LISTEN has been established.
+        self.connects = 0
+        #: The listening session's server process while connected, else `None`.
+        self.backend_pid: int | None = None
+
+    async def run(self) -> None:
+        delay = self.backoff
+        while True:
+            connects = self.connects
+            try:
+                await self._listen()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "the render queue listener is disconnected; workers poll until it is back",
+                    extra={"error": str(error)},
+                )
+            if self.connects != connects:
+                delay = self.backoff  # it had been up: a new outage starts short
+            await asyncio.sleep(delay * random.uniform(0.5, 1.0))
+            delay = min(delay * 2, self.max_backoff)
+
+    async def _listen(self) -> None:
+        conn = await AsyncConnection.connect(
+            self.conninfo,
+            autocommit=True,
+            connect_timeout=max(1, round(self.connect_timeout)),
+            application_name=LISTENER_APPLICATION_NAME,
+        )
+        async with conn:
+            await conn.execute(f"LISTEN {QUEUE_CHANNEL}".encode())
+            self.connects += 1
+            self.backend_pid = conn.info.backend_pid
+            self.on_state(True)
+            try:
+                self.on_notify()
+                while True:
+                    async for _ in conn.notifies(timeout=self.check_interval):
+                        self.on_notify()
+                    await conn.execute(b"SELECT 1")
+            finally:
+                self.backend_pid = None
+                self.on_state(False)

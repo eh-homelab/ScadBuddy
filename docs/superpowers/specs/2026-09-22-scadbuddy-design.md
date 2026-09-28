@@ -53,8 +53,37 @@ Non-goals (v1):
 - Running OpenSCAD in the browser (openscad-wasm). Server-side render is
   simpler and uses the Manifold nightly; the door stays open.
 - Sandboxing OpenSCAD beyond a timeout and resource limits. `.scad` is a
-  scripting language, but it cannot touch the network and its file access is
-  limited to `import()`/`include` under the model's directory.
+  scripting language that cannot touch the network, but its file access is
+  **not** confined by OpenSCAD: `import()` and `surface()` open whatever path a
+  string hands them, relative or absolute, with the backend's uid (#281). What
+  bounds it is ScadBuddy, not the binary:
+  - A template is trusted code. Its own source, its `include`/`use`, and the
+    values it writes itself (a parameter's initial, a select's options) can name
+    any path the process can read.
+  - A value a *client* supplies cannot steer those calls out of the directory of
+    the file that reads it. A `// file:` parameter takes only a bare name — a
+    staged upload or a shipped sample (#204, #231). Every other string-valued
+    parameter (`string`, `font`, `color`, a string `select`) is refused with a
+    422 when its value starts with `/` or has a `..` path component; relative
+    names below that directory still pass. The check is by path component, so
+    ordinary text (`"Wait..."`, `"3/4 inch"`, `"AC/DC"`) is unaffected; the cost
+    is that text which genuinely starts with a slash (`"/r/3dprinting"`) or
+    contains `/../` cannot be rendered. It judges the value, not what the
+    template does with it: a template that builds a path by concatenation
+    (`str("/", name)`) must guard its own input, as `flexi-fabric`'s and
+    `bookmark`'s `safe_file()` do.
+  - openscad (and openscad-lsp, and fontconfig's `fc-*`) gets an allowlisted
+    environment — `PATH`, `HOME`, the `XDG_*` directories, locale (`LANG`,
+    `LANGUAGE`, `LC_*`), `TZ`, `TMPDIR` and fontconfig's own variables — never a
+    copy of the backend's (`core/fontconfig.py`), so `/proc/self/environ` holds
+    no API key or database URL.
+
+  Kernel-level confinement (a mount namespace, Landlock, a read-only bind of the
+  model directory) would close the rest — what a template itself reads. It stays
+  a non-goal for the same reason authentication is: anyone who can reach this
+  LAN-only instance can already upload or paste a template (#92), so the
+  boundary that matters is what the process can read at all, which is why the
+  environment is the part that is locked down.
 
 ## 3. Verified facts the design rests on
 
@@ -225,7 +254,9 @@ jobs/<job-id>.json                render job state (pending/running/done/failed,
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
-assets/<sha256>.json              its original name, kind and size; never pruned
+assets/<sha256>.json              its original name, kind and size; swept once unreferenced
+.assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
+.assets.usage.json                the upload store's running count and bytes (§5.5, "Usage")
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -519,8 +550,70 @@ string.
   under the same URL; any other name is a 404. Provenance for a sample is its
   name, so a re-render reproduces the output while the revision still ships it.
 - **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
-  content hash; assets are never pruned, so a re-render and "Customize this
-  version" reproduce the output.
+  content hash; an asset any output names is never swept (below), so a re-render
+  and "Customize this version" reproduce the output.
+- **Limits and the sweep (#296).** Distinct uploads were otherwise kept forever,
+  so every slightly different picture added a blob to the volume for good.
+  - *Caps.* `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1 000 000 000) and
+    `SCADBUDDY_ASSET_MAX_COUNT` (10 000); 0 is no limit for either. An upload whose
+    content is not already stored and that would take the store past either is a
+    413 problem document (RFC 9457, the same shape as the 8 MiB refusal) whose
+    `detail` names the setting and whose `usage` extension is the store's
+    `{count, bytes, max_count, max_total_bytes}`. Content already stored is
+    never refused, so re-uploading what an output uses keeps working at the cap.
+    The check and the write happen under one lock, so two uploads cannot both take
+    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
+  - *Usage.* A running total, not a directory scan (#390): `.assets.usage.json`
+    beside the store holds `{count, bytes, dirty}`, read and rewritten under the
+    store's flock by every upload that adds a blob and every sweep removal, so the
+    quota check is O(1) and replicas sharing the volume see the same numbers. A
+    change marks it dirty before touching a file and clean once counted; a dirty,
+    missing or unreadable ledger is recounted from the directory on the next read,
+    so a crash mid-change costs one scan, never a wrong total. The boot recounts
+    it unconditionally, for files added or removed while nothing was running.
+    `GET /assets/usage` answers the same four numbers; Settings shows
+    them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
+    `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
+    `scadbuddy_assets_max_bytes` (read per scrape), `scadbuddy_assets_rejected_total`
+    and `scadbuddy_assets_swept_total`.
+  - *What keeps an asset.* Any 64-hex string equal to its id in: an output's JSON
+    records (`params.json`, `meta.json`) or, when `params.json` is gone, the raw
+    root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to
+    is stamped (raw rather than through `provenance.read`, which answers "no
+    stamp" for a stamp it cannot parse); a
+    saved preset (`presets/`); a template's `presets.json` or `model.json`, mine or
+    built-in; or a job in the render queue's store, whatever its state (with
+    Postgres, every replica's). The match is on raw text, not on parsed `file`
+    values, so a damaged record still keeps what it names, and a coincidental
+    match only keeps a file longer. An older revision's shipped `presets.json` in
+    the models history is not read: shipped presets name samples, not uploads.
+  - *Last use.* An asset's last use is the later mtime of its two files. An upload
+    (a re-upload included) rewrites them; every `file` value that a render submit,
+    a render's staging or a preset save validates is marked used (`AssetStore.use`,
+    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+    value that is not an upload or a sample, as a render always did.
+  - *The sweep* removes an asset nothing keeps whose last use is older than
+    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s). It runs at
+    boot, after the render queue has opened its store, and then every
+    `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 1 day; 0 turns the sweep off, boot
+    included). Like the tombstone, orphan and library-staging sweeps it is best
+    effort: a failure is logged and never stops the boot. (#271 proposes the same
+    shape for library checkouts; there is no such sweep yet to share code with.)
+  - *Why it is safe against concurrent uploads and renders.* The references are
+    read first, and if any source cannot be read (a store outage, an unreadable
+    record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
+    the set, so what protects it is the last use: every path that creates one
+    marks the asset used under the store's lock, and the sweep re-checks the last
+    use under the same lock immediately before it removes each asset. Either the
+    use wins, and the sweep sees a fresh asset and skips it, or the sweep wins and
+    the use is a not-found: a 422 for that render or preset, never a job that
+    loses its file halfway. A running render was marked used when it staged its
+    files, and its job stays in the store until the TTL prunes it. An upload whose
+    first render has not been submitted yet is protected by the grace alone, which
+    is why the grace has a floor. Removal takes the metadata first, so `get` stops
+    finding the asset before its bytes go. The lock is an `flock` on
+    `data/.assets.lock`, beside the store rather than in it, so it also holds
+    between replicas sharing the volume.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job
@@ -568,7 +661,13 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
   heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
   jobs survive a restart. Migrations are append-only and applied at startup under
-  an advisory lock. Without a database URL the store is JSON files under `jobs/`
+  an advisory lock. A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
+  the transaction that queues it; each process keeps one `LISTEN` connection
+  (reconnected with capped, jittered back-off) that wakes its idle workers, so a job
+  queued on one replica starts at once on an idle other. While it is connected,
+  idle workers poll only every `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s),
+  to catch a notification missed around a reconnect; while it is down, every
+  `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s). Without a database URL the store is JSON files under `jobs/`
   with the wait list in the process, and a restart fails unfinished jobs.
   A retry renders into its own `attempt-N/` under the job's work directory, since a
   lapsed lease does not prove the first worker died; only the attempt that still
@@ -601,7 +700,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (the scrape), `work` (claiming), `reap`, `heartbeat`. The app never falls back to
   files on a database error: an unreachable database at startup fails the start.
   The file store's read is in-process with no I/O, so without a database URL
-  `store_up` is always 1.
+  `store_up` is always 1. The wake-up listener (Postgres):
+  `scadbuddy_render_queue_listener_connected` (always 0 with the file store) and
+  `scadbuddy_render_queue_listener_reconnects_total`.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:
@@ -609,6 +710,22 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   `true`/`false`. A parameter not in the schema is rejected (422).
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the
   model's directory so `include`/`import` resolve.
+- **Template notes (#285).** A template tells the user what it changed from the
+  parameters it was given (a size capped or text shrunk to fit the plate) by
+  echoing one string that starts `NOTE: ` — or `WARNING: `, which `wifi-qr-plaque`
+  and `flexi-fabric` use; both are accepted rather than renaming them. The main
+  render's whole log is scanned (not just the tail: the echo comes early), and
+  each distinct message, prefix removed, lands in the job's `notes` (at most 20).
+  The customize view shows them under the preview of a successful render. Any
+  other echo — `echo("NOTE:", x)`, debug output — and OpenSCAD's own `WARNING:`
+  lines stay in the log only. OpenSCAD prints the string raw, embedded quotes
+  unescaped (measured on 2026.09.23).
+- **Job warnings (#383).** ScadBuddy's own `warnings` on a job (a file
+  parameter's asset OpenSCAD could not open, uncoloured geometry, a skipped plate
+  thumbnail) show beside the template notes under a "From ScadBuddy" heading, in
+  the warn colour, so they do not read as the template's. A failed render shows
+  them above its log when the job carries any; today it carries none, since
+  `warnings` lives on the result and a failed job has no result.
 
 ### 6.2 Bambu-style 3MF writer
 
@@ -717,6 +834,140 @@ runs. Models that recolour a subtree get the fallback's open parts for the
 affected colour, not wrong geometry, since the outer colour still renders its
 own subtree.
 
+**Concurrency (#282).** The wrapper renders of one job run up to
+`SCADBUDDY_SOLID_CONCURRENCY` at a time rather than one after another: a colour
+costs one whole-model `openscad` run, and dollhouse-kit's window piece has 16 live
+colours (an AMS template can have 28). The default, `0`, derives the bound from the
+CPUs the process may use — its affinity mask, capped by a cgroup CPU limit (a pod's
+`limits.cpu`, rounded up; cgroup v2 `cpu.max`, or v1 `cpu.cfs_quota_us`) — less
+`SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, since every
+worker can be in this stage at once; at least 1, at most 8. With the 8-CPU limit the
+eh-homelab/clusters deployment runs today, two workers and one check that is 3, so
+the pod's worst case (§9) is 2 × 3 + 1 = 7 processes on 8 CPUs; under a 2-CPU limit
+it is 1, the old sequential loop. Above that floor the derived bound never
+oversubscribes the CPUs: each wrapper render has its own `SCADBUDDY_RENDER_TIMEOUT`,
+so contention that stretched every child would turn closed parts into timed-out
+fallbacks. When no cgroup CPU controller is readable at all, a limit may be going
+unseen, so the process logs a warning once and sizes for the affinity mask; set the
+value explicitly there. The clock
+starts when a colour's process does, not while it waits for a slot, so a 28-colour
+job is not charged for the queue. Set it explicitly to size memory as well; the
+derivation reads only CPUs.
+
+The semantics are unchanged from the sequential loop:
+
+- **Order.** Parts, meshes and warnings come back in colour order, whatever order
+  the renders finish in, and each colour still writes `solid_<n>.3mf`.
+- **Fallback.** An OpenSCAD failure — including a timeout — is still that colour's
+  fallback, and its siblings carry on.
+- **Failure.** Anything else (a 3MF that cannot be read, a cancelled job) fails the
+  job with that colour's own error, not an exception group, and cancels the
+  siblings: their `openscad` processes are killed and colours still waiting for a
+  slot never start. The wrapper is deleted only after every render has stopped.
+  One stage is not interrupted: each solid's 3MF is parsed in a worker thread
+  (off the event loop), and a cancelled task abandons that thread rather than
+  stopping it, so a parse already under way runs to completion — bounded work,
+  unlike an `openscad` run.
+
+### 6.4 More than one plate (#289)
+
+Some templates make parts that cannot share one bed: `models/maze-puzzle` in
+`ball_lid` mode at 15 x 15 cells and 16 mm pitch is a 244 mm tray plus a 248 mm
+lid, and the H2C reaches 300 x 320 mm with both nozzles. A template says which
+part goes on which plate with a **template convention**, not a new API field,
+so the same file still opens unchanged in OpenSCAD and on MakerWorld:
+
+```scad
+/* [Hidden] */
+$plate = 0;                        // 0 = every plate; ScadBuddy sets 1..N
+plates = lid_fits ? 1 : 2;
+echo(plates = plates);             // logs `ECHO: plates = 2`
+
+if ($plate == 0 || $plate == 1) tray();
+if ($plate == 0 || $plate == 2) translate($plate == 0 ? beside : [0, 0, 0]) lid();
+```
+
+- **`echo(plates = N)`** is how a template states its plate count. The render
+  reads `ECHO: plates = N` off the whole log (not the 50-line tail), the last
+  such line wins, and it may depend on parameters. Absent, or 1, and nothing
+  below happens: the pipeline and its 3MF are byte-for-byte what §6.1-§6.3
+  describe. More than `MAX_PLATES` (16) fails the job, since each plate is a
+  render and a solid render per colour of its own.
+- **`$plate`** is the plate being drawn. The template declares it as `0` in
+  `[Hidden]`, where 0 means "every plate, laid out as the template likes" —
+  what a plain OpenSCAD render, MakerWorld and ScadBuddy's preview all draw.
+  ScadBuddy renders plate *k* with `-D '$plate=k'`, which overrides the
+  template's own `$plate = 0`, and the solid wrapper of §6.3 passes it through
+  the same way. Measured on 2026.09.23: a `$`-variable is not exported to the
+  customizer schema even outside `[Hidden]`, and the `-D` override works through
+  the wrapper's `include`.
+- A special variable rather than a module or a parameter: it is dynamically
+  scoped, so a template can test it anywhere, including inside its own modules,
+  without threading an argument through; and it is not a customizer parameter, so
+  it never shows as a control and never reaches a preset.
+
+The pipeline for a multi-plate template:
+
+1. The ordinary render (no `$plate` set, so 0) gives the preview GLB, its
+   bounding box, the colour list and the **global extruder order** (§7) exactly
+   as for any template. Its log gives `plates`.
+2. For each plate *k*: a render with `$plate = k`, split by material, each part
+   mapped onto the global extruder list by colour (a colour plate 0 did not show
+   is appended, with a warning — the template drew something on one plate that
+   it does not draw on all of them), then the per-colour solids of §6.3 with
+   `$plate = k`. A plate that renders empty fails the job naming the plate.
+3. One cover image set per plate (`Metadata/plate_k.png`, `_small`, `top_k`,
+   `pick_k`), under the same single budget §6.2.1 gives the one plate.
+4. One 3MF with N plates (§6.2 generalised below).
+
+The job's result carries `plates`: for each, its index, bounding box and
+colours. The customizer checks every plate against the printer with
+`GET /plate/fit` and prefixes each problem with its plate; a one-plate job
+carries an empty list and is checked as before. The print dialog already offers
+a plate, or all of them, for any 3MF with more than one (#83, #240).
+
+**The 3MF.** Bambu Studio assigns objects to plates *by position*, not by the
+plate list in `model_settings.config`: `PartPlateList::load_from_3mf_structure`
+ends in `reload_all_objects`, which puts each instance on the first plate whose
+area its bounding box intersects (`src/slic3r/GUI/PartPlate.cpp`), and the CLI
+Bambuddy slices with runs the same code (`src/BambuStudio.cpp`). Plate *i*
+(0-based) of *n* sits at `(col * W * 1.2, -row * D * 1.2)`, where `W` x `D` is
+the printer's bed (`printable_area`, truncated to whole millimetres),
+`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
+`printable_area`, the CLI takes the printer's own as the file's
+(`old_printable_width = current_printable_width`), so there is no shrink and
+nothing moves (`shrink_to_new_bed == 0`). `compute_colum_count` does not spell
+it `ceil`: it rounds `sqrt(n)` to the nearest whole number and adds one when that
+rounded down. Rounding a non-integer root up gives its ceiling, and rounding it
+down and adding one gives the same; a whole root is its own ceiling. So the two
+agree for every `n`, and `bambu3mf.plate_columns` keeps Bambu Studio's form while
+a test checks it against `ceil(sqrt(n))` for `n` up to ten times `MAX_PLATES`.
+So:
+
+- Objects are numbered across plates: `object_1..object_M` are every plate's
+  parts in plate order, each a component of its plate's assembly, and the
+  assemblies take ids `M+1..M+N`. Each part's `extruder` in
+  `model_settings.config` is its index in the global filament list.
+- One build `<item>` per plate, at that plate's origin plus the placement §6.2
+  already computes for its parts (centred on the reachable area, a prime tower
+  only for a plate that uses more than one colour).
+- One `<plate>` per plate with `plater_id` 1..N, its `model_instance` and its
+  own cover entries. The package cover relationships keep pointing at plate 1.
+- `wipe_tower_x`/`wipe_tower_y` become per-plate arrays (Bambu Studio's
+  `coFloats`, indexed by plate); a plate with no tower repeats another plate's
+  value, which it never reads.
+- `replate_3mf` re-places every item on the chosen printer with that printer's
+  plate stride, and a `PlateFitError` names the plate that does not fit.
+- The mesh analysis (#284, `GET /outputs/{id}/geometry?plate=k`) measures one
+  plate at a time, reading the plate's parts from its assembly. Every plate is
+  drawn at the model origin, so measuring them together would superimpose
+  geometry that is never on one bed. The result's `plate` and `plates` say which
+  plate it is and how many there are.
+
+Not verified end to end: no Bambu Studio or Bambuddy runs in CI, so the layout
+rests on the source above, and slicing a multi-plate ScadBuddy file through
+Bambuddy is an acceptance check still to make on a live instance.
+
 ## 7. Bambuddy integration
 
 Settings (stored in `settings.json` on the PVC, editable in the UI):
@@ -766,7 +1017,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must already be a per-model pin `{name, url, ref, commit}` (#93): a bare name is a 422 naming it (no shared lockfile is left to resolve it against), a malformed pin a 422, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must already be a per-model pin `{name, url, ref, commit}` (#93): a bare name is a 422 naming it (no shared lockfile is left to resolve it against), a malformed pin a 422, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them before anything is cloned; each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |
@@ -776,7 +1027,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
-| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5) |
+| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5); 413 past the store's caps, with its `usage` |
+| GET | `/assets/usage` | the upload store: `{count, bytes, max_count, max_total_bytes}`, a cap of 0 being none (§5.5) |
 | GET | `/models/{slug}/assets/{id}` / `…/{id}/content` | an upload's metadata / its stored bytes (served with a sandboxing CSP) |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema. `?merge_base=<commit>` saves a conflicted upstream merge's resolution: conflict markers are refused (422, `force` or not), and `upstream.base` advances to that revision in the same commit, `Merge <upstream id> into <slug>` by default |
 | GET | `/models/{slug}/upstream` | a duplicate's upstream: `{state, upstream, revision, preview}`. `state` is `current`, `update` (the upstream's current revision is neither `base` nor `dismissed`), `dismissed` or `gone`. On `update`, `preview` is `{ours, base, theirs, merged, clean, taken[], kept[]}`: `merged` is `git merge-file -p --diff3 ours base theirs`, `taken` the other files that follow the upstream (unchanged here since `base`) and `kept` those changed on both sides. 404 for a template that is not a duplicate |
@@ -791,7 +1043,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/models/{slug}/versions/{commit}/diff` | `?base=` (default: the parent) → unified patch |
 | POST | `/models/{slug}/versions/{commit}/restore` | restores it as a NEW commit, never a rewrite |
 | POST | `/models/{slug}/render` | body `{params, version?}` → `{job_id}` (202) |
-| GET | `/jobs/{id}` | state, progress, log tail, result URLs |
+| GET | `/jobs/{id}` | state, progress, log tail, result URLs, the template's `notes` (§6.1) |
 | GET | `/jobs/{id}/preview.glb` | viewer mesh |
 | POST | `/models/{slug}/outputs` | persist a finished job as an output (Generate) |
 | GET | `/models/{slug}/outputs` / `/outputs/{id}` | history |
@@ -804,17 +1056,22 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
-| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, upload store, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 
 - `applications/scadbuddy/`: Deployment (1 replica, `Recreate`), Service
   `scadbuddy:8080`, PVC `scadbuddy-data` 5Gi on `vsphere-csi-sc`,
   `nodeSelector: kubernetes.io/arch: amd64` (image is multi-arch but keep it
-  next to the slicer), requests 250m/512Mi, limits 2/2Gi (Manifold is
-  multi-threaded; OpenSCAD text rendering allocates freely).
-- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` + `SCADBUDDY_CHECK_CONCURRENCY`
-  concurrent `openscad` processes** (default 2 + 1), not the render figure alone. The
+  next to the slicer), requests 1/2Gi, limits 8/16Gi (Manifold is
+  multi-threaded; OpenSCAD text rendering allocates freely). Those are the values in
+  eh-homelab/clusters' `applications/scadbuddy/scadbuddy.yaml` as of #282; the
+  derived `SCADBUDDY_SOLID_CONCURRENCY` (§6.3) follows whatever limit is set there.
+- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` × the solid concurrency +
+  `SCADBUDDY_CHECK_CONCURRENCY` concurrent `openscad` processes**, not the render figure
+  alone: each worker in its closed-parts stage runs up to `SCADBUDDY_SOLID_CONCURRENCY`
+  wrapper renders at once (§6.3; by default the CPUs the checks leave, divided between
+  the workers, so the whole sum stays at one process per CPU). The
   editor's parse check (#92) does not go through the render queue — the queue caps
   itself with N worker tasks, so there is no semaphore to share — and it is reached on
   a 700 ms debounce from every open editor tab. It therefore carries its own declared

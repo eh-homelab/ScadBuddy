@@ -17,6 +17,7 @@ from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
@@ -30,6 +31,8 @@ PARAMS_NAME = "params.json"
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
+#: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
+GEOMETRY_NAME = "geometry.json"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -376,6 +379,35 @@ class OutputStore:
             # Deleted or replaced since it was resolved; the next ask rescans.
             self.forget_plate_cover(slug)
             return None
+
+    def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
+        """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
+        once and cached.
+
+        ``model.3mf`` is not rewritten after `create` stamps it -- a send re-places
+        a copy in memory -- so the cache only goes stale when the analysis itself
+        changes, which :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION` tracks.
+        Raises `FileNotFoundError` when there is no 3MF to analyse and
+        `~scadbuddy.render.geometry.NoSuchPlateError` when it has no such plate.
+        """
+        directory = self._find_dir(output_id)
+        name = GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
+        cache = directory / name
+        try:
+            cached = GeometryAnalysis.model_validate_json(cache.read_text(encoding="utf-8"))
+        except (OSError, ValidationError):
+            cached = None
+        if cached is not None and cached.version == ANALYSIS_VERSION:
+            return cached
+        model = directory / MODEL_NAME
+        if not model.is_file():
+            raise FileNotFoundError(model)
+        analysis = analyze_3mf(model, warnings=self.get(output_id).warnings, plate=plate)
+        # Written aside and renamed, so a concurrent reader never sees half a file.
+        partial = cache.with_name(f".{name}.{uuid.uuid4().hex}")
+        partial.write_text(analysis.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        partial.replace(cache)
+        return analysis
 
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME

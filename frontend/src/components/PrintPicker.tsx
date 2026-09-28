@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type {
   FilamentOptions,
@@ -582,6 +583,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               onClick={() => void run()}
               disabled={running || selected === null || (asksForPrinter && printerId === null)}
               data-testid="run-pipeline"
+              {...USER_ONLY}
             >
               {running && <Spinner />}
               {force ? 'Run anyway' : 'Run'}

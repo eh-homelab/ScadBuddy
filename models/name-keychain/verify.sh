@@ -19,7 +19,7 @@ mkdir -p "$OUT"
 # family is missing, derive a throwaway image that has it -- otherwise OpenSCAD
 # silently falls back to DejaVu Sans and every measurement below is meaningless.
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if ! docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE
@@ -36,7 +36,7 @@ echo "==> rendering with $IMAGE"
 render() {  # render <out.3mf> [-D ...]: fails on OpenSCAD warnings
     local out=$1 log
     shift
-    log=$(docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
+    log=$(docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" \
         openscad --backend=Manifold "$@" -o "$out" model.scad 2>&1) \
         || { echo "$log"; echo "FAIL: $out did not render"; exit 1; }
     if grep -qE '^(WARNING|ERROR)' <<<"$log"; then
@@ -65,7 +65,7 @@ for c in "${EDGE[@]}"; do
 done
 
 echo "==> preview"
-if docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
+if docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" \
     openscad --backend=Manifold -D 'name="Reagan"' \
     --imgsize=1400,520 --viewall --autocenter --projection=o \
     --colorscheme=Tomorrow -o "$OUT/preview.png" model.scad >/dev/null 2>&1; then

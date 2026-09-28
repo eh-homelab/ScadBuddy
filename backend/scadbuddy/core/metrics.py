@@ -81,6 +81,19 @@ class Metrics:
             ["operation"],
             registry=r,
         )
+        self.listener_connected = Gauge(
+            "scadbuddy_render_queue_listener_connected",
+            "1 while this process LISTENs for the NOTIFY that wakes its render workers "
+            "(Postgres); 0 while that connection is down and the workers fall back to "
+            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none.",
+            registry=r,
+        )
+        self.listener_reconnects = Counter(
+            "scadbuddy_render_queue_listener_reconnects",
+            "Times the render queue's LISTEN connection was re-established after it "
+            "dropped (Postgres). A first connection is not counted.",
+            registry=r,
+        )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
@@ -158,6 +171,41 @@ class Metrics:
             "Time spent in each step of a render.",
             ["stage"],
             buckets=RENDER_BUCKETS,
+            registry=r,
+        )
+
+        # Uploads for `// file` parameters (#296). The usage gauges are read from the
+        # store per scrape, like the queue's.
+        self.assets_stored = Gauge(
+            "scadbuddy_assets_stored",
+            "Distinct files stored for `// file` parameters under data/assets/.",
+            registry=r,
+        )
+        self.assets_bytes = Gauge(
+            "scadbuddy_assets_bytes",
+            "Total bytes of the files stored for `// file` parameters.",
+            registry=r,
+        )
+        self.assets_max_count = Gauge(
+            "scadbuddy_assets_max_count",
+            "SCADBUDDY_ASSET_MAX_COUNT: stored files past which an upload is refused; "
+            "0 is no limit.",
+            registry=r,
+        )
+        self.assets_max_bytes = Gauge(
+            "scadbuddy_assets_max_bytes",
+            "SCADBUDDY_ASSET_MAX_TOTAL_BYTES: stored bytes past which an upload is "
+            "refused; 0 is no limit.",
+            registry=r,
+        )
+        self.assets_rejected = Counter(
+            "scadbuddy_assets_rejected",
+            "Uploads refused (413) because the store was at one of its caps.",
+            registry=r,
+        )
+        self.assets_swept = Counter(
+            "scadbuddy_assets_swept",
+            "Stored files removed by the sweep because nothing referenced or used them.",
             registry=r,
         )
 

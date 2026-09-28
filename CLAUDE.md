@@ -47,8 +47,11 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
 ```
 
-Tests never call Anthropic. `test/cliVersion.test.ts` runs the bundled Claude Code
-binary's `--version` only.
+Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
+against a local fake Anthropic endpoint; `test/pg.test.ts` needs
+`SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
+-e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
+`SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
 
 Generated files (the `freshness` job regenerates them on PRs and pushes a fix; run
 them yourself when you change an API model or route, in this order):
@@ -64,8 +67,11 @@ Both `gen:api` steps read the exported spec, so export first. `--save` is requir
 (without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh models/*/verify.sh`, and the `.github/scripts/*.test.sh`
-suites.
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
+`.github/scripts/*.test.sh` suites. Every `docker run` in a `verify.sh` must carry
+`--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
+`"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
+the same line: `verify-models.sh` reaps a timed-out template's containers by it (#302).
 
 Template checks (the `models` job): each `models/<slug>/verify.sh` the PR touches, or all
 of them when the Dockerfile, `ci.yml` or the selector/runner scripts change, and always on
@@ -99,17 +105,50 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   the mocked e2e run.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
-  reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` and
-  `SCADBUDDY_SECRET_KEY_FILE` (no AI env vars; AI settings live in the database);
-  `src/app.ts` is the Hono server (`/healthz`); `src/harness/options.ts` builds every
-  query's SDK options (`tools: []`, `settingSources: []`); `src/api/backend.ts` is the
-  `openapi-fetch` client over the generated `src/api/schema.d.ts`. The design is
+  reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
+  variable the backend reads; the one origin allowed to write) and
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
+  env vars; AI settings live in the database.
+  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
+  `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
+  (credential writes now; `/mcp` and `/api/v1/ws` later) uses the one allowlist in
+  `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
+  those equal). `src/harness/options.ts` builds every query's SDK options
+  (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
+  top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
+  abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
+  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `src/api/backend.ts` is the `openapi-fetch` client over the generated
+  `src/api/schema.d.ts`.
+  - Database: the agent owns the `ai_*` tables. Schema changes are appended to
+    `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
+    start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
+    ledger `ai_migrations` with a sha256 per entry: an edited merged entry stops the
+    service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
+    envelope-encrypted with `src/secrets.ts` under the KEK in
+    `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
+    value to its row and to the columns that say where it is sent (for the credential:
+    `kind` and `base_url`). Comparable tokens are stored hashed instead.
+  - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
+    starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
+    refused, because it would inherit the credential env.
+  - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
+    (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
+    (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
+    `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend; the `agent` CI job sets it. The design is
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
   line 185) describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
+  `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
+  the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
+  `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
+  the authoritative manifest check.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 

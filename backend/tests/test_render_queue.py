@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
@@ -18,6 +19,7 @@ import pytest_asyncio
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_store import LOST_WORKER_ERROR, JobBackend, QueueCounts, render_key
 from scadbuddy.render.jobs import (
@@ -30,7 +32,14 @@ from scadbuddy.render.jobs import (
     RenderQueue,
     attempt_work_dir,
 )
-from scadbuddy.render.pg_store import MIGRATIONS, TWIN_QUEUED_ERROR, PostgresJobStore
+from scadbuddy.render.pg_store import (
+    MIGRATIONS,
+    QUEUE_CHANNEL,
+    TWIN_QUEUED_ERROR,
+    PostgresJobStore,
+    QueueListener,
+)
+from scadbuddy.render.runner import OpenSCADError
 
 CONFIG = Config(
     data_dir=Path("/unused"),
@@ -419,6 +428,74 @@ def test_a_missing_job_is_a_lookup_error(make_store: StoreFactory) -> None:
         store.close()
 
 
+# --- diagnostics where the job lives (#252) ------------------------------------------
+
+WARNING = Diagnostic(severity="warning", message="unknown variable", file="model.scad", line=3)
+ERROR = Diagnostic(severity="error", message="Parser error: syntax error", file="model.scad")
+
+
+async def test_a_failed_render_s_diagnostics_are_kept_with_the_job(
+    make_queue: QueueFactory,
+) -> None:
+    """A failed render has no result: its diagnostics must be on the record itself,
+    in the job file or on the `render_jobs` row."""
+
+    async def fail(job: Job) -> tuple[JobResult, list[str]]:
+        raise OpenSCADError("openscad exited with 1", ["ERROR: x"], 1, [ERROR], 7)
+
+    queue = await make_queue(fail)
+    job = await queue.submit("demo", {"n": 1})
+    await queue.join()
+
+    stored = queue.store.read(job.id)
+    assert stored.state == "failed"
+    assert stored.diagnostics == [ERROR]
+    assert stored.diagnostics_dropped == 7
+
+
+async def test_a_done_render_s_diagnostics_are_kept_with_the_job(
+    make_queue: QueueFactory,
+) -> None:
+    async def render(job: Job) -> tuple[JobResult, list[str]]:
+        return _result().model_copy(update={"diagnostics": [WARNING]}), []
+
+    queue = await make_queue(render)
+    job = await queue.submit("demo", {"n": 1})
+    await queue.join()
+
+    stored = queue.store.read(job.id)
+    assert stored.diagnostics == [WARNING]
+    assert stored.result is not None and stored.result.diagnostics == [WARNING]
+
+
+def test_the_latest_settled_render_is_the_one_that_finished_last(
+    make_store: StoreFactory,
+) -> None:
+    store = make_store()
+    store.open()
+    try:
+        settled: list[str] = []
+        for n in (1, 2, 3):
+            job = _job(n=n)
+            store.submit(job, render_key("demo", job.params, None))
+            claimed = store.claim()
+            assert claimed is not None
+            claimed.state = "failed" if n == 2 else "done"
+            claimed.finished_at = datetime.now(UTC)
+            claimed.diagnostics = [ERROR] if n == 2 else []
+            assert store.finish(claimed)
+            settled.append(claimed.id)
+        waiting = _job(n=9)
+        store.submit(waiting, render_key("demo", waiting.params, None))
+
+        latest = store.latest_finished("demo")
+
+        assert latest is not None and latest.id == settled[-1]
+        assert store.latest_finished("another") is None
+    finally:
+        store.close()
+
+
 # --- Postgres only -----------------------------------------------------------------
 
 
@@ -578,6 +655,32 @@ def test_a_twin_in_the_queue_fails_one_row_not_the_whole_reap(
 
 
 @pytest.mark.requires_postgres
+def test_a_retry_keeps_only_its_own_diagnostics(pg_conninfo: str, paths: DataPaths) -> None:
+    """The stale attempt's diagnostics never land; the retry's do."""
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        job = _job(n=1)
+        store.submit(job, render_key("demo", job.params, None))
+        stale = store.claim()
+        assert stale is not None
+        store.reap(lease=0.0001, max_attempts=3)
+        assert store.read(job.id).diagnostics == []
+        retry = store.claim()
+        assert retry is not None
+
+        stale.state, stale.diagnostics, stale.diagnostics_dropped = "failed", [ERROR], 4
+        assert store.finish(stale) is False
+        retry.state, retry.result, retry.diagnostics = "done", _result(), [WARNING]
+        assert store.finish(retry) is True
+
+        stored = store.read(job.id)
+        assert (stored.diagnostics, stored.diagnostics_dropped) == ([WARNING], 0)
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
 def test_a_reaped_worker_cannot_overwrite_the_retry(pg_conninfo: str, paths: DataPaths) -> None:
     store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
     store.open()
@@ -621,6 +724,129 @@ async def test_a_heartbeating_job_is_not_reaped(pg_conninfo: str, paths: DataPat
         await queue.aclose()
 
 
+# --- wake-ups: NOTIFY, and the fallback poll ----------------------------------------
+
+#: Neither poll can explain a pickup well inside this: only a wake-up can.
+SLOW_POLLS = replace(CONFIG, render_poll_interval=30.0, render_fallback_poll_interval=30.0)
+#: "Well under the fallback interval".
+PROMPTLY = 5.0
+
+
+async def _until(predicate: Callable[[], bool], timeout: float = PROMPTLY) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out"
+        await asyncio.sleep(0.01)
+
+
+def _listening(queue: RenderQueue) -> bool:
+    return _sample(queue.metrics, "scadbuddy_render_queue_listener_connected") == 1
+
+
+@pytest.mark.requires_postgres
+def test_only_a_committed_new_job_is_announced(pg_conninfo: str, paths: DataPaths) -> None:
+    """NOTIFY goes out in the submit's transaction: a coalesced submit queued nothing
+    and a refused one was rolled back, so neither wakes anybody."""
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        with psycopg.connect(pg_conninfo, autocommit=True) as listen:
+            listen.execute(f"LISTEN {QUEUE_CHANNEL}".encode())
+            key = render_key("demo", {"n": 1}, None)
+            store.submit(_job(n=1), key)
+            store.submit(_job(n=1), key)  # coalesced
+            with pytest.raises(QueueFullError):
+                store.submit(_job(n=2), render_key("demo", {"n": 2}, None), max_pending=1)
+            announced = list(listen.notifies(timeout=0.5))
+    finally:
+        store.close()
+
+    assert [n.channel for n in announced] == [QUEUE_CHANNEL]
+
+
+@pytest.mark.requires_postgres
+async def test_a_job_queued_by_one_pool_is_taken_at_once_by_another(
+    pg_conninfo: str, paths: DataPaths
+) -> None:
+    gate_a, gate_b = Gate(), Gate()
+    a = RenderQueue(
+        CONFIG, paths, store=PostgresJobStore(pg_conninfo, paths, pool_size=4), render=gate_a
+    )
+    b = RenderQueue(
+        SLOW_POLLS, paths, store=PostgresJobStore(pg_conninfo, paths, pool_size=4), render=gate_b
+    )
+    await a.start()
+    try:
+        await _occupy_the_worker(a, gate_a)  # A cannot take the next job itself
+        await b.start()
+        await _until(lambda: _listening(b))
+
+        started = time.monotonic()
+        job = await a.submit("demo", {"n": 1})
+        await _until(lambda: gate_b.started == [job.id])
+
+        assert time.monotonic() - started < PROMPTLY < SLOW_POLLS.render_fallback_poll_interval
+    finally:
+        gate_a.release.set()
+        gate_b.release.set()
+        await a.aclose()
+        await b.aclose()
+
+
+@pytest.mark.requires_postgres
+async def test_a_dropped_listener_reconnects_and_work_continues(
+    pg_conninfo: str, paths: DataPaths
+) -> None:
+    gate = Gate()
+    gate.release.set()
+    queue = RenderQueue(
+        SLOW_POLLS, paths, store=PostgresJobStore(pg_conninfo, paths, pool_size=4), render=gate
+    )
+    elsewhere = PostgresJobStore(pg_conninfo, paths, pool_size=2)  # another replica
+    elsewhere.open()
+    await queue.start()
+    try:
+        await _until(lambda: _listening(queue))
+        listener = queue.listener
+        assert isinstance(listener, QueueListener)
+        assert queue.idle_poll_interval == SLOW_POLLS.render_fallback_poll_interval
+        dropped = listener.backend_pid
+        with psycopg.connect(pg_conninfo, autocommit=True) as admin:
+            admin.execute("SELECT pg_terminate_backend(%s)", (dropped,))
+
+        reconnects = "scadbuddy_render_queue_listener_reconnects_total"
+        await _until(lambda: _sample(queue.metrics, reconnects) == 1 and _listening(queue))
+        assert listener.backend_pid not in (None, dropped)
+
+        job = _job(n=1)
+        elsewhere.submit(job, render_key("demo", {"n": 1}, None))
+        await _until(lambda: gate.started == [job.id])
+    finally:
+        await queue.aclose()
+        elsewhere.close()
+    assert not _listening(queue)
+
+
+async def test_the_file_store_wakes_its_own_workers_without_a_listener(
+    paths: DataPaths,
+) -> None:
+    gate = Gate()
+    gate.release.set()
+    config = replace(SLOW_POLLS, render_poll_interval=20.0)
+    queue = RenderQueue(config, paths, store=JobStore(paths), render=gate)
+    await queue.start()
+    try:
+        assert queue.listener is None
+        assert queue.idle_poll_interval == config.render_poll_interval  # unchanged
+        await asyncio.sleep(0.05)  # the worker has found nothing and is idle
+        job = await queue.submit("demo", {"n": 1})
+        await _until(lambda: gate.started == [job.id])
+        assert not _listening(queue)
+        assert _sample(queue.metrics, "scadbuddy_render_queue_listener_reconnects_total") == 0
+    finally:
+        await queue.aclose()
+
+
 # --- metrics and config --------------------------------------------------------------
 
 
@@ -643,6 +869,7 @@ def test_every_outcome_series_exists_before_the_first_job() -> None:
         ("render_queue_max", -1, "SCADBUDDY_RENDER_QUEUE_MAX"),
         ("render_queue_timeout", -1.0, "SCADBUDDY_RENDER_QUEUE_TIMEOUT"),
         ("render_poll_interval", 0.0, "SCADBUDDY_RENDER_POLL_INTERVAL"),
+        ("render_fallback_poll_interval", 0.0, "SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL"),
         ("render_lease_timeout", 0.0, "SCADBUDDY_RENDER_LEASE_TIMEOUT"),
         ("render_max_attempts", 0, "SCADBUDDY_RENDER_MAX_ATTEMPTS"),
         ("render_queue_depth_slo", -1, "SCADBUDDY_RENDER_QUEUE_DEPTH_SLO"),

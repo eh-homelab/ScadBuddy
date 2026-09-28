@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import { committed, touchAfterRender, waitFor } from '../agent/highlight'
+import { AgentToolError } from '../agent/types'
+import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
@@ -14,11 +17,21 @@ interface Props {
   slug: string
   job: Job | undefined
   rendering: boolean
+  /**
+   * #254 — whether `job` is the render of the values on screen. Only an agent's
+   * `generate` reads it: a person cannot press Generate in the frame where it is not.
+   */
+  upToDate?: boolean
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
+  /**
+   * #289 — every problem the fit check found, each named by its plate when the render
+   * has more than one. Without it the tooltip states `fit`'s own, unnamed.
+   */
+  fitProblems?: string[]
   /** #81 — the model of the printer the print picker has in view. */
   onPrinterModel: (model: string | null) => void
   onGenerated: (output: Output) => void
@@ -31,9 +44,11 @@ export function ActionBar({
   slug,
   job,
   rendering,
+  upToDate = true,
   output,
   capture,
   fit,
+  fitProblems,
   onPrinterModel,
   onGenerated,
   onSent,
@@ -50,8 +65,8 @@ export function ActionBar({
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
 
-  async function generate() {
-    if (!job) return
+  async function generate(): Promise<Output | null> {
+    if (!job) return null
     setGenerating(true)
     setError(null)
     try {
@@ -62,12 +77,49 @@ export function ActionBar({
         await api.putThumbnail(created.id, png).catch(() => undefined)
       }
       onGenerated(created)
+      return created
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not save this output.')
+      const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
+      setError(message)
+      throw new AgentToolError('failed', message)
     } finally {
       setGenerating(false)
     }
   }
+
+  const live = useLatest({ ready: ready && upToDate, generating, output, sendOpen, printOpen })
+
+  // #254 — Generate, and opening (never confirming) the print and send dialogs.
+  useAgentHandlers('actions', {
+    generate: async ({ timeout_ms }) => {
+      await waitFor(() => (live.current.ready ? true : undefined), {
+        timeout: timeout_ms,
+        what: 'the preview render to finish',
+      })
+      if (live.current.generating) throw new AgentToolError('invalid_args', 'Generate is already running.')
+      touchAfterRender(() => document.querySelector('[data-testid="generate"]'))
+      const created = await generate()
+      if (!created) return null
+      await committed(() => live.current.output?.id === created.id, 'the saved output')
+      return { output: { id: created.id, name: created.name ?? null } }
+    },
+    open_print_dialog: async ({ kind }) => {
+      if (!live.current.output) {
+        throw new AgentToolError(
+          'invalid_args',
+          'There is no generated output for these values yet; call generate first.',
+        )
+      }
+      if (kind === 'send') setSendOpen(true)
+      else setPrintOpen(true)
+      await committed(() => (kind === 'send' ? live.current.sendOpen : live.current.printOpen), 'the dialog to open')
+      touchAfterRender(() => document.querySelector('[role="dialog"]'))
+      return {
+        opened: kind === 'send' ? 'Send to Bambuddy' : 'Print',
+        note: 'The dialog is open for the user to review. Only the user can confirm it.',
+      }
+    },
+  })
 
   async function download() {
     if (!output) return
@@ -115,7 +167,7 @@ export function ActionBar({
         <div className="flex items-center gap-2">
           <Button
             variant="primary"
-            onClick={() => void generate()}
+            onClick={() => void generate().catch(() => undefined)}
             disabled={!ready || generating}
             data-testid="generate"
           >
@@ -134,7 +186,7 @@ export function ActionBar({
             onClick={() => setPrintOpen(true)}
             disabled={!output}
             data-testid="print"
-            title={misfit && fit ? fitMessages(fit, unit).join('\n') : undefined}
+            title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >
             Print
             {misfit && <span className="text-[12px]">· {misfit}</span>}

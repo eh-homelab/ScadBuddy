@@ -8,8 +8,9 @@ from collections.abc import Callable
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, SlugPath
-from scadbuddy.api.models import require_mine
+from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.models import announce_source_change, require_mine
+from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelNotFoundError, ModelRecord
 from scadbuddy.library.history import GitError, GitUnavailableError
@@ -74,7 +75,8 @@ def _answer[T](slug: str, action: Callable[[], T]) -> T:
     description=(
         "`state` is `current` (this template includes the upstream's current revision), "
         "`update` (the upstream has moved), `dismissed` (it has moved, to the revision "
-        "the user dismissed) or `gone` (the upstream no longer exists). On `update`, "
+        "the user dismissed; still mergeable) or `gone` (the upstream no longer "
+        "exists). On `update` and `dismissed`, "
         "`preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` "
         "result, plus which other files would follow the upstream (`taken`) and which "
         "would stay because both sides changed them (`kept`). 404 for a template that "
@@ -95,13 +97,28 @@ def get_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamStatus:
         "template has not changed since `base`, sets `base` to the upstream's revision "
         "and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. "
         "Conflicted: 409 with the marked-up source as `merged` and the revision to "
-        "save the resolution against as `merge_base`; nothing is written. 409 too when "
-        "there is no update to merge."
+        "save the resolution against as `merge_base`; nothing is written. A dismissed "
+        "update merges the same way. 409 is one of three cases, told apart by the "
+        "problem's fields: a conflict carries `merged` and `merge_base`; no update to "
+        "merge carries `state` `current` or `gone`; and a template or upstream that kept "
+        "changing across every attempt to write the merge carries `state` `update` or "
+        "`dismissed` and is worth retrying."
     ),
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "The merge conflicts (`merged`, `merge_base`, `conflicts`: resolve it in "
+                "the editor), there is no update to merge (`state` is `current` or "
+                "`gone`), or the template or its upstream kept changing while the merge "
+                "was worked out (`state` is `update` or `dismissed`: retry)"
+            )
+        }
+    },
 )
-def merge_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamMerge:
+def merge_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> UpstreamMerge:
     require_mine(slug)
     record, plan = _answer(slug, lambda: catalogue.merge_upstream(slug))
+    announce_source_change(events, slug)
     return UpstreamMerge(model=record, taken=plan.preview.taken, kept=plan.preview.kept)
 
 
@@ -115,9 +132,11 @@ def merge_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamMerge:
         "`Dismiss <upstream id> update in <slug>`. 409 when there is no update."
     ),
 )
-def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
-    return _answer(slug, lambda: catalogue.dismiss_upstream(slug))
+    record = _answer(slug, lambda: catalogue.dismiss_upstream(slug))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 @router.post(
@@ -130,6 +149,8 @@ def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
         "409 while the upstream still exists."
     ),
 )
-def detach_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def detach_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
-    return _answer(slug, lambda: catalogue.detach_upstream(slug))
+    record = _answer(slug, lambda: catalogue.detach_upstream(slug))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record

@@ -5,11 +5,14 @@ import re
 import shutil
 import zipfile
 
+import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
 
@@ -306,3 +309,92 @@ def test_an_unreadable_stamp_404s_rather_than_500s(
     response = client.get(f"/api/v1/outputs/{created['id']}/edit")
     assert response.status_code == 404
     assert created["id"] in response.json()["detail"]
+
+
+def test_the_geometry_of_an_output_is_measured_and_cached(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The stub's 3MF is one closed 10 x 10 x 5 box.
+    assert [(part["source"], part["open_edges"]) for part in body["parts"]] == [("solid", 0)]
+    assert body["edges"] == []
+    assert body["height_mm"] == 5
+    assert body["bed_contact_area_mm2"] == 100
+    assert body["height_to_base_ratio"] == 0.5
+    assert body["thinnest_wall"]["thickness_mm"] == 5
+
+    cache = paths.output_dir(model, created["id"]) / "geometry.json"
+    assert json.loads(cache.read_text(encoding="utf-8")) == body
+    # Served from the cache from then on: a doctored cache comes back as written.
+    cache.write_text(json.dumps({**body, "height_mm": 42}), encoding="utf-8")
+    assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
+
+
+def test_the_geometry_of_an_output_without_a_3mf_is_404(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    (paths.output_dir(model, created["id"]) / "model.3mf").unlink()
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 404
+    assert client.get(f"/api/v1/outputs/{'0' * 32}/geometry").status_code == 404
+
+
+def test_the_geometry_of_a_damaged_3mf_is_422(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A truncated object entry raises ``ET.ParseError`` -- a ``SyntaxError``, not a
+    ``ValueError`` -- which must still come back as the documented 422, not a 500."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    path = paths.output_dir(model, created["id"]) / "model.3mf"
+    with zipfile.ZipFile(path) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    with zipfile.ZipFile(path, "w") as archive:
+        for info, payload in entries:
+            if info.filename == "3D/Objects/object_1.model":
+                payload = payload[: len(payload) // 2]
+            archive.writestr(info, payload)
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 422, response.text
+    assert "cannot be analysed" in response.json()["detail"]
+
+
+def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    directory = paths.output_dir(model, created["id"])
+    small = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 10)))
+    big = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(30, 30, 30)))
+    write_plates_3mf(
+        [PlateParts((small,), (1,)), PlateParts((big,), (1,))],
+        ["#FF0000"],
+        directory / "model.3mf",
+        thumbnails=None,
+    )
+    url = f"/api/v1/outputs/{created['id']}/geometry"
+
+    first = client.get(url).json()
+    second = client.get(url, params={"plate": 2}).json()
+
+    assert (first["plate"], first["plates"], first["height_mm"]) == (1, 2, 10)
+    assert (second["plate"], second["plates"], second["height_mm"]) == (2, 2, 30)
+    assert json.loads((directory / "geometry-plate-2.json").read_text(encoding="utf-8")) == second
+    missing = client.get(url, params={"plate": 3})
+    assert missing.status_code == 404
+    assert "no plate 3" in missing.json()["detail"]
+    assert client.get(url, params={"plate": 0}).status_code == 422

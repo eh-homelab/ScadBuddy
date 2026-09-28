@@ -20,6 +20,7 @@ def test_render_is_accepted_and_the_job_completes(client: TestClient, model: str
     assert job["params"] == {"width": 12}
     assert job["colors"] == ["#FF0000"]
     assert job["warnings"] == ["a warning"]
+    assert job["notes"] == ["a note"]
     assert job["bbox_mm"]["size"] == [10.0, 10.0, 5.0]
     assert job["parts"][0]["extruder"] == 1
     assert job["log_tail"] == ["rendered fine"]
@@ -47,6 +48,16 @@ def test_a_parameter_of_the_wrong_type_is_rejected(client: TestClient, model: st
     response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": "wide"}})
     assert response.status_code == 422
     assert "expects a number" in response.json()["detail"]
+
+
+def test_a_text_parameter_holding_a_path_is_rejected(client: TestClient, model: str) -> None:
+    """#281: a template may hand any string to import()/surface(), so a value that
+    would reach outside the model's directory never reaches openscad."""
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"params": {"label": "/proc/self/environ"}}
+    )
+    assert response.status_code == 422
+    assert "looks like a file path" in response.json()["detail"]
 
 
 def test_rendering_an_unknown_model_is_a_404(client: TestClient) -> None:
