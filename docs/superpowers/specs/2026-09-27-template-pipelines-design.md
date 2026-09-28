@@ -99,7 +99,12 @@ Non-goals
 - New required settings: `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE`
   (default `scadbuddy`), `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` /
   `_BAMBUDDY` (defaults `render`, `bambuddy`). `SCADBUDDY_DATABASE_URL` becomes
-  required; the in-memory `render/job_store.py` is deleted.
+  required; `render/job_store.py` — JSON job files under `data/jobs/` plus an
+  in-process wait list, used when no database is configured — is deleted. Its
+  records are not carried over: the phase-1 boot imports settled jobs (`done` /
+  `failed`) as `render_jobs` rows once, so outputs keep their `job_id` links, then
+  removes `data/jobs/`; unfinished ones are gone with it (they would have failed on
+  restart today anyway).
 
 ### 3.2 The job table is a projection
 
@@ -125,8 +130,10 @@ Prometheus metric names in `core/metrics.py` are unchanged;
 `scadbuddy_render_jobs_running` is derived from the projection.
 
 Added: `workflow_id` (always `render-<job_id>`), `kind` (`render` | `arrange`),
-`inputs` (jsonb; §4.3), `pipeline_version`, `steps` (jsonb, `[{name, state, done,
-total}]`, what `ctx.progress` writes and `GET /jobs/{id}` shows). `params` stays
+`inputs` (jsonb; §4.3), `pipeline_version` (the sha256 of the pipeline source
+`load_pipeline` recorded, or `default`; §3.4 step 1, carried onto the output's
+record, §8.4), `steps` (jsonb, `[{name, state, done, total}]`, what `ctx.progress`
+writes and `GET /jobs/{id}` shows). `params` stays
 through phase 1 as the default pipeline's `inputs.params`, and is dropped by phase
 2's migration once every reader uses `inputs`.
 
@@ -187,10 +194,16 @@ activity directly, not the workflow.
 1. `load_pipeline(slug, revision)` — activity; returns the source of the template's
    `pipeline/pipeline.py` (or the built-in default, §5.3) at the job's pinned
    revision, plus its declared `api` major. **The source text becomes part of the
-   workflow history**, so a replay always runs the code the job started with.
+   workflow history**, so a replay always runs the code the job started with. Its
+   sha256 is projected as `render_jobs.pipeline_version` (`default` for the
+   built-in pipeline) and lands on the output's reproducibility record (§8.4).
 2. Execute that source inside Temporal's Python workflow sandbox and call
    `run(ctx, inputs)`. The `ctx` primitives (§5.2) are the only way out of the
-   sandbox: each is an activity or a child workflow.
+   sandbox: each is an activity or a child workflow. The source is compiled with
+   the template file's name so tracebacks carry `pipeline/pipeline.py:<line>`; a
+   sandbox violation (the SDK's `RestrictedWorkflowAccessError`, which names the
+   restricted module or attribute) is wrapped into the job's `error` together
+   with that location.
 3. Every state change is a `project(job_id, …)` activity that updates the row in
    place, guarded by state order (`pending < running < done | failed | cancelled`)
    so a retried activity cannot move a job backwards.
@@ -246,7 +259,16 @@ in-flight runs, then exit. The Deployment's `preStop` waits for the worker's
 carries `workflow.patched(...)` markers only where a change must apply to running
 workflows; the default is to let them finish on the old build.
 
-### 3.6 Tests
+### 3.6 To verify against the pinned `temporalio` before phase 1 lands
+
+`temporalio` is not a dependency yet, so these are recalled, not measured (the base
+spec's §3 rule): the sandbox exception type and message shape on a restricted
+import or call; that a traceback through `exec`'d source compiled with a file name
+carries usable line numbers; that `parent_close_policy=ABANDON` with
+`id_conflict_policy=USE_EXISTING` behaves as §3.4 assumes for shared children;
+worker build-ID versioning semantics in the pinned SDK release (§3.5).
+
+### 3.7 Tests
 
 - `temporalio.testing.WorkflowEnvironment` (time-skipping) for workflow logic, with
   activities mocked to record their calls.
@@ -345,8 +367,9 @@ models/dollhouse-kit/
 
 ### 5.2 The contract
 
-`pipeline.py` must be deterministic (Temporal's workflow sandbox enforces the import
-and I/O rules and the error names the offending line). It gets one object:
+`pipeline.py` must be deterministic. Temporal's workflow sandbox enforces the import
+and I/O rules; ScadBuddy reports a violation as the job's `error` with the pipeline
+file and line (§3.4 step 2). It gets one object:
 
 ```python
 class Ctx:
@@ -354,7 +377,8 @@ class Ctx:
     plate: PlateGeometry                       # the selected/default printer's bed (#81)
     async def render(self, file: str, **params) -> Part        # child RenderPiece, deduped
     async def activity(self, name: str, *args, **kwargs) -> Any  # pipeline/activities.py:<name>
-    async def pack(self, items: list[Part | tuple[Part, int]], *, goal: Goal = "fewest_plates") -> Layout
+    async def pack(self, items: list[Part | tuple[Part, int]], *, goal: Goal = "fewest_plates",
+                   filament_plan: FilamentPlan | None = None) -> Layout
     def plate_of(self, items, *, at: list[tuple[x, y, rot]] | None = None) -> Plate
     async def output(self, *, plates: Layout | list[Plate], name: str | None = None,
                      bom: list[BomEntry] | None = None, files: dict[str, bytes | Blob] = {}) -> OutputRef
@@ -372,9 +396,15 @@ class Ctx:
   `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT` (default 30 min). The generic activity
   runs the template function in a subprocess it kills on cancellation, like the
   `openscad_*` activities (§3.4).
-- `pack` is the Arrange packing activity (§7) — `async`, because it reads footprints
-  from the store and, for filament-aware goals, spool state from Bambuddy.
-  `plate_of` is pure in-workflow construction of an explicit plate. Both yield a
+- `pack` is the Arrange packing activity (§7), with the same parameters — `async`,
+  because it reads footprints from the store and, for filament-aware goals, spool
+  state from Bambuddy. `filament_plan` is the print-flow spec's `FilamentPlan`; a
+  pipeline may pass one it built from `inputs` (a UI that lets the user pick spools
+  up front), and with `None` the filament-aware goals work from colour signatures
+  alone, which is the usual case at Generate time when no printer has been chosen
+  yet (#317). The Print dialog's Arrange (§7) re-packs against a real plan later
+  without re-rendering. `plate_of` is pure in-workflow construction of an explicit
+  plate. Both yield a
   `Layout`; `output` writes it (multi-plate 3MF via
   the multi-plate writer of base spec §6.4, thumbnails, `bom`, extra `files`) to the
   store and records the
@@ -546,8 +576,8 @@ re-rendering; this makes that the rule.
   the Print dialog already collects — and a `goal`:
   `fewest_plates` | `fewest_swaps` | `by_colour` (single-colour plates skip the prime
   tower) | `keep_together` groups. It produces a new layout → 3MF in seconds, with no
-  re-render. `ctx.pack(goal=…)` in a pipeline awaits the same packing activity
-  (§5.2).
+  re-render. `ctx.pack(goal=…, filament_plan=…)` in a pipeline awaits the same
+  packing activity with the same parameters (§5.2).
 - Heuristic, not a solver: group by colour signature, first-fit-decreasing 2D packing
   against `plate.py`'s exclusion zones and prime-tower rules, then order plates to
   minimise swaps. `Goal` is pluggable.
@@ -584,7 +614,8 @@ template edit never changes a running job.
 ### 8.4 Reproducibility record
 
 Every output stores: template revision, `ui.api`,
-`pipeline.api`, `inputs.v`, the worker image digest (`SCADBUDDY_REVISION`), the
+`pipeline.api`, `pipeline_version` (§3.2), `inputs.v`, the worker image digest
+(`SCADBUDDY_REVISION`), the
 `openscad --version` string, the plate geometry key, and the store refs of every
 Part it was built from. "Re-render" is a new job on the same record; "Customize
 this version" pins the revision.
