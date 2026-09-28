@@ -16,6 +16,11 @@ from scadbuddy.store.refs import BlobRefs
 logger = logging.getLogger(__name__)
 
 
+class PieceStateLostError(LookupError):
+    """A stage found nothing to continue from: the store no longer holds the piece an
+    earlier stage published (deleted in the backend between two stages)."""
+
+
 class BlobStore(Protocol):
     backend: str
 
@@ -26,13 +31,27 @@ class BlobStore(Protocol):
         claimed between its `referenced()` snapshot and its pass over the keys."""
         ...
 
-    def exists(self, key: str) -> bool: ...
+    def exists(self, key: str) -> bool:
+        """Synchronous (it may read the index): call it from a thread, not the loop."""
+        ...
+
     def remove(self, key: str) -> None: ...
     def keys(self) -> list[str]: ...
     def touched_at(self, key: str) -> float: ...
 
     async def fetch(self, key: str) -> bool:
         """Make ``dir_for(key)`` hold the stored blob; False when there is none."""
+        ...
+
+    async def checkout(self, key: str) -> str | None:
+        """`fetch` for a stage about to write into ``dir_for(key)``: the directory stops
+        being a hit until that stage publishes. Returns the sha it was fetched at, the
+        baseline for `publish_fresh`; raises `PieceStateLostError` when nothing is stored."""
+        ...
+
+    async def checkout_fresh(self, key: str) -> str | None:
+        """For a stage that renders from nothing (`render_main`): the directory stops
+        being a hit, and the baseline is what the index holds now."""
         ...
 
     async def publish(self, key: str, *, scope: BlobScope) -> None:

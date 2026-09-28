@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import io
 import os
+import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -19,13 +24,14 @@ from scadbuddy.render.job_models import JobResult, PartInfo
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.archive import MARKER, pack_dir, unpack_dir
 from scadbuddy.store.cache import CachedBlobStore, StaleBlobError
-from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.content import BlobRef, BlobScope, ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
 from tests.support.store import local_content
+from tests.test_activities import _deps, _paths, _request
 
 pytestmark = pytest.mark.requires_postgres
 SCOPE = BlobScope(slug="demo", title="Demo")
@@ -202,3 +208,117 @@ async def test_cached_piece_answers_on_a_worker_that_never_rendered_it(
     piece = await RenderActivities(deps).cached_piece(req)
     assert piece is not None and piece.result == result
     assert (b.dir_for(key) / PIECE_NAME).is_file()
+
+
+# ── fix round 1 ────────────────────────────────────────────────────────────────
+
+
+def _stage_worker(tmp_path: Path, content: ContentStore) -> RenderActivities:
+    """The activities over a cache of their own, as on a worker with no shared volume."""
+    paths = _paths(tmp_path)
+    deps = _deps(tmp_path, paths)
+    blobs = CachedBlobStore(LocalBlobStore(paths.blobs), content, max_bytes=1 << 30, min_age=0)
+    return RenderActivities(dataclasses.replace(deps, blobs=blobs))
+
+
+async def test_the_stages_publish_so_a_third_worker_answers_the_piece(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    env = ActivityEnvironment()
+    a, b, c = (_stage_worker(tmp_path / n, content) for n in "abc")
+    req = _request()
+    prepared = await env.run(a.prepare, req)
+    main = await env.run(a.render_main, req, prepared)
+    await env.run(b.render_solids, req, prepared, main)
+    piece = await env.run(b.finish_piece, req, prepared, main)
+    assert await env.run(c.cached_piece, req) == piece
+    assert (c.deps.paths.root / piece.result.model_3mf).is_file()
+
+
+async def test_a_finished_piece_whose_publish_failed_is_not_answered_by_its_worker(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = ActivityEnvironment()
+    a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
+    req = _request()
+    prepared = await env.run(a.prepare, req)
+    main = await env.run(a.render_main, req, prepared)
+    await env.run(a.render_solids, req, prepared, main)
+
+    async def store_down(*_: Any, **__: Any) -> None:
+        raise RuntimeError("the store is full")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(content, "replace", store_down)
+        with pytest.raises(RuntimeError, match="full"):
+            await env.run(b.finish_piece, req, prepared, main)
+    # B wrote piece.json, but the store never got it: no worker may answer it.
+    assert await env.run(b.cached_piece, req) is None
+
+
+async def test_a_stage_whose_piece_is_gone_fails_by_name(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    env = ActivityEnvironment()
+    a, b = _stage_worker(tmp_path / "a", content), _stage_worker(tmp_path / "b", content)
+    req = _request()
+    prepared = await env.run(a.prepare, req)
+    main = await env.run(a.render_main, req, prepared)
+    await content.forget(req.piece_key)  # deleted in the backend between two stages
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(b.render_solids, req, prepared, main)
+    assert raised.value.type == "PieceStateLost" and raised.value.non_retryable
+
+
+async def test_two_misses_on_one_key_download_once(tmp_path: Path, content: ContentStore) -> None:
+    a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
+    (a.dir_for("k") / "model.3mf").write_bytes(b"3mf")
+    await a.publish("k", scope=SCOPE)
+    downloads = content.backend.download
+    calls = 0
+
+    def counting(backend_id: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return downloads(backend_id)
+
+    content.backend.download = counting  # type: ignore[method-assign]
+    assert list(await asyncio.gather(b.fetch("k"), b.fetch("k"))) == [True, True]
+    assert calls == 1
+    assert (b.dir_for("k") / "model.3mf").read_bytes() == b"3mf"
+
+
+def test_unpacking_one_directory_from_two_threads_never_fails(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "model.3mf").write_bytes(b"x" * 4096)
+    data = pack_dir(source)
+    target = tmp_path / "blobs" / "k"
+    errors: list[BaseException] = []
+
+    def unpack() -> None:
+        try:
+            unpack_dir(data, target, sha256="s")
+        except BaseException as error:
+            errors.append(error)
+
+    for _ in range(20):
+        threads = [threading.Thread(target=unpack) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    assert errors == []
+    assert (target / "model.3mf").read_bytes() == b"x" * 4096
+    assert sorted(p.name for p in target.parent.iterdir()) == ["k"]  # nothing left aside
+
+
+async def test_a_row_on_another_backend_is_not_this_caches_to_fetch(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    b = worker(tmp_path / "b", content)
+    foreign = BlobRef(sha256="0" * 64, kind="piece", backend="bambuddy", backend_id="42", size=1)
+    content.index.put("k", foreign, slug="demo", meta={})
+    assert await b.fetch("k") is False
+    assert await b.indexed_sha("k") is None
+    assert b.exists("k") is False
