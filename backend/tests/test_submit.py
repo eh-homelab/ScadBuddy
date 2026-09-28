@@ -351,7 +351,7 @@ async def test_a_preview_past_its_timeout_stops_waiting_and_leaves_the_shared_ru
 class _Handle:
     """`get_workflow_handle`'s result, with `cancel` recorded or refused."""
 
-    def __init__(self, workflow_id: str, cancelled: list[str], error: RPCError | None) -> None:
+    def __init__(self, workflow_id: str, cancelled: list[str], error: Exception | None) -> None:
         self.workflow_id, self.cancelled, self.error = workflow_id, cancelled, error
 
     async def cancel(self, **_: object) -> None:
@@ -361,7 +361,7 @@ class _Handle:
 
 
 def _spy_cancel(
-    monkeypatch: pytest.MonkeyPatch, client: Client, error: RPCError | None = None
+    monkeypatch: pytest.MonkeyPatch, client: Client, error: Exception | None = None
 ) -> list[str]:
     cancelled: list[str] = []
     monkeypatch.setattr(
@@ -393,6 +393,33 @@ async def test_a_cancel_that_fails_is_a_warning_and_the_supersede_still_succeeds
     assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
     warned = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warned and getattr(warned[0], "job_id", None) == first.id
+    assert (
+        service.metrics.registry.get_sample_value(
+            "scadbuddy_render_store_errors_total", {"operation": "cancel_workflow"}
+        )
+        == 1
+    )
+
+
+async def test_a_cancel_that_fails_with_anything_else_never_fails_the_supersede(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        first = await service.submit(SLUG, {"width": 17})
+        _spy_cancel(monkeypatch, client, ValueError("not an RPC error"))
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.render.submit"):
+            second = await service.submit(SLUG, {"width": 18}, supersedes=first.id)
+        await service.aclose()
+
+    assert second.id != first.id and second.state == "pending"
+    assert (await asyncio.to_thread(projection.read, first.id)).state == "cancelled"
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned and getattr(warned[0], "job_id", None) == first.id
+    assert getattr(warned[0], "error_type", None) == "ValueError"
     assert (
         service.metrics.registry.get_sample_value(
             "scadbuddy_render_store_errors_total", {"operation": "cancel_workflow"}

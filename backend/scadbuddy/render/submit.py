@@ -257,6 +257,15 @@ class RenderService:
                 extra={"job_id": job.id, "status": error.status.name},
             )
             self.metrics.store_errors.labels("cancel_workflow").inc()
+        except Exception as error:
+            # Not an RPC status (a client that cannot connect, say): the row is
+            # cancelled all the same, so this never fails the submit that superseded it.
+            logger.warning(
+                "could not cancel a render's workflow",
+                extra={"job_id": job.id, "error_type": type(error).__name__},
+                exc_info=True,
+            )
+            self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _reconcile_forever(self) -> None:
         while True:
