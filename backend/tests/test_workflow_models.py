@@ -5,10 +5,14 @@ from __future__ import annotations
 import re
 import uuid
 
+import pytest
+from pydantic import ValidationError
+
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobResult, PartInfo
 from scadbuddy.render.job_store import render_key
-from scadbuddy.workflows.models import Failure, Projection, piece_key
+from scadbuddy.render.schema import ParamValue
+from scadbuddy.workflows.models import Failure, PieceRequest, Projection, piece_key
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -64,3 +68,20 @@ def test_projection_round_trips_through_json() -> None:
     assert restored.result.model_3mf == "blobs/k/model.3mf"
     assert restored.failure is not None
     assert restored.failure.error == "boom"
+
+
+def test_a_piece_request_carries_its_own_key() -> None:
+    params: dict[str, ParamValue] = {"width": 1, "height": 2}
+    key = piece_key("demo", "abc123", "model.scad", params)
+    request = PieceRequest(slug="demo", revision="abc123", params=params, piece_key=key)
+
+    assert PieceRequest.model_validate(request.model_dump(mode="json")) == request
+
+
+def test_a_piece_request_with_another_requests_key_is_refused() -> None:
+    other = piece_key("demo", "abc123", "model.scad", {"width": 9, "height": 2})
+
+    with pytest.raises(ValidationError, match="does not match"):
+        PieceRequest(
+            slug="demo", revision="abc123", params={"width": 1, "height": 2}, piece_key=other
+        )
