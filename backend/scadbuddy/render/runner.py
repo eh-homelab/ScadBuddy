@@ -57,9 +57,16 @@ class OpenSCADError(RuntimeError):
         returncode: int | None = None,
         diagnostics: Sequence[Diagnostic] = (),
         diagnostics_dropped: int = 0,
+        missing_files: Sequence[str] = (),
+        warnings: Sequence[str] = (),
     ):
         super().__init__(message)
         self.log_tail = list(log_tail)
+        #: Base names of the files the run could not open (see `ProcessOutput`).
+        self.missing_files = tuple(missing_files)
+        #: ScadBuddy's own warnings about the failed render (#408), the ones a
+        #: successful render puts on `JobResult.warnings`; set by `render_job`.
+        self.warnings = list(warnings)
         self.returncode = returncode
         #: The run's ERROR/WARNING lines, parsed (#252). Read off the whole log.
         self.diagnostics = list(diagnostics)
@@ -221,6 +228,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
             tail,
             diagnostics=collector.diagnostics,
             diagnostics_dropped=collector.dropped,
+            missing_files=missing,
         ) from None
     except asyncio.CancelledError:
         # A cancelled caller (a superseded parse check, a shutting-down worker) must not
@@ -238,6 +246,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
             returncode,
             collector.diagnostics,
             collector.dropped,
+            missing_files=missing,
         )
     return ProcessOutput(
         returncode=returncode,

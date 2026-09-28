@@ -1386,6 +1386,17 @@ export const handlers = [
       return HttpResponse.json(jobView(job))
     }
 
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
+      job.status = 'failed'
+      job.error = 'openscad exited with 1'
+      job.log_tail = [
+        "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
+        'Current top level object is empty.',
+      ]
+      job.warnings = fixtures.FAILED_JOB_WARNINGS
+      return HttpResponse.json(jobView(job))
+    }
+
     job.status = 'done'
     job.bbox_mm = bboxOf(job.params ?? {})
     job.colors = colorsOf(job.slug, job.params ?? {})

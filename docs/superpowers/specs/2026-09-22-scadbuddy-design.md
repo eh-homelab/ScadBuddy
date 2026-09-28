@@ -686,8 +686,12 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   parameter's asset OpenSCAD could not open, uncoloured geometry, a skipped plate
   thumbnail) show beside the template notes under a "From ScadBuddy" heading, in
   the warn colour, so they do not read as the template's. A failed render shows
-  them above its log when the job carries any; today it carries none, since
-  `warnings` lives on the result and a failed job has no result.
+  them above its log. A failed job has no result, so its warnings (#408) live on
+  the job record beside `diagnostics` (the job file, or the `render_jobs.warnings`
+  column, migration 3): the files the run could not open (`OpenSCAD could not
+  open pic.svg`, without "rendered without it") and any unreadable colour
+  parameter. A template that draws only a missing picture exits 1 with "Current
+  top level object is empty.", so this is often the only explanation there is.
 
 ### 6.2 Bambu-style 3MF writer
 

@@ -68,6 +68,10 @@ class Job(BaseModel):
     #: Stored where the job record lives: the job file, or `render_jobs` columns.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
+    #: ScadBuddy's own warnings (#408): the result's on success, and on failure the
+    #: ones the failed run can still give (`failed_render_warnings`), which have no
+    #: result to live on. Stored beside `diagnostics`, for the same reason.
+    warnings: list[str] = Field(default_factory=list)
     result: JobResult | None = None
     #: Which try this is, as the store that handed the job to a worker numbered it.
     #: Not on the wire: it is how `finish` tells the attempt that still holds a job

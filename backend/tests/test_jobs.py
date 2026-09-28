@@ -6,6 +6,7 @@ import shutil
 import threading
 import zipfile
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
+    MISSING_FILE_FAILED_WARNING,
     THUMBNAIL_FAILED_WARNING,
     THUMBNAIL_TIMEOUT_WARNING,
     UNCOLOURED_WARNING,
@@ -884,3 +886,59 @@ async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -
         result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
 
     assert result.notes == ["letter_size reduced"]
+
+
+# --- warnings on a failed render (#408) ---------------------------------------------
+
+
+async def _failed_render(paths: DataPaths, render_3mf: object, **patches: object) -> OpenSCADError:
+    paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _colour_schema(("base_color", "#0047BB"), ("text_color", "#0047BB"))
+
+    with ExitStack() as stack:
+        stack.enter_context(mock.patch.object(jobs, "render_3mf", render_3mf))
+        stack.enter_context(mock.patch.object(jobs, "cached_schema", cached_schema))
+        for name, value in patches.items():
+            stack.enter_context(mock.patch.object(jobs, name, value))
+        raised = stack.enter_context(pytest.raises(OpenSCADError))
+        await jobs.render_job(
+            _job("j", params={"text_color": "not-a-colour"}), config=CONFIG, paths=paths
+        )
+    return raised.value
+
+
+async def test_a_failed_openscad_run_keeps_its_warnings(paths: DataPaths) -> None:
+    """The missing picture that likely made it fail, and the unreadable colour."""
+
+    async def exits_1(*args: object, **kwargs: object) -> object:
+        raise OpenSCADError("openscad exited with 1", [], 1, missing_files=("pic.svg",))
+
+    error = await _failed_render(paths, exits_1)
+
+    assert error.warnings == [
+        MISSING_FILE_FAILED_WARNING.format(name="pic.svg"),
+        *unreadable_colour_warnings(
+            _colour_schema(("base_color", "#0047BB"), ("text_color", "#0047BB")),
+            {"text_color": "not-a-colour"},
+        ),
+    ]
+
+
+async def test_a_render_that_drew_nothing_says_which_file_it_could_not_open(
+    paths: DataPaths,
+) -> None:
+    """A template that draws only the file parameter's picture renders no geometry
+    when the picture is missing, and the missing-file warning is the reason why."""
+
+    async def no_geometry(*args: object, **kwargs: object) -> object:
+        return mock.Mock(
+            log_tail=[], missing_files=("pic.svg",), diagnostics=(), diagnostics_dropped=0, notes=()
+        )
+
+    error = await _failed_render(paths, no_geometry, split_by_material=lambda path: [])
+
+    assert str(error) == "the render produced no geometry"
+    assert error.warnings[0] == MISSING_FILE_FAILED_WARNING.format(name="pic.svg")
