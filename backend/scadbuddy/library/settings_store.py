@@ -8,8 +8,8 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
   environment's value; a reset (#322) deletes the row, so the field follows the
   environment again. Every runtime field of ``Settings`` is env-seeded, so the row's
   presence alone is each field's source (:data:`SettingSource`). Map-valued settings
-  (``model_pipelines`` and the per-printer and per-model print options) change one key
-  at a time inside that row's upsert.
+  (the per-printer and per-model print options) change one key at a time inside that
+  row's upsert.
 - ``model_print_choices``: what the print dialog last chose, one row per model.
 - ``printer_bed_types``: the plate last printed on, one row per printer.
 
@@ -38,7 +38,7 @@ from pydantic import (
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
+from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
@@ -57,10 +57,20 @@ SettingSource = Literal["stored", "env", "default", "cleared"]
 
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
+#: Settings rows #312 retired with the slicer pipeline. A load already ignores them, as
+#: it does any name it does not know; :meth:`SettingsStore.save` deletes them, so they do
+#: not outlive the first write.
+RETIRED = (
+    "pipeline_id",
+    "printer_preset",
+    "process_preset",
+    "filament_presets",
+    "bed_type",
+    "model_pipelines",
+)
 
 #: The ``settings`` rows that are remembered choices (#322), which "Forget all" drops.
 REMEMBERED_ROWS = (
-    "model_pipelines",
     "print_options",
     "printer_print_options",
     "model_print_options",
@@ -80,21 +90,17 @@ NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 class BambuddyIds(BaseModel):
     """The Bambuddy object ids ScadBuddy points at.
 
-    Integers, because that is what Bambuddy's own OpenAPI declares for
-    ``folder_id``, ``pipeline_id`` and ``printer_id`` — an earlier draft of this
-    file typed them as strings.
+    Integers, because that is what Bambuddy's own OpenAPI declares for ``folder_id``
+    and ``printer_id`` — an earlier draft of this file typed them as strings.
     """
 
     library_folder_id: int | None = None
-    pipeline_id: int | None = None
     printer_id: int | None = None
 
 
 class ModelPrintChoices(BaseModel):
-    """What the print picker last chose for one model, beyond its pipeline (#78).
-
-    ``printer_id`` is only the printer picked for a class-targeted pipeline, which is the
-    one case the picker asks. ``filament_plan`` is only a plan the user moved off the
+    """What the print dialog last chose for one model (#78). ``printer_id`` is the
+    printer it printed on. ``filament_plan`` is only a plan the user moved off the
     auto-match: a spool no longer in the inventory is dropped by the picker, which then
     falls back to the auto-match for that slot.
 
@@ -117,7 +123,12 @@ class ModelPrintChoices(BaseModel):
 
 
 class StoredSettings(BambuddyIds):
-    """Bambuddy connection details. The API key never leaves the server."""
+    """Bambuddy connection details. The API key never leaves the server.
+
+    A store from before #312 may still hold ``pipeline_id``, the four raw-preset keys or
+    ``model_pipelines`` (:data:`RETIRED`); a load ignores them, and the next
+    :meth:`SettingsStore.save` drops them.
+    """
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
@@ -128,18 +139,8 @@ class StoredSettings(BambuddyIds):
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
 
-    # Used by "Slice and queue" when no pipeline is configured.
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] = Field(default_factory=list)
-    bed_type: str | None = None
-
-    #: Model slug -> the pipeline that model once printed with (#86). No longer read:
-    #: its routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here
-    #: can be neither seen nor changed and must not override the Settings pipeline.
-    model_pipelines: dict[str, int] = Field(default_factory=dict)
-    #: Model slug -> the rest of what the picker chose, set one model at a time for the
-    #: same reason (:meth:`SettingsStore.set_model_choices`).
+    #: Model slug -> what the picker chose, set one model at a time
+    #: (:meth:`SettingsStore.set_model_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
     #: printer, not per model: the plate is a property of the machine. Set one printer at
@@ -151,14 +152,6 @@ class StoredSettings(BambuddyIds):
     #: enough to open the picker where it was left rather than modelling which models
     #: belong to which project — that question is Bambuddy's to answer.
     last_project_id: int | None = None
-
-    def pipeline_for(self, slug: str) -> int | None:
-        """The pipeline the send bar runs for ``slug``: the Settings one, for every model.
-
-        ``model_pipelines`` is deliberately not consulted — see its note.
-        """
-        del slug
-        return self.pipeline_id
 
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
@@ -179,7 +172,8 @@ class SettingsPatch(BaseModel):
     default, applies again. Numbers and switches cannot be cleared, only reset. Every
     value is checked against the bounds a ``SCADBUDDY_<FIELD>`` meets
     (:func:`~scadbuddy.core.settings.check_value`), so a bad one is a 422 naming it. An
-    unknown field, such as a bootstrap one, is refused rather than ignored.
+    unknown field, such as a bootstrap one, is refused rather than ignored; only a
+    :data:`RETIRED` one, such as an older client's ``pipeline_id``, is dropped instead.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -188,12 +182,7 @@ class SettingsPatch(BaseModel):
     bambuddy_api_key: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
-    pipeline_id: int | None = None
     printer_id: int | None = None
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] | None = None
-    bed_type: str | None = None
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
@@ -255,6 +244,15 @@ class SettingsPatch(BaseModel):
                 f"{', '.join(unknown)}: not an env-seeded setting, so nothing to reset"
             )
         return list(dict.fromkeys(names))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired(cls, data: Any) -> Any:
+        """An older client may still send a field #312 retired; that is not a mistake
+        worth a 422, so it is dropped rather than refused."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if key not in RETIRED}
+        return data
 
     @model_validator(mode="after")
     def _set_or_reset(self) -> Self:
@@ -390,6 +388,7 @@ class SettingsStore:
             if changes.get(secret) == "":
                 changes[secret] = None
         with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
                 # Back to following the environment, then the default.
                 conn.execute("DELETE FROM settings WHERE name = %s", (name,))
@@ -403,16 +402,6 @@ class SettingsStore:
                     # Back to the default.
                     conn.execute("DELETE FROM settings WHERE name = %s", (name,))
         return self._written("connection")
-
-    def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
-        """Point one model at a pipeline, or clear it back to the global fallback.
-
-        One slug at a time rather than through :class:`SettingsPatch`, which would make
-        the browser send the whole map back and lose any entry it had not loaded.
-        """
-        with self._pool.connection() as conn:
-            _put_entry(conn, "model_pipelines", slug, pipeline_id)
-        return self._written("model_pipeline")
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
@@ -457,7 +446,7 @@ class SettingsStore:
         """Replace one scope's print-option overrides.
 
         Deliberately not part of :class:`SettingsPatch`, for the same reason
-        :meth:`set_model_pipeline` is not: a patch replaces a whole value, so the browser
+        :meth:`set_model_choices` is not: a patch replaces a whole value, so the browser
         would have to send every printer and model back and would lose any it had not
         loaded. An all-unset ``options`` **removes** the scope rather than storing an
         empty object, so the settings do not accumulate an entry per printer someone
@@ -478,8 +467,8 @@ class SettingsStore:
         return self._written("print_options")
 
     def forget_remembered(self) -> StoredSettings:
-        """Forget every remembered choice (#322): the per-model pipelines and print-dialog
-        choices, the per-printer plates, and the print options at every scope. The
+        """Forget every remembered choice (#322): the per-model print-dialog choices, the
+        per-printer plates, and the print options at every scope. The
         settings themselves are left alone."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM model_print_choices")

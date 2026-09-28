@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import logging
-from typing import Annotated, Any, Literal, Self
+from typing import Any, Literal, Self
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, SlugPath, StateDep
+from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
-from scadbuddy.bambuddy.models import Folder, Pipeline, PresetRef, Printer
+from scadbuddy.bambuddy.models import Folder, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
 from scadbuddy.core.problems import ApiError
@@ -32,8 +31,6 @@ from scadbuddy.library.settings_store import (
 )
 
 router = APIRouter(tags=["settings"])
-
-logger = logging.getLogger(__name__)
 
 
 class BootstrapValue(BaseModel):
@@ -68,12 +65,7 @@ class SettingsView(BaseModel):
     has_api_key: bool = False
     public_url: str | None = None
     library_folder_id: int | None = None
-    pipeline_id: int | None = None
     printer_id: int | None = None
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] = Field(default_factory=list)
-    bed_type: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
     last_project_id: int | None = None
@@ -137,14 +129,8 @@ class PrintOptionsView(BaseModel):
 
 
 class PrintOptionsState(PrintOptionsView):
-    """The view plus the printer the per-printer scope keys on.
-
-    Only the GET carries it, and only the GET may touch Bambuddy: with a slicer pipeline
-    configured the target printer lives on the pipeline, so reading it costs one
-    ``GET /slicer-pipelines/{id}``. The PUT deliberately does not resolve it — remembering
-    an option must not need a reachable Bambuddy — and an override saved against the wrong
-    id would silently never apply, which is why this is served rather than guessed.
-    """
+    """The view plus the printer the per-printer scope keys on: the printer set in
+    Settings, or none. Neither half needs Bambuddy."""
 
     printer_id: int | None = None
 
@@ -193,11 +179,9 @@ class ConnectionTest(BaseModel):
 
 
 class RememberedChoices(BaseModel):
-    """What the print dialog and send bar remember (#322), for Settings to show and
-    forget. Each is changed one key at a time through its own route."""
+    """What the print dialog remembers (#322), for Settings to show and forget. Each is
+    changed one key at a time through its own route."""
 
-    #: Model slug -> the pipeline it once printed with (#86); no longer read.
-    model_pipelines: dict[str, int] = Field(default_factory=dict)
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate last printed on it.
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
@@ -222,7 +206,6 @@ class BambuddyTargets(BaseModel):
     """Everything the settings page needs to fill its pickers."""
 
     folders: list[Folder] = Field(default_factory=list)
-    pipelines: list[Pipeline] = Field(default_factory=list)
     printers: list[Printer] = Field(default_factory=list)
 
 
@@ -272,12 +255,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         has_api_key=bool(stored.bambuddy_api_key),
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,
-        pipeline_id=stored.pipeline_id,
         printer_id=stored.printer_id,
-        printer_preset=stored.printer_preset,
-        process_preset=stored.process_preset,
-        filament_presets=stored.filament_presets,
-        bed_type=stored.bed_type,
         default_plate=stored.default_plate,
         display_unit=stored.display_unit,
         last_project_id=stored.last_project_id,
@@ -313,7 +291,6 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
 
 def _remembered(settings: StoredSettings) -> RememberedChoices:
     return RememberedChoices(
-        model_pipelines=settings.model_pipelines,
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
         print_options=settings.print_options,
@@ -331,8 +308,8 @@ def _remembered(settings: StoredSettings) -> RememberedChoices:
 def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
-    ``PUT /settings/print-options`` with no options, and the ``DELETE`` below for a
-    model's pipeline, so the browser never posts a whole map back."""
+    and ``PUT /settings/print-options`` with no options, so the browser never posts a
+    whole map back."""
     return _remembered(store.load())
 
 
@@ -344,16 +321,6 @@ def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
 )
 def delete_remembered(store: SettingsStoreDep) -> RememberedChoices:
     return _remembered(store.forget_remembered())
-
-
-@router.delete(
-    "/settings/remembered/model-pipelines/{slug}",
-    response_model=RememberedChoices,
-    response_model_exclude_none=True,
-    summary="Forget the pipeline one model printed with",
-)
-def delete_model_pipeline(slug: SlugPath, store: SettingsStoreDep) -> RememberedChoices:
-    return _remembered(store.set_model_pipeline(slug, None))
 
 
 def _options_view(settings: StoredSettings) -> PrintOptionsView:
@@ -370,36 +337,9 @@ def _options_view(settings: StoredSettings) -> PrintOptionsView:
     response_model=PrintOptionsState,
     summary="Remembered print options",
 )
-async def get_print_options(
-    store: SettingsStoreDep,
-    pipeline_id: Annotated[
-        int | None,
-        Query(description="The pipeline about to run, when the caller has already chosen one"),
-    ] = None,
-) -> PrintOptionsState:
+def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
     settings = store.load()
-    printer_id = settings.printer_id
-    # The Settings pipeline, for every model (a legacy per-model one is no longer read).
-    # A caller that has already chosen one passes it (#145), and the run keys the scope
-    # on that pipeline's target.
-    if pipeline_id is None:
-        pipeline_id = settings.pipeline_id
-    if printer_id is None and pipeline_id is not None:
-        try:
-            async with client_for(settings) as client:
-                printer_id = (await client.pipeline(pipeline_id)).target_printer_id
-        except ApiError as error:
-            # Everything else here is read from the stored settings and needs no network, so
-            # a Bambuddy hiccup — or a pipeline deleted on its side, which ScadBuddy cannot
-            # notice, since it stores only the id — must not take the whole panel down. The
-            # fallback is the state the UI already has a shape for: no printer known, so the
-            # per-printer scope is disabled and the global and per-model rows still show.
-            logger.info(
-                "could not resolve the pipeline's target printer; the per-printer scope "
-                "will be unavailable",
-                extra={"pipeline_id": pipeline_id, "detail": error.detail},
-            )
-    return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=printer_id)
+    return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=settings.printer_id)
 
 
 @router.put(
@@ -453,7 +393,7 @@ async def test_settings(store: SettingsStoreDep) -> ConnectionTest:
 SCOPES: tuple[tuple[Scope, bool, str], ...] = (
     (Scope.READ_STATUS, True, "Printers, their status, and the print history."),
     (Scope.MANAGE_LIBRARY, True, "Uploading 3MFs to the library, and its folders."),
-    (Scope.MANAGE_QUEUE, True, "Queueing prints and running slicer pipelines."),
+    (Scope.MANAGE_QUEUE, True, "Queueing prints."),
     (Scope.MANAGE_PROJECTS, False, "Sending to a Bambuddy project."),
     (Scope.MANAGE_ARCHIVES, False, "Attaching photos and timelapses to a print."),
 )
@@ -499,13 +439,12 @@ async def get_bambuddy_status(store: SettingsStoreDep) -> BambuddyStatus:
 @router.get(
     "/settings/targets",
     response_model=BambuddyTargets,
-    summary="Folders, pipelines and printers to choose from",
+    summary="Folders and printers to choose from",
 )
 async def get_targets(store: SettingsStoreDep) -> BambuddyTargets:
     async with client_for(store.load()) as client:
         return BambuddyTargets(
             folders=await client.folders(),
-            pipelines=await client.pipelines(),
             printers=await client.printers(),
         )
 

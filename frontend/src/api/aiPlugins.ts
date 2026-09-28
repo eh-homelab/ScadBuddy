@@ -97,6 +97,9 @@ export interface PluginPackage {
   enabled: boolean
   pending: {
     ref: string
+    /** Where the re-pin is fetched from; replaces the pin's on approval. */
+    plugin_url: string
+    plugin_path: string
     commit_sha: string
     content_hash: string
     review: PackageReview
@@ -104,6 +107,20 @@ export interface PluginPackage {
   } | null
   created_at: string
   updated_at: string
+}
+
+/** Where a package's pinned files are fetched from: the repository and the path in it. */
+export function packageFetch(pkg: PluginPackage): { url: string; path: string } {
+  return pkg.source.kind === 'marketplace'
+    ? { url: pkg.source.plugin_url, path: pkg.source.plugin_path }
+    : { url: pkg.source.url, path: pkg.source.path }
+}
+
+/** A pending re-pin fetched from another repository or path than the pin. */
+export function repinMoves(pkg: PluginPackage): boolean {
+  if (!pkg.pending) return false
+  const { url, path } = packageFetch(pkg)
+  return pkg.pending.plugin_url !== url || pkg.pending.plugin_path !== path
 }
 
 export type PackageInstall =

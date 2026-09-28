@@ -10,13 +10,12 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
-    contextmanager,
     nullcontext,
     suppress,
 )
@@ -396,13 +395,13 @@ async def plates_thumbnails(
     return rendered, []
 
 
-@contextmanager
-def staged_assets(
+@asynccontextmanager
+async def staged_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
     model_dir: Path,
     store: AssetStore,
-) -> Iterator[dict[str, ParamValue]]:
+) -> AsyncIterator[dict[str, ParamValue]]:
     """``params`` with each uploaded file copied beside the model (#204).
 
     OpenSCAD resolves `import()` and `surface()` relative to the file that calls
@@ -412,11 +411,16 @@ def staged_assets(
     its file parameter against paths still takes it. Each render gets its own
     copies: two renders of one model overlap routinely, and a shared name would be
     deleted from under the one still running.
+
+    The lookup runs in a worker thread, as at every other call site: `use` is a
+    database round trip (#591) that can wait on a row lock, and on the loop that
+    wait would stall every other request and render in the process.
     """
+    found = await asyncio.to_thread(file_assets, schema, params, store, model_dir)
     staged = dict(params)
     created: list[Path] = []
     try:
-        for name, meta in file_assets(schema, params, store, model_dir).items():
+        for name, meta in found.items():
             target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
             shutil.copyfile(store.blob_path(meta), target)
             created.append(target)
@@ -636,7 +640,7 @@ async def render_job(
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
 
-        with staged_assets(schema, job.params, scad.parent, assets) as params:
+        async with staged_assets(schema, job.params, scad.parent, assets) as params:
             with stage("render"):
                 try:
                     output = await render_3mf(
@@ -789,7 +793,8 @@ class RenderQueue:
         self.paths = paths
         #: The upload store the renders stage `file` parameters from: the app's own
         #: (`AppState.assets`), so one instance serves the routes and the workers.
-        #: Built from ``paths`` only when none is given, for tests that render.
+        #: Built from ``paths`` only when none is given, for tests that render no
+        #: upload: without a database pool, every lookup in it raises.
         self.assets = assets if assets is not None else AssetStore(paths.assets)
         self.history = history
         #: Told of every state a job enters (`job.*`), whichever path moved it.

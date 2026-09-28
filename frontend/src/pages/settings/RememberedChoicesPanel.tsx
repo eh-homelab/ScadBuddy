@@ -39,7 +39,7 @@ function isEmptyOptions(options: PrintOptions | undefined): boolean {
 }
 
 /**
- * #322 — what the print dialog and send bar remember, each with Forget. Every Forget is
+ * #322 — what the print dialog remembers, each with Forget. Every Forget is
  * that entry's own one-key route, so the page never posts a whole map back.
  */
 export function RememberedChoicesPanel({ targets }: { targets: BambuddyTargets | null | undefined }) {
@@ -50,21 +50,10 @@ export function RememberedChoicesPanel({ targets }: { targets: BambuddyTargets |
 
   const printerName = (id: number | string) =>
     targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ?? `Printer ${id}`
-  const pipelineName = (id: number) =>
-    targets?.pipelines?.find((pipeline) => pipeline.id === id)?.name ?? `Pipeline ${id}`
 
   const remembered: RememberedChoices | undefined = state.data
   const rows: Row[] = []
   if (remembered) {
-    for (const [slug, id] of Object.entries(remembered.model_pipelines ?? {})) {
-      rows.push({
-        key: `pipeline:${slug}`,
-        kind: 'Model pipeline',
-        subject: slug,
-        value: pipelineName(id),
-        forget: () => api.forgetModelPipeline(slug),
-      })
-    }
     for (const [slug, choices] of Object.entries(remembered.model_print_choices ?? {})) {
       rows.push({
         key: `choices:${slug}`,

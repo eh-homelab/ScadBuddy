@@ -102,7 +102,7 @@ def test_reset_puts_a_field_back_on_the_deployment_value(settings: Settings) -> 
 
 
 def test_reset_names_only_env_seeded_fields(client: TestClient) -> None:
-    response = client.put("/api/v1/settings", json={"reset": ["pipeline_id"]})
+    response = client.put("/api/v1/settings", json={"reset": ["printer_id"]})
     assert response.status_code == 422
 
 
@@ -210,9 +210,6 @@ def test_the_upload_limit_is_editable_and_the_gate_follows_it(
 
 
 def _remember_everything(client: TestClient) -> None:
-    state = _state(client)
-    state.settings_store.set_model_pipeline("gear", 2)
-    state.settings_store.set_model_pipeline("box", 5)
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
     client.put("/api/v1/print/models/box/choices", json={"tier": "draft"})
     client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Cool Plate"})
@@ -230,7 +227,6 @@ def _remember_everything(client: TestClient) -> None:
 def test_the_remembered_choices_are_listed(client: TestClient) -> None:
     _remember_everything(client)
     body = client.get("/api/v1/settings/remembered").json()
-    assert body["model_pipelines"] == {"gear": 2, "box": 5}
     assert body["model_print_choices"]["gear"]["tier"] == "fine"
     assert body["printer_bed_types"] == {"1": "Cool Plate", "2": "Textured PEI Plate"}
     assert body["model_print_options"] == {"gear": {"timelapse": True}}
@@ -238,26 +234,18 @@ def test_the_remembered_choices_are_listed(client: TestClient) -> None:
     assert body["printer_print_options"] == {}
 
 
-def test_forgetting_one_model_pipeline_leaves_the_rest(client: TestClient) -> None:
-    _remember_everything(client)
-    body = client.delete("/api/v1/settings/remembered/model-pipelines/gear").json()
-    assert body["model_pipelines"] == {"box": 5}
-    assert body["model_print_choices"]["gear"]["tier"] == "fine"
-
-
 def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
     _remember_everything(client)
-    client.put("/api/v1/settings", json={"pipeline_id": 4})
+    client.put("/api/v1/settings", json={"printer_id": 4})
     body = client.delete("/api/v1/settings/remembered").json()
     assert body == {
-        "model_pipelines": {},
         "model_print_choices": {},
         "printer_bed_types": {},
         "print_options": {},
         "printer_print_options": {},
         "model_print_options": {},
     }
-    assert client.get("/api/v1/settings").json()["pipeline_id"] == 4
+    assert client.get("/api/v1/settings").json()["printer_id"] == 4
 
 
 def test_the_default_project_is_a_setting(client: TestClient) -> None:

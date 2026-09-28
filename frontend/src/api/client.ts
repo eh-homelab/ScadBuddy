@@ -707,9 +707,9 @@ export const api = {
   createProject: (body: ProjectRequest) =>
     request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** Filed after the run, never during it: a pipeline run's `jobs[].queue_entry_id` is
-   * null when Bambuddy answers 202, and an archive only exists once a print has finished,
-   * so the ids come from the progress read (#89). */
+  /** Filed after the run, never during it: a plate's queue item only exists once it has
+   * sliced, and an archive only once a print has finished, so the ids come from the
+   * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
     request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
@@ -805,11 +805,6 @@ export const api = {
 
   /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
   getRemembered: () => request<RememberedChoices>('/settings/remembered'),
-
-  forgetModelPipeline: (slug: string) =>
-    request<RememberedChoices>(`/settings/remembered/model-pipelines/${seg(slug)}`, {
-      method: 'DELETE',
-    }),
 
   forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 

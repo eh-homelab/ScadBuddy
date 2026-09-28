@@ -43,7 +43,7 @@ export const settingsTools: Tool[] = [
     name: 'get_settings',
     description:
       'ScadBuddy settings: the Bambuddy URL, whether an API key is set (never the key), default printer, ' +
-      'pipeline, plate, presets and display unit.',
+      'plate and display unit.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings'],
@@ -92,11 +92,11 @@ export const settingsTools: Tool[] = [
   defineTool({
     name: 'get_print_targets',
     description:
-      "Bambuddy's printers (with model and live status), library folders and slicer pipelines: the farm " +
+      "Bambuddy's printers (with model and live status), and library folders: the farm " +
       'context a print is planned against.',
     input: z.object({}),
     risk: 'read',
-    bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
+    bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/settings/targets'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/settings/targets'), 'get print targets')),
   }),
@@ -105,16 +105,12 @@ export const settingsTools: Tool[] = [
     name: 'get_print_options',
     description:
       'Remembered print options (timelapse, bed levelling, AMS, …) at each scope: global, per printer and ' +
-      'per model, and the effective values for `slug`/`pipeline_id` when given.',
-    input: z.object({ slug: z.string().optional(), pipeline_id: z.number().int().optional() }),
+      'per model, and the printer the per-printer scope keys on (the Settings printer).',
+    input: z.object({}),
     risk: 'read',
-    // Only to find a pipeline's target printer; answered without it when Bambuddy is unreachable.
-    bambuddyScope: ['Manage Queue'],
     routes: ['GET /api/v1/settings/print-options'],
-    handler: async ({ slug, pipeline_id }, { backend }) =>
-      json(
-        await ok(backend.GET('/api/v1/settings/print-options', { params: { query: { slug, pipeline_id } } }), 'get print options'),
-      ),
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/settings/print-options'), 'get print options')),
   }),
 
   // `outward`, deliberately, unlike the `remember_*` tools in print.ts (`write`).
@@ -122,11 +118,9 @@ export const settingsTools: Tool[] = [
   // PUT /settings/print-options (backend/scadbuddy/api/settings.py
   // `put_print_options` → settings_store `save_print_options`) sets options that
   // bambuddy/send.py `resolve_print_options` then applies, global → per-printer
-  // → per-model, to EVERY later send and print at that scope, by anyone, without
-  // being chosen again: bed levelling, flow calibration, timelapse, preheat,
-  // manual start, queue position. On the send bar, a remembered option the
-  // pipeline run cannot carry also changes the dispatch route to slice-and-queue
-  // (bambuddy/send.py `_queue_send`, #124).
+  // → per-model, to EVERY later print at that scope, by anyone, without being
+  // chosen again: bed levelling, flow calibration, timelapse, preheat, manual
+  // start, queue position.
   //
   // The `remember_*` tools write a different kind of state: which printer,
   // spools, nozzles, quality and plate type the print dialog pre-selects for

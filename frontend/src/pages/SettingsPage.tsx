@@ -59,12 +59,12 @@ function isSecret(name: FieldName): name is Secret {
   return (SECRETS as readonly string[]).includes(name)
 }
 
-const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'pipeline_id', 'printer_id', 'last_project_id']
+const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'last_project_id']
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   connection: ['bambuddy_url', 'bambuddy_api_key', 'public_url'],
-  printing: ['pipeline_id', 'printer_id'],
+  printing: ['printer_id'],
   projects: ['library_folder_id', 'last_project_id'],
   preview: ['display_unit', 'default_plate'],
 }
@@ -332,7 +332,6 @@ export function SettingsPage() {
     bambuddy_url: 'bambuddy-url',
     public_url: 'public-url',
     library_folder_id: 'library-folder',
-    pipeline_id: 'slicer-pipeline',
     printer_id: 'printer',
     default_plate: 'default-plate',
     display_unit: 'display-unit',
@@ -342,7 +341,6 @@ export function SettingsPage() {
   const plate = value('default_plate')
   const choices = {
     library_folder_id: ['', ...(targetsState.data?.folders ?? []).map((folder) => String(folder.id))],
-    pipeline_id: ['', ...(targetsState.data?.pipelines ?? []).map((pipeline) => String(pipeline.id))],
     printer_id: ['', ...(targetsState.data?.printers ?? []).map((printer) => String(printer.id))],
     default_plate: ['', ...plateNames, ...(plate && !plateNames.includes(plate) ? [plate] : [])],
     display_unit: ['mm', 'in'],
@@ -366,7 +364,6 @@ export function SettingsPage() {
         api_key_typed: value('bambuddy_api_key').length > 0,
         choices: {
           library_folder_id: (targetsState.data?.folders ?? []).map((folder) => ({ value: String(folder.id), name: folder.name })),
-          pipeline_id: (targetsState.data?.pipelines ?? []).map((pipeline) => ({ value: String(pipeline.id), name: pipeline.name })),
           printer_id: (targetsState.data?.printers ?? []).map((printer) => ({ value: String(printer.id), name: printer.name })),
           default_plate: plateNames,
           display_unit: ['mm', 'in'],
@@ -775,26 +772,6 @@ export function SettingsPage() {
           {saved(
             'printing',
             <>
-              <FieldRow
-                id="slicer-pipeline"
-                label="Slicer pipeline"
-                help="The fallback for “Slice and queue” and for Print. Without one, ScadBuddy slices with the stored presets and queues to the printer below."
-              >
-                <select
-                  id="slicer-pipeline"
-                  value={value('pipeline_id')}
-                  onChange={(event) => setField('pipeline_id', event.target.value)}
-                  className="sb-field cursor-pointer"
-                >
-                  <option value="">None — slice with the presets below</option>
-                  {(targetsState.data?.pipelines ?? []).map((pipeline) => (
-                    <option key={pipeline.id} value={pipeline.id}>
-                      {pipeline.name}
-                    </option>
-                  ))}
-                </select>
-              </FieldRow>
-
               <FieldRow id="printer" label="Printer">
                 <select
                   id="printer"

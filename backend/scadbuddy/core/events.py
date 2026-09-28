@@ -181,7 +181,6 @@ class FontInstalled(BaseEvent):
 SettingsSection = Literal[
     "connection",
     "print_options",
-    "model_pipeline",
     "model_choices",
     "printer_bed_type",
     "last_project",

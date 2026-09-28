@@ -24,12 +24,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'preferences, confirmed in the Settings UI only. An agent forgets one entry through its own tool.',
   },
   {
-    operation: 'DELETE /api/v1/settings/remembered/model-pipelines/{slug}',
-    reason:
-      'Clears a legacy per-model pipeline that no send reads any more (#86; spec 2026-09-27 §4). Only the ' +
-      "Settings page's Remembered choices table shows these, so there is nothing for an agent to act on.",
-  },
-  {
     operation: 'POST /api/v1/settings/register-sidebar',
     reason: "One-time setup that edits Bambuddy's own sidebar; an operator action in Settings, not an agent task.",
   },

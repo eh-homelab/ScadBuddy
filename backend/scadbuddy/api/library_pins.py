@@ -27,6 +27,12 @@ from scadbuddy.library.libraries import (
     ModelLibrary,
 )
 
+#: The most curated libraries one create may pin (#444). The create holds
+#: :meth:`CheckoutGate.pinning` across every clone, so removals wait on all of them;
+#: the gate is not taken per library, because a removal between two of one create's
+#: installs could delete a checkout the create has cloned but not yet recorded.
+MAX_CREATE_LIBRARIES = 16
+
 
 async def resolve_pin(
     name: str,
@@ -83,15 +89,22 @@ async def pinned_at_create(
     """``meta`` with the curated ``names`` pinned at the catalogue's ref, for a create
     to record in its first commit and parse-check against (#169).
 
-    Every name is checked against the catalogue before anything is cloned; one the
-    ``meta`` already pins (a dropped ``model.json``) keeps that pin. The gate is held
-    until the block exits, so no removal deletes a checkout before the create has
-    recorded it.
+    Every name is checked against the catalogue, and their number against
+    :data:`MAX_CREATE_LIBRARIES`, before anything is cloned; one the ``meta`` already
+    pins (a dropped ``model.json``) keeps that pin. The gate is held until the block
+    exits, so no removal deletes a checkout before the create has recorded it.
     """
     wanted = [
         name for name in dict.fromkeys(names) if all(pin.name != name for pin in meta.libraries)
     ]
     require_library_names(wanted)
+    if len(wanted) > MAX_CREATE_LIBRARIES:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"a create pins at most {MAX_CREATE_LIBRARIES} libraries, not {len(wanted)}; "
+            "pin the rest once the model is created",
+            libraries=wanted,
+        )
     if not wanted:
         yield meta
         return

@@ -91,7 +91,6 @@ export type RememberedChoices = Schemas['RememberedChoices']
 export type BambuddyStatus = Schemas['BambuddyStatus']
 export type BambuddyTargets = Schemas['BambuddyTargets']
 export type BambuddyFolder = Schemas['Folder']
-export type BambuddyPipeline = Schemas['Pipeline']
 export type BambuddyPrinter = Schemas['Printer']
 export type PresetRef = Schemas['PresetRef']
 export type SidebarLink = Schemas['SidebarLink']
@@ -159,7 +158,6 @@ export type PlateFit = Schemas['PlateFit']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
-export type SendMode = SendResult['mode']
 
 /**
  * A view model, not a wire type: the API returns a flat `parameters` list plus the

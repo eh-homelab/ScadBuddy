@@ -180,12 +180,12 @@ def test_a_key_removed_while_another_is_written_leaves_only_the_other(
 def test_a_connection_save_leaves_the_remembered_choices_alone(store: SettingsStore) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(1, "Cool Plate")
-    store.save(SettingsPatch(pipeline_id=4, public_url="https://scad.example"))
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
 
     loaded = store.load()
     assert loaded.model_print_choices["gear"].tier == "fine"
     assert loaded.printer_bed_types == {"1": "Cool Plate"}
-    assert loaded.pipeline_id == 4
+    assert loaded.printer_id == 4
 
 
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
@@ -256,7 +256,7 @@ def test_an_env_var_added_after_other_settings_were_saved_is_honoured(
     """Review focus (#322): the ENV_SEEDED semantics, extended to every field."""
     store = _store_over(settings)
     try:
-        store.save(SettingsPatch(render_timeout=45.0, pipeline_id=3))
+        store.save(SettingsPatch(render_timeout=45.0, printer_id=3))
     finally:
         store.close()
     later = settings.model_copy(update={"job_ttl": 600.0, "log_level": "DEBUG"})
@@ -348,8 +348,7 @@ def test_the_patch_refuses_what_the_ui_may_not_set() -> None:
 def test_forget_all_clears_the_remembered_choices_and_nothing_else(
     store: SettingsStore,
 ) -> None:
-    store.save(SettingsPatch(pipeline_id=4, render_timeout=33.0))
-    store.set_model_pipeline("gear", 2)
+    store.save(SettingsPatch(printer_id=4, render_timeout=33.0))
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(1, "Cool Plate")
     store.save_print_options("global", None, PrintOptions(timelapse=True))
@@ -359,11 +358,10 @@ def test_forget_all_clears_the_remembered_choices_and_nothing_else(
     store.forget_remembered()
 
     loaded = store.load()
-    assert loaded.model_pipelines == {}
     assert loaded.model_print_choices == {}
     assert loaded.printer_bed_types == {}
     assert loaded.print_options.is_empty()
     assert loaded.printer_print_options == {}
     assert loaded.model_print_options == {}
-    assert loaded.pipeline_id == 4
+    assert loaded.printer_id == 4
     assert store.snapshot().runtime.render_timeout == 33.0

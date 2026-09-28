@@ -288,23 +288,22 @@ describe('SettingsPage secrets (#322)', () => {
 describe('SettingsPage remembered choices (#322)', () => {
   it('forgets one remembered choice and leaves the rest', async () => {
     setMockRemembered({
-      modelPipelines: { 'name-keychain': 1 },
       modelChoices: { 'name-keychain': { tier: 'fine' }, gear: { tier: 'draft' } },
       printerBedTypes: { '1': 'Textured PEI Plate' },
     })
     const { user } = renderPage(<SettingsPage />)
     const table = await screen.findByRole('table', { name: 'Remembered choices' })
-    expect(within(table).getAllByRole('row')).toHaveLength(5)
+    expect(within(table).getAllByRole('row')).toHaveLength(4)
 
     await user.click(within(table).getByRole('button', { name: 'Forget printer and spools for gear' }))
-    await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(4))
+    await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3))
     expect(within(table).queryByText('draft quality')).toBeNull()
     expect(within(table).getByText('fine quality')).toBeInTheDocument()
     expect(within(table).getByText('Textured PEI Plate')).toBeInTheDocument()
 
-    await user.click(within(table).getByRole('button', { name: 'Forget model pipeline for name-keychain' }))
-    await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(3))
-    expect((await api.getRemembered()).model_pipelines).toEqual({})
+    await user.click(within(table).getByRole('button', { name: 'Forget printer and spools for name-keychain' }))
+    await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(2))
+    expect((await api.getRemembered()).model_print_choices).toEqual({})
     expect((await api.getRemembered()).printer_bed_types).toEqual({ '1': 'Textured PEI Plate' })
   })
 
