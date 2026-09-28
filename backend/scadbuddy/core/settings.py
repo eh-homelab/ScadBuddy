@@ -13,6 +13,7 @@ from scadbuddy.core.config import (
     DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
     DEFAULT_DATABASE_POOL_SIZE,
+    DEFAULT_DUPLICATE_STAGING_MAX_AGE,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
     DEFAULT_LIBRARY_MAX_BYTES,
@@ -69,6 +70,7 @@ class Settings(BaseSettings):
     asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
+    duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -138,6 +140,7 @@ class Settings(BaseSettings):
             asset_max_count=self.asset_max_count,
             asset_sweep_grace=self.asset_sweep_grace,
             asset_sweep_interval=self.asset_sweep_interval,
+            duplicate_staging_max_age=self.duplicate_staging_max_age,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
