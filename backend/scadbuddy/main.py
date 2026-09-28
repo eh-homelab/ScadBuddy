@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -9,26 +11,9 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import (
-    assets,
-    fonts,
-    health,
-    jobs,
-    libraries,
-    lsp,
-    metrics,
-    models,
-    outputs,
-    plates,
-    presets,
-    printing,
-    prints,
-    realtime,
-    settings,
-    upstream,
-    versions,
-)
+from scadbuddy.api import health, libraries, metrics, models
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
@@ -52,23 +37,24 @@ logger = logging.getLogger(__name__)
 DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 
 
+#: The `scadbuddy.api` modules whose router sits at the root rather than under
+#: :data:`API_PREFIX`.
+ROOT_ROUTE_MODULES = frozenset({"health", "metrics"})
+
+
 def _api_router() -> APIRouter:
+    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
+    is by name and does not matter, because no two routes match the same request
+    (`tests/api/test_routes.py`)."""
     router = APIRouter(prefix=API_PREFIX)
-    router.include_router(models.router)
-    router.include_router(upstream.router)
-    router.include_router(versions.router)
-    router.include_router(presets.router)
-    router.include_router(jobs.router)
-    router.include_router(assets.router)
-    router.include_router(outputs.router)
-    router.include_router(printing.router)
-    router.include_router(prints.router)
-    router.include_router(settings.router)
-    router.include_router(fonts.router)
-    router.include_router(plates.router)
-    router.include_router(libraries.router)
-    router.include_router(lsp.router)
-    router.include_router(realtime.router)
+    for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
+        if info.name in ROOT_ROUTE_MODULES:
+            continue
+        module = importlib.import_module(f"scadbuddy.api.{info.name}")
+        module_router = getattr(module, "router", None)
+        if isinstance(module_router, APIRouter):
+            router.include_router(module_router)
     return router
 
 
@@ -331,6 +317,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await sweeper
         await state.queue.aclose()
+        if state.decisions is not None:
+            await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
 
 

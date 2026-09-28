@@ -10,7 +10,13 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
-import { type DecisionListener, makeCanUseTool, makePreToolUseHook, type TierResolver } from './permissions.js'
+import {
+  type ApprovalGate,
+  type DecisionListener,
+  makeCanUseTool,
+  makePreToolUseHook,
+  type TierResolver,
+} from './permissions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -40,7 +46,8 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
 //   - the permission seam (permissions.ts) as both `canUseTool` and a
-//     `PreToolUse` hook;
+//     `PreToolUse` hook, with the session's approval gate when it has one
+//     (#258: outward calls park until a human decides);
 //   - in-process MCP servers (#251's registry plugs in here) and local plugin
 //     paths (#297, #299), each vetted by plugins.ts: a plugin that would start
 //     a process of its own (command hook, stdio MCP server, LSP server,
@@ -89,6 +96,11 @@ export type HarnessRun = {
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   onDecision?: DecisionListener
+  /**
+   * Parks outward calls until a human decides (#258, src/approvals/). Without
+   * one, outward calls are denied as needing approval.
+   */
+  approvalGate?: ApprovalGate
   /** Appended to the SDK's default system prompt: route, model, diagnostics (#256). */
   systemPromptAppend?: string
   /** Session id to resume (#300). */
@@ -202,8 +214,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate),
+    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate)] },
     permissionMode: 'default',
   }
   if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools

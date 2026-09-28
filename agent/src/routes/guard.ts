@@ -33,6 +33,11 @@ import {
 // Browsers send `Origin` on every POST, PUT and DELETE (Fetch standard), so a
 // write without one did not come from a page.
 //
+// The approval decisions (routes/approvals.ts, #258) use the same check: a
+// request that passes it is treated as the browser user, the one principal
+// that approves outward actions in the UI (spec §8.1, §8.2). The limitation
+// below applies to them unchanged.
+//
 // LIMITATION, stated plainly: this is not an approval and not authentication.
 // Anything that can open a TCP connection to port 8081 can set Host and Origin
 // to the allowed values; what it cannot do from a non-trusted peer is claim
@@ -48,43 +53,32 @@ export function requestFacts(c: Context, remoteAddress: RemoteAddress): RequestF
   return { peer: remoteAddress(c), header: (name) => c.req.header(name) }
 }
 
-export type GuardOptions = {
-  /** What is being changed, for the refusal message ("credential changes" by default). */
-  subject?: string
-  /**
-   * Methods whose body must be `application/json` (check 3 above). PUT by
-   * default; the plugin routes (#297) add POST and PATCH, whose bodies they read.
-   */
-  jsonMethods?: readonly string[]
-}
-
 /** Returns why the request is refused, or undefined when it may proceed. */
 export function uiRequestProblem(
   c: Context,
   policy: OriginPolicy,
   remoteAddress: RemoteAddress,
-  options: GuardOptions = {},
+  what = 'credential changes',
 ): string | undefined {
-  const subject = options.subject ?? 'credential changes'
   const facts = requestFacts(c, remoteAddress)
   if (!isSecureTransport(facts, policy)) {
-    return `${subject} must come through the HTTPS ingress`
+    return `${what} must come through the HTTPS ingress`
   }
   const verdict = checkOrigin(facts, policy)
   if (!verdict.ok) {
     switch (verdict.reason) {
       case 'no-origin':
-        return `${subject} must come from the ScadBuddy UI (no Origin header)`
+        return `${what} must come from the ScadBuddy UI (no Origin header)`
       case 'malformed-origin':
-        return `${subject} must come from the ScadBuddy UI (malformed Origin header)`
+        return `${what} must come from the ScadBuddy UI (malformed Origin header)`
       case 'not-allowed':
         return (
-          `${subject} must come from the ScadBuddy UI at its public URL ` +
+          `${what} must come from the ScadBuddy UI at its public URL ` +
           '(SCADBUDDY_PUBLIC_URL; Origin or Host is not on the allowlist)'
         )
     }
   }
-  if ((options.jsonMethods ?? ['PUT']).includes(c.req.method)) {
+  if (c.req.method === 'PUT') {
     const type = c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase()
     if (type !== 'application/json') return 'request body must be application/json'
   }
@@ -92,15 +86,12 @@ export function uiRequestProblem(
 }
 
 /**
- * The same check for a READ the UI makes (GET /api/v1/ai/plugins). A browser
- * sends no `Origin` on a same-origin GET (Fetch standard), so here `Origin` is
- * checked when present and otherwise the request's own origin (its Host, or a
- * trusted proxy's `X-Forwarded-Host`) must be the UI's public origin, or
- * loopback from a loopback peer; a `Sec-Fetch-Site` other than `same-origin`
- * or `none` is refused. The transport rule is the same.
- *
- * Identical in name and semantics to the one #471 adds (the #258 approvals
- * PR): whichever of the two merges second keeps one copy.
+ * The same check for a READ the UI makes (GET /api/v1/ai/approvals). A
+ * browser sends no `Origin` on a same-origin GET (Fetch standard), so here
+ * `Origin` is checked when present and otherwise the request's own origin
+ * (its Host, or a trusted proxy's `X-Forwarded-Host`) must be the UI's public
+ * origin, or loopback from a loopback peer; a `Sec-Fetch-Site` other than
+ * `same-origin` or `none` is refused. The transport rule is the same.
  */
 export function uiReadProblem(
   c: Context,

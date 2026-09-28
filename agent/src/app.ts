@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type { ApprovalService } from './approvals/service.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
@@ -9,6 +10,7 @@ import type { PackageInstaller } from './plugins/packages/install.js'
 import type { PackageRepo } from './plugins/packages/store.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
+import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
 import { registerPluginRoutes } from './routes/plugins.js'
@@ -17,9 +19,10 @@ import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), the plugin registry routes (#297, routes/plugins.ts),
-// the plugin package routes (#297, routes/pluginPackages.ts),
-// and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
+// plugin registry routes (#297, routes/plugins.ts), the plugin package routes
+// (#297, routes/pluginPackages.ts), and /mcp when `mcp` is given (#251,
+// mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -53,6 +56,8 @@ export type AppDeps = {
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
+  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+  approvals?: ApprovalService
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
@@ -200,6 +205,13 @@ export function createApp(deps: AppDeps): AgentApp {
   registerPluginPackageRoutes(app, {
     packages: deps.pluginPackages,
     installer: deps.packageInstaller,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerApprovalRoutes(app, {
+    approvals: deps.approvals,
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,

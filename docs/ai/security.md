@@ -319,9 +319,9 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, never loaded in production.** `main.ts` passes no plugin path
-   and builds no `SessionManager` yet. Installed plugin packages load only once the
-   manager is wired (#471).
+7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
+   `SessionManager` the enabled remote plugins and plugin packages for each turn, but
+   nothing starts a session over HTTP yet (the comment on `sessions` in `main.ts`).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
 

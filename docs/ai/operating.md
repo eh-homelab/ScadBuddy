@@ -350,7 +350,7 @@ The session manager reads the enabled packages at the start of each turn
 (`packagePlugins` in `SessionManagerDeps`,
 [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)). A package that
 cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
-turn goes ahead without it. `main.ts` builds the store and the installer, but no
-`SessionManager` yet (#471), so no production turn loads packages until that lands.
-The Settings UI for the review and the approval is not built.
+turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
+`SessionManager`, but nothing starts a session over HTTP yet (the comment on `sessions`
+in `main.ts`). The Settings UI for the review and the approval is not built.
 
