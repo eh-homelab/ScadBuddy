@@ -313,8 +313,10 @@ export function SettingsPage() {
           </div>
         )}
 
-        <section className="mt-5 rounded-[6px] border border-line bg-surface">
-          <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Connection</h2>
+        <section className="mt-5 rounded-[6px] border border-line bg-surface" aria-labelledby="connection-heading">
+          <h2 id="connection-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+            Connection
+          </h2>
           <div className="space-y-4 p-4">
             <div>
               <label htmlFor="bambuddy-url" className="block text-[13px]">

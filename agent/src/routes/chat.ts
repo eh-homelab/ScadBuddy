@@ -129,6 +129,8 @@ export class ChatConnection {
   private closed = false
   private readonly snapshotMs: number
   private snapshotTimer: NodeJS.Timeout | undefined
+  /** A timer re-read of the session list is queued or running. */
+  private snapshotPending = false
   /** The last session list sent, as JSON, so an unchanged list is not sent again. */
   private lastSnapshot = ''
   private readonly buffered: () => number
@@ -188,9 +190,22 @@ export class ChatConnection {
   open(): Promise<void> {
     const first = this.enqueue(() => this.sendSnapshot(true))
     this.snapshotTimer = setInterval(() => {
-      // Queued like a frame, so a list never overtakes the events before it.
-      // A failed re-read is skipped quietly; the next one tries again.
-      void this.enqueue(() => this.sendSnapshot(false).catch(() => {}))
+      // Queued like a frame, so a list never overtakes the events before it, but
+      // not counted against the frame cap, and never more than one at a time: a
+      // slow database must not fill the queue with stale re-reads and turn the
+      // panel's frames away as `busy`. A failed re-read is skipped quietly; the
+      // next tick tries again.
+      if (this.snapshotPending) return
+      this.snapshotPending = true
+      void this.enqueue(
+        () =>
+          this.sendSnapshot(false)
+            .catch(() => {})
+            .finally(() => {
+              this.snapshotPending = false
+            }),
+        { counted: false },
+      )
     }, this.snapshotMs)
     this.snapshotTimer.unref()
     return first
@@ -245,8 +260,9 @@ export class ChatConnection {
     return [...this.follows.keys()]
   }
 
-  private enqueue(task: () => Promise<void>): Promise<void> {
-    this.queued += 1
+  /** Runs `task` after everything queued before it. `counted` tasks (frames) take a `maxQueued` slot. */
+  private enqueue(task: () => Promise<void>, { counted = true } = {}): Promise<void> {
+    if (counted) this.queued += 1
     const run = this.queue.then(async () => {
       try {
         if (this.closed) return
@@ -254,7 +270,7 @@ export class ChatConnection {
       } catch (err) {
         this.emit(errorEvent(err, undefined, this.log))
       } finally {
-        this.queued -= 1
+        if (counted) this.queued -= 1
       }
     })
     this.queue = run

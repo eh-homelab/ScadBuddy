@@ -140,8 +140,8 @@ describe('createSocketTransport', () => {
     expect(ws.sent).toEqual([JSON.stringify(reattach), JSON.stringify(decision), JSON.stringify(message)])
   })
 
-  it('says the connection is refused after repeated failed handshakes, and asks the status again', () => {
-    const onRefused = vi.fn()
+  it('asks the status after repeated failed handshakes, and says refused only when the agent says so', async () => {
+    const onRefused = vi.fn<() => Promise<boolean>>().mockResolvedValue(true)
     const onClose = vi.fn()
     const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10, maxMs: 10, onRefused })
     t.connect({ onFrame: () => {}, onClose })
@@ -152,8 +152,11 @@ describe('createSocketTransport', () => {
     expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
     expect(onRefused).not.toHaveBeenCalled()
     FakeSocket.instances.at(-1)!.drop()
-    expect(onClose).toHaveBeenLastCalledWith(REFUSED_MESSAGE)
+    // A failed handshake alone is a drop, not a refusal: the agent may be restarting.
+    expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
     expect(onRefused).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onClose).toHaveBeenLastCalledWith(REFUSED_MESSAGE)
     // Still retrying; once a connection opens, the count starts over.
     vi.advanceTimersByTime(10)
     FakeSocket.instances.at(-1)!.open()
@@ -161,5 +164,61 @@ describe('createSocketTransport', () => {
     expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
     expect(onRefused).toHaveBeenCalledTimes(1)
     t.close()
+  })
+
+  it('rides out an outage: the agent down keeps "reconnecting", and what was queued still goes first', async () => {
+    // The status read fails too while the agent is down (502 → unreachable, not refused).
+    const onRefused = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
+    const onClose = vi.fn()
+    const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10, maxMs: 10, onRefused })
+    t.connect({ onFrame: () => {}, onClose })
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop(1001)
+    const decision = clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true })
+    expect(t.send(decision)).toBe('queued')
+    expect(t.send(attach)).toBe('queued')
+    for (let i = 0; i < REFUSED_AFTER * 2; i++) {
+      vi.advanceTimersByTime(10)
+      FakeSocket.instances.at(-1)!.drop()
+      await vi.advanceTimersByTimeAsync(0)
+    }
+    expect(onRefused).toHaveBeenCalledTimes(2)
+    expect(onClose).not.toHaveBeenCalledWith(REFUSED_MESSAGE)
+    expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
+    // The agent is back: the queues survived the outage, the decision first.
+    vi.advanceTimersByTime(10)
+    const ws = FakeSocket.instances.at(-1)!
+    ws.open()
+    expect(ws.sent).toEqual([JSON.stringify(decision), JSON.stringify(attach)])
+    t.close()
+  })
+
+  it('does not call a connection refused once one has opened, or after close()', async () => {
+    let answer: (refused: boolean) => void = () => {}
+    const onRefused = () =>
+      new Promise<boolean>((resolve) => {
+        answer = resolve
+      })
+    const onClose = vi.fn()
+    const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10, maxMs: 10, onRefused })
+    t.connect({ onFrame: () => {}, onClose })
+    for (let i = 0; i < REFUSED_AFTER; i++) {
+      FakeSocket.instances.at(-1)!.drop()
+      vi.advanceTimersByTime(10)
+    }
+    // The status answers "refused" only after the next handshake succeeded: stale.
+    FakeSocket.instances.at(-1)!.open()
+    answer(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onClose).not.toHaveBeenCalledWith(REFUSED_MESSAGE)
+    FakeSocket.instances.at(-1)!.drop()
+    for (let i = 0; i < REFUSED_AFTER - 1; i++) {
+      vi.advanceTimersByTime(10)
+      FakeSocket.instances.at(-1)!.drop()
+    }
+    t.close()
+    answer(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(onClose).not.toHaveBeenCalledWith(REFUSED_MESSAGE)
   })
 })

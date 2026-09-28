@@ -29,6 +29,13 @@ export interface AiAvailability {
   state?: AiState
   /** Why it is off, for Settings. */
   reason?: string
+  /**
+   * The chat socket's gate would refuse this page (opened by LAN address or over
+   * plain HTTP). The shell hides a mounted panel on this, and on `not_configured`;
+   * `unreachable` and any other `unavailable` may be a passing outage, which the
+   * panel's transport rides out by reconnecting.
+   */
+  chat?: 'refused'
 }
 
 export const AI_STATUS_PATH = '/api/v1/ai/status'
@@ -116,13 +123,14 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
   if (!isStatusBody(body)) return { available: false, state: 'unreachable', reason: NOT_ROUTED }
   if (body.available) return { available: true, state: 'configured' }
   const reason = body.reason ?? body.ai
-  if (body.state === 'unavailable' || (body.state === 'enabled' && body.chat === 'refused')) return { available: false, state: 'unavailable', reason }
+  if (body.state === 'enabled' && body.chat === 'refused') return { available: false, state: 'unavailable', reason, chat: 'refused' }
+  if (body.state === 'unavailable') return { available: false, state: 'unavailable', reason }
   return { available: false, state: 'not_configured', reason }
 }
 
 // One read shared by every caller in the tab (the shell, Settings).
 let current: AiAvailability & { state: AiState } = { available: false, state: 'checking' }
-let inflight: Promise<void> | null = null
+let inflight: Promise<AiAvailability & { state: AiState }> | null = null
 let lastRead = 0
 /** Bumped by `resetAiAvailability`, so a read started before it is dropped. */
 let generation = 0
@@ -133,15 +141,21 @@ function publish(next: AiAvailability & { state: AiState }) {
   for (const listener of listeners) listener()
 }
 
-/** Asks the agent again (Settings' "Check again"; also on focus and on a timer while off). */
-export function recheckAiAvailability(): Promise<void> {
+/**
+ * Asks the agent again (Settings' "Check again"; on focus and on a timer while off;
+ * the chat transport after failed handshakes), and resolves with the answer as
+ * published: what every `useAiAvailability` sees, or the value in force when the
+ * read was dropped by a reset.
+ */
+export function recheckAiAvailability(): Promise<AiAvailability & { state: AiState }> {
   if (inflight) return inflight
   const started = generation
-  const read: Promise<void> = fetchAiAvailability()
+  const read: Promise<AiAvailability & { state: AiState }> = fetchAiAvailability()
     .then((next) => {
-      if (started !== generation) return
+      if (started !== generation) return current
       lastRead = Date.now()
       publish(next)
+      return next
     })
     .finally(() => {
       if (inflight === read) inflight = null

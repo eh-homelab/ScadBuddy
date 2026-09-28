@@ -49,6 +49,7 @@ describe('fetchAiAvailability', () => {
       available: false,
       state: 'unavailable',
       reason: body.reason,
+      chat: 'refused',
     })
   })
 
@@ -102,6 +103,23 @@ describe('fetchAiAvailability', () => {
       })
     expect(await fetchAiAvailability(listening, 50)).toMatchObject({ state: 'unreachable' })
     expect(aborted).toBe(true)
+  })
+})
+
+describe('recheckAiAvailability', () => {
+  it('resolves with the answer it published, so the chat transport can act on it', async () => {
+    server.use(
+      http.get(AI_STATUS_PATH, () =>
+        HttpResponse.json({ available: false, state: 'enabled', ai: 'enabled', chat: 'refused', reason: 'not here' }),
+      ),
+    )
+    const { result } = renderHook(() => useAiAvailability())
+    let answer: Awaited<ReturnType<typeof recheckAiAvailability>> | undefined
+    await act(async () => {
+      answer = await recheckAiAvailability()
+    })
+    expect(answer).toEqual({ available: false, state: 'unavailable', reason: 'not here', chat: 'refused' })
+    expect(result.current).toEqual(answer)
   })
 })
 
