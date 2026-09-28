@@ -1,0 +1,390 @@
+"""Issue #316 — one library copy per (folder, target); a project's file is never moved
+or deleted.
+
+Driven through the real app, like the rest of the print tests. The folder a send lands
+in is the upload's ``folder_id`` query parameter, so that is what these read.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import httpx
+import respx
+from fastapi.testclient import TestClient
+
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.render.plate import DEFAULT_PLATE
+from tests.api.test_print import (
+    _two_pipelines,
+    pipelines_route,
+    presets_routes,
+    printers_route,
+    run_body,
+)
+from tests.api.test_print_filaments import inventory_routes, queue_route, slice_routes
+from tests.api.test_send import BASE, configure, make_output
+
+API = f"{BASE}/api/v1"
+INBOX = 2
+#: project id -> the id of its library folder.
+PROJECT_FOLDERS = {7: 9, 8: 10}
+
+
+def uploads(*ids: int) -> respx.Route:
+    """``POST /library/files`` answering with each id in turn, and each one readable."""
+    for file_id in ids:
+        exists(file_id)
+    return respx.post(f"{API}/library/files").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": file_id, "filename": f"demo-{file_id}.3mf"})
+            for file_id in ids
+        ]
+    )
+
+
+def exists(file_id: int, folder_id: int | None = INBOX) -> respx.Route:
+    return respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": file_id, "filename": f"demo-{file_id}.3mf", "folder_id": folder_id},
+        )
+    )
+
+
+def deletes() -> respx.Route:
+    return respx.route(method="DELETE", path__regex=r"/api/v1/library/files/\d+$").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+
+def project_routes() -> None:
+    for project_id, folder_id in PROJECT_FOLDERS.items():
+        respx.get(f"{API}/library/folders/by-project/{project_id}").mock(
+            return_value=httpx.Response(
+                200, json=[{"id": folder_id, "name": f"p{project_id}", "project_id": project_id}]
+            )
+        )
+
+
+def run_routes() -> None:
+    for pipeline_id in (1, 2):
+        respx.post(f"{API}/slicer-pipelines/{pipeline_id}/run").mock(
+            return_value=httpx.Response(202, json=run_body())
+        )
+
+
+def never_moved() -> respx.Route:
+    return respx.post(f"{API}/library/files/move").mock(return_value=httpx.Response(200, json={}))
+
+
+def run(client: TestClient, output_id: str, **body: Any) -> dict[str, Any]:
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body)
+    assert response.status_code == 200, response.text
+    result: dict[str, Any] = response.json()
+    return result
+
+
+def copies(client: TestClient, output_id: str) -> list[tuple[int, int | None]]:
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    return [(row["id"], row["folder_id"]) for row in rows]
+
+
+def folders_uploaded_to(route: respx.Route) -> list[str | None]:
+    return [call.request.url.params.get("folder_id") for call in route.calls]
+
+
+def set_up(client: TestClient, model: str, **settings: Any) -> str:
+    configure(client, library_folder_id=INBOX, **settings)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    project_routes()
+    run_routes()
+    return make_output(client, model)
+
+
+@respx.mock
+def test_a_send_to_project_a_then_b_leaves_a_file_in_each(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    delete = deletes()
+    moved = never_moved()
+
+    assert run(client, output_id, pipeline_id=1, project_id=7)["library_file_id"] == 41
+    body = run(client, output_id, pipeline_id=1, project_id=8)
+
+    assert (body["library_file_id"], body["folder_id"]) == (42, 10)
+    assert folders_uploaded_to(upload) == ["9", "10"]
+    assert not moved.called, "project A's file was moved into project B"
+    assert not delete.called, "project A's file was deleted"
+    assert copies(client, output_id) == [(41, 9), (42, 10)]
+
+    # Back to A: its own copy is still there, and reused.
+    assert run(client, output_id, pipeline_id=1, project_id=7)["library_file_id"] == 41
+    assert upload.call_count == 2
+
+
+@respx.mock
+def test_a_printer_change_keeps_the_old_file_in_a_project_folder(
+    client: TestClient, model: str
+) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    delete = deletes()
+
+    run(client, output_id, pipeline_id=1, project_id=7)
+    # Pipeline 2 aims at a P1S: a different plate, so a different target.
+    body = run(client, output_id, pipeline_id=2, project_id=7)
+
+    assert body["library_file_id"] == 42
+    assert folders_uploaded_to(upload) == ["9", "9"]
+    assert not delete.called, "the file the project printed from was deleted"
+    assert copies(client, output_id) == [(41, 9), (42, 9)]
+
+
+@respx.mock
+def test_the_inbox_copy_is_replaced_on_a_printer_change(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    delete = deletes()
+
+    run(client, output_id, pipeline_id=1)
+    run(client, output_id, pipeline_id=2)
+
+    assert folders_uploaded_to(upload) == ["2", "2"]
+    assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
+    assert copies(client, output_id) == [(42, INBOX)]
+
+
+@respx.mock
+def test_a_superseded_inbox_copy_that_cannot_be_deleted_does_not_fail_the_send(
+    client: TestClient, model: str
+) -> None:
+    """The new copy is already uploaded by then, so the print goes ahead; the old one
+    stays recorded, so nothing is left in Bambuddy that ScadBuddy has lost track of."""
+    output_id = set_up(client, model)
+    uploads(41, 42)
+    respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    run(client, output_id, pipeline_id=1)
+    assert run(client, output_id, pipeline_id=2)["library_file_id"] == 42
+
+    assert copies(client, output_id) == [(41, INBOX), (42, INBOX)]
+
+
+@respx.mock
+def test_a_copy_deleted_in_bambuddy_is_dropped_and_uploaded_again(
+    client: TestClient, model: str
+) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    delete = deletes()
+    run(client, output_id, pipeline_id=1, project_id=7)
+
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(404, json={"detail": "Not found"})
+    )
+    body = run(client, output_id, pipeline_id=1, project_id=7)
+
+    assert body["library_file_id"] == 42
+    assert upload.call_count == 2
+    assert not delete.called
+    assert copies(client, output_id) == [(42, 9)]
+
+
+@respx.mock
+def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: str) -> None:
+    # The picker's eligibility check lays the file out for the default pipeline, so it
+    # is the same target as a run of pipeline 1 only while that is the default.
+    output_id = set_up(client, model, pipeline_id=1)
+    upload = uploads(41)
+
+    run(client, output_id, pipeline_id=1)
+    run(client, output_id, pipeline_id=1)
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={"pipeline_ids": []})
+
+    assert upload.call_count == 1
+
+
+# --- records written before #316 -----------------------------------------------------
+
+
+def write_legacy(paths: DataPaths, model: str, output_id: str, **legacy: Any) -> None:
+    path = paths.output_dir(model, output_id) / "meta.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta.pop("library_files", None)
+    meta.update(legacy)
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_a_single_slot_record_loads_as_one_copy_in_an_unknown_folder() -> None:
+    meta = OutputMeta.model_validate(
+        {
+            "id": "a" * 32,
+            "slug": "demo",
+            "job_id": "b" * 32,
+            "created_at": "2026-09-22T10:00:00Z",
+            "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
+            "library_file_id": 41,
+            "library_file_plate": "H2C@0.4",
+        }
+    )
+    [copy] = meta.library_files
+    assert (copy.id, copy.folder_known, copy.target_key) == (41, False, "H2C@0.4")
+    assert "library_file_id" not in meta.model_dump()
+
+
+@respx.mock
+def test_a_legacy_output_sent_to_a_project_is_not_moved(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = set_up(client, model)
+    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate="H2C")
+    read = exists(41, folder_id=INBOX)
+    upload = uploads(42)
+    delete = deletes()
+    moved = never_moved()
+
+    body = run(client, output_id, pipeline_id=1, project_id=7)
+
+    assert body["library_file_id"] == 42
+    assert folders_uploaded_to(upload) == ["9"]
+    assert not moved.called
+    assert not delete.called
+    # Its folder was read once and recorded; from here the normal rules apply.
+    assert copies(client, output_id) == [(41, INBOX), (42, 9)]
+    run(client, output_id, pipeline_id=1, project_id=7)
+    assert read.call_count == 1
+
+
+@respx.mock
+def test_a_legacy_output_still_resolves_to_its_file(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = set_up(client, model)
+    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate=DEFAULT_PLATE.key)
+    exists(41, folder_id=INBOX)
+    upload = uploads()
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.json()["library_file_id"] == 41
+    assert not upload.called
+
+
+# --- sliced files --------------------------------------------------------------------
+
+
+def sliced(client: TestClient, output_id: str) -> list[list[dict[str, Any]]]:
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    return [row["sliced"] for row in rows]
+
+
+@respx.mock
+def test_the_slice_and_queue_route_records_its_sliced_file(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    uploads(41)
+    presets_routes()
+    inventory_routes()
+    slice_routes(sliced_id=77)
+    queue_route()
+
+    run(
+        client,
+        output_id,
+        pipeline_id=1,
+        printer_id=1,
+        filament_plan={"slots": [{"slot_id": 1, "spool_id": 9}]},
+    )
+
+    [[row]] = sliced(client, output_id)
+    assert row["id"] == 77
+    assert row["preset_key"]
+
+
+@respx.mock
+def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
+    client: TestClient, model: str
+) -> None:
+    output_id = set_up(client, model)
+    uploads(41)
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(202, json={**run_body(), "sliced_library_file_id": None})
+    )
+    run(client, output_id, pipeline_id=1)
+    assert sliced(client, output_id) == [[]]
+
+    respx.get(f"{API}/pipeline-runs/12").mock(return_value=httpx.Response(200, json=run_body()))
+    client.get(f"/api/v1/print/outputs/{output_id}/progress")
+    client.get(f"/api/v1/print/outputs/{output_id}/progress")
+
+    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
+
+
+# --- deleting an output --------------------------------------------------------------
+
+
+@respx.mock
+def test_deleting_an_output_can_take_its_inbox_copies_and_never_a_projects(
+    client: TestClient, model: str
+) -> None:
+    output_id = set_up(client, model)
+    uploads(41, 42)
+    delete = deletes()
+    run(client, output_id, pipeline_id=1)
+    run(client, output_id, pipeline_id=1, project_id=7)
+
+    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+
+    assert response.status_code == 204
+    assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
+    assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+
+
+@respx.mock
+def test_deleting_an_output_leaves_bambuddy_alone_unless_asked(
+    client: TestClient, model: str
+) -> None:
+    output_id = set_up(client, model)
+    uploads(41)
+    delete = deletes()
+    run(client, output_id, pipeline_id=1)
+
+    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert not delete.called
+
+
+@respx.mock
+def test_an_inbox_copy_that_cannot_be_deleted_keeps_the_output(
+    client: TestClient, model: str
+) -> None:
+    """Deleting the record first would lose the only pointer to a file still in the
+    inbox, so a failed delete stops before the output goes."""
+    output_id = set_up(client, model)
+    uploads(41)
+    run(client, output_id, pipeline_id=1)
+    respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    response = client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true")
+
+    assert response.status_code >= 500
+    assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
+
+
+@respx.mock
+def test_deleting_resolves_a_legacy_copys_folder_first(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = set_up(client, model)
+    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate="H2C")
+    exists(41, folder_id=9)
+    delete = deletes()
+
+    assert client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true").is_success
+    assert not delete.called, "a legacy copy that sits in a project folder was deleted"

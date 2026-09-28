@@ -56,6 +56,12 @@ def configure(client: TestClient, **extra: Any) -> None:
 
 
 def upload_route(file_id: int = 41) -> respx.Route:
+    """The upload, and the read that finds the copy still there when it is reused (#316)."""
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": file_id, "filename": "demo-elan.3mf", "folder_id": 2}
+        )
+    )
     return respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(
             200,
@@ -145,39 +151,29 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     meta = json.loads(
         (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
     )
-    assert meta["library_file_id"] == 41
+    assert [(row["id"], row["folder_id"]) for row in meta["library_files"]] == [(41, 2)]
 
     # And the detail route reports it, so the UI can deep-link without re-sending.
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    assert [row["id"] for row in rows] == [41]
 
 
 @respx.mock
-def test_a_re_send_deletes_the_previous_file_rather_than_duplicating_it(
+def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     client: TestClient, model: str
 ) -> None:
+    """Same folder, same printer: the copy already there is this exact 3MF (#316)."""
     configure(client)
     output_id = make_output(client, model)
     upload = upload_route()
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
-
     delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
-    upload.mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "id": 42,
-                "filename": "demo-elan.3mf",
-                "file_type": "3mf",
-                "file_size": 9,
-                "thumbnail_path": None,
-            },
-        )
-    )
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
     body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
 
-    assert delete.called
-    assert body["library_file_id"] == 42
+    assert body["library_file_id"] == 41
+    assert upload.call_count == 1
+    assert not delete.called
 
 
 @respx.mock
@@ -186,16 +182,19 @@ def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
 ) -> None:
     configure(client)
     output_id = make_output(client, model)
-    upload_route()
+    upload = upload_route()
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
-    respx.delete(f"{API}/library/files/41").mock(
+    respx.get(f"{API}/library/files/41").mock(
         return_value=httpx.Response(404, json={"detail": "Not found"})
     )
+    upload_route(42)
 
     response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
     assert response.status_code == 200
+    assert response.json()["library_file_id"] == 42
+    assert upload.call_count == 2
 
 
 def test_sending_without_a_url_configured_is_a_conflict(client: TestClient, model: str) -> None:
@@ -617,10 +616,11 @@ def _uploaded_3mf(route: respx.Route) -> bytes:
 def test_a_refused_re_send_leaves_the_previous_file_in_place(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """The fit check runs before the delete, so a refusal costs nothing.
+    """The fit check runs before anything touches Bambuddy, so a refusal costs nothing.
 
-    Deleting first would strand ``library_file_id`` pointing at a file that is no
-    longer in Bambuddy: the button would report 409 and the deep link would 404.
+    Deleting first would leave the recorded copy pointing at a file that is no longer
+    in Bambuddy: the button would report 409 and the deep link would 404. (A delete
+    that fails *after* the new upload is covered in ``test_library_copies.py``.)
     """
     respx.get(f"{API}/slicer-pipelines/").mock(
         return_value=httpx.Response(200, json={"pipelines": []})
@@ -664,36 +664,8 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
 
     assert response.status_code == 409
     assert not delete.called, "the old file was removed before the refusal"
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
-
-
-@respx.mock
-def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, model: str) -> None:
-    """A delete that is not a 404 leaves the previous send intact and retryable.
-
-    Clearing the id first would strand the file in Bambuddy with nothing pointing
-    at it, and every retry would upload another copy — the duplication this delete
-    exists to prevent.
-    """
-    configure(client)
-    output_id = make_output(client, model)
-    upload = upload_route()
-    assert (
-        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
-            "library_file_id"
-        ]
-        == 41
-    )
-
-    respx.delete(f"{API}/library/files/41").mock(
-        return_value=httpx.Response(500, json={"detail": "boom"})
-    )
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
-
-    assert response.status_code >= 500
-    assert upload.call_count == 1, "a second copy was uploaded despite the failed delete"
-    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+    rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
+    assert [row["id"] for row in rows] == [41]
 
 
 # --- #80 the Edit in ScadBuddy back-link ---------------------------------------------

@@ -40,6 +40,8 @@ class QueueOutcome(BaseModel):
 
     slice_job_id: int
     sliced_library_file_id: int
+    #: :attr:`SliceRequest.preset_key` of the slice, recorded with the sliced file (#316).
+    preset_key: str | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
     printer_id: int | None = None
     target_model: str | None = None
@@ -95,17 +97,15 @@ async def slice_and_queue(
             "cannot be sliced with the chosen filaments",
         )
 
-    accepted = await client.slice(
-        library_file_id,
-        SliceRequest(
-            printer_preset=pipeline.printer_preset,
-            process_preset=pipeline.process_preset,
-            filament_presets=filament_presets,
-            filament_colours=filament_colours,
-            bed_type=bed_type or pipeline.bed_type,
-            plate=plate_id,
-        ),
+    request = SliceRequest(
+        printer_preset=pipeline.printer_preset,
+        process_preset=pipeline.process_preset,
+        filament_presets=filament_presets,
+        filament_colours=filament_colours,
+        bed_type=bed_type or pipeline.bed_type,
+        plate=plate_id,
     )
+    accepted = await client.slice(library_file_id, request)
     job = await client.await_slice(accepted.job_id)
     failure = job.failure
     if failure is not None:
@@ -147,6 +147,7 @@ async def slice_and_queue(
     return QueueOutcome(
         slice_job_id=accepted.job_id,
         sliced_library_file_id=sliced,
+        preset_key=request.preset_key,
         queue_item_ids=[item.id],
         printer_id=printer,
         target_model=target_model,

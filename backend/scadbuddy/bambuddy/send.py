@@ -31,7 +31,14 @@ from scadbuddy.bambuddy.models import (
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
+from scadbuddy.library.outputs import (
+    MODEL_NAME,
+    LibraryCopy,
+    OutputMeta,
+    OutputStore,
+    SlicedCopy,
+    download_filename,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
@@ -224,6 +231,45 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
 
 
+def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:
+    """Whether ``folder_id`` is the inbox: the folder from Settings, where a send with no
+    project lands (``None``, the library root, when Settings names none).
+
+    The only folder ScadBuddy ever deletes from (#316). Every other folder a copy is in
+    is a project's, and the file there is the user's record of what that project
+    printed.
+    """
+    return folder_id == settings.library_folder_id
+
+
+async def _resolve_folders(
+    client: BambuddyClient, store: OutputStore, meta: OutputMeta
+) -> tuple[OutputMeta, dict[int, str]]:
+    """Read and record the folder of every copy migrated from a pre-#316 record.
+
+    Such a record never said where its file was, and no decision about a copy — reuse
+    it, delete it — can be made without that. Read once: the folder is recorded, so the
+    next send knows it. A copy that 404s is gone from Bambuddy and is dropped.
+
+    Returns the file name of each copy this call has just seen alive, so the caller need
+    not read it again to learn it exists.
+    """
+    seen: dict[int, str] = {}
+    for copy in [row for row in meta.library_files if not row.folder_known]:
+        try:
+            found = await client.library_file(copy.id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            meta = store.forget_library_file(meta.id, copy.id)
+            continue
+        meta = store.record_library_file(
+            meta.id, copy.model_copy(update={"folder_id": found.folder_id, "folder_known": True})
+        )
+        seen[copy.id] = found.filename
+    return meta, seen
+
+
 async def upload_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -233,53 +279,106 @@ async def upload_output(
     target: Target | None = None,
     folder_id: int | None = None,
 ) -> tuple[OutputMeta, str]:
-    """Upload ``model.3mf``, replacing a file a previous send left behind.
+    """Upload a new copy of ``model.3mf`` into ``folder_id`` (the inbox when ``None``).
 
-    ``folder_id`` overrides the folder from Settings, which is how a send to a project
-    lands in *that project's* folder (#79) — a folder carries ``project_id``, so putting
-    the file there is what makes Bambuddy's project page list it.
+    A folder carries ``project_id``, so the folder is what files the copy under a
+    project (#79) and puts it on Bambuddy's project page.
 
-    Bambuddy keeps both copies if you simply upload again, so a re-send deletes the
-    recorded id first. A delete that 404s is not fatal — someone removing the file in
-    Bambuddy must not wedge the button.
+    Only in the inbox does the new copy *supersede* anything: every other copy already
+    in the inbox is deleted, so the inbox holds one copy per output rather than one per
+    printer it was ever aimed at. A copy in a project's folder is never deleted, even
+    when this upload is for another printer — that project printed from it (#316).
 
-    The order matters: the plate fit is decided *before* anything is deleted, so a
-    model that cannot be laid out refuses with the previous send still intact rather
-    than taking the old file with it. The recorded id is cleared only once the delete
-    has actually come back — committed or 404 — so a failure between delete and upload
-    cannot leave ``library_file_id`` pointing at a file that is gone, and a delete that
-    *fails* leaves the id in place to be retried rather than orphaning the file.
+    The order matters. The plate fit is decided before anything touches Bambuddy, so a
+    model that cannot be laid out refuses with every copy intact. The upload comes
+    before the deletes, so there is never a moment with no copy at all. A delete that
+    404s was done for us; one that fails otherwise is logged and the copy *stays
+    recorded* — the send itself succeeded, and forgetting the id would strand the file
+    in Bambuddy with nothing pointing at it. It is tried again the next time an upload
+    supersedes it.
     """
     target = target if target is not None else await target_for(client, settings, meta.slug)
     payload = _laid_out_for(_read_3mf(store, meta), target)
-    filename = download_filename(meta)
+    folder = folder_id if folder_id is not None else settings.library_folder_id
 
-    if meta.library_file_id is not None:
-        library_file_id = meta.library_file_id
+    uploaded = await client.upload_library_file(download_filename(meta), payload, folder_id=folder)
+    meta = store.record_library_file(
+        meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
+    )
+    if is_inbox(folder, settings):
+        for copy in meta.library_files:
+            if copy.id == uploaded.id or not copy.folder_known or copy.folder_id != folder:
+                continue
+            meta = await _delete_copy(client, store, meta, copy.id, strict=False)
+    return meta, uploaded.filename
+
+
+async def _delete_copy(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    library_file_id: int,
+    *,
+    strict: bool,
+) -> OutputMeta:
+    """Delete one copy and forget it once the delete has come back (committed or 404).
+
+    ``strict`` raises a failed delete; otherwise it is logged and the copy stays
+    recorded, to be retried. Forgetting it first is never right: a delete that failed
+    would leave the file in Bambuddy with nothing pointing at it.
+    """
+    try:
+        await client.delete_library_file(library_file_id)
+    except ApiError as error:
+        if error.status != status.HTTP_404_NOT_FOUND:
+            if strict:
+                raise
+            logger.warning(
+                "could not delete a superseded inbox copy; it stays recorded for the next try",
+                extra={"library_file_id": library_file_id, "status": error.status},
+            )
+            return meta
+        logger.info("the library copy was already gone", extra={"library_file_id": library_file_id})
+    return store.forget_library_file(meta.id, library_file_id)
+
+
+async def _ensure_copy(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    *,
+    target: Target | None,
+    folder_id: int | None,
+) -> tuple[OutputMeta, int, str]:
+    """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under."""
+    target = target if target is not None else await target_for(client, settings, meta.slug)
+    folder = folder_id if folder_id is not None else settings.library_folder_id
+    meta, seen = await _resolve_folders(client, store, meta)
+    for copy in list(meta.library_files):
+        if copy.folder_id != folder or copy.target_key != target.key:
+            continue
+        if copy.id in seen:
+            return meta, copy.id, seen[copy.id]
+        # Someone may have deleted it in Bambuddy since. Reusing a dead id would fail
+        # the slice or the eligibility check with an upstream 404, so it is read first
+        # and a 404 is dropped and uploaded again rather than failing the send.
         try:
-            await client.delete_library_file(library_file_id)
+            found = await client.library_file(copy.id)
         except ApiError as error:
             if error.status != status.HTTP_404_NOT_FOUND:
-                # The file is still there and still ours. Leaving the recorded id
-                # alone is what lets the next send delete it; clearing it first
-                # would strand the file in Bambuddy with nothing pointing at it,
-                # and every retry would add another copy.
                 raise
             logger.info(
-                "the previously sent library file was already gone",
-                extra={"library_file_id": library_file_id},
+                "a recorded library copy was deleted in Bambuddy; uploading it again",
+                extra={"library_file_id": copy.id},
             )
-        meta = store.forget_library_file(meta.id)
-
-    uploaded = await client.upload_library_file(
-        filename,
-        payload,
-        folder_id=folder_id if folder_id is not None else settings.library_folder_id,
+            meta = store.forget_library_file(meta.id, copy.id)
+            continue
+        return meta, copy.id, found.filename
+    meta, filename = await upload_output(
+        client, store, meta, settings, target=target, folder_id=folder_id
     )
-    recorded = store.record_send(
-        meta.id, library_file_id=uploaded.id, library_file_plate=target.key
-    )
-    return recorded, uploaded.filename
+    return meta, meta.library_files[-1].id, filename
 
 
 async def ensure_uploaded(
@@ -291,32 +390,57 @@ async def ensure_uploaded(
     target: Target | None = None,
     folder_id: int | None = None,
 ) -> tuple[OutputMeta, int]:
-    """The library file id to slice, judge or print, uploading the 3MF if there is none.
+    """The library file id to slice, judge or print, uploading the 3MF where needed.
 
-    An output is immutable once generated — changing a parameter produces a new one — so
-    a recorded id still describes this exact 3MF and is reused rather than re-uploaded.
-    The print picker (#86) leans on that: opening it checks eligibility, which needs a
-    file in Bambuddy, and must not re-upload on every open.
+    ``folder_id`` is the folder the copy has to be in — a project's (#79) — and
+    ``None`` means the inbox, the folder from Settings.
 
-    The *placement* is not immutable, though: it is chosen from the printer this send
-    is aimed at (#105), and the printer can change between sends. So the id is only
-    reused while it was laid out for the plate now in play — and states the nozzle now
-    in play (#126); otherwise this re-uploads,
-    or the second send would hand Bambuddy a file centred on the previous printer's bed
-    with the prime tower somewhere the new one's extruders cannot reach.
+    An output is immutable once generated — changing a parameter produces a new one —
+    so a recorded copy still describes this exact 3MF. What is *not* immutable is where
+    it sits and what it was laid out for, so a copy is reused only where both still
+    hold: the same folder, and the same :attr:`Target.key` (the plate, #105, and the
+    nozzle, #126). The print picker (#86) leans on the reuse: opening it checks
+    eligibility, which needs a file in Bambuddy, and must not upload on every open.
+
+    Anything else uploads a **new copy** there (#316). Never a move: a file sent to
+    project A is A's record of what it printed, and A's slices and archives stay in A,
+    so moving the file to project B would leave A pointing at nothing. And never a
+    delete outside the inbox; see :func:`upload_output`.
     """
-    target = target if target is not None else await target_for(client, settings, meta.slug)
-    if meta.library_file_id is not None and meta.library_file_plate == target.key:
-        if folder_id is not None:
-            # The file was uploaded before this project was chosen, so it is sitting in
-            # whatever folder that send used. Bambuddy has a move route, and a caller
-            # that reports `folder_id` must not report one the file is not in.
-            await client.move_library_files([meta.library_file_id], folder_id)
-        return meta, meta.library_file_id
-    meta, _ = await upload_output(client, store, meta, settings, target=target, folder_id=folder_id)
-    if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
-    return meta, meta.library_file_id
+    meta, library_file_id, _ = await _ensure_copy(
+        client, store, meta, settings, target=target, folder_id=folder_id
+    )
+    return meta, library_file_id
+
+
+def record_sliced(
+    store: OutputStore, output_id: str, library_file_id: int, sliced: SlicedCopy
+) -> OutputMeta:
+    """Record a slice Bambuddy made of the copy ``library_file_id`` (#316).
+
+    Bambuddy writes a slice into its source's folder, so it is recorded against that
+    copy. Idempotent, so a progress poll may call it on every read.
+    """
+    return store.record_sliced(output_id, library_file_id, sliced)
+
+
+async def delete_inbox_copies(
+    client: BambuddyClient, store: OutputStore, meta: OutputMeta, settings: StoredSettings
+) -> OutputMeta:
+    """Delete the output's copies that sit in the inbox, before the output itself goes.
+
+    A copy in a project's folder is kept: it is that project's record. A pre-#316 copy
+    has its folder read first, so one that sits in a project is not taken for an inbox
+    copy. Any failure but a 404 raises, so the caller keeps the output — and with it the
+    only pointer to a file still in Bambuddy — for a retry.
+
+    Slices are left alone: a queued print may still reference one.
+    """
+    meta, _ = await _resolve_folders(client, store, meta)
+    for copy in list(meta.library_files):
+        if is_inbox(copy.folder_id, settings):
+            meta = await _delete_copy(client, store, meta, copy.id, strict=True)
+    return meta
 
 
 async def attach_edit_link(
@@ -507,6 +631,13 @@ async def _queue_send(
             ),
         )
         store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
+        if run.sliced_library_file_id is not None:
+            record_sliced(
+                store,
+                meta.id,
+                library_file_id,
+                SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
+            )
         return SendResult(
             mode="queue",
             library_file_id=library_file_id,
@@ -554,6 +685,9 @@ async def _queue_send(
             f"Bambuddy slice job {accepted.job_id} completed without a sliced file",
         )
 
+    record_sliced(
+        store, meta.id, library_file_id, SlicedCopy(id=sliced, preset_key=slice_request.preset_key)
+    )
     item = await client.enqueue(
         QueueItemCreate(
             printer_id=printer_id,
@@ -596,10 +730,9 @@ async def send_output(
     settings: StoredSettings,
     request: SendRequest,
 ) -> SendResult:
-    meta, filename = await upload_output(client, store, meta, settings)
-    if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
-    library_file_id = meta.library_file_id
+    meta, library_file_id, filename = await _ensure_copy(
+        client, store, meta, settings, target=None, folder_id=None
+    )
 
     if request.mode == "library":
         return SendResult(

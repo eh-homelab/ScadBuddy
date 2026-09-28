@@ -1692,6 +1692,49 @@
         "title": "JobStatus",
         "type": "object"
       },
+      "LibraryCopy": {
+        "description": "One copy of the output's 3MF in Bambuddy's library (#316).\n\nKeyed by (``folder_id``, ``target_key``). The folder is what files it under a\nproject, and the target is what it was laid out for, so a copy is reusable only\nwhere both still hold. A copy in a project's folder is the user's record of what\nthat project printed and is never moved or deleted by ScadBuddy; only a copy in\nthe inbox (Settings' ``library_folder_id``) is ever replaced.",
+        "properties": {
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "folder_known": {
+            "default": true,
+            "title": "Folder Known",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "sliced": {
+            "items": {
+              "$ref": "#/components/schemas/SlicedCopy"
+            },
+            "title": "Sliced",
+            "type": "array"
+          },
+          "target_key": {
+            "title": "Target Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "folder_id",
+          "target_key"
+        ],
+        "title": "LibraryCopy",
+        "type": "object"
+      },
       "LibraryPinRequest": {
         "properties": {
           "ref": {
@@ -2347,27 +2390,12 @@
             "title": "Job Id",
             "type": "string"
           },
-          "library_file_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Library File Id"
-          },
-          "library_file_plate": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Library File Plate"
+          "library_files": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryCopy"
+            },
+            "title": "Library Files",
+            "type": "array"
           },
           "model_version": {
             "anyOf": [
@@ -5598,6 +5626,31 @@
         "title": "SidebarLink",
         "type": "object"
       },
+      "SlicedCopy": {
+        "description": "A sliced 3MF Bambuddy wrote beside one of this output's library copies (#316).\n\nBambuddy puts a slice in its source's folder, so it belongs to that copy's entry:\na slice made for project A is in A's folder, next to the file it was sliced from.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "preset_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset Key"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SlicedCopy",
+        "type": "object"
+      },
       "SlotChoice": {
         "description": "One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)\nand what it remembers per model (#78).",
         "properties": {
@@ -8813,6 +8866,7 @@
     },
     "/api/v1/outputs/{output_id}": {
       "delete": {
+        "description": "Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's\ninbox folder (#316).\n\nCopies in a project's folder are never deleted: they are that project's record of\nwhat it printed, listed in ``library_files`` so the UI can say they stay. Nor are\nsliced files, which a queued print may still reference. A Bambuddy delete that\nfails stops here, before the record goes \u2014 it is the only pointer to the file.",
         "operationId": "delete_output_api_v1_outputs__output_id__delete",
         "parameters": [
           {
@@ -8823,6 +8877,16 @@
               "pattern": "^[0-9a-f]{32}$",
               "title": "Output Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delete_inbox_copies",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Delete Inbox Copies",
+              "type": "boolean"
             }
           }
         ],
@@ -9114,7 +9178,7 @@
     },
     "/api/v1/outputs/{output_id}/send": {
       "post": {
-        "description": "Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,\nslice and queue it.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send replaces the file Bambuddy already holds rather\nthan adding a second copy.",
+        "description": "Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,\nslice and queue it.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send reuses the copy already in the inbox while it was\nlaid out for the same printer, and replaces it otherwise (#316).",
         "operationId": "send_output_to_bambuddy_api_v1_outputs__output_id__send_post",
         "parameters": [
           {
@@ -9650,7 +9714,7 @@
     },
     "/api/v1/print/outputs/{output_id}/eligibility": {
       "post": {
-        "description": "Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.\n\nBambuddy judges a *library file*, so there is no eligibility answer before an\nupload. The upload happens once per output: an output is immutable, so a recorded\n``library_file_id`` still describes this 3MF.\n\nEvery report comes back as Bambuddy sent it, including ``printer_reports`` \u2014 under\n``target_kind=\"printer_class\"`` that is where the per-printer reasons are, and the\ntop-level ``ok`` means only that *some* printer passes.",
+        "description": "Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.\n\nBambuddy judges a *library file*, so there is no eligibility answer before an\nupload. The upload happens once per folder and target: an output is immutable, so a\nrecorded copy still describes this 3MF (#316).\n\nEvery report comes back as Bambuddy sent it, including ``printer_reports`` \u2014 under\n``target_kind=\"printer_class\"`` that is where the per-printer reasons are, and the\ntop-level ``ok`` means only that *some* printer passes.",
         "operationId": "post_eligibility_api_v1_print_outputs__output_id__eligibility_post",
         "parameters": [
           {

@@ -289,6 +289,9 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: Only on a read (``FileResponse``); the upload's answer does not carry it. Read to
+    #: learn where a copy recorded before #316 lives, since that record never said.
+    folder_id: int | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
@@ -308,6 +311,22 @@ class SliceRequest(BambuddyModel):
     bed_type: str | None = None
     plate: int = 1
     use_embedded_settings: bool = False
+
+    @property
+    def preset_key(self) -> str:
+        """What makes two slices of the same source the same slice (#316).
+
+        The printer, process and filament presets — the preset triple — plus the plate
+        and the plate type: a slice of plate 2, or for another plate type, is a
+        different file even with the same presets. Recorded as
+        :attr:`~scadbuddy.library.outputs.SlicedCopy.preset_key`.
+        """
+        filaments = ",".join(f"{ref.source}:{ref.id}" for ref in self.filament_presets)
+        return (
+            f"{self.printer_preset.source}:{self.printer_preset.id}"
+            f"/{self.process_preset.source}:{self.process_preset.id}"
+            f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
+        )
 
 
 class SliceJobAccepted(BambuddyModel):

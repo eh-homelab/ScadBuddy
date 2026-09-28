@@ -37,7 +37,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["colors"] == ["#FF0000"]
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
-    assert body["library_file_id"] is None
+    assert body["library_files"] == []
     assert body["pipeline_run_id"] is None
     assert body["queue_item_id"] is None
 

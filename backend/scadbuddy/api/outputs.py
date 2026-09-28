@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Response, UploadFile, status
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +23,7 @@ from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_j
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
+from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
@@ -188,8 +189,26 @@ def get_edit_target(
 @router.delete(
     "/outputs/{output_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an output"
 )
-def delete_output(output_id: OutputIdPath, outputs: OutputsDep, events: EventsDep) -> Response:
+async def delete_output(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    events: EventsDep,
+    store: SettingsStoreDep,
+    delete_inbox_copies: Annotated[bool, Query()] = False,
+) -> Response:
+    """Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's
+    inbox folder (#316).
+
+    Copies in a project's folder are never deleted: they are that project's record of
+    what it printed, listed in ``library_files`` so the UI can say they stay. Nor are
+    sliced files, which a queued print may still reference. A Bambuddy delete that
+    fails stops here, before the record goes — it is the only pointer to the file.
+    """
     meta = require_output(outputs, output_id)
+    if delete_inbox_copies and meta.library_files:
+        settings = store.load()
+        async with client_for(settings) as client:
+            await remove_inbox_copies(client, outputs, meta, settings)
     outputs.delete(output_id)
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -349,8 +368,8 @@ async def send_output_to_bambuddy(
     slice and queue it.
 
     The file is read from the PVC and pushed by the server, so the API key never
-    reaches the browser. A re-send replaces the file Bambuddy already holds rather
-    than adding a second copy.
+    reaches the browser. A re-send reuses the copy already in the inbox while it was
+    laid out for the same printer, and replaces it otherwise (#316).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()

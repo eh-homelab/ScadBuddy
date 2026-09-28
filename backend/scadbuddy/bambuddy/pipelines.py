@@ -65,13 +65,14 @@ from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
+    record_sliced,
     request_scope,
     resolve_print_options,
     scope_printer,
     target_for,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend, SlicedCopy
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.plate import bed_types_for, nozzle_diameter_of
@@ -655,8 +656,8 @@ async def run_for_output(
     target = await target_for(client, settings, meta.slug, pipeline_id=pipeline_id)
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
-    # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
-    # there.
+    # the copy is looked up by (folder, target): a project gets a copy of its own, and
+    # one another project printed from is neither moved nor deleted (#316).
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     meta, library_file_id = await ensure_uploaded(
@@ -690,6 +691,14 @@ async def run_for_output(
             print_route="pipeline",
             project_id=project_id,
         )
+        if run.sliced_library_file_id is not None:
+            # Usually null on the 202; the progress read records it once it appears.
+            record_sliced(
+                store,
+                meta.id,
+                library_file_id,
+                SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
+            )
         return PrintRunResult(
             pipeline_id=pipeline_id,
             library_file_id=library_file_id,
@@ -722,7 +731,7 @@ async def run_for_output(
                 project_id=project_id,
                 options=print_options,
             )
-            sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
+            sent = _record_queued(store, meta, library_file_id, plate_id, outcome, project_id, sent)
             outcomes.append(outcome)
         warnings: list[FilamentWarning] = []
         target_model = outcomes[0].target_model
@@ -812,7 +821,7 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
-        sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
+        sent = _record_queued(store, meta, library_file_id, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
         plate_options.append(options)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
@@ -866,6 +875,7 @@ async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pip
 def _record_queued(
     store: OutputStore,
     meta: OutputMeta,
+    library_file_id: int,
     plate_id: int,
     outcome: QueueOutcome,
     project_id: int | None,
@@ -875,8 +885,15 @@ def _record_queued(
 
     Recorded per plate, not after the last one: a later plate failing to slice must not
     leave the plates already on Bambuddy's queue unknown to the output (#83). ``plates``
-    carries every plate of this print, since the single ids hold only the last.
+    carries every plate of this print, since the single ids hold only the last. The
+    plate's sliced file is recorded against the copy it was sliced from (#316).
     """
+    record_sliced(
+        store,
+        meta.id,
+        library_file_id,
+        SlicedCopy(id=outcome.sliced_library_file_id, preset_key=outcome.preset_key),
+    )
     sent = sent + [
         PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
         for item in outcome.queue_item_ids

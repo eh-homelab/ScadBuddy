@@ -214,8 +214,8 @@ async def post_eligibility(
     """Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
 
     Bambuddy judges a *library file*, so there is no eligibility answer before an
-    upload. The upload happens once per output: an output is immutable, so a recorded
-    ``library_file_id`` still describes this 3MF.
+    upload. The upload happens once per folder and target: an output is immutable, so a
+    recorded copy still describes this 3MF (#316).
 
     Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
     ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
@@ -326,7 +326,7 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        progress = await progress_for(client, meta)
+        progress = await progress_for(client, meta, store=outputs)
     observer.observe(meta, progress)
     return progress
 
