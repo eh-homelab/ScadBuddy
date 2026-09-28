@@ -11,9 +11,11 @@ from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -32,7 +34,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -80,6 +82,8 @@ class AppState:
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
+    #: Follows each started print until it settles (#268).
+    print_watcher: PrintWatcher
     metrics: Metrics
     #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
     #: (until #401 makes one required): the routes that persist answer 503.
@@ -225,6 +229,20 @@ def build_state(settings: Settings) -> AppState:
         # Everything that can change whether a model needs a preview, or which one.
         catalogue.on_change = previews.request
         outputs.on_change = previews.request
+    settings_store = SettingsStore(paths.root / SETTINGS_NAME, settings, events=events)
+    print_progress = ProgressObserver(events)
+    print_links = PrintLinkStore(pool)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        # The watcher links archives too (#306), so a print nobody watches is found.
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(
+                client,
+                meta,
+                uploads=uploads if pool is not None else None,
+                links=print_links if print_links.available else None,
+            )
+
     return AppState(
         settings=settings,
         config=config,
@@ -233,9 +251,9 @@ def build_state(settings: Settings) -> AppState:
         catalogue=catalogue,
         outputs=outputs,
         uploads=uploads,
-        print_links=PrintLinkStore(pool),
+        print_links=print_links,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
+        settings_store=settings_store,
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
@@ -248,7 +266,15 @@ def build_state(settings: Settings) -> AppState:
         metrics=metrics,
         decisions=decisions,
         events=events,
-        print_progress=ProgressObserver(events),
+        print_progress=print_progress,
+        print_watcher=PrintWatcher(
+            outputs=outputs,
+            observer=print_progress,
+            read=read_progress,
+            events=events,
+            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
+            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
+        ),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -347,6 +373,10 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
+def get_print_watcher(state: StateDep) -> PrintWatcher:
+    return state.print_watcher
+
+
 #: Problem ``type`` for a route that needs the database when none is configured.
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
@@ -393,6 +423,7 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
+PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]

@@ -18,6 +18,7 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PrintLinksDep,
     PrintProgressDep,
+    PrintWatcherDep,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
@@ -122,6 +123,7 @@ async def post_run(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintRunResult:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -135,6 +137,7 @@ async def post_run(
     async with client_for(settings) as client:
         result = await run_for_output(client, outputs, uploads, meta, settings, body)
     observer.started(meta)
+    await watcher.started(meta.id)
     return result
 
 
@@ -216,6 +219,7 @@ async def get_progress(
     links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintProgress | None:
     """Follow whichever of Bambuddy's two routes this output last took (#89).
 
@@ -234,6 +238,11 @@ async def get_progress(
             client, meta, uploads=uploads, links=links if links.available else None
         )
     observer.observe(meta, progress)
+    # Someone is looking at a print that is still moving: make sure it is followed
+    # (#268). The watcher may not be, after a restart without a database, for a print
+    # sent before the watcher existed, or once it gave up on a quiet print.
+    if progress is not None and not progress.settled:
+        watcher.watch(meta.id)
     return progress
 
 
