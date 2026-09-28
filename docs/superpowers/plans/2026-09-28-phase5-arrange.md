@@ -21,7 +21,13 @@
 - `library/outputs.py`: `OutputStore.create(job, *, name, public_url, inputs, index, files_dir)`, `BOM_NAME`, `RECORD_NAME`, `FILES_DIR`, `OutputStore.bom/record/files`; `api/outputs.py`: `CreateOutputRequest.index`, `OutputDetail.bom/record/files`; `api/jobs.py`: `JobOutputSummary`, `JobStatus.outputs`, `_job_status`; `render/inputs.py`: `inputs_key`.
 - Tests: `tests/test_packing_and_outputs.py` `_part`, `_deps`, `_render`, `_record`, `PLATE`; `tests/support/pipelines.py` `FakeWorld`, `run_job`, `a_job`.
 - Phase 1: `TemplatePipeline`, `RenderPiece`, `RenderPreview`, `SHORT`, `RETRY`, `PROJECT_RETRY`, `_openscad_timeout`, `_failure_of` (`workflows/pipelines.py`); `render_worker` (`workflows/client.py`); `RenderService` (`render/submit.py`, `_start`, `reconcile_once`); `JobProjection`, `workflow_id_for`; `tests/support/temporal.py` `temporal_client()`; `tests/test_submit.py` fixture `projection`.
-- Phase 3: `BlobRefs.add/drop_holder/referenced`, `sweep_blobs`, `LocalBlobStore`, `BlobStore.fetch/exists`.
+- Phase 1 (`docs/superpowers/plans/2026-09-28-phase1-render-on-temporal.md`), the blob store this plan's parts live in: `BlobRefs(pool)` with `add(key, holder_kind, holder_id)`, `drop_holder(holder_kind, holder_id)`, `referenced()` (`store/refs.py`); `LocalBlobStore(root)` (`store/local.py`); the `BlobStore` protocol with its sync `dir_for`, `exists`, `remove`, `keys`, `touched_at`, and `sweep_blobs(store, refs, *, grace, now=None)` (`store/__init__.py`).
+- Phase 3 (#426; plan `docs/superpowers/plans/2026-09-28-phase3-blob-store.md`, PR #590). Checked against its implementation at f9223552, it keeps all of phase 1's names above (nothing is renamed; `exists` stays), and it adds:
+  - async `BlobStore.fetch(key) -> bool`, `checkout`, `checkout_fresh`, `publish(key, *, scope)`, `indexed_sha` and `publish_fresh`; `LocalBlobStore` implements them with phase 1's behaviour (`fetch` is `exists`, and the publishes do nothing);
+  - the `ContentStore` (`store/content.py`) that the `bambuddy` backend stores through, with `CachedBlobStore` (`store/cache.py`) as each process's copy, built by `build_store` into `AppState.store` (`store/factory.py`);
+  - `sweep_content(content, refs, *, grace)` (`store/content.py`). It replaces `sweep_blobs` on the `bambuddy` backend, and `main.py`'s `_sweep_blobs_logged` picks one by `state.store.content`. Both skip every key `BlobRefs.referenced()` names, so an output's `hold_parts` (Task 1) keeps its Parts on either backend.
+
+  This plan's tests run on the local backend (`LocalBlobStore` plus `sweep_blobs`), as phase 4's do.
 - Unchanged baseline: `render/plate.py` `plate_for`, `fit_problem`, `PlateGeometry`, `PRIME_TOWER_SIDE`; `render/bambu3mf.py` `write_plates_3mf`, `PlateParts.tower`, `plates_of`; `bambuddy/filaments.py` `FilamentPlan(slots: list[SlotChoice], force_colour_match)`, `SlotChoice(slot_id, spool_id)`; `bambuddy/client.py` `client_for`, `BambuddyClient.printer`.
 
 ## Global Constraints
@@ -95,7 +101,7 @@ Suggested PRs: 1) Tasks 1–3 (manifests and the packer; every Generate keeps wo
 - Test: `backend/tests/test_arrange_outputs.py`, `backend/tests/api/test_output_parts.py`
 
 **Interfaces:**
-- Consumes: phase 4's `OutputRequest`, `PipelineOutput`, `build_output`, `OutputStore.create`, `BomEntry`, `Part`, `Layout`, `LayoutPlate`, `Placed`; test helpers `_deps`, `_render`, `_record` (`tests/test_packing_and_outputs.py`); phase 3's `BlobRefs`, `sweep_blobs`.
+- Consumes: phase 4's `OutputRequest`, `PipelineOutput`, `build_output`, `OutputStore.create`, `BomEntry`, `Part`, `Layout`, `LayoutPlate`, `Placed`; test helpers `_deps`, `_render`, `_record` (`tests/test_packing_and_outputs.py`); phase 1's `BlobRefs` (`store/refs.py`) and `sweep_blobs` (`store/__init__.py`), which phase 3 keeps for the local backend and pairs with `sweep_content` for the `bambuddy` one; both honour `BlobRefs`.
 - Produces:
   ```python
   # render/job_models.py
@@ -1667,17 +1673,20 @@ git commit -m "feat(arrange): the Arrange workflow on a kind='arrange' row, star
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
+from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, Goal, arrange_inputs
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputStore
-from tests.support.arrange import saved_output
+from scadbuddy.workflows.arrange import GOALS
+from tests.support.arrange import finished_job, saved_output
 
 
 async def test_objects_become_pack_items_with_their_provenance(tmp_path: Path) -> None:
@@ -1698,6 +1707,46 @@ async def test_objects_become_pack_items_with_their_provenance(tmp_path: Path) -
     assert inputs.colours == written.result.colors  # the source's filament order by default
     assert inputs.provenance[key].source_output == meta.id
     assert inputs.sources == [meta.id] and inputs.name == "more"
+
+
+async def test_objects_from_two_templates_are_refused(tmp_path: Path) -> None:
+    paths, job, written = await finished_job(tmp_path)
+    store = OutputStore(paths)
+    first = store.create(job, name="a", index=0)
+    # A second template with the same files, so its output is saved as `create` expects.
+    shutil.copytree(paths.model_dir("demo"), paths.model_dir("other"))
+    second = store.create(job.model_copy(update={"slug": "other"}), name="b", index=0)
+    part = written.manifest[0].part
+    body = ArrangeRequest(objects=[
+        ArrangeObject(output_id=first.id, part=part, count=1),
+        ArrangeObject(output_id=second.id, part=part, count=1),
+    ])
+    with pytest.raises(ApiError) as raised:
+        arrange_inputs(store, body, plate_model=None)
+    assert raised.value.status == 422
+    assert "more than one template (demo, other)" in raised.value.detail
+
+
+async def test_objects_from_two_outputs_of_one_template_are_arranged_together(
+    tmp_path: Path,
+) -> None:
+    paths, job, written = await finished_job(tmp_path)
+    store = OutputStore(paths)
+    first = store.create(job, name="a", index=0)
+    second = store.create(job, name="b", index=0)
+    part = written.manifest[0].part
+    body = ArrangeRequest(objects=[
+        ArrangeObject(output_id=first.id, part=part, count=1),
+        ArrangeObject(output_id=second.id, part=part, count=2),
+    ])
+    slug, inputs = arrange_inputs(store, body, plate_model=None)
+    assert slug == "demo" and [i.count for i in inputs.items] == [1, 2]
+    assert inputs.sources == [first.id, second.id]
+
+
+def test_the_routes_goals_are_the_packers() -> None:
+    """The import-time check's twin: `Goal` and `GOALS` are one list."""
+    assert get_args(Goal) == GOALS
 
 
 async def test_a_part_not_in_the_output_is_refused(tmp_path: Path) -> None:
@@ -1832,7 +1881,9 @@ from scadbuddy.workflows.models import ArrangeInputs, PackItem, SlotPlan
 from scadbuddy.workflows.pipeline_activities import plate_size
 
 Goal = Literal["fewest_plates", "fewest_swaps", "by_colour", "keep_together"]
-assert GOALS == get_args(Goal)
+# Not `assert`: `python -O` strips asserts, and this must hold in every process.
+if get_args(Goal) != GOALS:
+    raise RuntimeError(f"the route's goals {get_args(Goal)} are not the packer's {GOALS}")
 #: The most copies one arrange places, summed over its objects.
 MAX_ARRANGE_COPIES = 2000
 
@@ -1883,7 +1934,16 @@ def arrange_inputs(
     slug: str | None = None
     for obj in body.objects:
         meta = require_output(outputs, obj.output_id)
-        slug = slug or meta.slug
+        if slug is None:
+            slug = meta.slug
+        elif meta.slug != slug:
+            # The arranged output is saved under one template (`POST /models/{slug}/outputs`),
+            # so objects from two templates would silently file under the first one's.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"objects come from more than one template ({slug}, {meta.slug});"
+                " arrange the objects of one template at a time",
+            )
         if obj.output_id not in manifests:
             manifest = outputs.manifest(obj.output_id)
             if not manifest:
@@ -2838,7 +2898,7 @@ git commit -m "feat(frontend): Arrange dialog for several outputs, and re-arrang
 5. **Where the output's Parts live.** Phase 4 refs Parts only by their job, which the TTL prunes. §7's "no re-render" needs them later, so a saved output holds them (`OUTPUT_HOLDER`, Review Focus 3).
 6. **Outputs saved before this phase** have no manifest. They cannot be arranged without a re-render; the API says so (409), and the dialog lists them.
 7. **Foreign objects (#313).** §7 names the limit ("Arrange can place them but not split them by colour"). Placing a Bambuddy library file needs its meshes read from a 3MF ScadBuddy did not write; that is #313's change and is not in this plan.
-8. **`POST /outputs/arrange` response.** §10 says "a `render_jobs` row … polled with `GET /jobs/{id}`". The route answers 202 with that row's `JobStatus`; saving the result is the ordinary `POST /models/{slug}/outputs {job_id}`, so an arranged output is an output like any other. Its slug is the first object's output's.
+8. **`POST /outputs/arrange` response.** §10 says "a `render_jobs` row … polled with `GET /jobs/{id}`". The route answers 202 with that row's `JobStatus`; saving the result is the ordinary `POST /models/{slug}/outputs {job_id}`, so an arranged output is an output like any other. Its slug is the one template all its objects come from: §7's "objects from one or more outputs" holds within a template, and a request mixing templates is a 422 (Task 5), since the saved output is filed under one slug.
 9. **The shelf packer.** Phase 4's `shelf_pack` is deleted; its two coordinate-pinning tests go with it (Task 2 Step 5).
 
 ## Self-review notes
@@ -2854,7 +2914,7 @@ git commit -m "feat(frontend): Arrange dialog for several outputs, and re-arrang
   - §10 `manifest` on `GET /outputs/{id}`, `POST /outputs/arrange` → Tasks 1 and 5.
   - §12 #314 → Tasks 5 and 7; #81 (plate follows printer) → Task 5 (`printer_id` → `plate_for`); #83 → Task 7 (the new output's plates in the Print dialog); #313 → deferred.
 - **Placeholder scan.** No TBD or TODO. Steps that edit phase 1/4 code this plan cannot quote verbatim (`OutputStore.directory`'s behaviour on an unknown id, phase 3/4's final argument list of `outputs.create` in the create route, `FakeWorld`'s worker set-up, the `NOT_A_TOOL` entry form) name the exact site and show the code to write there. `Dialog`'s props, the `filament_colour` key, the `default_plate` setting, `Scope.READ_STATUS` on `client.printer` and `plate_for("H2C").key` were checked against the baseline and are no longer hedged.
-- **Type consistency.** `ManifestObject` is defined once (`render/job_models.py`) and used by `OutputRequest.provenance`, `ArrangeInputs.provenance`, `OutputStore.manifest`, `OutputDetail.manifest`, `part_of`. `SlotPlan.slots: dict[int, int]` is the same in `signature_of`, `PackRequest`, `ArrangeInputs`, `SlotPlan.of`. `Placed.rot` is read by `placement_matrix` and written by `arrange` and `explicit_plate`. `OutputRequest.colours` (Task 3) is set by `Arrange` (Task 4) from `ArrangeInputs.colours` (Task 5). `RenderService.arrange(slug, inputs)` has the same signature in Tasks 4 and 5. `GOALS` equals the route's `Goal` literal (asserted at import).
+- **Type consistency.** `ManifestObject` is defined once (`render/job_models.py`) and used by `OutputRequest.provenance`, `ArrangeInputs.provenance`, `OutputStore.manifest`, `OutputDetail.manifest`, `part_of`. `SlotPlan.slots: dict[int, int]` is the same in `signature_of`, `PackRequest`, `ArrangeInputs`, `SlotPlan.of`. `Placed.rot` is read by `placement_matrix` and written by `arrange` and `explicit_plate`. `OutputRequest.colours` (Task 3) is set by `Arrange` (Task 4) from `ArrangeInputs.colours` (Task 5). `RenderService.arrange(slug, inputs)` has the same signature in Tasks 4 and 5. `GOALS` equals the route's `Goal` literal (checked at import with a `RuntimeError`, which `python -O` keeps, and pinned by `test_the_routes_goals_are_the_packers`).
 - **Review Focus.** All five pinned: (1) Task 2 `test_every_packed_plate_places_on_the_real_printer`; (2) Task 4 `test_the_reconciler_starts_an_arrange_row_as_arrange`; (3) Task 1 `test_a_saved_output_keeps_its_parts_after_the_job_is_pruned`, with the routes in `tests/api/test_output_parts.py` (create holds, output delete and model delete release, an arrange save holds and records `arranged_from`); (4) Task 3 `test_an_arranged_output_keeps_the_filament_order_it_was_planned_against` and `test_one_object_arranged_alone_still_takes_the_planned_order` (Arrange never takes the `own` shortcut, Task 2 `test_arrange_packs_even_one_object`); (5) Task 5 `test_an_output_without_a_manifest_is_refused_up_front` and `test_a_part_not_in_the_output_is_refused`.
 - **Known risks for the implementer.** The packer calls `fit_problem` once per candidate spot; 200 copies on a busy plate is a few thousand calls of pure arithmetic, well inside the `pack` activity's `SHORT` timeout, but a much larger build list would want the check only on the final candidate. The total copies per request are capped at 2000 (`MAX_ARRANGE_COPIES`, a 422), which keeps that well inside `SHORT`. `test_a_long_part_is_turned_to_share_a_plate` uses the geometry the review traced through this packer (240 x 60 beside 150 x 200: one plate turned, two unturned), so deleting the quarter turn from `_try` fails it.
 
@@ -2907,3 +2967,15 @@ revision-2 Interfaces blocks. Every finding is fixed; none is declined.
   - the `HistoryPage` changes: state, list block, `OutputRow` props, checkbox and Edit swap;
   - the `PrintPicker` changes: target, `rearrange`, fieldset.
 - The hedges the review flagged (the `filament_colour` key, `plate.key`, `Dialog`'s props, `text-danger`) are replaced with the checked facts.
+
+## Revision 2 (merge-gate review of 83979273)
+
+- **The Base section attributes each interface to its phase.** `BlobRefs` (`store/refs.py`), `LocalBlobStore` (`store/local.py`), the `BlobStore` protocol and `sweep_blobs` (`store/__init__.py`) are phase 1's. Phase 3 (#426, plan PR #590, checked against its implementation at f9223552) renames none of them: `exists` stays, so Task 1's `blobs.exists(key)` test holds.
+  - Phase 3 adds the async `fetch`/`publish` family, `ContentStore`, and `CachedBlobStore` behind `build_store`.
+  - Phase 3 also replaces the sweep with `sweep_content` on the `bambuddy` backend. Both sweeps honour `BlobRefs`, so `hold_parts` protects an output's Parts on either backend.
+  - Task 1's Consumes line now says the same.
+- **`POST /outputs/arrange` takes objects of one template only.** `arrange_inputs` answers 422 ("objects come from more than one template (demo, other)…") when a later object's output has another slug. This replaces `slug = slug or meta.slug`, which silently filed a mixed request under the first object's template.
+  - New tests: `test_objects_from_two_templates_are_refused`, and `test_objects_from_two_outputs_of_one_template_are_arranged_together` (§7's "one or more outputs" still holds within a template).
+  - Disagreement 8 states the rule.
+- **No bare `assert` for the goals.** `api/outputs.py` checks `get_args(Goal) != GOALS` at import and raises `RuntimeError`, which survives `python -O`. `test_the_routes_goals_are_the_packers` pins it too.
+
