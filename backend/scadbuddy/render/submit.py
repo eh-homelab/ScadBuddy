@@ -22,7 +22,7 @@ from typing import Any
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
@@ -187,9 +187,11 @@ class RenderService:
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
-        for the slug joins the first run. Past ``timeout`` the run is cancelled, so a
-        preview that timed out stops rendering; the activity's own bound, the margin
-        later, is the backstop should that cancel never arrive."""
+        for the slug joins the first run. Past ``timeout`` this caller stops waiting;
+        the run is shared, so it is not cancelled (another caller may still be waiting
+        on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
+        is ``timeout`` plus the margin. The timeout counts from the start, so it
+        includes any wait for a free worker."""
         assert self.client is not None
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
@@ -200,12 +202,7 @@ class RenderService:
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
         )
-        try:
-            png: bytes = await asyncio.wait_for(handle.result(), timeout)
-        except TimeoutError:
-            with suppress(RPCError):
-                await handle.cancel()
-            raise
+        png: bytes = await asyncio.wait_for(handle.result(), timeout)
         return png
 
     def retry_after(self) -> int:
@@ -247,9 +244,19 @@ class RenderService:
         assert self.client is not None
         try:
             await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel()
-        except RPCError:
-            # Never started (the reconciler had not got to it) or already closed.
-            logger.debug("no workflow to cancel", extra={"job_id": job.id})
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                # Never started (the reconciler had not got to it). A closed one
+                # accepts the cancel without an error.
+                logger.debug("no workflow to cancel", extra={"job_id": job.id})
+                return
+            # The row is cancelled either way; the workflow may run on until its next
+            # `project` finds that. The submit that superseded it still succeeds.
+            logger.warning(
+                "could not cancel a render's workflow",
+                extra={"job_id": job.id, "status": error.status.name},
+            )
+            self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _reconcile_forever(self) -> None:
         while True:
