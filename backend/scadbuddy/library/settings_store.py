@@ -28,7 +28,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
-from scadbuddy.core.config import DEFAULT_MEDIA_UPLOAD_MAX_BYTES
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.pg_store import migrate
@@ -45,12 +44,7 @@ ENV_SEEDED = (
     "bambuddy_api_key",
     "public_url",
     "default_plate",
-    "media_upload_max_bytes",
 )
-#: The env-seeded fields with no ``None``: a clear puts the environment's value back,
-#: and keeps following it.
-NEVER_NONE = frozenset({"media_upload_max_bytes"})
-
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
 
@@ -105,9 +99,6 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
-    #: The largest media upload (#274), in bytes. Never cleared: a clear puts the
-    #: environment's value back.
-    media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # Used by "Slice and queue" when no pipeline is configured.
     printer_preset: PresetRef | None = None
@@ -167,8 +158,6 @@ class SettingsPatch(BaseModel):
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
-    #: ``null`` puts it back to ``SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`` (or 1 GiB).
-    media_upload_max_bytes: int | None = Field(default=None, gt=0)
 
 
 class SettingsStore:
@@ -253,7 +242,7 @@ class SettingsStore:
             for name, value in changes.items():
                 if value is not None:
                     _put(conn, name, value)
-                elif name in ENV_SEEDED and name not in NEVER_NONE:
+                elif name in ENV_SEEDED:
                     # Cleared, which must beat the environment: a JSON null row.
                     _put(conn, name, None)
                 else:

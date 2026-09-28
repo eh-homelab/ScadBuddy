@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
-    # SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES (#274): the initial value for the stored
-    # setting, like the Bambuddy fields below; `PUT /settings` overrides it.
+    # The largest media upload (#274). Environment only: GET /settings reports it
+    # read-only, and nothing stores an override.
     media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes

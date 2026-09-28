@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
-import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.core.config import DEFAULT_MEDIA_UPLOAD_MAX_BYTES
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
@@ -31,7 +29,7 @@ def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
         "bed_type": None,
         "default_plate": None,
         "display_unit": "mm",
-        "media_upload_max_bytes": DEFAULT_MEDIA_UPLOAD_MAX_BYTES,
+        "media_upload_max_bytes": 1024**3,
     }
 
 
@@ -148,30 +146,6 @@ def test_a_field_never_stored_follows_the_environment_it_starts_with(
         assert client.get("/api/v1/settings").json()["public_url"] == "https://scad.example"
 
 
-def test_the_media_upload_limit_is_seeded_edited_and_a_clear_follows_the_environment(
-    settings: Settings,
-) -> None:
-    """#274's limit: ``SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`` seeds it, the UI may change it,
-    and a clear puts the environment's value back (it has no "none") and keeps
-    following it, rather than pinning the value it had at the clear."""
-    seeded = settings.model_copy(update={"media_upload_max_bytes": 5_000})
-    with TestClient(create_app(seeded)) as client:
-        assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 5_000
-        edited = client.put("/api/v1/settings", json={"media_upload_max_bytes": 7_000})
-        assert edited.json()["media_upload_max_bytes"] == 7_000
-        cleared = client.put("/api/v1/settings", json={"media_upload_max_bytes": None})
-        assert cleared.json()["media_upload_max_bytes"] == 5_000
-    assert "media_upload_max_bytes" not in read_stored(settings.database_url)
-    moved = settings.model_copy(update={"media_upload_max_bytes": 9_000})
-    with TestClient(create_app(moved)) as client:
-        assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 9_000
-
-
-@pytest.mark.parametrize("value", [0, -1])
-def test_a_media_upload_limit_below_one_byte_is_refused(client: TestClient, value: int) -> None:
-    assert client.put("/api/v1/settings", json={"media_upload_max_bytes": value}).status_code == 422
-
-
 @respx.mock
 def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
     client.put(
@@ -218,3 +192,11 @@ def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> N
     response = client.post("/api/v1/settings/test")
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
+
+
+def test_the_upload_limit_is_read_only(client: TestClient) -> None:
+    """It comes from SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES alone: a PUT cannot store one."""
+    saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 5 * 1024 * 1024})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["media_upload_max_bytes"] == 1024**3
+    assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024**3
