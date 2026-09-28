@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_fonts, get_libraries
-from scadbuddy.core.events import Event, InProcessEventBus
+from scadbuddy.core.events import Event, EventBus, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
 from tests.api.conftest import PNG_BYTES, wait_for_job
@@ -39,9 +39,10 @@ class Recorded(list[Event]):
     `wait_for` blocks on the listener itself instead.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bus: EventBus | None = None) -> None:
         super().__init__()
         self._changed = threading.Condition()
+        self._bus = bus
 
     def record(self, event: Event) -> None:
         with self._changed:
@@ -56,6 +57,25 @@ class Recorded(list[Event]):
 
         with self._changed:
             assert self._changed.wait_for(seen, timeout), f"{kind} for {job_id} never published"
+
+    def settle(self, timeout: float = 5.0) -> None:
+        """Until everything published so far is in. The Postgres bus delivers through
+        LISTEN a moment after the request returned, in commit order: a marker
+        published now arrives after every earlier event, and is then dropped."""
+        if not isinstance(self._bus, PgNotifyEventBus):
+            return
+        marker = SettingsChanged(section="connection")
+        self._bus.publish(marker)
+        with self._changed:
+            assert self._changed.wait_for(
+                lambda: any(event.id == marker.id for event in self), timeout
+            ), "the bus never delivered its marker"
+            self[:] = [event for event in self if event.id != marker.id]
+
+    def clear(self) -> None:
+        """Settled first, so an event of what came before cannot land after it."""
+        self.settle()
+        super().clear()
 
     def wait_for_kind(self, kind: str, timeout: float = 5.0) -> None:
         """Until an event of ``kind`` is in: on the Postgres bus (#374) delivery comes
@@ -72,7 +92,7 @@ def events(app: FastAPI) -> Recorded:
     # A test with a database gets the Postgres bus (#374), which delivers through the
     # same in-process bus once its NOTIFY comes back.
     assert isinstance(bus, InProcessEventBus | PgNotifyEventBus)
-    seen = Recorded()
+    seen = Recorded(bus)
     bus.add_listener(seen.record)
     return seen
 
@@ -88,6 +108,8 @@ def mine(client: TestClient, events: list[Event]) -> str:
 def published(events: list[Event], kind: str | None = None) -> list[dict[str, Any]]:
     """What was published, as kind plus ids, in order; the event's own id and time
     are left out so the assertions read as the payloads they are about."""
+    if isinstance(events, Recorded):
+        events.settle()
     return [
         event.model_dump(exclude={"id", "at"})
         for event in events

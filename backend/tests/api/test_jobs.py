@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.jobs import QueueFullError, RenderQueue
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, wait_for_job
 
@@ -132,3 +134,56 @@ def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model
     body = response.json()
     assert body["retry_after"] == 7
     assert "queue is full" in body["detail"]
+
+
+# -- the customizer's range and options (#432) -------------------------------------
+
+RANGED_SOURCE = (
+    "// %%RANGED%%\n"
+    "width = 10; // [1:100]\n"
+    'shape = "round"; // [round:Round, square:Square]\n'
+    '// retired shape = "circle"\n'
+)
+
+
+@pytest.fixture
+def ranged(paths: DataPaths, model: str) -> str:
+    paths.model_source(model).write_text(RANGED_SOURCE, encoding="utf-8")
+    return model
+
+
+@pytest.mark.parametrize(
+    ("params", "name", "detail"),
+    [
+        ({"width": 101}, "width", "'width' must be between 1 and 100, got 101"),
+        ({"width": 0.5}, "width", "'width' must be between 1 and 100, got 0.5"),
+        ({"shape": "hexagon"}, "shape", '\'shape\' must be one of "round", "square"'),
+    ],
+)
+def test_a_value_outside_the_customizer_is_rejected_by_name(
+    client: TestClient, ranged: str, params: dict[str, object], name: str, detail: str
+) -> None:
+    response = client.post(f"/api/v1/models/{ranged}/render", json={"params": params})
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["parameters"] == [name]
+    assert detail in body["detail"]
+    assert response.headers["content-type"] == "application/problem+json"
+
+
+def test_the_customizer_bounds_and_a_retired_option_are_accepted(
+    client: TestClient, ranged: str
+) -> None:
+    for params in ({"width": 1}, {"width": 100}, {"shape": "square"}, {"shape": "circle"}):
+        response = client.post(f"/api/v1/models/{ranged}/render", json={"params": params})
+        assert response.status_code == 202, (params, response.text)
+
+
+def test_a_preset_outside_the_customizer_is_rejected(client: TestClient, ranged: str) -> None:
+    url = f"/api/v1/models/{ranged}/presets"
+    refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}})
+    assert refused.status_code == 422
+    assert refused.json()["parameters"] == ["width"]
+    # A preset saved before an option was renamed can be saved again.
+    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
+    assert kept.status_code == 201, kept.text

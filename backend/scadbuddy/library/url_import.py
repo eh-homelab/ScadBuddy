@@ -72,6 +72,11 @@ class ImportRefusedError(Exception):
     """The URL could not be imported; the message says why."""
 
 
+class ResolverUnavailableError(Exception):
+    """The lookup did not finish -- every resolver thread was busy, or it ran past
+    `RESOLVE_TIMEOUT` -- so it says nothing about the host either way."""
+
+
 def unreachable(host: str) -> ImportRefusedError:
     """The one answer for every destination that did not answer as a public server."""
     return ImportRefusedError(
@@ -129,19 +134,30 @@ def _getaddrinfo(host: str, port: int) -> list[str]:
 
 async def resolve_host(host: str, port: int) -> list[str]:
     if not _RESOLVER_SLOTS.acquire(blocking=False):
-        # An OSError, so it reads as `unreachable` like any other failed lookup.
-        raise OSError("every import resolver thread is busy")
+        raise ResolverUnavailableError(f"could not resolve {host}: every resolver thread is busy")
     return await asyncio.get_running_loop().run_in_executor(_RESOLVER, _getaddrinfo, host, port)
 
 
-async def public_addresses(host: str, port: int) -> list[str]:
+async def public_addresses(host: str, port: int, *, tell_unavailable: bool = False) -> list[str]:
     """Every address ``host`` resolves to, or :func:`unreachable` unless all are public.
 
     Shared with the library clones (#93), which vet a user-added git URL the same way.
+    They pass ``tell_unavailable``: a lookup that did not finish (the threads busy,
+    or a timeout) is then :class:`ResolverUnavailableError` rather than the refusal,
+    so an install can say "try again" instead of calling the host private (#205).
+    An import keeps the one answer for both.
     """
     try:
         addresses = await asyncio.wait_for(resolve_host(host, port), RESOLVE_TIMEOUT)
-    except (OSError, TimeoutError):
+    except TimeoutError:
+        if tell_unavailable:
+            raise ResolverUnavailableError(f"could not resolve {host} in time") from None
+        raise unreachable(host) from None
+    except ResolverUnavailableError:
+        if tell_unavailable:
+            raise
+        raise unreachable(host) from None
+    except OSError:
         raise unreachable(host) from None
     if not addresses or not all(is_public(address) for address in addresses):
         raise unreachable(host)

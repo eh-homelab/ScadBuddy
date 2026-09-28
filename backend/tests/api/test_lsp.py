@@ -498,14 +498,10 @@ def test_frame_counts_bytes_not_characters() -> None:
 
 
 @pytest.fixture
-def real_client(data_dir: Path, seed_dir: Path, fake_openscad: str) -> Iterator[TestClient]:
+def real_client(settings: Settings) -> Iterator[TestClient]:
+    # The real openscad-lsp, not this module's fake.
     app = create_app(
-        Settings(
-            openscad=fake_openscad,
-            data_dir=data_dir,
-            seed_models_dir=seed_dir,
-            frontend_dir=Path("/nonexistent"),
-        )
+        settings.model_copy(update={"openscad_lsp": Settings.model_fields["openscad_lsp"].default})
     )
     with TestClient(app) as client:
         yield client
