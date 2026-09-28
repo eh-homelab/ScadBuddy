@@ -14,6 +14,7 @@ from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.fontconfig import env_for
+from scadbuddy.render.diagnostics import Diagnostic, DiagnosticCollector
 from scadbuddy.render.schema import (
     CustomizerSchema,
     Parameter,
@@ -52,10 +53,21 @@ _TEMPLATE_NOTE = re.compile(r'^ECHO: "(?:NOTE|WARNING): (?P<text>.*)"$')
 
 
 class OpenSCADError(RuntimeError):
-    def __init__(self, message: str, log_tail: Sequence[str], returncode: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        log_tail: Sequence[str],
+        returncode: int | None = None,
+        diagnostics: Sequence[Diagnostic] = (),
+        diagnostics_dropped: int = 0,
+    ):
         super().__init__(message)
         self.log_tail = list(log_tail)
         self.returncode = returncode
+        #: The run's ERROR/WARNING lines, parsed (#252). Read off the whole log.
+        self.diagnostics = list(diagnostics)
+        #: The diagnostics past the cap that ``diagnostics`` does not hold.
+        self.diagnostics_dropped = diagnostics_dropped
 
 
 class RenderTimeoutError(OpenSCADError):
@@ -74,6 +86,11 @@ class ProcessOutput:
     #: Base names of the files the run could not open, in first-seen order. Read off
     #: the whole log, not the tail: the message comes early and a long log drops it.
     missing_files: tuple[str, ...] = ()
+    #: Every ERROR/WARNING-class line, parsed (#252). Also read off the whole log:
+    #: a parser error is the first thing OpenSCAD prints.
+    diagnostics: tuple[Diagnostic, ...] = ()
+    #: How many more there were past the cap (``MAX_DIAGNOSTICS``).
+    diagnostics_dropped: int = 0
     #: What the template echoed for the user (`template_note`), in first-seen order
     #: and once each. Read off the whole log for the same reason as `missing_files`.
     notes: tuple[str, ...] = ()
@@ -167,11 +184,13 @@ async def _drain(
     tail: deque[str],
     missing: list[str],
     notes: list[str],
+    diagnostics: DiagnosticCollector,
     plates: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
         tail.append(line)
+        diagnostics.feed(line)
         name = missing_file(line)
         if name is not None and name not in missing:
             missing.append(name)
@@ -206,8 +225,9 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     missing: list[str] = []
     notes: list[str] = []
     plates: list[int] = []
+    collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, plates))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector, plates))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -215,7 +235,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         await process.wait()
         drain.cancel()
         raise RenderTimeoutError(
-            f"openscad timed out after {config.render_timeout:g}s", tail
+            f"openscad timed out after {config.render_timeout:g}s",
+            tail,
+            diagnostics=collector.diagnostics,
+            diagnostics_dropped=collector.dropped,
         ) from None
     except asyncio.CancelledError:
         # A cancelled caller (a superseded parse check, a shutting-down worker) must not
@@ -227,12 +250,20 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     await drain
     duration = time.monotonic() - started
     if returncode != 0:
-        raise OpenSCADError(f"openscad exited with {returncode}", tail, returncode)
+        raise OpenSCADError(
+            f"openscad exited with {returncode}",
+            tail,
+            returncode,
+            collector.diagnostics,
+            collector.dropped,
+        )
     return ProcessOutput(
         returncode=returncode,
         log_tail=list(tail),
         duration_s=duration,
         missing_files=tuple(missing),
+        diagnostics=tuple(collector.diagnostics),
+        diagnostics_dropped=collector.dropped,
         notes=tuple(notes),
         plates=plates[-1] if plates else None,
     )

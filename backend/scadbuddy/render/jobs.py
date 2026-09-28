@@ -9,9 +9,16 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
+from contextlib import (
+    AbstractContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -27,7 +34,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import model_search_path, revision_search_path
+from scadbuddy.library.libraries import (
+    CheckoutGate,
+    model_search_path,
+    require_checkouts,
+    revision_search_path,
+)
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import bounding_box, write_glb
@@ -213,7 +225,11 @@ async def plate_layout(
             await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
         except OpenSCADError as error:
             raise OpenSCADError(
-                f"plate {index} of {count}: {error}", error.log_tail, error.returncode
+                f"plate {index} of {count}: {error}",
+                error.log_tail,
+                error.returncode,
+                diagnostics=error.diagnostics,
+                diagnostics_dropped=error.diagnostics_dropped,
             ) from error
         split = split_by_material(raw)
         if not split:
@@ -516,6 +532,23 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
         shutil.rmtree(staging, ignore_errors=True)
 
 
+@asynccontextmanager
+async def _library_lease(
+    checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
+) -> AsyncIterator[None]:
+    """A lease on the checkouts a render resolved, when there are any to hold.
+    Released when the attempt's render ends however it ends -- done, failed,
+    cancelled -- and per attempt: a retry of the same job after a lapsed lease
+    holds its own, so the first attempt finishing late never releases it."""
+    if checkouts is None or not library_path:
+        yield
+        return
+    async with checkouts.rendering(holder, library_path):
+        # A removal that ran between resolving and leasing took one away.
+        require_checkouts(library_path)
+        yield
+
+
 def attempt_work_dir(paths: DataPaths, job: Job) -> Path:
     """Where this attempt at ``job`` writes its files.
 
@@ -539,6 +572,7 @@ async def render_job(
     history: ModelHistory | None = None,
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
+    checkouts: CheckoutGate | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         return metrics.stage(name) if metrics is not None else nullcontext()
@@ -546,48 +580,60 @@ async def render_job(
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then
     # render newer source while claiming the older revision.
-    with stage("source"):
-        source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
-        scad = source.scad
-        # #90 stamps the model's own commit id, which `provenance.source_version`
-        # was written to accept (a free string, never a structured field). The
-        # content hash remains the answer when there is no repository to name a
-        # revision -- and it hashes what was actually rendered, which for an old
-        # revision is its export, not the live model directory. Reads every file
-        # under it; off the loop, like the other two. One timed stage for all of
-        # it: resolving the source and deriving its schema are the same step.
-        version = source.version
-        config = source.configure(config)
-        if version is None:
-            version = await asyncio.to_thread(source_version, scad.parent)
-        schema = await cached_schema(scad, source.schema_cache, config=config)
-    work = attempt_work_dir(paths, job)
-    work.mkdir(parents=True, exist_ok=True)
+    async with AsyncExitStack() as held:
+        with stage("source"):
+            source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+            scad = source.scad
+            # #90 stamps the model's own commit id, which `provenance.source_version`
+            # was written to accept (a free string, never a structured field). The
+            # content hash remains the answer when there is no repository to name a
+            # revision -- and it hashes what was actually rendered, which for an old
+            # revision is its export, not the live model directory. Reads every file
+            # under it; off the loop, like the other two. One timed stage for all of
+            # it: resolving the source and deriving its schema are the same step.
+            version = source.version
+            config = source.configure(config)
+            if version is None:
+                version = await asyncio.to_thread(source_version, scad.parent)
+            # Held from here for every openscad run below -- the schema derivation
+            # included: those are what read the checkouts on OPENSCADPATH, and a
+            # removal must not take one out from under them (#253).
+            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            schema = await cached_schema(scad, source.schema_cache, config=config)
+        work = attempt_work_dir(paths, job)
+        work.mkdir(parents=True, exist_ok=True)
 
-    with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
-        with stage("render"):
-            output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
-        with stage("split"):
-            preview_parts = extruder_order(
-                split_by_material(work / RAW_RENDER_NAME), schema, params
-            )
-            if not preview_parts:
-                raise OpenSCADError("the render produced no geometry", output.log_tail)
-            preview_path = work / PREVIEW_NAME
-            box = write_glb(preview_parts, preview_path)
+        with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
+            with stage("render"):
+                output = await render_3mf(
+                    scad, schema, params, work / RAW_RENDER_NAME, config=config
+                )
+            with stage("split"):
+                preview_parts = extruder_order(
+                    split_by_material(work / RAW_RENDER_NAME), schema, params
+                )
+                if not preview_parts:
+                    raise OpenSCADError(
+                        "the render produced no geometry",
+                        output.log_tail,
+                        diagnostics=output.diagnostics,
+                        diagnostics_dropped=output.diagnostics_dropped,
+                    )
+                preview_path = work / PREVIEW_NAME
+                box = write_glb(preview_parts, preview_path)
 
-        with stage("solids"):
-            # One plate unless the template asked for more (spec §6.4); every plate
-            # beyond the ordinary render is rendered and solidified here.
-            layout = await plate_layout(
-                scad,
-                schema,
-                params,
-                preview_parts,
-                output.plates or 1,
-                work,
-                config=config,
-            )
+            with stage("solids"):
+                # One plate unless the template asked for more (spec §6.4); every plate
+                # beyond the ordinary render is rendered and solidified here.
+                layout = await plate_layout(
+                    scad,
+                    schema,
+                    params,
+                    preview_parts,
+                    output.plates or 1,
+                    work,
+                    config=config,
+                )
     # Exit 0 with the picture missing is otherwise invisible: the preview simply
     # has no overlay, and nothing says why.
     warnings = [
@@ -623,6 +669,8 @@ async def render_job(
         colors=list(layout.colours),
         warnings=warnings,
         plates=result_plates(layout),
+        diagnostics=list(output.diagnostics),
+        diagnostics_dropped=output.diagnostics_dropped,
         notes=list(output.notes),
     )
     return result, output.log_tail
@@ -680,6 +728,7 @@ class RenderQueue:
         history: ModelHistory | None = None,
         metrics: Metrics | None = None,
         events: EventBus | None = None,
+        checkouts: CheckoutGate | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
@@ -707,6 +756,7 @@ class RenderQueue:
                 history=history,
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
+                checkouts=checkouts,
             )
         )
         self._tasks: list[asyncio.Task[None]] = []
@@ -974,6 +1024,8 @@ class RenderQueue:
             job.state = "failed"
             job.error = str(error)
             job.log_tail = error.log_tail
+            job.diagnostics = error.diagnostics
+            job.diagnostics_dropped = error.diagnostics_dropped
         except Exception as error:  # the job carries the failure, the worker lives on
             outcome = "failed"
             job.state = "failed"
@@ -983,6 +1035,8 @@ class RenderQueue:
             job.state = "done"
             job.result = result
             job.log_tail = log_tail
+            job.diagnostics = result.diagnostics
+            job.diagnostics_dropped = result.diagnostics_dropped
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

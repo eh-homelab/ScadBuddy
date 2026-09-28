@@ -85,6 +85,19 @@ for the project picker).
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
   editor still works, without completion and hover.
+- **Uploaded files** (the SVGs and PNGs for `// file` parameters, in
+  `/data/assets`):
+  - `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1000000000) and
+    `SCADBUDDY_ASSET_MAX_COUNT` (10000), 0 for no limit: a new upload that would
+    take the store past either is refused with 413. Re-uploading a file already
+    stored is never refused.
+  - `SCADBUDDY_ASSET_SWEEP_GRACE` (default 604800 s, a week; at least 3600): a
+    file that no saved output, preset or render job references is removed once
+    nothing has uploaded or used it for this long.
+  - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
+    after the one at startup; 0 turns it off.
+  - Settings shows the usage under "Uploaded files"; so do
+    `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
@@ -123,7 +136,8 @@ for the project picker).
   (read from the store, so across replicas with Postgres), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
   the queue's store can be read (`scadbuddy_render_store_up`), the
-  SLO targets, and HTTP requests by route. It is unauthenticated, like the rest of
+  SLO targets, the upload store's files and bytes against its caps
+  (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
 
 ## Deploying
