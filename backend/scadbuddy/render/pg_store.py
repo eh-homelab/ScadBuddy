@@ -136,6 +136,8 @@ JOB_COLUMNS = (
     "diagnostics",
     "diagnostics_dropped",
     "warnings",
+    "inputs",
+    "claims",
 )
 
 TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identical render is queued"
@@ -466,8 +468,10 @@ class PostgresJobStore:
                         key,
                     ),
                 )
-                self._announce(conn, job, "job.done")
-                return Submitted(job, cached=True, superseded=superseded)
+                # The job as stored, so `submit(...).job` and `read(job.id)` agree.
+                written = job.model_copy(update={"inputs": {"params": job.params}})
+                self._announce(conn, written, "job.done")
+                return Submitted(written, cached=True, superseded=superseded)
             if max_pending:
                 # Inside the transaction: raising rolls the supersede above back,
                 # so a refusal changes nothing. A soft limit across replicas --

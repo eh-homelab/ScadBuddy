@@ -42,11 +42,9 @@ CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
 PROJECTION_COLUMNS = (
     *JOB_COLUMNS,
     "kind",
-    "inputs",
     "pipeline_version",
     "steps",
     "workflow_id",
-    "claims",
 )
 
 
@@ -288,7 +286,10 @@ class JobProjection:
     def stale_pending(self, older_than: float) -> list[Job]:
         with self._pool.connection() as conn:
             rows = conn.execute(
+                # Only rows a workflow owns: a legacy pending row (no workflow_id) is
+                # the legacy queue's during a rolling deploy, never the reconciler's.
                 "SELECT * FROM render_jobs WHERE state = 'pending' AND started_at IS NULL"
+                " AND workflow_id IS NOT NULL"
                 " AND created_at < now() - make_interval(secs => %s) ORDER BY created_at",
                 (older_than,),
             ).fetchall()
