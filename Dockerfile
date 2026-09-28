@@ -449,6 +449,20 @@ FROM app AS test
 # Re-chown: this sync runs as root and rewrites both the venv and the cache.
 RUN uv sync --frozen \
     && chown -R scadbuddy:scadbuddy /opt/venv /opt/uv-cache
+
+# The Temporal CLI's dev server backs the `requires_temporal` tests
+# (tests/support/temporal.py). Pinned by version and digest like openscad-lsp above.
+ARG TEMPORAL_CLI_VERSION=1.9.1
+ARG TEMPORAL_CLI_SHA256=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+RUN curl --fail --silent --show-error --location --output /tmp/temporal-cli.tar.gz \
+        "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+    && printf '%s  /tmp/temporal-cli.tar.gz\n' "$TEMPORAL_CLI_SHA256" > /tmp/temporal-cli.sha256 \
+    && sha256sum --check --strict /tmp/temporal-cli.sha256 \
+    && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \
+    && rm -f /tmp/temporal-cli.tar.gz /tmp/temporal-cli.sha256 \
+    && temporal --version
+ENV SCADBUDDY_TEST_TEMPORAL_DEV_SERVER=/usr/local/bin/temporal
+
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.
 USER 10001:10001
