@@ -39,6 +39,15 @@ test.describe('pasted source', () => {
     await page.getByRole('button', { name: 'Save and customize' }).click()
     await expect(page).toHaveURL(/\/m\/pasted-keychain$/)
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    // Pasted with no thumbnail: back on the catalogue, its card shows the default
+    // render the backend made in the background.
+    await page.getByRole('main').getByRole('link', { name: 'Models' }).click()
+    const card = page.getByRole('listitem').filter({ hasText: 'Pasted Keychain' })
+    await expect(card.getByRole('img', { name: 'Pasted Keychain' })).toHaveAttribute(
+      'src',
+      /\/thumbnail\?v=[^"]*\.preview\.\.[0-9a-f]{16}$/,
+    )
   })
 
   test('squiggles the failing line and only saves when forced', async ({ page }) => {
