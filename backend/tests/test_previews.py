@@ -34,6 +34,7 @@ from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import render_preview
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import write_openscad_3mf
 
 SLUG = "widget"
@@ -111,13 +112,15 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     store.write("gone", "a" * 64, b"png")
     store.write(SLUG, "a" * 64, b"png")
 
-    removed = Catalogue(paths, previews=store).sweep_orphan_previews()
+    removed = Catalogue(
+        paths, previews=store, wrapper_prefix=WRAPPER_PREFIX
+    ).sweep_orphan_previews()
 
     assert removed == ["gone"]
     assert store.record("gone") is None
     assert store.image(SLUG) == b"png"
     # The file sweep has nothing of the previews' to look at.
-    assert Catalogue(paths, previews=store).sweep_orphans() == []
+    assert Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans() == []
 
 
 def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
@@ -130,7 +133,9 @@ def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
         raise psycopg.OperationalError("the database went away")
 
     with caplog.at_level("ERROR"):
-        removed = Catalogue(paths, previews=PreviewStore(unreachable)).sweep_orphan_previews()
+        removed = Catalogue(
+            paths, previews=PreviewStore(unreachable), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphan_previews()
 
     assert removed == []
     assert "could not list the previews to sweep" in caplog.text
@@ -157,7 +162,7 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
 def test_the_catalogue_ranks_its_own_image_over_the_preview(
     store: PreviewStore, paths: DataPaths
 ) -> None:
-    catalogue = Catalogue(paths, previews=store)
+    catalogue = Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX)
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
@@ -173,7 +178,9 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(
 @pytest.mark.requires_postgres
 def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths: DataPaths) -> None:
     store.write(SLUG, "a" * 64, b"preview")
-    catalogue = Catalogue(paths, previews=store, serve_previews=False)
+    catalogue = Catalogue(
+        paths, previews=store, serve_previews=False, wrapper_prefix=WRAPPER_PREFIX
+    )
 
     assert catalogue.thumbnail_source(SLUG).source is None
     assert catalogue.thumbnail(SLUG) is None
@@ -297,7 +304,9 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     """`_clear_derived` (a create or duplicate reusing the slug) takes the same lock as
     a render's write, whether or not previews are served, so the previous model's
     preview never survives it."""
-    catalogue = Catalogue(paths, previews=store, serve_previews=serving)
+    catalogue = Catalogue(
+        paths, previews=store, serve_previews=serving, wrapper_prefix=WRAPPER_PREFIX
+    )
     writer, _, release = _held_write(store)
 
     clearing = threading.Thread(target=lambda: catalogue._clear_derived(SLUG))
@@ -319,7 +328,9 @@ def test_the_orphan_sweep_leaves_a_live_model_being_written(
     store.write("gone", "a" * 64, b"png")
     writer, _, release = _held_write(store)
 
-    sweeping = threading.Thread(target=Catalogue(paths, previews=store).sweep_orphan_previews)
+    sweeping = threading.Thread(
+        target=Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphan_previews
+    )
     sweeping.start()
     sweeping.join(0.2)
     release.set()

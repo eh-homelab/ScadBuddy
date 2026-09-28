@@ -68,7 +68,6 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
-from scadbuddy.render.solids import WRAPPER_PREFIX
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -335,6 +334,7 @@ class Catalogue:
         media_store: MediaStore | None = None,
         *,
         serve_previews: bool = True,
+        wrapper_prefix: str,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -351,6 +351,8 @@ class Catalogue:
         #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
         self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: A render's colour wrapper file prefix, which a duplicate leaves out.
+        self.wrapper_prefix = wrapper_prefix
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -747,7 +749,9 @@ class Catalogue:
                         staged,
                         # Nor a render's colour wrapper, written beside the source
                         # for the length of a render and gitignored for that reason.
-                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
+                        ignore=shutil.ignore_patterns(
+                            ".*", *([f"{self.wrapper_prefix}*"] if self.wrapper_prefix else [])
+                        ),
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
@@ -1584,6 +1588,52 @@ class Catalogue:
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
         return removed
+
+    def sweep_stranded_claims(self) -> list[str]:
+        """Move to tombstones the model directories a claim left with nothing in them.
+
+        `_claim` makes a slug's directory before `create` or `duplicate` writes
+        into it; a process killed in between leaves one with no ``model.scad``,
+        which reads as missing yet refuses a retry as taken. Only one with nothing
+        tracked at HEAD either goes, and only once older than ``duplicate_staging_max_age``:
+        another replica sharing ``/data`` may be mid-claim. Runs at boot, before
+        the tombstone sweep. One that cannot be read or moved is logged and skipped.
+        """
+        root = self.paths.models
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - self.duplicate_staging_max_age
+        moved: list[str] = []
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            logger.exception("could not list for stranded claims", extra={"path": str(root)})
+            return []
+        for directory in entries:
+            slug = directory.name
+            if slug.startswith(".") or slug == BUILTIN_DIR:
+                continue
+            try:
+                if not directory.is_dir() or (directory / SOURCE_NAME).exists():
+                    continue
+                if directory.stat().st_mtime > cutoff:
+                    continue
+                # Tracked at HEAD: a model whose source is missing from disk, not a
+                # claim -- restoring it is the history's job, not this sweep's.
+                if self.history is not None and self.history.available:
+                    head = self.history.head()
+                    if head is not None and self.history.files_at(head, slug):
+                        continue
+                tombstones = self.paths.tombstones
+                tombstones.mkdir(parents=True, exist_ok=True)
+                directory.rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
+            except FileNotFoundError:
+                continue
+            except (OSError, GitError):
+                logger.exception("could not sweep a stranded claim", extra={"slug": slug})
+                continue
+            moved.append(slug)
+        return moved
 
     def sweep_orphan_previews(self) -> list[str]:
         """Drop the default-render preview of every model that is gone; returns their

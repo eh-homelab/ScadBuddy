@@ -156,7 +156,7 @@ def store(pg_conninfo: str, data: DataPaths) -> Iterator[PostgresMediaStore]:
 
 @pytest.fixture
 def catalogue(data: DataPaths, store: PostgresMediaStore) -> Catalogue:
-    catalogue = Catalogue(data, media_store=store)
+    catalogue = Catalogue(data, media_store=store, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     return catalogue
 
@@ -347,7 +347,7 @@ def test_the_listing_reads_every_templates_media_in_one_query(
 ) -> None:
     """ONE media query for the page, not one per model, as with the git walk."""
     counting = _CountingStore(store)
-    catalogue = Catalogue(data, media_store=counting)
+    catalogue = Catalogue(data, media_store=counting, wrapper_prefix=WRAPPER_PREFIX)
     for slug in ("one", "two", "three"):
         catalogue.create(slug, "cube(1);\n", ModelMeta(name=slug))
     catalogue.add_media("two", _stage(catalogue, PNG, "image", "png"), caption="Two")
@@ -375,7 +375,7 @@ def test_a_delete_removes_the_templates_rows(
 
 
 def test_without_a_database_only_the_legacy_thumbnail_is_listed(data: DataPaths) -> None:
-    catalogue = Catalogue(data)
+    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
 
     assert [item.id for item in catalogue.list_media("demo")] == [LEGACY_ID]
@@ -383,7 +383,7 @@ def test_without_a_database_only_the_legacy_thumbnail_is_listed(data: DataPaths)
 
 
 def test_without_a_database_a_media_write_is_refused(data: DataPaths) -> None:
-    catalogue = Catalogue(data)
+    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
     staged = _stage(catalogue, PNG, "image", "png")
 
@@ -401,7 +401,7 @@ def test_without_a_database_a_media_write_is_refused(data: DataPaths) -> None:
 
 
 def test_a_crashed_uploads_staging_is_swept_once_it_is_old(data: DataPaths) -> None:
-    catalogue = Catalogue(data)
+    catalogue = Catalogue(data, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     fresh = _stage(catalogue, PNG, "image", "png")
     stale = _stage(catalogue, PNG, "image", "png")

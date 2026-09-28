@@ -516,15 +516,15 @@ class ModelHistory:
 
         Walks the model's own history newest first. ``None`` when the model was
         made some other way -- uploaded, duplicated, or recreated after a delete --
-        since an older seed of the same slug is then not its origin.
+        since an older seed of the same slug is then not its origin. The subject
+        alone is not trusted: any commit can carry it, so the seed must also be
+        authored and committed as ScadBuddy.
         """
-        completed = self._run("log", "--format=%H%x1f%s", "--", slug, check=False)
-        assert isinstance(completed.stdout, str)
-        if completed.returncode != 0:
-            raise GitError(f"git log failed: {completed.stderr.strip()}", completed.stderr)
-        for line in completed.stdout.splitlines():
-            commit, _, subject = line.partition(_FIELD)
-            if _SEED_SUBJECT.match(subject):
+        log = self._out("log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s", "--", slug)
+        ours = [AUTHOR_NAME, AUTHOR_EMAIL, AUTHOR_NAME, AUTHOR_EMAIL]
+        for line in log.splitlines():
+            commit, *identity, subject = line.split(_FIELD, 5)
+            if _SEED_SUBJECT.match(subject) and identity == ours:
                 return commit
             if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
                 return None

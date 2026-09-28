@@ -197,6 +197,7 @@ def build_state(settings: Settings) -> AppState:
         outputs,
         preview_store,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        wrapper_prefix=WRAPPER_PREFIX,
         serve_previews=settings.preview_renders,
         media_store=(
             PostgresMediaStore(store.pool) if isinstance(store, PostgresJobStore) else None

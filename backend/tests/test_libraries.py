@@ -94,7 +94,7 @@ def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStor
 
 @pytest.fixture
 def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history)
+    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
 
 
 def _create(catalogue: Catalogue, slug: str = "widget") -> None:
