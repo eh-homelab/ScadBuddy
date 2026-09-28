@@ -1,0 +1,65 @@
+---
+name: Merge queue review
+
+# `claude-review` is the second required check on `main`, and the merge queue
+# (#508) requires it on the queue's own commit, which is not any PR's head. The
+# review runs per PR (claude-code-review.yml, dispatched by ci.yml's
+# `dispatch-review`) and a PR cannot be queued until its head passed it, so this
+# carries that verdict onto the queue commit rather than reviewing again. What the
+# queue adds is `CI Summary` on main plus the PRs ahead; ci.yml runs that.
+#
+# A PR pushed to after it was queued leaves the queue, so the head read here is
+# the head the review passed.
+on:
+  merge_group:
+
+permissions: {}
+
+jobs:
+  carry:
+    # NOT named `claude-review`: a check run of that name beside the commit
+    # status would make two objects claim the required context (see the
+    # `claude-review` job in claude-code-review.yml).
+    name: Carry the PR's review verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+      pull-requests: read
+    steps:
+      - name: Publish claude-review on the queue commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+          QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # gh-readonly-queue/<base>/pr-<number>-<base sha>: the entry's own PR.
+          # The PRs ahead of it in the group were each carried on their own entry.
+          state=failure
+          if [[ "$QUEUE_REF" =~ /pr-([0-9]+)-[0-9a-f]+$ ]]; then
+            pr="${BASH_REMATCH[1]}"
+            head="$(gh api "repos/${REPO}/pulls/${pr}" --jq .head.sha)"
+            verdict="$(gh api "repos/${REPO}/commits/${head}/status" \
+              --jq '[.statuses[] | select(.context == "claude-review")][0].state // "missing"')"
+            echo "PR #${pr} head ${head}: claude-review=${verdict}"
+            if [ "$verdict" = "success" ]; then
+              state=success
+              description="Carried from PR #${pr} at ${head:0:12}."
+            else
+              description="PR #${pr}'s head has claude-review=${verdict}."
+            fi
+          else
+            description="Could not read the PR number from ${QUEUE_REF}."
+          fi
+
+          echo "Publishing commit status claude-review=${state} on ${QUEUE_SHA}"
+          gh api -X POST "repos/${REPO}/statuses/${QUEUE_SHA}" \
+            -f state="$state" \
+            -f context=claude-review \
+            -f description="$description" \
+            -f target_url="$RUN_URL" >/dev/null
+          [ "$state" = success ]
