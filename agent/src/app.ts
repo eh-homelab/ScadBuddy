@@ -3,7 +3,7 @@ import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
-import { type McpEndpointDeps, mountMcp } from './mcp/http.js'
+import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
@@ -116,8 +116,12 @@ async function aiStatus(deps: AppDeps, dbOk: boolean | undefined): Promise<Pick<
   return { ai: 'enabled', credential }
 }
 
-export function createApp(deps: AppDeps): Hono {
+/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep. */
+export type AgentApp = Hono & { close: () => Promise<void> }
+
+export function createApp(deps: AppDeps): AgentApp {
   const app = new Hono()
+  let mcp: McpHandle | undefined
 
   // Liveness: always 200 while the process serves HTTP. A missing or
   // unreachable database or backend is REPORTED, not failed on, so a Postgres
@@ -162,7 +166,7 @@ export function createApp(deps: AppDeps): Hono {
         }
         await next()
       })
-      mountMcp(app, deps.mcp, { origins: deps.origins, remoteAddress: deps.remoteAddress })
+      mcp = mountMcp(app, deps.mcp, { origins: deps.origins, remoteAddress: deps.remoteAddress })
     } else {
       // Spec §9, "No database": AI features are disabled. /mcp answers why
       // instead of 404, so an MCP client's error names the fix.
@@ -172,5 +176,9 @@ export function createApp(deps: AppDeps): Hono {
     }
   }
 
-  return app
+  return Object.assign(app, {
+    close: async () => {
+      await mcp?.close()
+    },
+  })
 }

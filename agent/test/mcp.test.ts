@@ -127,7 +127,7 @@ describe('/mcp: tools over Streamable HTTP', () => {
 })
 
 describe('/mcp: HTTPS and Origin from the shared allowlist (src/http/origins.ts, spec §8.4)', () => {
-  for (const mode of ['bearer', 'disabled'] as const) {
+  for (const mode of ['bearer', 'disabled', 'oidc'] as const) {
     it(`refuses plain HTTP via the ingress with 403 naming the https URL (${mode})`, async () => {
       const { app } = testApp({ settings: { mode } })
       const res = await appFetch(app, { address: INGRESS })(MCP_URL, { method: 'POST', body: '{}' })

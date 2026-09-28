@@ -34,15 +34,34 @@ export type McpEndpointDeps = {
    * fail-closed: `bearer` mode with a token store that verifies nothing.
    */
   authSettings: () => McpAuthSettings | Promise<McpAuthSettings>
+  /** Open sessions across everyone: a backstop (default 200). */
   maxSessions?: number
+  /**
+   * Open sessions per caller (default 20), so one caller cannot take the
+   * global allowance from everyone else. A caller is its token; in `disabled`
+   * mode, where every session is its own principal, it is the client address.
+   */
+  maxSessionsPerCaller?: number
+  /** A session with no request for this long is ended (default 1 h). */
   idleSessionMs?: number
+  /** How often idle sessions are swept, on a timer of its own (default 1 min). */
+  sweepIntervalMs?: number
 }
 
 type Session = {
   transport: WebStandardStreamableHTTPServerTransport
   server: McpServer
   principalId: string
+  /** What `maxSessionsPerCaller` counts by. */
+  callerKey: string
   lastSeen: number
+}
+
+/** What `mountMcp` hands back: the open-session count and a shutdown hook. */
+export type McpHandle = { sessions: () => number; close: () => Promise<void> }
+
+function callerKey(principal: Principal): string {
+  return principal.kind === 'anonymous' ? `anonymous@${principal.clientIp ?? 'unknown'}` : principal.id
 }
 
 /**
@@ -90,10 +109,16 @@ export function mountMcp(
   app: Hono,
   deps: McpEndpointDeps,
   http: McpHttpContext,
-): { sessions: () => number; close: () => Promise<void> } {
+): McpHandle {
   const sessions = new Map<string, Session>()
   const maxSessions = deps.maxSessions ?? 200
+  const maxPerCaller = deps.maxSessionsPerCaller ?? 20
   const idleSessionMs = deps.idleSessionMs ?? 60 * 60_000
+  // Sweeps on a timer, not only when a session opens, so an abandoned session
+  // (dropped without DELETE) is ended promptly even when nobody else connects.
+  // unref'd: it never keeps the process alive; `close` stops it.
+  const sweeper = setInterval(() => void sweep(Date.now()), deps.sweepIntervalMs ?? 60_000)
+  sweeper.unref()
 
   async function end(id: string): Promise<void> {
     const session = sessions.get(id)
@@ -146,6 +171,15 @@ export function mountMcp(
 
     if (request.method !== 'POST') return jsonRpcError(400, -32000, 'Mcp-Session-Id header is required')
     await sweep(Date.now())
+    const key = callerKey(auth.principal)
+    const own = [...sessions.values()].filter((s) => s.callerKey === key).length
+    if (own >= maxPerCaller) {
+      return jsonRpcError(
+        429,
+        -32000,
+        `This caller already has ${own} open MCP sessions (the limit is ${maxPerCaller}); end one with DELETE /mcp`,
+      )
+    }
     if (sessions.size >= maxSessions) return jsonRpcError(503, -32000, 'Too many MCP sessions; try again later')
 
     // Minted before the transport so the anonymous principal can carry it
@@ -157,7 +191,7 @@ export function mountMcp(
       sessionIdGenerator: () => id,
       eventStore: new BoundedEventStore(),
       onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, server, principalId: principal.id, lastSeen: Date.now() })
+        sessions.set(sid, { transport, server, principalId: principal.id, callerKey: key, lastSeen: Date.now() })
       },
       onsessionclosed: (sid) => {
         void end(sid)
@@ -173,6 +207,7 @@ export function mountMcp(
   return {
     sessions: () => sessions.size,
     close: async () => {
+      clearInterval(sweeper)
       await Promise.all([...sessions.keys()].map(end))
     },
   }

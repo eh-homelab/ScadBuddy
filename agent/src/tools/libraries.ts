@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
@@ -22,6 +23,16 @@ export function sameRepository(first: string, second: string): boolean {
     return match ? `${match[1]!.toLowerCase()}://${match[2]!.toLowerCase()}${match[3]}` : trimmed
   }
   return bare(first) === bare(second)
+}
+
+function repin(backend: BackendClient, slug: string, name: string, ref: string | undefined) {
+  return ok(
+    backend.PATCH('/api/v1/models/{slug}/libraries/{name}', {
+      params: { path: { slug, name } },
+      body: { ref: ref ?? null },
+    }),
+    `re-pin ${name} of ${slug}`,
+  )
 }
 
 export const libraryTools: Tool[] = [
@@ -136,6 +147,87 @@ export const libraryTools: Tool[] = [
           `unpin ${name} from ${slug}`,
         ),
       ),
+  }),
+
+  // Re-pinning clones again from the URL the model's pin already records, at a
+  // ref the caller chooses (backend/scadbuddy/api/libraries.py, PATCH). Tiered
+  // like pinning, by WHAT IS FETCHED: when the recorded URL is the catalogue's
+  // repository it is `write` (nothing a caller chose leaves the pod); when it is
+  // any other URL (a fork, a private repo) it is `outward`, because the ref
+  // name reaches that server during the fetch and could carry data to a host
+  // an injected agent controls. SSRF is the backend's (see the pin tools above).
+  defineTool({
+    name: 'repin_library',
+    description:
+      "Re-pin a model's catalogue library from the repository it already pins, at `ref` or at the ref " +
+      'already pinned (moving a branch pin to the branch\'s current commit), as a revision in its history. ' +
+      'For a library pinned from a non-catalogue URL use repin_library_from_pinned_url.',
+    input: z.object({ slug, name: libraryName, ref: z.string().optional().describe('A tag or branch') }),
+    risk: 'write',
+    // Also reads GET /models/{slug} (get_model) and GET /libraries (list_libraries).
+    routes: ['PATCH /api/v1/models/{slug}/libraries/{name}'],
+    handler: async ({ slug, name, ref }, { backend }) => {
+      const [model, catalogue] = await Promise.all([
+        ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`),
+        ok(backend.GET('/api/v1/libraries'), 'list libraries'),
+      ])
+      const pinned = (model.libraries ?? []).find((l) => l.name === name)
+      if (!pinned) throw new ToolError(`model ${slug} does not pin a library named "${name}"`)
+      const known = catalogue.find((entry) => entry.name === name)
+      if (!known || !sameRepository(pinned.url, known.url)) {
+        throw new ToolError(
+          `"${name}" is pinned from ${pinned.url}, not the catalogue's repository. Re-pinning it fetches from ` +
+            'that URL, which needs a human approval: use repin_library_from_pinned_url.',
+        )
+      }
+      return json(await repin(backend, slug, name, ref))
+    },
+  }),
+
+  defineTool({
+    name: 'repin_library_from_pinned_url',
+    description:
+      "Re-pin a model's library from the non-catalogue URL its pin already records (a fork, another repo), " +
+      'at `ref` or the ref already pinned. The backend clones that URL again, so this needs a human approval.',
+    input: z.object({ slug, name: libraryName, ref: z.string().optional().describe('A tag or branch') }),
+    risk: 'outward',
+    routes: ['PATCH /api/v1/models/{slug}/libraries/{name}'],
+    summarize: ({ slug, name, ref }) =>
+      `Clone library ${name} of model "${slug}" again from the URL its pin records, at ${ref ?? 'the pinned ref'}`,
+    handler: async ({ slug, name, ref }, { backend }) => json(await repin(backend, slug, name, ref)),
+  }),
+
+  defineTool({
+    name: 'list_installed_libraries',
+    description: 'Every library checkout on the data volume, with the models whose live pins read it.',
+    input: z.object({}),
+    risk: 'read',
+    routes: ['GET /api/v1/libraries/installed'],
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries')),
+  }),
+
+  defineTool({
+    name: 'remove_library_checkout',
+    description:
+      "Delete a library's checkout at `commit`, or all of its checkouts, from the volume. Refused while a " +
+      'model pins it or a render reads it. Irreversible (a later render of an old revision needs a re-pin), ' +
+      'so it needs a human approval.',
+    input: z.object({
+      name: libraryName,
+      commit: z.string().regex(/^[0-9a-f]{40}([0-9a-f]{24})?$/).optional(),
+    }),
+    risk: 'outward',
+    routes: ['DELETE /api/v1/libraries/{name}'],
+    summarize: ({ name, commit }) =>
+      commit ? `Delete the ${name} checkout at ${commit}` : `Delete every checkout of library ${name}`,
+    handler: async ({ name, commit }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/libraries/{name}', { params: { path: { name }, query: { commit: commit ?? null } } }),
+        `remove ${name} checkouts`,
+      )
+      return json({ removed: name, commit: commit ?? 'all' })
+    },
   }),
 
   defineTool({

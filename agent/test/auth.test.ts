@@ -42,6 +42,8 @@ describe('FailClosedTokenStore (production until #255)', () => {
     const store = new FailClosedTokenStore()
     expect(await store.verify()).toBeNull()
     await expect(store.mint()).rejects.toThrow(/#255/)
+    expect(await store.list()).toEqual([])
+    expect(await store.revoke()).toBe(false)
   })
 })
 

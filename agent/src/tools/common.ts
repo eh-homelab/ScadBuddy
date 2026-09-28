@@ -15,7 +15,17 @@ export const outputId = z.string().min(1).describe('Output id, as list_outputs r
 
 export const commit = z.string().regex(/^[0-9a-f]{7,40}$/).describe('A revision id from list_versions')
 
-export const paramValue = z.union([z.boolean(), z.number(), z.string()])
+/** The named views the backend draws (`views/{view}.png` in backend/openapi.json). */
+export const VIEW = z.enum(['iso', 'front', 'back', 'left', 'right', 'top', 'bottom'])
+export const VIEW_SIZE = z
+  .number()
+  .int()
+  .min(64)
+  .max(1024)
+  .optional()
+  .describe('Edge of the square PNG in pixels (512 by default)')
+
+export const paramValue =z.union([z.boolean(), z.number(), z.string()])
 
 // `catchall`, not `z.record`: the MCP server bundled in @anthropic-ai/claude-agent-sdk
 // 0.3.283 fails `tools/list` with "Cannot read properties of undefined (reading

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { binary } from './binary.js'
-import { outputId, slug } from './common.js'
+import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
@@ -95,6 +95,31 @@ export const outputTools: Tool[] = [
     handler: async ({ output_id }, { backend }) =>
       json(
         await ok(backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id } } }), `get plates of ${output_id}`),
+      ),
+  }),
+
+  defineTool({
+    name: 'get_output_view',
+    description:
+      "A saved output's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as " +
+      'a shaded PNG.',
+    input: z.object({ output_id: outputId, view: VIEW, size: VIEW_SIZE }),
+    risk: 'read',
+    routes: ['GET /api/v1/outputs/{output_id}/views/{view}.png'],
+    handler: async ({ output_id, view, size }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/views/{view}.png', {
+          params: { path: { output_id, view }, query: { size } },
+          parseAs: 'stream',
+        }),
+        `draw ${view} view of ${output_id}`,
+        ctx,
+        {
+          path: `/api/v1/outputs/${output_id}/views/${view}.png${size ? `?size=${size}` : ''}`,
+          name: `${output_id}-${view}.png`,
+          fallbackType: 'image/png',
+        },
+        image,
       ),
   }),
 

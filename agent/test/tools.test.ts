@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -8,6 +9,7 @@ import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
+import { OPENSCAD_COLOUR_NAMES } from '../src/tools/colours.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // Handlers against an msw backend, called with `execute` where a test needs
@@ -43,7 +45,7 @@ const SCHEMA = {
     { name: 'style', type: 'select', initial: 'round', options: [{ name: 'Round', value: 'round' }, { name: 'Square', value: 'square' }] },
     { name: 'label', type: 'string', initial: '', max_length: 5 },
     { name: 'colour', type: 'color', initial: '#ff0000' },
-    { name: 'logo', type: 'file', initial: '' },
+    { name: 'logo', type: 'file', initial: 'default-logo.svg', accept: ['svg'], samples: ['default-logo.svg', 'star.svg'] },
   ],
 }
 
@@ -61,7 +63,7 @@ describe('validateParams', () => {
       style: 'hex',
       label: 'too long',
       colour: 'not a colour!',
-      logo: 'logo.png',
+      logo: 'other.svg',
       nope: 1,
     })
     expect(report.valid).toBe(false)
@@ -70,10 +72,43 @@ describe('validateParams', () => {
       count: 'must be a whole number',
       style: 'must be one of "round", "square"',
       label: 'must be at most 5 characters',
-      colour: 'must be a colour: a #rrggbb hex value or a colour name',
-      logo: 'must be an asset id from upload_asset (a SHA-256), or "" for none',
+      colour: 'must be a colour: #rgb, #rgba, #rrggbb or #rrggbbaa, or an SVG colour name OpenSCAD knows (e.g. "red")',
+      logo: 'must be "" (none), the default ("default-logo.svg"), a sample file ("default-logo.svg", "star.svg"), or an asset id from upload_asset',
       nope: 'is not a parameter of this model',
     })
+  })
+})
+
+describe('validateParams: file values the backend accepts (assets.py file_assets)', () => {
+  const ok = (logo: string) => validateParams(SCHEMA as never, { logo }).valid
+  it('accepts "", the non-empty default, a shipped sample and an uploaded asset id', () => {
+    expect(ok('')).toBe(true)
+    expect(ok('default-logo.svg')).toBe(true)
+    expect(ok('star.svg')).toBe(true)
+    expect(ok('c'.repeat(64))).toBe(true)
+  })
+  it('refuses anything else, including a path', () => {
+    expect(ok('other.svg')).toBe(false)
+    expect(ok('../etc/passwd')).toBe(false)
+  })
+})
+
+describe('validateParams: colours OpenSCAD knows', () => {
+  const ok = (colour: string) => validateParams(SCHEMA as never, { colour }).valid
+  it('accepts SVG names in any case and every hex form', () => {
+    for (const c of ['red', 'CornflowerBlue', ' darkslategrey ', '#f00', '#f008', '#ff0000', '#ff000080']) {
+      expect(ok(c), c).toBe(true)
+    }
+  })
+  it('refuses unknown names and malformed hex', () => {
+    for (const c of ['cerulean', 'banana', 'rebeccapurple', 'ff0000', '#ff000', '#gg0000', '']) expect(ok(c), c).toBe(false)
+  })
+  it("matches the backend's measured list (backend/scadbuddy/render/colours.py CSS_COLOURS) exactly", () => {
+    const source = readFileSync(new URL('../../backend/scadbuddy/render/colours.py', import.meta.url), 'utf8')
+    const block = /CSS_COLOURS[^{]*\{([\s\S]*?)\n\}/.exec(source)?.[1] ?? ''
+    const backend = [...block.matchAll(/"([^"]+)"\s*:/g)].map((m) => m[1])
+    expect(backend.length).toBeGreaterThan(100)
+    expect([...OPENSCAD_COLOUR_NAMES].sort()).toEqual(backend.sort())
   })
 })
 
@@ -408,6 +443,70 @@ describe('binary results: inline under the cap, a link over it', () => {
     const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
     expect(large.isError).toBeFalsy()
     expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
+  })
+})
+
+describe("tools for #324's routes", () => {
+  const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
+  const model = (url: string) => ({ slug: 'box', name: 'Box', libraries: [{ name: 'BOSL2', url, ref: 'main', commit: 'a'.repeat(40) }] })
+
+  it('reads diagnostics, installed libraries and asset usage', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/diagnostics`, () => HttpResponse.json({ warnings: [{ line: 3 }] })),
+      http.get(`${BACKEND}/api/v1/libraries/installed`, () => HttpResponse.json([{ name: 'BOSL2', commit: 'c', used_by: ['box'] }])),
+      http.get(`${BACKEND}/api/v1/assets/usage`, () => HttpResponse.json({ count: 1, bytes: 2, max_count: 0, max_total_bytes: 0 })),
+    )
+    expect(firstText(await runTool(tool('get_render_diagnostics'), { slug: 'box' }, ctx()))).toEqual({ warnings: [{ line: 3 }] })
+    expect(firstText(await runTool(tool('list_installed_libraries'), {}, ctx()))).toEqual([{ name: 'BOSL2', commit: 'c', used_by: ['box'] }])
+    expect(firstText(await runTool(tool('get_asset_usage'), {}, ctx()))).toMatchObject({ count: 1 })
+  })
+
+  it('draws a view inline, and links it when it is over the cap', async () => {
+    const job = 'd'.repeat(32)
+    let requested = ''
+    server.use(
+      http.get(`${BACKEND}/api/v1/jobs/${job}/views/top.png`, ({ request }) => {
+        requested = new URL(request.url).search
+        return new HttpResponse(new Uint8Array(32), { headers: { 'content-type': 'image/png' } })
+      }),
+    )
+    const inline = await runTool(tool('get_render_view'), { job_id: job, view: 'top', size: 256 }, ctx())
+    expect(inline.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' })
+    expect(requested).toBe('?size=256')
+    const linked = await runTool(tool('get_render_view'), { job_id: job, view: 'top' }, ctx({ maxInlineBytes: 8 }))
+    expect(linked.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/jobs/${job}/views/top.png` })
+  })
+
+  it('removing a library checkout is outward (irreversible) and only prepares', async () => {
+    expect(tool('remove_library_checkout').risk).toBe('outward')
+    const result = await runTool(tool('remove_library_checkout'), { name: 'BOSL2' }, ctx())
+    expect(firstText(result)).toMatchObject({ status: 'pending_approval', summary: 'Delete every checkout of library BOSL2' })
+  })
+
+  it('re-pins a catalogue library unattended, and refuses one pinned from another URL', async () => {
+    let pinnedFrom = CATALOGUE[0]!.url
+    let patched: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json(model(pinnedFrom))),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.patch(`${BACKEND}/api/v1/models/box/libraries/BOSL2`, async ({ request }) => {
+        patched = await request.json()
+        return HttpResponse.json({ slug: 'box' })
+      }),
+    )
+    expect((await runTool(tool('repin_library'), { slug: 'box', name: 'BOSL2', ref: 'v2.1.0' }, ctx())).isError).toBeFalsy()
+    expect(patched).toEqual({ ref: 'v2.1.0' })
+
+    patched = undefined
+    pinnedFrom = 'https://attacker.example/BOSL2'
+    const refused = await runTool(tool('repin_library'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(firstText(refused)).toContain('repin_library_from_pinned_url')
+    expect(patched).toBeUndefined()
+
+    expect(firstText(await runTool(tool('repin_library_from_pinned_url'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({
+      status: 'pending_approval',
+    })
   })
 })
 

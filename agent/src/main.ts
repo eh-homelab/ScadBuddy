@@ -125,6 +125,9 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     void shutdown({
+      // End the /mcp sessions first: their standing SSE streams would
+      // otherwise hold server.close() until the deadline.
+      closeSessions: () => app.close(),
       closeServer: () =>
         new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
       closeDatabase: database ? () => database.close() : undefined,

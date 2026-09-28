@@ -2,10 +2,11 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Hono } from 'hono'
 import { createBackendClient } from '../../src/api/backend.js'
-import { type AppDeps, createApp } from '../../src/app.js'
+import { type AgentApp, type AppDeps, createApp } from '../../src/app.js'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../../src/auth/authenticate.js'
 import { InMemoryTokenStore, type TokenStore } from '../../src/auth/tokens.js'
 import { originPolicy } from '../../src/http/origins.js'
+import type { McpEndpointDeps } from '../../src/mcp/http.js'
 import { ALL_TOOLS } from '../../src/tools/index.js'
 import { PendingActionStore } from '../../src/tools/pending.js'
 import type { ToolServices } from '../../src/tools/registry.js'
@@ -39,7 +40,7 @@ export function services(overrides: Partial<ToolServices> = {}): ToolServices {
   }
 }
 
-export type TestApp = { app: Hono; tokens: TokenStore; settings: McpAuthSettings; services: ToolServices }
+export type TestApp = { app: AgentApp; tokens: TokenStore; settings: McpAuthSettings; services: ToolServices }
 
 /** The non-MCP app dependencies (#255's credential routes and health), with a database that is up and migrated. */
 export function baseDeps(overrides: Partial<AppDeps> = {}): AppDeps {
@@ -66,6 +67,8 @@ export function testApp(
     authSettings?: () => McpAuthSettings | Promise<McpAuthSettings>
     /** Overrides for the rest of the app, e.g. a database whose migrations failed. */
     deps?: Partial<AppDeps>
+    /** Overrides for the /mcp endpoint itself (session limits, sweep timing). */
+    mcp?: Partial<McpEndpointDeps>
   } = {},
 ): TestApp {
   const settings = { ...DEFAULT_MCP_AUTH, ...options.settings }
@@ -79,6 +82,7 @@ export function testApp(
         services: svc,
         tokens,
         authSettings: options.authSettings ?? (() => settings),
+        ...options.mcp,
       },
     }),
   )

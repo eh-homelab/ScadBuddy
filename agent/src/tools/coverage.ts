@@ -32,34 +32,5 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
  * NOT_A_TOOL entry) and leaves this list.
  */
 export const PENDING_ROUTES: readonly { operation: string; pr: number; tool: string; reason: string }[] = [
-  {
-    operation: 'GET /api/v1/models/{slug}/diagnostics',
-    pr: 324,
-    tool: 'get_render_diagnostics',
-    reason: "OpenSCAD's warnings and errors with file and line, from the latest settled render; route added by #324.",
-  },
-  {
-    operation: 'GET /api/v1/jobs/{job_id}/views/{view}.png',
-    pr: 324,
-    tool: 'get_render_view',
-    reason: 'Rendered views (front, top, …) of a job for visual checks; route added by #324.',
-  },
-  {
-    operation: 'GET /api/v1/outputs/{output_id}/views/{view}.png',
-    pr: 324,
-    tool: 'get_output_view',
-    reason: 'Rendered views of a saved output; route added by #324.',
-  },
-  {
-    operation: 'GET /api/v1/libraries/installed',
-    pr: 324,
-    tool: 'list_installed_libraries',
-    reason: 'Library checkouts on the volume and the models that use them; route added by #324.',
-  },
-  {
-    operation: 'DELETE /api/v1/libraries/{name}',
-    pr: 324,
-    tool: 'remove_library_checkout',
-    reason: 'Deletes library checkouts no model uses (outward: irreversible); route added by #324.',
-  },
+  // Empty: #320's and #324's routes have merged and have their tools.
 ]

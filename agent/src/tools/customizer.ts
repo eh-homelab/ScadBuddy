@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, fileForm, params, slug } from './common.js'
+import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { validateParams } from './validate.js'
 
@@ -15,7 +15,6 @@ type JobStatus = Awaited<ReturnType<typeof getJob>>
 
 const jobId = z.string().min(1).describe('Render job id, as render_model returns it')
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
-
 async function fetchSchema(ctx: ToolContext, slug: string, version?: string) {
   return version
     ? ok(
@@ -166,6 +165,56 @@ export const customizerTools: Tool[] = [
         { path: `/api/v1/jobs/${job_id}/preview.glb`, name: `preview-${job_id}.glb`, fallbackType: 'model/gltf-binary' },
         (bytes, mimeType) => blob(`scadbuddy://jobs/${job_id}/preview.glb`, bytes, mimeType),
       ),
+  }),
+
+  defineTool({
+    name: 'get_render_view',
+    description:
+      "A render job's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as a " +
+      'shaded PNG, to check the geometry without a 3D viewer.',
+    input: z.object({ job_id: jobId, view: VIEW, size: VIEW_SIZE }),
+    risk: 'read',
+    routes: ['GET /api/v1/jobs/{job_id}/views/{view}.png'],
+    handler: async ({ job_id, view, size }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/jobs/{job_id}/views/{view}.png', {
+          params: { path: { job_id, view }, query: { size } },
+          parseAs: 'stream',
+        }),
+        `draw ${view} view of ${job_id}`,
+        ctx,
+        {
+          path: `/api/v1/jobs/${job_id}/views/${view}.png${size ? `?size=${size}` : ''}`,
+          name: `${job_id}-${view}.png`,
+          fallbackType: 'image/png',
+        },
+        image,
+      ),
+  }),
+
+  defineTool({
+    name: 'get_render_diagnostics',
+    description:
+      "OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently " +
+      'settled render (done or failed). Use it to fix a failing or warning-laden model.',
+    input: z.object({ slug }),
+    risk: 'read',
+    routes: ['GET /api/v1/models/{slug}/diagnostics'],
+    handler: async ({ slug }, { backend }) =>
+      json(
+        await ok(backend.GET('/api/v1/models/{slug}/diagnostics', { params: { path: { slug } } }), `get diagnostics of ${slug}`),
+      ),
+  }),
+
+  defineTool({
+    name: 'get_asset_usage',
+    description:
+      'How much the upload store for `// file` parameters holds (count, bytes) and the caps past which an ' +
+      'upload is refused (0 is no limit).',
+    input: z.object({}),
+    risk: 'read',
+    routes: ['GET /api/v1/assets/usage'],
+    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/assets/usage'), 'get asset usage')),
   }),
 
   defineTool({
