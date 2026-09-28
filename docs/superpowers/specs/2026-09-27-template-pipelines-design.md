@@ -279,11 +279,14 @@ workflows; the default is to let them finish on the old build.
 - **SIGTERM.** tini forwards it, and it starts the drain. The worker keeps polling until
   no workflow pinned to its build is running (a visibility count on
   `TemporalWorkerDeploymentVersion`). This wait is bounded by
-  `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s.
+  `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Past the bound the worker exits
+  anyway: workflows still pinned to its build have no poller, and their jobs stay
+  `running` until that build polls again.
 - **Activities.** After that, the SDK gives in-flight activities up to
   `SCADBUDDY_RENDER_TIMEOUT + 60` s.
 - **Grace period.** `terminationGracePeriodSeconds` must be at least
-  `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120`, which is 660 s at the default.
+  `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown (e.g.
+  30 s): 690 s at the default.
 - **In-process mode.** `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (dev and tests) does not
   drain.
 

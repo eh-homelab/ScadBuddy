@@ -35,8 +35,11 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
-Run `tests/` files and `tests/api/` files in separate pytest commands, grouped by
-directory: given both in one command, pytest drops `tests/api/conftest.py`.
+Mixing `tests/` and `tests/api/` paths in one pytest command is fine two at a time,
+but an api module after a non-api module that itself follows an api module loses
+`tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
+tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
+with `fixture 'client' not found`. Put the `tests/api/` paths together.
 Renders: `SCADBUDDY_TEMPORAL_ADDRESS` empty runs the legacy in-process render queue; set,
 renders run on Temporal with `python -m scadbuddy.worker` as the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). The legacy path
