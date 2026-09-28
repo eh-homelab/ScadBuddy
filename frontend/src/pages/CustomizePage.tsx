@@ -143,15 +143,11 @@ export function CustomizePage() {
       setSourceChangedFor(slug)
       return
     }
-    api.getSchema(slug).then(
-      (latest) => {
-        if (isDirty.current()) setSourceChangedFor(slug)
-        else schemaState.setData(latest)
-      },
-      () => {
-        // The parameters keep what they show; the next change reads again.
-      },
-    )
+    schemaState.refresh(() => {
+      if (!isDirty.current()) return true
+      setSourceChangedFor(slug)
+      return false
+    })
   })
   const reloadSchema = () => {
     setSourceChangedFor(null)

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
-import { useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
+import { useLatest } from '../lib/useLatest'
 import { useSubscription, type RealtimeSignal } from '../lib/realtime'
 import type { CatalogueLibrary, LibraryPinRequest, ModelLibrary, ModelSummary } from '../api/types'
 import { Button } from './ui/Button'

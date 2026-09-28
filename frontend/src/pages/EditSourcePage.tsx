@@ -62,22 +62,15 @@ export function EditSourcePage() {
   const untouched = () => buffer.current.source === null || buffer.current.source === buffer.current.loaded
   useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
     if (signal === 'resync' || signal.kind !== 'source.changed') return
-    // Not loaded yet: read it again through the loader, whose sequence guard drops a
-    // first read that was already in flight with the old text.
-    if (buffer.current.source === null) {
-      loaded.refresh()
-      return
-    }
-    api.getSource(slug).then(
-      (latest) => {
-        if (latest === buffer.current.source) return
-        if (untouched()) loaded.setData(latest)
-        else setTheirs(latest)
-      },
-      () => {
-        // The buffer keeps what it shows; the next change reads again.
-      },
-    )
+    // Through the loader, whose sequence guard drops an older read still in flight
+    // (the first one, say). Decided as the answer lands, not as the signal came.
+    loaded.refresh((latest) => {
+      // Already what the buffer holds (typed the same, or this tab's own save): take it
+      // as loaded, so the buffer reads as untouched again.
+      if (latest === buffer.current.source || untouched()) return true
+      setTheirs(latest)
+      return false
+    })
   })
   const takeTheirs = () => {
     if (theirs === null) return

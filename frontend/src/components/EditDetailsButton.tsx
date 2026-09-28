@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
-import { useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
+import { useLatest } from '../lib/useLatest'
 import { useSubscription } from '../lib/realtime'
 import type { ModelPatch, ModelSummary } from '../api/types'
 import {
@@ -67,6 +67,10 @@ function sameDetails(a: Baseline, b: Baseline) {
     (a.model.tags ?? []).join('\n') === (b.model.tags ?? []).join('\n') &&
     a.model.has_thumbnail === b.model.has_thumbnail &&
     a.model.thumbnail_source === b.model.thumbnail_source &&
+    // Which output or default render it is. An uploaded image replaced by another
+    // shows no difference in the record (tracked as a follow-up to #442).
+    a.model.thumbnail_output_id === b.model.thumbnail_output_id &&
+    a.model.thumbnail_preview_id === b.model.thumbnail_preview_id &&
     a.readme === b.readme
   )
 }

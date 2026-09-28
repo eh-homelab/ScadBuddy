@@ -6,8 +6,13 @@ export interface AsyncState<T> {
   error: Error | undefined
   loading: boolean
   reload: () => void
-  /** Fetch again in the background: the current data stays until the answer lands. */
-  refresh: () => void
+  /**
+   * Fetch again in the background: the current data stays until the answer lands.
+   * With `accept`, the answer (if still the newest) is applied only when `accept`
+   * returns true as it lands: a page holding unsaved edits decides there, and does
+   * whatever else it must (a "changed elsewhere" banner) instead.
+   */
+  refresh: (accept?: (data: T) => boolean) => void
   setData: (next: T) => void
 }
 
@@ -65,17 +70,22 @@ export function useAsync<T>(
   }, [key])
 
   const queued = useRef(false)
-  const refresh = useCallback(() => {
-    // Signals that arrive together are read once.
+  const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
+  const refresh = useCallback((accept?: (data: T) => boolean) => {
+    // Signals that arrive together are read once, deciding by the latest `accept`.
+    accepting.current = accept
     if (queued.current) return
     queued.current = true
     queueMicrotask(() => {
       queued.current = false
       const { load: current, key: at } = latest.current
+      const decide = accepting.current
       const mine = ++sequence.current
       current().then(
         (data) => {
-          if (sequence.current === mine) setSnapshot({ key: at, data })
+          if (sequence.current !== mine) return
+          if (decide && !decide(data)) return
+          setSnapshot({ key: at, data })
         },
         (cause: unknown) => {
           if (sequence.current !== mine) return
@@ -92,7 +102,7 @@ export function useAsync<T>(
   useEffect(() => {
     if (!topicList) return
     const realtime = getRealtime()
-    const stops = topicList.split('\n').map((topic) => realtime.subscribe(topic, refresh))
+    const stops = topicList.split('\n').map((topic) => realtime.subscribe(topic, () => refresh()))
     return () => {
       for (const stop of stops) stop()
     }

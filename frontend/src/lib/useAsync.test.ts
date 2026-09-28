@@ -103,3 +103,38 @@ it('shows the error of a failed read when there is nothing on screen yet', async
   act(() => signals[0]?.('resync'))
   await waitFor(() => expect(result.current.error?.message).toBe('down'))
 })
+
+it('applies a refresh only when accept says so as the answer lands', async () => {
+  let n = 0
+  const { result } = renderHook(() => useAsync(() => Promise.resolve(++n), [], ['m']))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  const seen: number[] = []
+  act(() =>
+    result.current.refresh((data) => {
+      seen.push(data)
+      return false
+    }),
+  )
+  await waitFor(() => expect(seen).toEqual([2]))
+  expect(result.current.data).toBe(1)
+  act(() => result.current.refresh(() => true))
+  await waitFor(() => expect(result.current.data).toBe(3))
+})
+
+it('never asks accept about an answer a newer read has overtaken', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  const asked: string[] = []
+  act(() => result.current.refresh((data) => (asked.push(data), true)))
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => result.current.reload())
+  await waitFor(() => expect(resolvers).toHaveLength(3))
+  await act(async () => {
+    resolvers[2]?.('newest')
+    await Promise.resolve()
+    resolvers[1]?.('stale')
+  })
+  expect(result.current.data).toBe('newest')
+  expect(asked).toEqual([])
+})

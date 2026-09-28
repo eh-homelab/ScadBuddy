@@ -150,15 +150,11 @@ export function SettingsPage() {
       setChangedElsewhere(true)
       return
     }
-    api.getSettings().then(
-      (latest) => {
-        if (isDirty.current()) setChangedElsewhere(true)
-        else settingsState.setData(latest)
-      },
-      () => {
-        // The form keeps what it shows; the next change reads again.
-      },
-    )
+    settingsState.refresh(() => {
+      if (!isDirty.current()) return true
+      setChangedElsewhere(true)
+      return false
+    })
   })
 
   function formValues() {
