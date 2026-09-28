@@ -7,6 +7,7 @@ import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { PRINTS_VIEW_KEY, resetStoredPrintsView } from '../lib/printsQuery'
 import { renderPage } from '../test/utils'
+import { App } from '../App'
 import { PrintsPage, TemplatePrintsPage } from './PrintsPage'
 
 /** Where the router is, so a test can read the URL the filters wrote. */
@@ -267,6 +268,29 @@ describe('PrintsPage (#310): the global print history', () => {
     // The archive's printer, named once: the progress read's is only a fallback.
     expect(printing).toHaveTextContent('3DP-H2C-042')
     expect(printing).not.toHaveTextContent('3DP-31B-598')
+  })
+})
+
+describe('the print route in the app (#310, until #311)', () => {
+  it('a row click lands on the print, not back on the catalogue', async () => {
+    const { user } = renderPage(
+      <>
+        <App />
+        <Location />
+      </>,
+      { route: '/prints' },
+    )
+    const failed = await item(36)
+    await user.click(within(failed).getByRole('link'))
+    expect(await screen.findByRole('heading', { name: 'Reagan' })).toBeInTheDocument()
+    expect(location()).toBe('/prints/36')
+    expect(screen.getByRole('link', { name: 'Print history' })).toHaveAttribute('href', '/prints')
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+  })
+
+  it('says so for a print ScadBuddy does not know', async () => {
+    renderPage(<App />, { route: '/prints/99' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a print of any ScadBuddy output')
   })
 })
 

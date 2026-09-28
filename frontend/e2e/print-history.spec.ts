@@ -53,17 +53,17 @@ test.describe('print history (#310)', () => {
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
-  test('a click on the row opens the print', async ({ page }) => {
+  test('a click on the row opens the print, and stays there', async ({ page }) => {
     await page.goto('/prints')
-    const visited: string[] = []
-    page.on('framenavigated', (frame) => {
-      if (frame === page.mainFrame()) visited.push(new URL(frame.url()).pathname)
-    })
     // Low on the card, away from the name and the image: the whole item is the link.
     const item = page.locator('[data-print="36"]')
     const box = await item.boundingBox()
     await item.click({ position: { x: 24, y: (box?.height ?? 0) - 12 } })
-    await expect.poll(() => visited).toContain('/prints/36')
+    // Settled on the print, not bounced back to the catalogue by the catch-all route.
+    await expect(page.getByRole('heading', { name: 'Reagan', level: 1 })).toBeVisible()
+    await expect(page).toHaveURL(/\/prints\/36$/)
+    await page.getByRole('link', { name: 'Print history' }).click()
+    await expect(page).toHaveURL(/\/prints$/)
   })
 
   test('the template’s Prints tab lists its prints, in the view last chosen', async ({ page }) => {
