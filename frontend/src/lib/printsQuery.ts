@@ -29,7 +29,8 @@ export const DEFAULT_PRINTS_QUERY: PrintsQuery = {
 }
 
 const DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
-const PRINTER = /^[1-9]\d{0,17}$/
+/** At most 15 digits: every such id is a safe integer, so `Number()` keeps it exact. */
+const PRINTER = /^[1-9]\d{0,14}$/
 
 function day(value: string | null): string {
   return value !== null && DAY.test(value) ? value : ''

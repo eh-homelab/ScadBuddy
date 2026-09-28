@@ -31,6 +31,14 @@ describe('print history URL state (#310)', () => {
     ).toEqual(DEFAULT_PRINTS_QUERY)
   })
 
+  it('takes only a printer id a JavaScript number carries exactly', () => {
+    expect(parsePrintsQuery(new URLSearchParams('printer=999999999999999')).printer).toBe('999999999999999')
+    expect(parsePrintsQuery(new URLSearchParams('printer=9999999999999999')).printer).toBe('')
+    expect(apiFilters(parsePrintsQuery(new URLSearchParams('printer=999999999999999')))).toEqual({
+      printer_id: 999999999999999,
+    })
+  })
+
   it('writes only what differs from the defaults, and round-trips', () => {
     expect(toPrintsParams(DEFAULT_PRINTS_QUERY).toString()).toBe('')
     const query = { ...DEFAULT_PRINTS_QUERY, status: 'completed', printer: '1', view: 'list' as const }
