@@ -109,6 +109,95 @@ export async function connect(app: Hono, via: Via = {}): Promise<Client> {
   return client
 }
 
+/**
+ * A client whose standalone GET SSE stream (the one resource notifications
+ * ride, #264) the test can see and cut:
+ *
+ * - `streamOpen` resolves once the GET stream is open. A notification sent
+ *   before it is stored for resumption but not delivered, and a first GET
+ *   carries no Last-Event-ID, so tests wait on this before triggering events.
+ * - `cut()` drops that stream as a network failure would: the server's side
+ *   is cancelled (so it stops writing and stores what follows) and the
+ *   client's side errors (so it reconnects with Last-Event-ID).
+ * - `hold()` makes the next resuming GET wait until the returned release is
+ *   called, so a test can send while the client is disconnected.
+ */
+export async function connectWatching(
+  app: Hono,
+  via: Via = {},
+): Promise<{
+  client: Client
+  streamOpen: () => Promise<void>
+  cut: () => void
+  hold: () => () => void
+  resumedWith: string[]
+}> {
+  const base = appFetch(app, via)
+  let cutCurrent: (() => void) | undefined
+  let opened!: () => void
+  let open = new Promise<void>((r) => (opened = r))
+  let gate: Promise<void> = Promise.resolve()
+  const resumedWith: string[] = []
+  const watched: typeof fetch = async (input, init) => {
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+    if (method !== 'GET') return base(input, init)
+    const lastEventId = new Headers(init?.headers).get('last-event-id')
+    if (lastEventId) {
+      resumedWith.push(lastEventId)
+      await gate
+    }
+    const res = await base(input, init)
+    if (!res.ok || !res.body) return res
+    const reader = res.body.getReader()
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({
+      start: (c) => {
+        controller = c
+      },
+      pull: async (c) => {
+        try {
+          const { done, value } = await reader.read()
+          if (done) c.close()
+          else c.enqueue(value)
+        } catch {
+          // Cut: already errored.
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    })
+    cutCurrent = () => {
+      void reader.cancel('cut').catch(() => {})
+      try {
+        controller.error(new Error('network drop'))
+      } catch {
+        // Already closed.
+      }
+    }
+    opened()
+    return new Response(body, { status: res.status, headers: res.headers })
+  }
+  const client = new Client({ name: 'scadbuddy-test', version: '0.0.0' })
+  const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
+    fetch: watched,
+    reconnectionOptions: { initialReconnectionDelay: 10, maxReconnectionDelay: 50, reconnectionDelayGrowFactor: 1, maxRetries: 20 },
+  })
+  await client.connect(transport)
+  return {
+    client,
+    streamOpen: () => open,
+    cut: () => {
+      open = new Promise<void>((r) => (opened = r))
+      cutCurrent?.()
+    },
+    hold: () => {
+      let release!: () => void
+      gate = new Promise<void>((r) => (release = r))
+      return release
+    },
+    resumedWith,
+  }
+}
+
 /** The text of a tool result's first content block, parsed as JSON when it is. */
 export function firstText(result: unknown): unknown {
   const content = (result as { content?: { type: string; text?: string }[] }).content ?? []

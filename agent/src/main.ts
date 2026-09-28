@@ -8,10 +8,12 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError } from './db/migrations.js'
+import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
+import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -75,6 +77,12 @@ void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
+
+// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
+// of its own, retried in the background, feeding MCP resource subscriptions.
+const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+events?.start()
+const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
 const app = createApp({
@@ -96,6 +104,7 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
+    resources,
     services: {
       backend,
       pending: new PendingActionStore(),
@@ -127,7 +136,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void shutdown({
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
-      closeSessions: () => app.close(),
+      closeSessions: async () => {
+        await app.close()
+        resources.close()
+        await events?.close()
+      },
       closeServer: () =>
         new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
       closeDatabase: database ? () => database.close() : undefined,
