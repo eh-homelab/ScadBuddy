@@ -2,13 +2,13 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { setMcpAuthMode } from '../mocks/mcpTokens'
+import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { McpAuthSection } from './McpAuthSection'
 
 // #251 — Settings → "MCP authentication" over the msw stand-in for the agent
-// service's /api/v1/ai/mcp/auth (src/mocks/mcpTokens.ts).
+// service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
 
 async function loaded() {
   return await screen.findByRole('radio', { name: /Require an access token/ })
