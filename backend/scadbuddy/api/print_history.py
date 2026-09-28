@@ -718,7 +718,8 @@ class PrintAgain(_Response):
     description=(
         "Adds the archive to Bambuddy's print queue (`POST /queue/` with `archive_id`; "
         "Bambuddy's own reprint route is gone), on the printer and plate it printed "
-        "on, with Bambuddy's default options. The key needs Bambuddy's queue scope. "
+        "on, with Bambuddy's default options. The key needs Read Status (the archive is "
+        "read first) and Manage Queue. "
         "409 when Bambuddy no longer has the archive or no printer is known for it."
     ),
 )
@@ -771,7 +772,8 @@ class TimelapsePull(BaseModel):
         "an explicit request. The name is one of the detail's "
         "`printer_media.remote_files` (read with `printer_media=1`); Bambuddy answers "
         "404 for a name the printer does not have, and ScadBuddy 409 for an archive "
-        "deleted in Bambuddy, as for a reprint. The key needs Manage Archives."
+        "deleted in Bambuddy, as for a reprint. The key needs Read Status (the archive is "
+        "read first) and Manage Archives; a refusal names the one that was missing."
     ),
 )
 async def pull_timelapse(

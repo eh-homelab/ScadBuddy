@@ -86,7 +86,7 @@ export const printHistoryTools: Tool[] = [
       filename: z.string().min(1).max(255).regex(/^[^/\\]+$/, 'must be a bare file name from printer_media'),
     }),
     risk: 'outward',
-    bambuddyScope: ['Manage Archives'],
+    bambuddyScope: ['Read Status', 'Manage Archives'],
     routes: ['POST /api/v1/prints/{archive_id}/timelapse/pull'],
     summarize: ({ archive_id, filename }) => `Pull timelapse ${filename} from the printer onto print ${archive_id}`,
     handler: async ({ archive_id, filename }, { backend }) => {

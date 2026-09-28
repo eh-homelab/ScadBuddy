@@ -227,3 +227,55 @@ def test_an_archive_no_output_printed_cannot_pull_a_timelapse(client: TestClient
 
     assert response.status_code == 404
     assert not select.called
+
+
+# --- scopes: the pull reads the archive (Read Status), then attaches (Manage Archives)
+
+
+@respx.mock
+def test_a_pull_refused_at_the_archive_read_names_read_status(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(403))
+    select = respx.post(f"{API}/archives/35/timelapse/select").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Read Status"
+    assert not select.called
+
+
+@respx.mock
+def test_a_pull_refused_at_the_attach_names_manage_archives(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35)
+    respx.post(f"{API}/archives/35/timelapse/select").mock(return_value=httpx.Response(403))
+
+    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Manage Archives"
+
+
+@pytest.mark.parametrize(
+    ("path", "scopes"),
+    [
+        ("/api/v1/prints/{archive_id}/timelapse/pull", ("Read Status", "Manage Archives")),
+        ("/api/v1/prints/{archive_id}/reprint", ("Read Status", "Manage Queue")),
+    ],
+)
+def test_each_write_documents_every_scope_it_needs(
+    client: TestClient, path: str, scopes: tuple[str, ...]
+) -> None:
+    description = client.get("/openapi.json").json()["paths"][path]["post"]["description"]
+
+    for scope in scopes:
+        assert scope in description

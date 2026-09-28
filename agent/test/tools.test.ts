@@ -795,6 +795,11 @@ describe('print_again and pull_print_timelapse (#311)', () => {
     expect(tool('print_again').risk).toBe('outward')
     expect(tool('pull_print_timelapse').risk).toBe('outward')
   })
+
+  it('declare every Bambuddy scope their route needs: the archive read, then the write', () => {
+    expect(tool('print_again').bambuddyScope).toEqual(['Read Status', 'Manage Queue'])
+    expect(tool('pull_print_timelapse').bambuddyScope).toEqual(['Read Status', 'Manage Archives'])
+  })
 })
 
 describe('get_output_preview (#308)', () => {
