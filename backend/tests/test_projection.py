@@ -484,3 +484,26 @@ def test_a_legacy_row_a_workflow_adopted_is_not_failed_as_a_legacy_running_row(
     assert started is not None and started.workflow_id == workflow_id_for(adopted.id)
     assert projection.fail_legacy_running(LEGACY_INTERRUPTED_ERROR) == []
     assert projection.read(adopted.id).state == "running"
+
+
+def test_temporal_boot_adopts_the_legacy_queues_pending_rows(
+    projection: JobProjection, pg_conninfo: str, paths: DataPaths
+) -> None:
+    ours = _job(n=6)
+    projection.submit(ours, render_key("demo", ours.params, None))
+    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    legacy.open()
+    try:
+        waiting = _job(n=7)
+        legacy.submit(waiting, render_key("demo", waiting.params, None))
+    finally:
+        legacy.close()
+    assert projection.read(waiting.id).workflow_id is None
+
+    assert projection.adopt_legacy_pending() == [waiting.id]
+
+    assert projection.read(waiting.id).workflow_id == workflow_id_for(waiting.id)
+    assert projection.read(ours.id).workflow_id == workflow_id_for(ours.id)
+    # The reconciler starts it like any row of this path.
+    assert waiting.id in [job.id for job in projection.stale_pending(older_than=0)]
+    assert projection.adopt_legacy_pending() == []

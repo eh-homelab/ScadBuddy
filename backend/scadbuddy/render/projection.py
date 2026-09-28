@@ -229,6 +229,24 @@ class JobProjection:
                 return None
             return self._release(conn, row, error=CANCELLED_ERROR)
 
+    def adopt_legacy_pending(self) -> list[str]:
+        """At boot on Temporal: give each row the legacy queue left pending the workflow
+        id the reconciler starts it under, so it is this path's to run. Returns their ids."""
+        with self._pool.connection() as conn, conn.transaction():
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM render_jobs WHERE state = 'pending' AND workflow_id IS NULL"
+                    " ORDER BY created_at, id FOR UPDATE"
+                ).fetchall()
+            ]
+            for job_id in ids:
+                conn.execute(
+                    "UPDATE render_jobs SET workflow_id = %s WHERE id = %s",
+                    (workflow_id_for(job_id), job_id),
+                )
+        return ids
+
     def fail_legacy_running(self, error: str) -> list[Job]:
         """At boot on Temporal: fail the rows the legacy queue was running (no
         workflow), which its reaper will never come back for. Its pending rows need

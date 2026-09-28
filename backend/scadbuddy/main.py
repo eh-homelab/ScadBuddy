@@ -299,6 +299,16 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
         )
         service.client = state.temporal
         # A flip from the legacy queue: what it was running, nothing will finish.
+        # Before the reconciler's first pass (`service.start`), which starts only rows
+        # that name a workflow: the legacy queue's pending ones become this path's.
+        # Disjoint from the running rows failed next, so the order between the two
+        # does not matter; pending first, as `PostgresJobStore.abandon_orphans` does.
+        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+        if adopted:
+            logger.info(
+                "adopted the renders the legacy queue left pending",
+                extra={"count": len(adopted), "job_ids": adopted},
+            )
         interrupted = await asyncio.to_thread(
             projection.fail_legacy_running, LEGACY_INTERRUPTED_ERROR
         )
