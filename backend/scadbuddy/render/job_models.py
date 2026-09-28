@@ -40,6 +40,10 @@ class JobResult(BaseModel):
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     #: Diagnostics past the cap that ``diagnostics`` leaves out; 0 when it is all.
     diagnostics_dropped: int = 0
+    #: The template's own `NOTE:`/`WARNING:` echoes (#285): what it changed from the
+    #: parameters it was given, say a size capped to fit the plate. Defaulted, like
+    #: `source_version`, so a result stored before the field existed still loads.
+    notes: list[str] = Field(default_factory=list)
 
 
 class Job(BaseModel):

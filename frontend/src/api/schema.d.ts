@@ -2040,6 +2040,8 @@ export interface components {
             log_tail?: string[];
             /** Model Version */
             model_version?: string | null;
+            /** Notes */
+            notes?: string[] | null;
             /** Params */
             params?: {
                 [key: string]: boolean | number | string;

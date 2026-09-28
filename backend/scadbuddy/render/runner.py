@@ -27,6 +27,8 @@ from scadbuddy.render.schema import (
 )
 
 LOG_TAIL_LINES = 50
+#: A template echoing a note inside a loop must not grow a job without bound.
+MAX_NOTES = 20
 
 _ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
@@ -37,6 +39,14 @@ _MISSING_FILE = re.compile(
     r"^(?:ERROR: Can't open file '(?P<imported>[^']*)'"
     r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
 )
+
+
+#: A message a template echoes for the person customizing it (#285): `NOTE:` by
+#: convention, `WARNING:` in the templates that predate it. A single string, so
+#: `echo("NOTE:", x)` -- and every debug echo -- stays in the log only. OpenSCAD
+#: prints the string raw, embedded quotes and backslashes unescaped (measured on
+#: 2026.09.23), so the text is everything between the first and the last quote.
+_TEMPLATE_NOTE = re.compile(r'^ECHO: "(?:NOTE|WARNING): (?P<text>.*)"$')
 
 
 class OpenSCADError(RuntimeError):
@@ -78,6 +88,17 @@ class ProcessOutput:
     diagnostics: tuple[Diagnostic, ...] = ()
     #: How many more there were past the cap (``MAX_DIAGNOSTICS``).
     diagnostics_dropped: int = 0
+    #: What the template echoed for the user (`template_note`), in first-seen order
+    #: and once each. Read off the whole log for the same reason as `missing_files`.
+    notes: tuple[str, ...] = ()
+
+
+def template_note(line: str) -> str | None:
+    """The text of a `NOTE:`/`WARNING:` echo on ``line``, without prefix or quoting."""
+    match = _TEMPLATE_NOTE.match(line)
+    if match is None:
+        return None
+    return match["text"].strip() or None
 
 
 def missing_file(line: str) -> str | None:
@@ -149,6 +170,7 @@ async def _drain(
     stream: asyncio.StreamReader,
     tail: deque[str],
     missing: list[str],
+    notes: list[str],
     diagnostics: DiagnosticCollector,
 ) -> None:
     async for raw in stream:
@@ -158,6 +180,9 @@ async def _drain(
         name = missing_file(line)
         if name is not None and name not in missing:
             missing.append(name)
+        note = template_note(line)
+        if note is not None and note not in notes and len(notes) < MAX_NOTES:
+            notes.append(note)
 
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
@@ -181,9 +206,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     missing: list[str] = []
+    notes: list[str] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, collector))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -220,6 +246,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         missing_files=tuple(missing),
         diagnostics=tuple(collector.diagnostics),
         diagnostics_dropped=collector.dropped,
+        notes=tuple(notes),
     )
 
 

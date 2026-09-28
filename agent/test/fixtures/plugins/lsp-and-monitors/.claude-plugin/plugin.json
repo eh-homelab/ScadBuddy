@@ -1,0 +1,7 @@
+{
+  "name": "lsp-and-monitors",
+  "lspServers": { "go": { "command": "gopls", "extensionToLanguage": { ".go": "go" } } },
+  "experimental": {
+    "monitors": [{ "name": "poll", "command": "./scripts/poll.sh", "description": "polls" }]
+  }
+}

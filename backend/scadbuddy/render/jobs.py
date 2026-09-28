@@ -516,6 +516,7 @@ async def render_job(
         warnings=warnings,
         diagnostics=list(output.diagnostics),
         diagnostics_dropped=output.diagnostics_dropped,
+        notes=list(output.notes),
     )
     return result, output.log_tail
 

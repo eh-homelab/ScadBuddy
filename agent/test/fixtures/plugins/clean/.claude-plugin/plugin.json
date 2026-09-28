@@ -1,0 +1,11 @@
+{
+  "name": "clean",
+  "version": "0.0.1",
+  "description": "Fixture: skills, a remote MCP server and a prompt hook; nothing that starts a process.",
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "http", "url": "https://hooks.example/stop" }] }]
+  },
+  "mcpServers": {
+    "remote-sse": { "type": "sse", "url": "https://mcp.example/sse" }
+  }
+}
