@@ -12,23 +12,26 @@ export function isEmbedded(): boolean {
   }
 }
 
-/**
- * Downloads have to survive the sandbox. Bambuddy's frame has no `allow-downloads`, so
- * Chromium silently drops a download started inside it, `target=_blank` or not
- * (measured in the #311 e2e). What it does allow is a popup that escapes the sandbox
- * (`allow-popups-to-escape-sandbox`): a blank one is same-origin with the frame
- * (`allow-same-origin`), so it can take the frame's blob URL, and a download anchor
- * clicked in it is not sandboxed. Outside a frame, a plain download anchor.
- */
-export function triggerDownload(url: string, filename: string, embedded = isEmbedded()): void {
-  const popup = embedded ? openDownloadWindow() : null
-  clickDownload(url, filename, popup, embedded)
+/** The escape popup was blocked inside the frame, so the file cannot be saved (#612). */
+export class DownloadBlockedError extends Error {
+  constructor() {
+    super('Allow pop-ups for this page to download from inside Bambuddy.')
+    this.name = 'DownloadBlockedError'
+  }
 }
 
 /**
- * `load` the file and save it as `filename`, through the escaped popup when embedded.
+ * `load` the file and save it as `filename`. Downloads have to survive the sandbox:
+ * Bambuddy's frame has no `allow-downloads`, so Chromium silently drops a download
+ * started inside it, `target=_blank` or not (#612). What it does allow is a popup that
+ * escapes the sandbox (`allow-popups-to-escape-sandbox`): a blank one is same-origin
+ * with the frame (`allow-same-origin`), so it can take the frame's blob URL, and a
+ * download anchor clicked in it is not sandboxed. Outside a frame, a plain anchor.
+ *
  * The popup is opened before `load` is awaited, while the click still allows one: a
- * large file can take longer to fetch than the browser keeps that permission.
+ * large file can take longer to fetch than the browser keeps that permission. If it is
+ * blocked, this rejects with `DownloadBlockedError` rather than fall back to the
+ * frame's own anchor, which would fail without a word.
  */
 export async function downloadBlob(
   load: () => Promise<Blob>,
@@ -36,11 +39,21 @@ export async function downloadBlob(
   embedded = isEmbedded(),
 ): Promise<void> {
   const popup = embedded ? openDownloadWindow() : null
+  if (embedded && !popup) throw new DownloadBlockedError()
   try {
     const url = URL.createObjectURL(await load())
-    clickDownload(url, filename, popup, embedded)
+    const host = popup?.document ?? document
+    const anchor = host.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.rel = 'noopener'
+    host.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
     // The anchor has been clicked; give the browser time to read the blob.
     setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    // The download has started; the blank window has nothing else to show.
+    if (popup) setTimeout(() => popup.close(), 1000)
   } catch (cause) {
     popup?.close()
     throw cause
@@ -53,22 +66,6 @@ function openDownloadWindow(): Window | null {
   } catch {
     return null
   }
-}
-
-function clickDownload(url: string, filename: string, popup: Window | null, embedded: boolean) {
-  const host = popup?.document ?? document
-  const anchor = host.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.rel = 'noopener'
-  // No popup (blocked): the frame's own anchor, which is all a browser that lets
-  // sandboxed downloads through needs.
-  if (embedded && !popup) anchor.target = '_blank'
-  host.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  // The download has started; the blank window has nothing else to show.
-  if (popup) setTimeout(() => popup.close(), 1000)
 }
 
 /** Opens a Bambuddy deep link, escaping the sandbox when embedded. */
