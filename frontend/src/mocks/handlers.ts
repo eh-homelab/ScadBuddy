@@ -2258,7 +2258,7 @@ export const handlers = [
     const body = (await request.json()) as AnalysisRun
     const output = state.outputs.find((o) => o.id === body.target.output_id)
     if (!output) return problem(404, 'Output not found')
-    return HttpResponse.json(analysisReport(output, body.request ?? { plate_id: 1 }))
+    return HttpResponse.json(analysisReport(output, body.request ?? { plate_id: 1, all_plates: false }))
   }),
 
   // --- #79 projects -----------------------------------------------------------------

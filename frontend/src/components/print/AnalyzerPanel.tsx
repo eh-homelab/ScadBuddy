@@ -85,7 +85,7 @@ interface Props {
   outputId: string | undefined
   /** The request the dialog would print with; `null` until it has one. */
   request: AnalysisRequest | null
-  /** Printing every plate: the analyzers take one plate (`AnalysisRequest.plate_id`). */
+  /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
   allPlates?: boolean
 }
 
@@ -142,7 +142,7 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
 
       {report && allPlates && (
         <p className="mt-1.5 text-[12px] text-faint">
-          The mesh checks read plate 1; the plate-fit check reads every plate.
+          The mesh checks read plate 1; the plate-fit and filament checks read every plate.
         </p>
       )}
 

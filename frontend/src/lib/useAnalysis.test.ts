@@ -15,6 +15,7 @@ function request(size: Size): AnalysisRequest {
   return {
     printer_id: 1,
     plate_id: 1,
+    all_plates: false,
     choices: {
       nozzles: [{ size, flow: 'standard' }],
       tier: 'standard',
