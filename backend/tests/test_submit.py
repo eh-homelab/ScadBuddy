@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy.core.config import load_config
@@ -19,10 +20,11 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.projection import JobProjection, workflow_id_for
-from scadbuddy.render.submit import RenderService
+from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
@@ -329,3 +331,69 @@ async def test_a_preview_past_its_timeout_is_cancelled_on_the_worker(
         await service.aclose()
 
     assert described.status == WorkflowExecutionStatus.CANCELED
+
+
+# ── inputs Temporal can never take (final review I2) ────────────────────────────
+
+
+async def test_a_submit_too_large_for_a_workflow_input_is_a_413_and_no_row(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(ApiError) as refused:
+            await service.submit(SLUG, {"text": "x" * MAX_WORKFLOW_INPUT_BYTES})
+        await service.aclose()
+
+    assert refused.value.status == 413
+    assert await asyncio.to_thread(projection.list_jobs) == []
+
+
+async def test_a_start_that_can_never_succeed_fails_the_job_and_is_not_retried(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        attempts: list[str] = []
+
+        async def refused(*_: object, **kwargs: Any) -> None:
+            attempts.append(kwargs["id"])
+            raise RPCError("Blob data size exceeds limit", RPCStatusCode.INVALID_ARGUMENT, b"")
+
+        monkeypatch.setattr(client, "start_workflow", refused)
+        job = await service.submit(SLUG, {"width": 8})
+        reconciled = await service.reconcile_once()
+        await service.aclose()
+
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == "failed"
+    assert stored.error is not None and "Blob data size exceeds limit" in stored.error
+    assert attempts == [workflow_id_for(job.id)]
+    assert reconciled == 0
+
+
+async def test_a_reconciled_start_that_can_never_succeed_fails_the_job(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}", reconcile_after=0.0)
+        with monkeypatch.context() as patched:
+
+            async def unavailable(*_: object, **__: object) -> None:
+                raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+            patched.setattr(client, "start_workflow", unavailable)
+            job = await service.submit(SLUG, {"width": 9})
+            assert await service.reconcile_once() == 0
+        assert (await asyncio.to_thread(projection.read, job.id)).state == "pending"
+
+        async def no_namespace(*_: object, **__: object) -> None:
+            raise RPCError("Namespace scadbuddy is not found.", RPCStatusCode.NOT_FOUND, b"")
+
+        monkeypatch.setattr(client, "start_workflow", no_namespace)
+        await service.reconcile_once()
+        await service.aclose()
+
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == "failed"
+    assert stored.error is not None and "not found" in stored.error

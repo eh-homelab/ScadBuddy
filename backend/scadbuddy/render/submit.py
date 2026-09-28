@@ -19,14 +19,17 @@ from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any
 
+from fastapi import status
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.job_store import QueueFullError, render_key
 from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE
@@ -36,6 +39,23 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
+
+#: The largest `Job` a submit sends as a workflow input. Temporal refuses a payload
+#: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
+MAX_WORKFLOW_INPUT_BYTES = 1024 * 1024
+#: Start errors that no retry can fix: the input itself (INVALID_ARGUMENT, e.g. over
+#: the payload limit), or a namespace that does not exist (NOT_FOUND).
+UNSTARTABLE = frozenset(
+    {
+        RPCStatusCode.INVALID_ARGUMENT,
+        RPCStatusCode.FAILED_PRECONDITION,
+        RPCStatusCode.NOT_FOUND,
+    }
+)
+
+
+def _unstartable(error: Exception) -> bool:
+    return isinstance(error, RPCError) and error.status in UNSTARTABLE
 
 
 class RenderService:
@@ -105,6 +125,13 @@ class RenderService:
             model_version=model_version,
             created_at=now(),
         )
+        size = len(pydantic_data_converter.payload_converter.to_payload(job).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these parameters make a render request of {size} bytes; the most a render"
+                f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
         key = render_key(slug, params, model_version)
         kept = (
             await asyncio.to_thread(cached_render, self.paths, slug, key)
@@ -142,13 +169,16 @@ class RenderService:
         self.metrics.render_submitted.inc()
         try:
             await self._start(submitted.job)
-        except Exception:
-            # The row is committed: the reconciler starts it.
-            logger.exception(
-                "could not start a render's workflow; the reconciler will",
-                extra={"job_id": submitted.job.id},
-            )
+        except Exception as error:
             self.metrics.store_errors.labels("start_workflow").inc()
+            if _unstartable(error):
+                await self._fail_unstartable(submitted.job, error)
+            else:
+                # The row is committed: the reconciler starts it.
+                logger.exception(
+                    "could not start a render's workflow; the reconciler will",
+                    extra={"job_id": submitted.job.id},
+                )
         return submitted.job
 
     async def cancel(self, job_id: str, *, slug: str) -> Job | None:
@@ -170,12 +200,15 @@ class RenderService:
                 await self._start(job, WorkflowIDConflictPolicy.FAIL)
             except WorkflowAlreadyStartedError:
                 continue
-            except Exception:
+            except Exception as error:
                 # One row that cannot start must not hold back the rows behind it.
-                logger.exception(
-                    "could not start a pending render's workflow", extra={"job_id": job.id}
-                )
                 self.metrics.store_errors.labels("start_workflow").inc()
+                if _unstartable(error):
+                    await self._fail_unstartable(job, error)
+                else:
+                    logger.exception(
+                        "could not start a pending render's workflow", extra={"job_id": job.id}
+                    )
                 continue
             started.append(job.id)
         if started:
@@ -242,6 +275,19 @@ class RenderService:
             id_conflict_policy=conflict,
             memo=self._memo(),
         )
+
+    async def _fail_unstartable(self, job: Job, error: Exception) -> None:
+        """Settle a row whose workflow Temporal will never start, so it neither waits
+        forever nor holds its render key for every identical request."""
+        logger.error(
+            "Temporal refused a render's workflow for good; failing the job",
+            extra={"job_id": job.id, "error": str(error)},
+        )
+        job.state = "failed"
+        job.finished_at = now()
+        job.error = f"the render could not be started: {error}"
+        if await asyncio.to_thread(self.store.finish, job):
+            self._settled(job, "failed")
 
     async def _cancel_workflow(self, job: Job) -> None:
         assert self.client is not None
