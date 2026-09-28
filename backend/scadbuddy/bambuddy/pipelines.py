@@ -19,6 +19,14 @@ from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
+from scadbuddy.bambuddy.extruders import (
+    SlotSide,
+    extruder_map,
+    mismatch_errors,
+    slot_sides,
+    unknown_side_warnings,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -36,6 +44,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.resolver import (
@@ -179,11 +188,14 @@ async def filament_options_for_output(
     if printer_id is None:
         return options
     try:
-        options.nozzles = (await client.printer_status(printer_id)).nozzles
+        printer_status = await client.printer_status(printer_id)
     except (ApiError, ValueError):
         logger.info("printer status unreadable; the filament step opens with no nozzles known")
         options.nozzles = []
-    return options
+        return options
+    options.nozzles = printer_status.nozzles
+    # Each loaded spool's side, so the picker can mark one whose nozzle differs (#469).
+    return with_sides(options, printer_status)
 
 
 async def _spool_colours(
@@ -199,6 +211,21 @@ async def _spool_colours(
         rgba.get(plan.spool_for(index + 1) or 0) or colour
         for index, colour in enumerate(meta.colors)
     ]
+
+
+async def _spool_sides(
+    client: BambuddyClient, meta: OutputMeta, plan: FilamentPlan, printer_id: int
+) -> tuple[list[SlotSide], PrinterStatus | None]:
+    """Each chosen spool's side on ``printer_id``, for the output's own filaments, and
+    the status they were read from (#469). An unreadable status knows no side."""
+    try:
+        status: PrinterStatus | None = await client.printer_status(printer_id)
+    except (ApiError, ValueError):
+        logger.info("printer status unreadable; the slicer chooses every extruder")
+        status = None
+    count = len(meta.colors)
+    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id <= count]})
+    return slot_sides(own, await client.spool_assignments(), status, printer_id=printer_id), status
 
 
 async def run_for_output(
@@ -251,6 +278,12 @@ async def run_for_output(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
+    # Before anything is uploaded (#469): a spool whose side has another nozzle fitted
+    # would be sliced for the wrong one, and the printer pauses at the first layer.
+    sides, status_read = await _spool_sides(client, meta, request.filament_plan, printer_id)
+    mismatches = mismatch_errors(sides, choices.nozzles[0].size, status_read)
+    if mismatches:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(mismatches))
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
         client,
@@ -259,6 +292,7 @@ async def run_for_output(
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
         colours=await _spool_colours(client, meta, request.filament_plan),
+        extruders=extruder_map(sides, filament_count=len(meta.colors)),
     )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
@@ -366,7 +400,7 @@ async def run_for_output(
         project_id,
         folder_id,
         copies=copies,
-        warnings=warnings + hardware,
+        warnings=warnings + hardware + unknown_side_warnings(sides),
     )
 
 

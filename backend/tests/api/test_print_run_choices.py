@@ -87,6 +87,19 @@ def body(**choices: Any) -> dict[str, Any]:
     }
 
 
+def _slot_1(spool_id: int) -> dict[str, Any]:
+    """Slot 1 from ``spool_id``. The recorded requirements list a slot 2 as well, which
+    the one-colour test model has no filament for, so its shelf spool is never pinned."""
+    return {"slots": [{"slot_id": 1, "spool_id": spool_id}, {"slot_id": 2, "spool_id": 5}]}
+
+
+def on_spool(spool_id: int, **choices: Any) -> dict[str, Any]:
+    """:func:`body` printing slot 1 from ``spool_id`` (#469). Spool 9 feeds the right
+    extruder (the 0.2), spool 10 the left (the 0.4) and spool 5 is on the shelf, so a
+    0.4 run takes spool 10 and a size neither side has takes the shelf spool."""
+    return {**body(**choices), "filament_plan": _slot_1(spool_id)}
+
+
 def run_request(**extra: Any) -> dict[str, Any]:
     """:func:`body` with request fields (not choices) replaced or added; ``None`` drops."""
     request = {**body(), **extra}
@@ -199,7 +212,7 @@ def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
 
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/run",
-        json=body(nozzles=[{"size": "0.4", "flow": "high_flow"}, {"size": "0.4"}]),
+        json=on_spool(10, nozzles=[{"size": "0.4", "flow": "high_flow"}, {"size": "0.4"}]),
     )
 
     assert response.status_code == 200, response.text
@@ -254,7 +267,7 @@ def test_a_nozzle_size_the_rack_lacks_is_warned_about(client: TestClient, model:
 
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/run",
-        json=body(nozzles=[{"size": "0.6"}], tier="standard"),
+        json=on_spool(5, nozzles=[{"size": "0.6"}], tier="standard"),
     )
 
     assert response.status_code == 200, response.text
@@ -564,13 +577,15 @@ def test_the_chosen_nozzle_is_stated_in_the_upload_and_a_change_re_uploads(
     slice_routes()
     queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+    # The shelf spool has no side, so neither run is refused or pinned and the nozzle
+    # really is the only thing that differs (#469).
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=on_spool(5))
     assert upload.call_count == 1
     assert _uploaded_nozzle(upload) == ["0.2"]
 
     client.post(
         f"/api/v1/print/outputs/{output_id}/run",
-        json=body(nozzles=[{"size": "0.4"}], tier="standard"),
+        json=on_spool(5, nozzles=[{"size": "0.4"}], tier="standard"),
     )
 
     assert upload.call_count == 2, "the 0.4 run reused a file stating the 0.2 nozzle"
@@ -762,3 +777,130 @@ def test_a_printer_that_is_not_an_h2c_is_a_422_before_anything_is_sliced(
         "Workshop's model is X1C."
     )
     assert not sliced.called
+
+
+# --- #469: every spool prints from the extruder its AMS feeds ----------------------------
+#
+# printer-status-rack.json is printer 1 with the Filament Track Switch: AMS 0/1 on inlet B
+# (right, the 0.2 HS00) and AMS 2 and the HT on inlet A (left, the 0.4 HH01). Spool 9 is
+# in AMS 0 tray 1, spool 10 in AMS 2 tray 0, and spool 5 is on the shelf
+# (inventory-assignments.json).
+
+
+def _uploaded_settings(route: respx.Route) -> dict[str, Any]:
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(route))) as archive:
+        settings: dict[str, Any] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+@respx.mock
+def test_a_spool_on_the_side_with_the_other_nozzle_is_a_422_before_anything_is_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """Queue item 108: sliced for 0.2 with a spool on the left, where the 0.4 is fitted.
+    The printer paused at the first layer; this refuses it instead."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(filament_plan=_slot_1(10))
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Slot 1's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for "
+        "0.2 mm. Pick a spool on the right, or choose 0.4."
+    )
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_the_upload_pins_each_filament_to_its_spools_extruder(
+    client: TestClient, model: str
+) -> None:
+    """Spool 9 feeds the right extruder: logical 2 through the H2C's ``["1","0"]``."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    assert settings["filament_map_mode"] == "Manual"
+    assert settings["filament_map"] == ["2"]
+    assert "side-unknown" not in {warning["kind"] for warning in response.json()["warnings"]}
+
+
+@respx.mock
+def test_a_spool_on_the_other_side_re_uploads_pinned_to_it(client: TestClient, model: str) -> None:
+    """Both sides fitted with a 0.2, so only the side changes between the two runs."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    run_routes()
+    status = recording("printer-status-rack.json")
+    status["nozzles"] = [{"nozzle_type": "HS00", "nozzle_diameter": "0.2"}] * 2
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+    slice_routes()
+    queue_route()
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+    assert _uploaded_settings(upload)["filament_map"] == ["2"]
+
+    # Spool 10's colour differs too; test_send's key test changes the side alone.
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(filament_plan=_slot_1(10))
+    )
+
+    assert response.status_code == 200, response.text
+    assert upload.call_count == 2, "the left-side run reused a file pinned to the right"
+    assert _uploaded_settings(upload)["filament_map"] == ["1"]
+
+
+@respx.mock
+def test_a_spool_not_in_this_printer_leaves_the_slicer_to_choose_and_says_so(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(filament_plan=_slot_1(5))
+    )
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    assert "filament_map" not in settings
+    assert settings.get("filament_map_mode") != "Manual"
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
+    assert warning["slot_id"] == 1
+    assert "slicer chooses" in warning["message"]
+
+
+@respx.mock
+def test_an_unreadable_status_refuses_nothing_and_leaves_the_slicer_to_choose(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(filament_plan=_slot_1(10))
+    )
+
+    assert response.status_code == 200, response.text
+    assert "filament_map" not in _uploaded_settings(upload)
+    assert "side-unknown" in {warning["kind"] for warning in response.json()["warnings"]}
