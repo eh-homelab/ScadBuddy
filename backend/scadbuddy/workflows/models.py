@@ -37,12 +37,14 @@ class PrepareResult(BaseModel):
 
 
 class RenderMainResult(BaseModel):
-    plates: int = 1
+    plates: int | None = 1
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
     notes: list[str] = Field(default_factory=list)
     missing_files: list[str] = Field(default_factory=list)
+    returncode: int = 0
+    duration_s: float = 0.0
 
 
 class PieceResult(BaseModel):
