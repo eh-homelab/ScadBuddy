@@ -91,6 +91,10 @@ CASES = [
     ("square-sharp", dict(corner_radius=0, edge_round=0, text="hello world", gap=2,
                           letter_scale=40, magnet="6x2", magnet_clearance=0.1)),
     ("all-spaces", dict(text="   ")),
+    # No magnet: the edge rounding and the deep inlay raise the thickness.
+    ("thin-edge-raised", dict(thickness=3, edge_round=2, letter_depth=2)),
+    # Room to spare, but a 2 mm edge rounding keeps a 0.5 mm-inset border off it.
+    ("border-clear-of-edge", dict(border=True, edge_round=2, border_inset=0.5)),
     # The smallest tiles with the widest, furthest-in border: the border is
     # narrowed and moved out so every tile still gets its letter.
     ("small-max-border", dict(tile_size=20, border=True, border_width=5, border_inset=5,
@@ -223,7 +227,7 @@ for name, ov in CASES:
     info[name] = dict(n=int(m.group(1)), cols=int(m.group(2)), rows=int(m.group(3)),
                       gap=float(m.group(4)), T=float(m.group(5)), inset=float(m.group(6)),
                       bw=float(m.group(7)), margin=float(m.group(8)), room=float(m.group(9)),
-                      heart_k=float(m.group(10)))
+                      heart_k=float(m.group(10)), log=log)
 
 failures = []
 
@@ -258,6 +262,19 @@ for name, ov in CASES:
         needs = 0
     T = max(p["thickness"], needs, p["edge_round"] + inlay + 1)
     check(near(I["T"], T), "tile thickness %.2f (expected %.2f)" % (I["T"], T))
+    # Every value the model changes is reported, and nothing else is.
+    for note, want in (("NOTE: thickness raised", T > p["thickness"]),
+                       ("NOTE: gap reduced", gap < p["gap"]),
+                       # Squeezed: narrower than asked, or further out than asked.
+                       ("NOTE: border set to", p["border"] and (I["bw"] < p["border_width"] - 1e-6
+                                                             or I["inset"] < p["border_inset"] - 1e-6)),
+                       # Only pushed in, by the edge rounding: wider than asked, same width.
+                       ("NOTE: border moved in", p["border"] and I["bw"] >= p["border_width"] - 1e-6
+                        and I["inset"] > p["border_inset"] + 1e-6)):
+        check((note in I["log"]) == want, "%s %s" % ("logs" if want else "no", note))
+    if T > p["thickness"]:
+        why = "mm magnet" if needs >= p["edge_round"] + inlay + 1 else "for the edge rounding and inlay"
+        check("NOTE: thickness raised" in I["log"] and why in I["log"], "the thickness note says: %s" % why)
     if p["magnet"] != "none":
         top = (SKIN if p["mount"] == "slide_in" else 0) + ph
         check(T - inlay - top >= ROOF - 1e-6,

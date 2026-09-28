@@ -91,6 +91,17 @@ CASES=(
     # The values before #318 renamed them; must render exactly as png-forced-types.
     "png-legacy-types|base_color,border_color,mask_color,overlay_color|shape=\"classic\";mask_file=\"sample-leaf.png\";mask_type=\"image_threshold\";mask_mode=\"inlay\";overlay_file=\"sample-leaf.png\";overlay_type=\"image_threshold\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
     "upload-names|base_color,border_color,overlay_color|shape=\"classic\";mask_file=\"_scadbuddy_solid_asset_0123456789abcdef.svg\";overlay_file=\"_scadbuddy_solid_asset_fedcba9876543210.png\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
+    # Second audit: shapes that used to leave their extent or lose the strip,
+    # text that ran through the cord hole or off the strip, and an overlay
+    # whose centre is off the strip (NOTE).
+    "tab-radius-over-width|base_color,border_color|shape=\"rounded_tab\";corner_radius=15;width=20;label=\"\";overlay_file=\"\";mask_file=\"\""
+    "tab-wider-than-long|base_color,border_color|shape=\"rounded_tab\";length=60;width=80;label=\"\";overlay_file=\"\";mask_file=\"\""
+    "heart-top-short|base_color,topper_color,border_color|shape=\"heart_top\";length=60;width=80;topper_size=100;label=\"\";overlay_file=\"\";mask_file=\"\""
+    "star-top-short|base_color,topper_color,border_color|shape=\"star_top\";length=60;width=40;topper_size=100;label=\"\";overlay_file=\"\";mask_file=\"\""
+    "text-clear-of-hole|base_color,border_color,text_color|text_y=0;label=\"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\";text_size=30;hole_from_top=30;hole_diameter=10;bead_count=0;mask_file=\"\";overlay_file=\"\""
+    "text-y-off-strip|base_color,border_color,text_color,bead_color,bead_color_2|length=60;text_y=120;mask_file=\"\";overlay_file=\"\""
+    "text-y-off-strip-across|base_color,border_color,text_color,bead_color,bead_color_2|text_direction=\"horizontal\";text_y=-120;mask_file=\"\";overlay_file=\"\""
+    "overlay-off-strip|base_color,border_color,text_color,bead_color,bead_color_2|length=60;mask_file=\"\""
     "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"png_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
 )
 
@@ -400,9 +411,24 @@ for line in open(os.path.join(OUT, "cases.txt")):
     NOTES = {
         "note-corner-outline": "NOTE: the page-corner shape keeps its triangle; mask_mode outline is ignored",
         "note-custom-mask-inlay": "NOTE: shape custom_mask uses the mask file as the outline; mask_mode is ignored",
+        "heart-top-short": "NOTE: topper_size reduced to 40 mm to fit a 80 mm wide, 60 mm long bookmark",
+        "star-top-short": "NOTE: topper_size reduced to 37.9 mm to fit a 40 mm wide, 60 mm long bookmark",
+        "text-y-off-strip": "NOTE: text_y 120 would put the text off the bookmark; moved to 14 mm",
+        "text-y-off-strip-across": "NOTE: text_y -120 would put the text off the bookmark; moved to -67.5 mm",
+        "overlay-off-strip": "NOTE: overlay_x / overlay_y (0, 46) put the overlay's centre off the 40 x 60 mm bookmark;",
     }
     if name in NOTES:
-        check(name, NOTES[name] in log, "the ignored mask_mode is reported: %s" % NOTES[name])
+        check(name, NOTES[name] in log, "the NOTE is reported: %s" % NOTES[name])
+
+    # Text never runs into the cord hole (it used to on a long label).
+    hole = shape != "corner" and (shape == "tassel" or p["hole_on_any_shape"])
+    tcol = p["text_color"].upper()
+    others = {mats[i][1] for i in named} - {tcol}
+    if hole and p["label"] and tcol in got and tcol not in others:
+        ty = [V[i][1] for t in T if mats[t[3]][1] == tcol for i in t[:3]]
+        hole_bottom = p["length"] / 2 - p["hole_from_top"] - p["hole_diameter"] / 2
+        check(name, max(ty) <= hole_bottom, "text (top at %.2f) stays below the cord hole (bottom at %.2f)"
+              % (max(ty), hole_bottom))
 
     if name == "dotdot-name-read":
         check(name, ('NOTE: mask_file "%s" ignored' % p["mask_file"]) not in log and "Can't open" not in log,

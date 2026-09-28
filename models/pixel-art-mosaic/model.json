@@ -1,0 +1,6 @@
+{
+  "name": "Pixel Art Mosaic",
+  "description": "A flat pixel-art plaque, fridge magnet or keychain, one colour per pixel. Five built-in patterns (heart, star, smiley, mushroom, blocky green face) or your own PNG, cut into 2-8 brightness bands that each print in their own colour (or two colours at a threshold). Pixel size, grooves between pixels, background filled, empty or cut away to the outline of the art, a raised frame, and a hanging tab, keyring loop or magnet pockets. Up to 10 colours.",
+  "tags": ["pixel art", "mosaic", "magnet", "keychain", "plaque", "png", "multi-colour", "gift"],
+  "source": "inspired by Printables \"Articulated Pixel Heart Keychain\" by Frikarte3D (762951, 2,387 downloads), \"Pixel-Art - IKEA Picture Frame\" by Tinker.Fun (676622) and the four-colour pixel-art fridge magnets by Nerhak (472136), with the colour-per-brightness-band approach of MakerWorld's image-to-multicolour customizers"
+}

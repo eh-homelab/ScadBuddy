@@ -82,7 +82,7 @@ class DecisionStore(Protocol):
 
 
 class PostgresDecisionStore:
-    """``analyzer_decisions`` on the #241 database (migration 3 in ``pg_store``).
+    """``analyzer_decisions`` on the #241 database (migration 4 in ``pg_store``).
 
     Connects on first use, not at construction, so building the app state stays
     offline, and applies the backend's migrations itself (idempotent, under their
