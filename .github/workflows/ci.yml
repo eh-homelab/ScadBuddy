@@ -505,7 +505,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # For the backend tests that need Postgres: every one that builds the app
-    # (the settings live there, #401) and the render queue's store. The test
+    # (the settings live there, #401), the render queue's store, the `render_jobs`
+    # projection the Temporal path writes (#424) and the other `requires_postgres`
+    # tests. The test
     # container reaches it on the runner's loopback (`--network host`), and each
     # test works in a schema of its own. The container smoke test below uses it
     # too, since the app will not start without it.
@@ -574,6 +576,8 @@ jobs:
       # No `-m` filter: inside the image `requires_openscad` tests are supposed
       # to run, and the point of building the image at all is that they can.
       # `requires_postgres` ones run against the service container above.
+      # `requires_temporal` ones start a dev server from the image's `temporal`
+      # CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal service is needed.
       - name: pytest
         run: >-
           docker run --rm --network host

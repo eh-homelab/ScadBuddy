@@ -66,6 +66,27 @@ the backend refuses to start and says so. Settings and the render queue live
 there; the schema is created and migrated at startup, so an empty database is
 enough.
 
+**Renders on Temporal** (#424) are behind `SCADBUDDY_TEMPORAL_ADDRESS` (the
+Temporal frontend's `host:port`). Empty, renders run on the legacy in-process
+queue described below. Set, they run on Temporal: the API submits and a separate
+render worker (see "Render worker" under Deploying) runs them. Temporal is
+optional until #546 makes the address required and removes the legacy queue. For
+a one-process dev run, let the API host the worker itself:
+
+```bash
+temporal server start-dev --namespace scadbuddy      # listens on 127.0.0.1:7233
+cd backend
+SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy \
+SCADBUDDY_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
+  uv run --frozen uvicorn --factory scadbuddy.main:create_app --port 8080
+```
+
+`SCADBUDDY_TEMPORAL_NAMESPACE` defaults to `scadbuddy` (hence `--namespace` above)
+and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
+`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
+on shutdown.
+
 Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 [Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
 **Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
@@ -202,7 +223,9 @@ for the project picker).
   - `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and `SCADBUDDY_RENDER_LATENCY_SLO`
     (60 s): targets, not limits. They are exported with the metrics for alerts.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is
-  writable, and the build revision.
+  writable, and the build revision. On the Temporal path it also has a `temporal`
+  object (`address`, `namespace`, `task_queue`, `worker_inprocess`); on the legacy
+  queue that key is absent.
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store, so across replicas with Postgres), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
@@ -287,6 +310,40 @@ the pinned `revision` — the commit stamped into the image at build time by
 `SCADBUDDY_REVISION` — then posts the result on the deploy PR and back here.
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
+
+### Render worker (#424)
+
+With `SCADBUDDY_TEMPORAL_ADDRESS` set, renders run on a separate worker. It is the
+**same image** run as `python -m scadbuddy.worker`, and it serves `/healthz`
+(`{"ok": true, "build_id": …, "task_queue": …}`) and `/metrics` on port **9090**.
+Probe that port: the image's `HEALTHCHECK` is the API's 8080.
+
+- **One replica in phase 1**, sharing `/data` with the API. A rendered piece is
+  written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
+  the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
+  same node (pod affinity).
+- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
+  the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+  `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
+  `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
+  id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
+  API's: the worker runs openscad under them, and the API derives the workflows'
+  timeouts from the same values.
+- **Versioning:** workflows are pinned to the build that started them. At start
+  the worker makes its own build the deployment's current version, so a new build
+  receives new workflows once it is polling.
+- **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
+  drain. The worker keeps polling until no workflow pinned to its build is
+  running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
+  SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. Set
+  `terminationGracePeriodSeconds` ≥ `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120`,
+  which is **660 s** at the default 120 s timeout. While a single replica drains
+  it is still current, so new renders keep landing on it; a rollout that starts
+  the new pod first (surge) lets it drain promptly.
+- **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
+  `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
+  API hosting the worker) is for dev and tests only.
 
 ### The agent sidecar (AI, #261)
 
