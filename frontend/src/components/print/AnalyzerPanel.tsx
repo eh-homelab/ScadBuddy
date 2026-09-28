@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
+  AnalyzerDecision,
   AnalyzerDiagnostic,
   AnalyzerSeverity,
   AnalyzerSource,
@@ -13,6 +14,7 @@ import {
   partition,
   scopeLabel,
   scopesForFinding,
+  widerThanTemplate,
 } from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
@@ -108,35 +110,83 @@ function DiagnosticItem({ diagnostic, scopes, onChanged }: ItemProps) {
   )
 }
 
-/** Removes the decision that set a finding aside, so it is open again. */
+/**
+ * Removes the decision that set a finding aside, so it is open again. Keyed by the
+ * decision, so the next one deciding the same finding (a wider suppression beneath the
+ * one removed) starts with its own state. An enforced decision was made to override
+ * narrower ones (`post_decision`), so it is not removed from here; one wider than the
+ * template reaches other models' prints, so removing it is confirmed first.
+ */
 function RemoveDecision({ diagnostic, onChanged }: { diagnostic: AnalyzerDiagnostic; onChanged: () => void }) {
-  const [busy, setBusy] = useState(false)
-  const [refusal, setRefusal] = useState<string | null>(null)
   const applied = diagnostic.decision?.decision
   if (!applied || applied.kind === 'accept') return null
-  const verb = applied.kind === 'suppress' ? 'suppression' : 'ignore'
+  return <RemoveButton key={applied.id} decision={applied} diagnostic={diagnostic} onChanged={onChanged} />
+}
+
+interface RemoveProps {
+  decision: AnalyzerDecision
+  diagnostic: AnalyzerDiagnostic
+  onChanged: () => void
+}
+
+function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
+  const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const verb = decision.kind === 'suppress' ? 'suppression' : 'ignore'
+  if (decision.enforced) {
+    return <span className="ml-1 text-faint">(enforced, so not removable from here)</span>
+  }
+  const wide = widerThanTemplate(decision.scope)
+
+  function remove() {
+    setBusy(true)
+    setConfirming(false)
+    setRefusal(null)
+    api
+      .deleteDecision(decision.id)
+      .then(onChanged)
+      .catch((cause: unknown) => {
+        setRefusal(cause instanceof ApiError ? cause.detail : 'It was not removed.')
+        setBusy(false)
+      })
+  }
+
+  const link = 'underline underline-offset-2 hover:text-ink disabled:opacity-45'
   return (
     <>
       {' '}
-      <button
-        type="button"
-        disabled={busy}
-        aria-label={`Remove the ${verb} of ${diagnostic.id}`}
-        onClick={() => {
-          setBusy(true)
-          setRefusal(null)
-          api
-            .deleteDecision(applied.id)
-            .then(onChanged)
-            .catch((cause: unknown) => {
-              setRefusal(cause instanceof ApiError ? cause.detail : 'It was not removed.')
-              setBusy(false)
-            })
-        }}
-        className="underline underline-offset-2 hover:text-ink disabled:opacity-45"
-      >
-        Remove
-      </button>
+      {confirming ? (
+        <span role="group" aria-label={`Remove the ${verb} of ${diagnostic.id}?`}>
+          Remove it for {scopeLabel(decision.scope).toLowerCase()}?{' '}
+          <button
+            type="button"
+            aria-label={`Confirm removing the ${verb} of ${diagnostic.id}`}
+            onClick={remove}
+            className={link}
+          >
+            Remove
+          </button>{' '}
+          <button
+            type="button"
+            aria-label={`Keep the ${verb} of ${diagnostic.id}`}
+            onClick={() => setConfirming(false)}
+            className={link}
+          >
+            Keep
+          </button>
+        </span>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          aria-label={`Remove the ${verb} of ${diagnostic.id}`}
+          onClick={wide ? () => setConfirming(true) : remove}
+          className={link}
+        >
+          Remove
+        </button>
+      )}
       {refusal && (
         <span role="alert" className="ml-1 text-warn">
           {refusal}

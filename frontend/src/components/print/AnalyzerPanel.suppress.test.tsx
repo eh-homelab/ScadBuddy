@@ -2,7 +2,14 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { AnalysisRequest, AnalyzerDiagnostic, ScopeRef } from '../../api/types'
+import { api } from '../../api/client'
+import type {
+  AnalysisRequest,
+  AnalyzerDecision,
+  AnalyzerDiagnostic,
+  DecisionCreate,
+  ScopeRef,
+} from '../../api/types'
 import {
   analysisReport,
   analysisScopes,
@@ -46,6 +53,22 @@ function watchDecisions() {
 function renderPanel() {
   return renderPage(<AnalyzerPanel outputId={output.id} request={request} />)
 }
+
+/** A suppression of SB1002:part-2 already stored, as another dialog or the agent leaves it. */
+function stored(scope: ScopeRef, reason: string, over: Partial<DecisionCreate> = {}) {
+  return api.createDecision({
+    diagnostic_id: 'SB1002',
+    instance: 'SB1002:part-2',
+    kind: 'suppress',
+    scope,
+    reason,
+    enforced: false,
+    confirm: false,
+    ...over,
+  })
+}
+
+const setAside = () => within(screen.getByTestId('checks-set-aside'))
 
 afterEach(() => server.events.removeAllListeners())
 
@@ -118,6 +141,116 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     )
     expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
     expect(deleted).toHaveLength(1)
+  })
+
+  it('shows why a removal was refused, and keeps the row with Remove offered again', async () => {
+    await stored({ kind: 'print', key: output.id }, 'for now')
+    server.use(
+      http.delete('/api/v1/analyzers/decisions/:id', () =>
+        HttpResponse.json(
+          {
+            title: 'Service Unavailable',
+            status: 503,
+            detail: 'the analyzer decision store cannot be reached (OperationalError)',
+          },
+          { status: 503 },
+        ),
+      ),
+    )
+    const { user } = renderPanel()
+    await user.click(await screen.findByText('1 not shown'))
+    const remove = setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })
+    await user.click(remove)
+    expect(await setAside().findByRole('alert')).toHaveTextContent(
+      'the analyzer decision store cannot be reached (OperationalError)',
+    )
+    expect(setAside().getByText(/suppressed for This print: for now/)).toBeVisible()
+    expect(remove).toBeEnabled()
+    expect(screen.queryByTestId('diagnostic-SB1002:part-2')).toBeNull()
+  })
+
+  it('offers Remove again for the wider suppression beneath the one removed', async () => {
+    await stored({ kind: 'template', key: output.slug }, 'second')
+    await stored({ kind: 'print', key: output.id }, 'first')
+    const { user } = renderPanel()
+    await user.click(await screen.findByText('1 not shown'))
+    expect(setAside().getByText(/suppressed for This print: first/)).toBeVisible()
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
+    expect(await setAside().findByText(/suppressed for This template: second/)).toBeVisible()
+    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })).toBeEnabled()
+  })
+
+  it('asks before removing a suppression wider than the template', async () => {
+    const { deleted } = watchDecisions()
+    await stored({ kind: 'global', key: '' }, 'everywhere')
+    const { user } = renderPanel()
+    await user.click(await screen.findByText('1 not shown'))
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
+    const ask = setAside().getByRole('group', { name: 'Remove the suppression of SB1002?' })
+    expect(ask).toHaveTextContent('Remove it for every print?')
+    await user.click(within(ask).getByRole('button', { name: 'Keep the suppression of SB1002' }))
+    expect(deleted).toHaveLength(0)
+    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })).toBeEnabled()
+
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
+    await user.click(
+      setAside().getByRole('button', { name: 'Confirm removing the suppression of SB1002' }),
+    )
+    expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
+    expect(deleted).toHaveLength(1)
+  })
+
+  it('does not remove an enforced suppression from the print dialog', async () => {
+    await stored({ kind: 'template', key: output.slug }, 'policy', { enforced: true })
+    const { user } = renderPanel()
+    await user.click(await screen.findByText('1 not shown'))
+    expect(setAside().queryByRole('button', { name: /Remove/ })).toBeNull()
+    expect(setAside().getByText('(enforced, so not removable from here)')).toBeVisible()
+  })
+
+  it('offers a finding with an accepted fix only scopes at or under the acceptance', async () => {
+    const accept: AnalyzerDecision = {
+      id: 'c'.repeat(32),
+      diagnostic_id: 'SB1002',
+      instance: 'SB1002:part-2',
+      kind: 'accept',
+      scope: { kind: 'template', key: output.slug },
+      reason: null,
+      enforced: false,
+      fix_id: 'none',
+      created_at: '2026-09-28T00:00:00Z',
+    }
+    server.use(
+      http.post('/api/v1/analyzers/run', () =>
+        HttpResponse.json(analysisReport(output, request, [openEdgesDiagnostic], [accept])),
+      ),
+    )
+    const { posted } = watchDecisions()
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB1002:part-2')
+    await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    expect(within(form).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'This template',
+      'These parameters',
+      'This print',
+    ])
+    expect(form).toHaveTextContent('A fix is accepted for this template')
+
+    const every = within(form).getByRole('checkbox', { name: 'Every SB1002 finding' })
+    await user.click(every)
+    expect(every).toBeChecked()
+    await user.selectOptions(within(form).getByLabelText('Scope'), 'This template')
+    expect(form).toHaveTextContent('This replaces the fix accepted for this template')
+    expect(every).toBeDisabled()
+    expect(every).not.toBeChecked()
+    await user.type(within(form).getByLabelText('Reason'), 'rather not')
+    await user.click(within(form).getByRole('button', { name: 'Suppress' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({
+      instance: 'SB1002:part-2',
+      scope: { kind: 'template', key: output.slug },
+    })
   })
 
   it('shows why a suppression was refused, and keeps the form', async () => {

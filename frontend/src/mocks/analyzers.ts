@@ -7,6 +7,7 @@ import type {
   Output,
   ScopeRef,
 } from '../api/types'
+import { SCOPE_RANK } from '../lib/analyzers'
 
 /**
  * #284 — the mock print analyzers, shaped like `POST /analyzers/run`'s answer
@@ -182,15 +183,6 @@ export function analysisScopes(output: Output, request: AnalysisRequest): ScopeR
 }
 
 const SEVERITY_ORDER = { error: 0, warning: 1, info: 2, hidden: 3 } as const
-const SCOPE_ORDER: ScopeRef['kind'][] = [
-  'global',
-  'material',
-  'printer',
-  'template',
-  'template_version',
-  'configuration',
-  'print',
-]
 
 /**
  * `scopes` for a finding about `slots` (every slot when empty), as `context.scopes_for`:
@@ -218,10 +210,7 @@ export function resolveDecision(
 ): AnalyzerDecision | undefined {
   const ordered = scopes
     .map((scope, index) => ({ scope, index }))
-    .sort(
-      (a, b) =>
-        SCOPE_ORDER.indexOf(a.scope.kind) - SCOPE_ORDER.indexOf(b.scope.kind) || a.index - b.index,
-    )
+    .sort((a, b) => SCOPE_RANK[a.scope.kind] - SCOPE_RANK[b.scope.kind] || a.index - b.index)
   const ranks = new Map(ordered.map(({ scope }, index) => [`${scope.kind}\u0000${scope.key}`, index]))
   const scopeRank = (decision: AnalyzerDecision) =>
     ranks.get(`${decision.scope.kind}\u0000${decision.scope.key}`) ?? -1
@@ -247,7 +236,10 @@ function decide(
 ): AnalyzerDiagnostic[] {
   return diagnostics.map((diagnostic) => {
     const decision = resolveDecision(diagnostic, decisions, scopesFor(scopes, diagnostic.slots ?? []))
-    if (!decision || decision.kind === 'accept') return diagnostic
+    if (!decision) return diagnostic
+    if (decision.kind === 'accept') {
+      return { ...diagnostic, status: 'accepted', decision: { decision, stale: false } }
+    }
     return {
       ...diagnostic,
       status: decision.kind === 'suppress' ? 'suppressed' : 'ignored',

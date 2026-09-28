@@ -622,9 +622,9 @@ function problem(status: number, title: string, detail?: string, extensions: obj
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -2311,11 +2311,10 @@ export const handlers = [
   http.post(`${base}/analyzers/decisions`, async ({ request }) => {
     const body = (await request.json()) as DecisionCreate
     if (body.kind === 'suppress' && !body.reason?.trim()) {
-      return problem(
-        422,
-        'Unprocessable Content',
-        'Value error, a suppression needs a reason, as #pragma warning disable does',
-      )
+      // `DecisionCreate._well_formed` is a model validator, refused while the body is parsed.
+      return shapeRefusal('Value error, a suppression needs a reason, as #pragma warning disable does', [
+        'body',
+      ])
     }
     const instance = body.instance ?? null
     const replaced = state.analyzerDecisions.filter(
