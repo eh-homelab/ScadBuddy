@@ -93,6 +93,8 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
+  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
+  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
@@ -203,6 +205,7 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
+  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
@@ -2433,6 +2436,20 @@ export const handlers = [
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
+
+  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/settings/headless-browser`, () =>
+    HttpResponse.json({ enabled: state.headlessBrowser }),
+  ),
+
+  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
+    const body = (await request.json()) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
+    }
+    state.headlessBrowser = body.enabled
+    return HttpResponse.json({ enabled: state.headlessBrowser })
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {
