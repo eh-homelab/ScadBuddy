@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import re
 import shutil
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -142,6 +143,18 @@ async def test_render_timeout_kills_openscad_and_keeps_the_log(tmp_path: Path) -
     assert caught.value.returncode is None
 
 
+def _process_is_dead(pid: int) -> bool:
+    """`pid` is gone, or a zombie: the `test` image has no init to reap a killed
+    grandchild, so it sits as a zombie rather than disappearing (#424 review)."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    state = re.search(r"^State:\s+(\S)", status, re.MULTILINE)
+    return state is not None and state[1] == "Z"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/<pid>/status")
 async def test_a_timed_out_openscad_takes_its_children_with_it(tmp_path: Path) -> None:
     fake = tmp_path / "openscad"
     fake.write_text("#!/bin/sh\nsleep 30 &\necho $! > child.pid\nwait\n", encoding="utf-8")
@@ -151,8 +164,7 @@ async def test_a_timed_out_openscad_takes_its_children_with_it(tmp_path: Path) -
         await run_openscad([], cwd=tmp_path, config=config)
     child = int((tmp_path / "child.pid").read_text())
     await asyncio.sleep(0.1)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child, 0)
+    assert _process_is_dead(child)
 
 
 ECHO_FONTCONFIG = """#!/bin/sh
