@@ -8,6 +8,7 @@ import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -597,6 +598,9 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Not part of the form above: it saves on its own (#258). */}
+        <AiAuditSection />
       </div>
     </div>
   )

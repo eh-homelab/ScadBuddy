@@ -55,6 +55,7 @@ import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
+import { auditHandlers, resetAuditMock } from './audit'
 
 const base = '/api/v1'
 
@@ -213,6 +214,7 @@ export function resetMockState(): void {
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
   state.mergeFiles = {}
+  resetAuditMock()
   state.plates = {}
   state.mediaFiles.clear()
   state.catalogueOffline = false
@@ -2550,4 +2552,7 @@ export const handlers = [
       embed_path: `/external/${state.sidebarLinkId}`,
     })
   }),
+
+  // The agent service's audit log (#258), served by the agent under /api/v1/ai/*.
+  ...auditHandlers,
 ]
