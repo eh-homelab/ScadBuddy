@@ -262,7 +262,10 @@ type Pingable = { readyState: number; ping(): void; terminate(): void; on(event:
  * pings keep it open without adding frames the panel would have to parse.
  * Returns a stop function.
  */
-export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = 25_000): () => void {
+/** The chat socket's ping interval; must stay under the ingress read timeout (docs/ai/operating.md §1.1). */
+export const HEARTBEAT_MS = 25_000
+
+export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = HEARTBEAT_MS): () => void {
   const alive = new WeakMap<Pingable, boolean>()
   const timer = setInterval(() => {
     for (const socket of server.clients) {

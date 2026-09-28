@@ -82,11 +82,13 @@ What the ingress must do:
   NGINX out of the box. No special configuration required." Its default
   `proxy-read-timeout` is 60 s
   ([ingress-nginx, WebSockets](https://kubernetes.github.io/ingress-nginx/user-guide/miscellaneous/#websockets)).
-  The agent pings each chat socket every 25 s (`startHeartbeat`,
+  The agent pings each chat socket every 25 s (`HEARTBEAT_MS`, `startHeartbeat`,
   [`agent/src/routes/chat.ts`](../../agent/src/routes/chat.ts)), and the session event
-  stream sends a comment every 20 s with `X-Accel-Buffering: no`
-  ([`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)). Both
-  therefore stay open under that default.
+  stream sends a comment every 20 s with `X-Accel-Buffering: no` (`SSE_KEEPALIVE_MS`,
+  [`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)). Both
+  therefore stay open under that default. The rule: both intervals must stay under
+  the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
+  either constant above it, closes idle assistant sockets and streams.
 - **Forwarded headers.** The ingress must append `X-Forwarded-Proto` and
   `X-Forwarded-Host`, and its pod range goes in `SCADBUDDY_AGENT_TRUSTED_PROXIES`
   (§6). Otherwise every chat and session write is refused with 403.
@@ -132,8 +134,9 @@ curl -sSI -X POST "$base/mcp" | grep -i '^x-scadbuddy-service: agent'        # a
 curl -sSI "$base/api/v1/settings" | grep -ci '^x-scadbuddy-service'          # 0: the backend
 ```
 
-The `real-backend` Playwright spec (`frontend/e2e/real-backend.spec.ts`) makes the
-same checks when `E2E_BASE_URL` points at a deployment. With the frontend's dev or
+The same checks as a Playwright spec are `frontend/e2e/real-agent.spec.ts`, added in
+#533, run with `E2E_BASE_URL` pointing at the deployment and
+`E2E_AGENT=1`. With the frontend's dev or
 preview server, `frontend/vite.config.ts` routes the same way on one local origin
 (`SCADBUDDY_BACKEND_URL` and `SCADBUDDY_AGENT_URL` override the two targets).
 
