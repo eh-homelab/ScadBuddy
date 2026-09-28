@@ -241,6 +241,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
   where it is refused (`document.fullscreenEnabled` is false, or the request is
   rejected) the full-screen view covers the frame instead.
+- The assistant (the agent's `/api/v1/ai/*`, including its WebSocket `/api/v1/ai/chat`)
+  is reached on ScadBuddy's own origin: the ingress routes those paths to the agent
+  sidecar (AI spec §4.2, `docs/ai/operating.md` §1.1). The sandbox's
+  `allow-same-origin` is what keeps the frame's `Origin` ScadBuddy's own, and the agent's
+  origin allowlist requires that. This is inferred from the sandbox attribute above and
+  has not been exercised inside a live Bambuddy.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 
