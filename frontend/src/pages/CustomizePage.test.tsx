@@ -8,6 +8,7 @@ import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import {
   BUILTIN_SLUG,
+  CANCELLED_ERROR,
   keychainSchema,
   printOptions,
   settings as settingsFixture,
@@ -209,7 +210,11 @@ describe('CustomizePage', () => {
     expect(log).toHaveTextContent('Compilation failed')
   })
 
-  it('shows the log when a render is cancelled, same as a failure', async () => {
+  it('shows the log when a render is cancelled, same as a failure, with the backend\'s own wording', async () => {
+    // Preview is mocked above (its own copy for `cancelled` vs `failed` is covered
+    // by Preview.test.tsx); this only checks the mock job store and useRenderJob
+    // wiring carry the cancellation through, with the same text the real backend's
+    // `CANCELLED_ERROR` uses rather than an OpenSCAD-shaped failure message.
     const { user } = render()
     await firstRender()
 
@@ -218,7 +223,8 @@ describe('CustomizePage', () => {
     await user.type(name, 'superseded')
 
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
-    expect(log).toHaveTextContent('Render cancelled')
+    expect(log).toHaveTextContent(CANCELLED_ERROR)
+    expect(log).not.toHaveTextContent('Compilation failed')
   })
 
   it('disables Generate while a render is in flight', async () => {

@@ -113,7 +113,11 @@ export function Preview({
   }, [job])
 
   const theme = useViewerTheme()
-  const failed = job?.status === 'failed' || job?.status === 'cancelled'
+  const cancelled = job?.status === 'cancelled'
+  // A cancelled job gets its own copy in `RenderError` (nothing was wrong with the
+  // parameters), but is otherwise gated the same as a failure: the success overlay
+  // and the "change a parameter" placeholder both stay hidden.
+  const failed = job?.status === 'failed' || cancelled
   const clear = covered ? { left: covered } : undefined
 
   return (
@@ -196,6 +200,7 @@ export function Preview({
 
       {failed && (
         <RenderError
+          cancelled={cancelled}
           log={(job.log_tail ?? []).join('\n')}
           warnings={job.warnings ?? []}
           covered={covered}
@@ -296,10 +301,12 @@ export function RenderWarnings({ warnings, inline = false }: { warnings: string[
 }
 
 function RenderError({
+  cancelled = false,
   log,
   warnings,
   covered,
 }: {
+  cancelled?: boolean
   log?: string
   warnings: string[]
   covered?: string
@@ -310,7 +317,9 @@ function RenderError({
       style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
     >
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
-        OpenSCAD could not render these parameters.
+        {cancelled
+          ? 'This render was cancelled. A newer request replaced it before it finished — your parameters were not the problem.'
+          : 'OpenSCAD could not render these parameters.'}
       </p>
       {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre

@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
-import { JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
+import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
 import { Preview } from './Preview'
 
 // WebGL does not exist in jsdom: the scene is dropped and only the overlays render.
@@ -63,23 +63,24 @@ describe('Preview', () => {
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
 
-  it('gives a cancelled render the log instead, same as a failure', () => {
+  it('tells a cancelled render apart from a failure: it keeps the log but not the OpenSCAD copy', () => {
     const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
     rerender(
       <Preview
         job={job({
           id: 'b'.repeat(32),
           status: 'cancelled',
-          error: 'superseded by a newer request',
-          log_tail: ['Render cancelled: superseded by a newer request'],
+          error: CANCELLED_ERROR,
+          log_tail: [CANCELLED_ERROR],
         })}
         rendering={false}
       />,
     )
     expect(screen.queryByTestId('render-notes')).not.toBeInTheDocument()
-    expect(screen.getByTestId('render-log')).toHaveTextContent(
-      'Render cancelled: superseded by a newer request',
-    )
+    expect(screen.getByTestId('render-log')).toHaveTextContent(CANCELLED_ERROR)
+    expect(screen.getByText(/this render was cancelled/i)).toBeInTheDocument()
+    expect(screen.getByText(/were not the problem/i)).toBeInTheDocument()
+    expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
   })
 
   it('names the step a running render is on (#267)', () => {

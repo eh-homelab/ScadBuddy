@@ -165,9 +165,11 @@ function runJob(jobId: string): void {
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
         job.status = 'cancelled'
-        job.error = fixtures.CANCELLED_LOG_TAIL[0]
+        job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        announce('job.cancelled')
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
