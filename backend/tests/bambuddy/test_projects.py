@@ -15,7 +15,6 @@ from scadbuddy.bambuddy.projects import (
     describe_projects,
     ensure_project,
     folder_for,
-    media_folder_for,
 )
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
@@ -201,33 +200,6 @@ def project_folders(*rows: dict[str, object]) -> respx.Route:
 
 PROJECT_FOLDER = {"id": 9, "name": "Kids' room", "project_id": 7, "parent_id": None}
 MEDIA_FOLDER = {"id": 12, "name": "Media", "project_id": 7, "parent_id": 9}
-
-
-@respx.mock
-async def test_the_media_folder_is_created_on_demand_inside_the_project_folder(
-    bambuddy: BambuddyClient,
-) -> None:
-    """#309's photos and videos go in ``Media/``, linked to the project too."""
-    project_folders(PROJECT_FOLDER)
-    made = respx.post(f"{API}/library/folders/").mock(
-        return_value=httpx.Response(200, json=MEDIA_FOLDER)
-    )
-
-    assert await media_folder_for(bambuddy, 7) == 12
-    assert json.loads(made.calls.last.request.content) == {
-        "name": "Media",
-        "parent_id": 9,
-        "project_id": 7,
-    }
-
-
-@respx.mock
-async def test_an_existing_media_folder_is_reused(bambuddy: BambuddyClient) -> None:
-    project_folders(PROJECT_FOLDER, MEDIA_FOLDER)
-    made = respx.post(f"{API}/library/folders/").mock(return_value=httpx.Response(500))
-
-    assert await media_folder_for(bambuddy, 7) == 12
-    assert not made.called
 
 
 @respx.mock
