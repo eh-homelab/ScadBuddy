@@ -203,11 +203,10 @@ async def attach_results(
 ) -> AttachResult:
     """Attach this output's queue entries, and any archives they have produced.
 
-    Split from the run on purpose. ``jobs[].queue_entry_id`` is null when a pipeline run
-    answers 202, and an archive only exists once a print has finished — so attaching at
-    run time would attach nothing on one route and only half on the other. This is
-    called once the ids are known, and attaching the same id twice is Bambuddy's
-    problem to dedupe, not a reason to keep state here.
+    Split from the run on purpose. A plate's queue item only exists once it has sliced,
+    and an archive only once a print has finished — so attaching at run time would
+    attach only part of it. This is called once the ids are known, and attaching the
+    same id twice is Bambuddy's problem to dedupe, not a reason to keep state here.
 
     With ``output_id`` and ``links``, the archive of each item in ``linkable`` is also
     linked to the output (#306), since the items are being read anyway. Only those:

@@ -125,9 +125,10 @@ Which AMS tray and extruder each spool feeds, and which rack nozzle is used,
 stay Bambuddy's and the printer's decisions (spool-first spec §6).
 
 The simpler **send** path, `POST /api/v1/outputs/{output_id}/send` with
-`{mode: "library" | "queue", copies, options}`, uploads to the library folder
-and, in `queue` mode, runs the pipeline chosen in Settings (`backend/openapi.json`;
-main spec §7; spool-first spec §0). It is outward too.
+`{mode: "library"}`, only uploads the 3MF to the library folder and attaches the
+edit link. It never slices or queues; `mode: "queue"` is refused with a 422
+(`backend/openapi.json`, `SendRequest`; spool-first spec §0, the #312 note). To
+print, use the run above. Sending is outward too.
 
 ## 4. After the run: the result
 
@@ -154,9 +155,6 @@ Projects** scope, which the key may not have (print-flow spec §7).
 - `null` means the output was never printed. That is an answer, not an error.
 - `settled` says when to stop. An all-plates print reads "Slicing…" until one of
   its plates has a queue entry, and a plate can fail before it is ever queued.
-  For a send-bar pipeline run, **`status` and the copy counters don't move** on a
-  failure, so don't read them as "still printing". The run's `completed_at` is
-  what settles it (print-flow spec §6).
 - Show Bambuddy's `error_message` **word for word**, next to the `fix` the route
   suggests (change the mapping, retry). Don't paraphrase it
   (print-flow spec §6).
@@ -165,8 +163,9 @@ Projects** scope, which the key may not have (print-flow spec §7).
 
 Every Bambuddy call declares the API-key scope it needs, so a 401 or 403 names
 the missing scope (`CLAUDE.md`, section "Bambuddy iframe facts";
-`backend/scadbuddy/bambuddy/errors.py`). Sending needs **Manage Library** and
-**Manage Queue**, and listing printers needs **Read Status** (main spec §7).
+`backend/scadbuddy/bambuddy/errors.py`). Sending needs **Manage Library**,
+printing also needs **Manage Queue**, and listing printers needs **Read Status**
+(main spec §7).
 Tell the user which scope to add to the key in Bambuddy. The key itself never
 leaves the server (`CLAUDE.md`, section "Bambuddy iframe facts").
 
