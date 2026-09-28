@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import time
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,7 +16,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import DUPLICATE_STAGING_PREFIX, Catalogue, ModelMeta
+from scadbuddy.library.catalogue import (
+    DUPLICATE_STAGING_MAX_AGE,
+    DUPLICATE_STAGING_PREFIX,
+    Catalogue,
+    ModelMeta,
+)
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -331,6 +338,8 @@ def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataP
     staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}dead" / "copy"
     staged.mkdir(parents=True)
     (staged / "model.scad").write_text(SOURCE, encoding="utf-8")
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(staged.parent, (old, old))
     kept = paths.cache / "keep-me"
     kept.mkdir()
 
@@ -339,6 +348,17 @@ def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataP
 
     assert _no_staging_left(paths)
     assert kept.is_dir()
+
+
+def test_the_boot_leaves_a_fresh_duplicate_staging_alone(app: FastAPI, paths: DataPaths) -> None:
+    """Another replica sharing /data may be mid-copy into it."""
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}live" / "copy"
+    staged.mkdir(parents=True)
+
+    with TestClient(app):
+        pass
+
+    assert staged.is_dir()
 
 
 def test_a_git_failure_reading_the_base_fails_the_duplicate(
