@@ -18,6 +18,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import jobs
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
     THUMBNAIL_FAILED_WARNING,
@@ -425,7 +426,7 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
                 ("Color 2", "#0047BB00", trimesh.creation.box(extents=(10, 10, 1))),
             ],
         )
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return schema
@@ -463,7 +464,7 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _colour_schema(("base_color", "#0047BB"))
@@ -526,7 +527,7 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -586,7 +587,7 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=("pic.svg",))
+        return mock.Mock(log_tail=[], missing_files=("pic.svg",), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -602,3 +603,136 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
 
     assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]
+
+
+# ── #289: a template that asks for more than one plate ────────────────────────
+
+TRAY = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))
+WALL = ("Color 2", "#FF149300", trimesh.creation.box(extents=(2, 2, 6)))
+LID = ("Color 3", "#FFFFFF00", trimesh.creation.box(extents=(12, 12, 1)))
+
+
+def _plate_of(extra_defines: object) -> int:
+    """The `$plate` a render was asked for, 0 when none."""
+    defines = list(extra_defines) if isinstance(extra_defines, list | tuple) else []
+    for define in defines:
+        if isinstance(define, str) and define.startswith("$plate="):
+            return int(define.removeprefix("$plate="))
+    return 0
+
+
+def _plated_render(
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]], plates: int | None
+) -> tuple[object, list[int]]:
+    """A stand-in `render_3mf` drawing ``drawn[$plate]``, and the plates it was asked for."""
+    asked: list[int] = []
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        plate = _plate_of(kwargs.get("extra_defines"))
+        asked.append(plate)
+        write_openscad_3mf(out, drawn[plate])
+        return mock.Mock(log_tail=[], missing_files=(), plates=plates)
+
+    return render, asked
+
+
+async def _render_plated(
+    paths: DataPaths,
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    solids: object | None = None,
+) -> tuple[JobResult, list[int]]:
+    paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    render, asked = _plated_render(drawn, plates)
+    schema = _colour_schema(
+        ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
+    )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    async def no_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", solids or no_solids),
+    ):
+        result, _ = await jobs.render_job(_job("p"), config=CONFIG, paths=paths)
+    return result, asked
+
+
+async def test_each_plate_is_its_own_render_and_the_3mf_holds_them_all(
+    paths: DataPaths,
+) -> None:
+    solid_defines: list[object] = []
+
+    async def solids(*args: object, **kwargs: object) -> SolidRender:
+        solid_defines.append(kwargs.get("extra_defines"))
+        return SolidRender()
+
+    result, asked = await _render_plated(
+        paths, {0: [TRAY, WALL, LID], 1: [TRAY, WALL], 2: [LID]}, plates=2, solids=solids
+    )
+
+    # The everything render, then one per plate; the wrapper renders get `$plate` too.
+    assert asked == [0, 1, 2]
+    assert [_plate_of(defines) for defines in solid_defines] == [1, 2]
+    assert result.colors == ["#0047BB", "#FF1493", "#FFFFFF"]
+    assert [(p.extruder, p.colour) for p in result.parts] == [
+        (1, "#0047BB"),
+        (2, "#FF1493"),
+        (3, "#FFFFFF"),
+    ]
+    assert [(p.index, p.colors) for p in result.plates] == [
+        (1, ["#0047BB", "#FF1493"]),
+        (2, ["#FFFFFF"]),
+    ]
+    assert result.plates[1].bbox_mm.size == pytest.approx((12.0, 12.0, 1.0))
+    assert result.warnings == []
+
+    model = paths.root / result.model_3mf
+    assert [plate.index for plate in plates_of(model)] == [1, 2]
+    with zipfile.ZipFile(model) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+        config = archive.read("Metadata/model_settings.config").decode()
+    assert settings["filament_colour"] == ["#0047BB", "#FF1493", "#FFFFFF"]
+    # The lid is extruder 3 on plate 2, not extruder 1 of a plate of its own.
+    assert 'value="Color 3"/>\n   <metadata key="extruder" value="3"/>' in config
+
+
+async def test_one_plate_or_no_count_is_the_ordinary_render(paths: DataPaths) -> None:
+    for plates in (None, 1, 0):
+        result, asked = await _render_plated(paths, {0: [TRAY, WALL]}, plates=plates)
+        assert asked == [0]
+        assert result.plates == []
+        assert [plate.index for plate in plates_of(paths.root / result.model_3mf)] == [1]
+
+
+async def test_a_colour_only_a_plate_draws_is_appended_with_a_warning(paths: DataPaths) -> None:
+    result, _ = await _render_plated(paths, {0: [TRAY, WALL], 1: [TRAY, WALL], 2: [LID]}, plates=2)
+    assert result.colors == ["#0047BB", "#FF1493", "#FFFFFF"]
+    assert result.warnings == [
+        "plate 2: #FFFFFF is not in the all-plates render; it gets extruder 3"
+    ]
+
+
+async def test_a_colour_no_plate_draws_gives_up_its_extruder(paths: DataPaths) -> None:
+    result, _ = await _render_plated(paths, {0: [TRAY, WALL, LID], 1: [TRAY], 2: [LID]}, plates=2)
+    assert result.colors == ["#0047BB", "#FFFFFF"]
+    assert [(p.index, p.colors) for p in result.plates] == [(1, ["#0047BB"]), (2, ["#FFFFFF"])]
+    assert result.warnings == ["#FF1493 is drawn only with every plate at once; it is on no plate"]
+
+
+async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
+    with pytest.raises(OpenSCADError, match="asks for 17 plates"):
+        await _render_plated(paths, {0: [TRAY]}, plates=jobs.MAX_PLATES + 1)
+
+
+async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
+    with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
+        await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)

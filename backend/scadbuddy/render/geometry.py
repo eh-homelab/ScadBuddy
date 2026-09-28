@@ -81,7 +81,7 @@ import numpy.typing as npt
 import trimesh
 from pydantic import BaseModel, Field
 
-from scadbuddy.render.bambu3mf import CORE_NS, PROJECT_SETTINGS_NAME
+from scadbuddy.render.bambu3mf import CORE_NS, MODEL_SETTINGS_NAME, PROJECT_SETTINGS_NAME
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import UNCOLOURED_WARNING
 from scadbuddy.render.solids import SPLIT_FALLBACK
@@ -257,6 +257,17 @@ def _read_parts(path: Path) -> list[ColourPart]:
         if PROJECT_SETTINGS_NAME in names:
             settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
             colours = [str(value) for value in settings.get("filament_colour") or []]
+        # Object N is extruder N in a one-plate file; a multi-plate one numbers its
+        # objects across plates (spec §6.4), so each part's extruder is read from
+        # the part list rather than assumed.
+        extruders: dict[int, int] = {}
+        if MODEL_SETTINGS_NAME in names:
+            listing = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+            for part_node in listing.iter("part"):
+                metadata = {m.get("key"): m.get("value") for m in part_node.findall("metadata")}
+                part_id, extruder = part_node.get("id") or "", metadata.get("extruder") or ""
+                if part_id.isdigit() and extruder.isdigit():
+                    extruders[int(part_id)] = int(extruder)
         index = 1
         while (entry := f"3D/Objects/object_{index}.model") in names:
             root = ET.fromstring(archive.read(entry))
@@ -278,7 +289,8 @@ def _read_parts(path: Path) -> list[ColourPart]:
                 dtype=np.int64,
             ).reshape(-1, 3)
             name = (obj.get("name") if obj is not None else None) or f"Color {index}"
-            colour = normalise_colour(colours[index - 1] if index <= len(colours) else None)
+            number = extruders.get(index, index)
+            colour = normalise_colour(colours[number - 1] if 1 <= number <= len(colours) else None)
             parts.append(
                 ColourPart(
                     material_index=index,

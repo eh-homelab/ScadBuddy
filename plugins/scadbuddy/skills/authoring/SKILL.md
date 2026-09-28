@@ -145,6 +145,31 @@ the printable parts all come from that. So:
 - Ignore the alpha byte of `displaycolor`: this OpenSCAD build writes it as `00`
   (main spec §3; `CLAUDE.md`, section "Verified OpenSCAD facts").
 
+### Parts that need more than one plate
+
+When the parts cannot share one bed (a tray and its lid, a box and its dividers), put
+them on separate plates of the same 3MF instead of offering a "which part" parameter
+(main spec §6.4; `models/maze-puzzle/model.scad` puts its lid on plate 2):
+
+```scad
+/* [Hidden] */
+$plate = 0;                          // 0 = every plate; ScadBuddy sets 1..N
+echo(plates = lid_fits ? 1 : 2);     // the plate count, may follow the parameters
+function on_plate(n) = $plate == 0 || $plate == n;
+
+if (on_plate(1)) tray();
+if (on_plate(2)) translate($plate == 2 ? [0, 0, 0] : beside) lid();
+```
+
+- Declare `$plate = 0` in `[Hidden]`. It is not a customizer parameter, and with 0 the
+  file still renders everything in plain OpenSCAD and on MakerWorld (main spec §6.4).
+- `echo(plates = N)` exactly, as a top-level statement. Absent or 1 means one plate and
+  nothing changes (main spec §6.4).
+- Draw each plate at the model origin when `$plate` names it; lay them out side by side
+  when `$plate` is 0, which is what the preview shows (main spec §6.4).
+- Keep the colour parameters the same on every plate: a colour is one extruder across
+  the whole 3MF, in declaration order (main spec §6.4 and §7).
+
 ## 6. Fonts: installed family names only
 
 `text()` resolves a family through fontconfig inside the container, and **a

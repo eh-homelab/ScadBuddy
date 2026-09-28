@@ -13,15 +13,23 @@ import trimesh
 
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
+    CORE_NS,
     PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
+    PRODUCTION_NS,
+    PlateParts,
+    cover_names,
+    plate_columns,
+    plate_origin,
     plates_of,
     replate_3mf,
     write_bambu_3mf,
+    write_plates_3mf,
 )
+from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
@@ -484,3 +492,206 @@ def add_plate(path: Path, index: int, *, thumbnail: bytes | None = None) -> Path
         for name, payload in entries.items():
             archive.writestr(name, payload)
     return path
+
+
+# ── #289: one 3MF, more than one plate ────────────────────────────────────────
+
+LID = "#FFFFFF"
+
+
+def _two_plates() -> tuple[list[PlateParts], list[str]]:
+    """A tray (two colours) on plate 1 and a lid (a third) on plate 2, each drawn at
+    the model origin the way a template draws a plate on its own."""
+    tray = _parts()
+    lid = ColourPart(3, "Lid", LID, trimesh.creation.box(extents=(12, 12, 2)))
+    return (
+        [PlateParts(tuple(tray), (1, 2)), PlateParts((lid,), (3,))],
+        [part.colour for part in tray] + [LID],
+    )
+
+
+def _write_plates(out: Path, *, covers: bool = True, plate: PlateGeometry = DEFAULT_PLATE) -> Path:
+    plates, colours = _two_plates()
+    write_plates_3mf(
+        plates,
+        colours,
+        out,
+        thumbnails=[render_plate_thumbnails(each.parts) for each in plates] if covers else None,
+        model_name="maze",
+        plate=plate,
+    )
+    return out
+
+
+def _placed_boxes(payload: bytes) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Each build item's assembly, as world-space XY boxes: what Bambu Studio's
+    ``reload_all_objects`` intersects with the plate areas to pick a plate."""
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+        paths = {
+            obj.get("id"): [
+                (component.get(f"{{{PRODUCTION_NS}}}path") or "").lstrip("/")
+                for component in obj.iter(f"{{{CORE_NS}}}component")
+            ]
+            for obj in root.iter(f"{{{CORE_NS}}}object")
+        }
+        boxes: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for item in root.iter(f"{{{CORE_NS}}}item"):
+            offset = np.array([float(v) for v in (item.get("transform") or "").split()[9:]])
+            points = np.array(
+                [
+                    [float(v.get("x", 0)), float(v.get("y", 0)), float(v.get("z", 0))]
+                    for name in paths[item.get("objectid")]
+                    for v in ET.fromstring(archive.read(name)).iter(f"{{{CORE_NS}}}vertex")
+                ]
+            )
+            boxes[item.get("objectid") or ""] = (
+                points.min(axis=0) + offset,
+                points.max(axis=0) + offset,
+            )
+    return boxes
+
+
+def _studio_plate(low: np.ndarray, high: np.ndarray, count: int, plate: PlateGeometry) -> int:
+    """The first plate whose bed the box overlaps, as Bambu Studio assigns it."""
+    for index in range(1, count + 1):
+        x, y = plate_origin(index, count, plate)
+        if (
+            low[0] < x + int(plate.size[0])
+            and high[0] > x
+            and low[1] < y + int(plate.size[1])
+            and high[1] > y
+        ):
+            return index
+    return 0
+
+
+class TestMultiplePlates:
+    @pytest.mark.parametrize(
+        ("count", "columns"), [(1, 1), (2, 2), (3, 2), (4, 2), (5, 3), (9, 3), (10, 4), (16, 4)]
+    )
+    def test_plates_are_laid_out_as_bambu_studio_counts_columns(
+        self, count: int, columns: int
+    ) -> None:
+        # `compute_colum_count` in PartPlate.hpp: sqrt, rounded, +1 when it rounded down.
+        assert plate_columns(count) == columns
+
+    def test_plate_origins_step_a_bed_and_a_fifth(self) -> None:
+        h2c = plate_for("H2C")  # a 330 x 320 bed
+        assert plate_origin(1, 2, h2c) == (0.0, 0.0)
+        assert plate_origin(2, 2, h2c) == pytest.approx((396.0, 0.0))
+        assert plate_origin(3, 3, h2c) == pytest.approx((0.0, -384.0))
+        assert plate_origin(2, 2, DEFAULT_PLATE) == pytest.approx((307.2, 0.0))
+
+    def test_every_plate_is_listed_with_its_own_cover(self, tmp_path: Path) -> None:
+        path = _write_plates(tmp_path / "maze.3mf")
+        assert [(p.index, p.thumbnail) for p in plates_of(path)] == [
+            (1, "Metadata/plate_1.png"),
+            (2, "Metadata/plate_2.png"),
+        ]
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+        assert {*cover_names(1), *cover_names(2)} <= names
+
+    def test_each_plate_lands_on_its_own_bed_as_bambu_studio_assigns_it(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _write_plates(tmp_path / "maze.3mf").read_bytes()
+        boxes = _placed_boxes(payload)
+        # Assemblies take the ids after the three part objects: 4 and 5.
+        assert _studio_plate(*boxes["4"], 2, DEFAULT_PLATE) == 1
+        assert _studio_plate(*boxes["5"], 2, DEFAULT_PLATE) == 2
+        # Centred on its bed, sitting on z = 0.
+        low, high = boxes["5"]
+        assert (low[:2] + high[:2]) / 2 == pytest.approx((307.2 + 128.0, 128.0))
+        assert low[2] == pytest.approx(0.0)
+
+    def test_extruders_are_numbered_across_plates(self, tmp_path: Path) -> None:
+        path = _write_plates(tmp_path / "maze.3mf", covers=False)
+        with zipfile.ZipFile(path) as archive:
+            config = ET.fromstring(archive.read("Metadata/model_settings.config"))
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        parts = {
+            part.get("id"): {m.get("key"): m.get("value") for m in part.findall("metadata")}
+            for part in config.iter("part")
+        }
+        assert {key: value["extruder"] for key, value in parts.items()} == {
+            "1": "1",
+            "2": "2",
+            "3": "3",
+        }
+        assert parts["3"]["name"] == "Lid"
+        instances = [
+            (
+                {m.get("key"): m.get("value") for m in plate.findall("metadata")}["plater_id"],
+                {m.get("key"): m.get("value") for m in plate.iter("metadata")}["object_id"],
+            )
+            for plate in config.iter("plate")
+        ]
+        assert instances == [("1", "4"), ("2", "5")]
+        assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB", LID]
+        assert len(settings["filament_settings_id"]) == 3
+
+    def test_only_a_plate_with_two_colours_gets_its_own_tower(self, tmp_path: Path) -> None:
+        path = _write_plates(tmp_path / "h2c.3mf", covers=False, plate=plate_for("H2C"))
+        with zipfile.ZipFile(path) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        # One entry per plate; the lid plate prints no tower and repeats plate 1's.
+        assert len(settings["wipe_tower_x"]) == 2
+        assert settings["wipe_tower_x"][1] == settings["wipe_tower_x"][0]
+
+    def test_replating_moves_every_plate_onto_the_printers_stride(self, tmp_path: Path) -> None:
+        written = _write_plates(tmp_path / "maze.3mf")
+        h2c = plate_for("H2C")
+        moved = replate_3mf(written.read_bytes(), h2c)
+        boxes = _placed_boxes(moved)
+        assert _studio_plate(*boxes["4"], 2, h2c) == 1
+        assert _studio_plate(*boxes["5"], 2, h2c) == 2
+        low, high = boxes["5"]
+        # Centred on the H2C's reachable area (x 25..325), one stride over.
+        assert (low[0] + high[0]) / 2 == pytest.approx(396.0 + 175.0)
+
+    def test_replating_a_multi_plate_file_matches_writing_it_for_that_printer(
+        self, tmp_path: Path
+    ) -> None:
+        written = _write_plates(tmp_path / "maze.3mf")
+        direct = _write_plates(tmp_path / "direct.3mf", plate=plate_for("H2C"))
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        assert moved == direct.read_bytes()
+        assert replate_3mf(moved, plate_for("H2C")) == moved
+
+    def test_a_plate_too_big_for_the_printer_is_named(self, tmp_path: Path) -> None:
+        tray = ColourPart(1, "Tray", "#FF6AC1", trimesh.creation.box(extents=(100, 100, 4)))
+        lid = ColourPart(2, "Lid", LID, trimesh.creation.box(extents=(200, 200, 2)))
+        path = tmp_path / "big-lid.3mf"
+        write_plates_3mf(
+            [PlateParts((tray,), (1,)), PlateParts((lid,), (2,))],
+            ["#FF6AC1", LID],
+            path,
+            thumbnails=None,
+        )
+        with pytest.raises(PlateFitError, match="plate 2"):
+            replate_3mf(path.read_bytes(), plate_for("A1 mini"))
+
+    def test_the_geometry_reader_gives_each_part_its_extruders_colour(self, tmp_path: Path) -> None:
+        parts = parts_from_3mf(_write_plates(tmp_path / "maze.3mf", covers=False))
+        assert [(part.name, part.colour) for part in parts] == [
+            ("Color 1", "#FF6AC1"),
+            ("Color 2", "#1F6FEB"),
+            ("Lid", LID),
+        ]
+
+    def test_cover_images_are_one_set_per_plate_or_none(self, tmp_path: Path) -> None:
+        plates, colours = _two_plates()
+        with pytest.raises(ValueError, match="one set per plate"):
+            write_plates_3mf(
+                plates,
+                colours,
+                tmp_path / "x.3mf",
+                thumbnails=[render_plate_thumbnails(plates[0].parts)],
+            )
+
+    def test_an_extruder_outside_the_filament_list_is_refused(self, tmp_path: Path) -> None:
+        plates, colours = _two_plates()
+        with pytest.raises(ValueError, match="extruder"):
+            write_plates_3mf(plates, colours[:2], tmp_path / "x.3mf", thumbnails=None)

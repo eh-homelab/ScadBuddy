@@ -1926,6 +1926,8 @@ export interface components {
             };
             /** Parts */
             parts?: components["schemas"]["PartInfo"][] | null;
+            /** Plates */
+            plates?: components["schemas"]["PlateInfo"][] | null;
             /** Preview Url */
             preview_url?: string | null;
             /** Slug */
@@ -2683,6 +2685,18 @@ export interface components {
             plate: components["schemas"]["PlateView"];
             /** Problem */
             problem?: string | null;
+        };
+        /**
+         * PlateInfo
+         * @description One plate of a multi-plate render (spec §6.4): what the customizer checks
+         *     against the printer, plate by plate.
+         */
+        PlateInfo: {
+            bbox_mm: components["schemas"]["BoundingBox"];
+            /** Colors */
+            colors: string[];
+            /** Index */
+            index: number;
         };
         /**
          * PlateSend

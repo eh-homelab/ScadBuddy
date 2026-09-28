@@ -1551,6 +1551,20 @@
             ],
             "title": "Parts"
           },
+          "plates": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PlateInfo"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plates"
+          },
           "preview_url": {
             "anyOf": [
               {
@@ -3802,6 +3816,32 @@
           "overshoots"
         ],
         "title": "PlateFit",
+        "type": "object"
+      },
+      "PlateInfo": {
+        "description": "One plate of a multi-plate render (spec \u00a76.4): what the customizer checks\nagainst the printer, plate by plate.",
+        "properties": {
+          "bbox_mm": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "colors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Colors",
+            "type": "array"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "bbox_mm",
+          "colors"
+        ],
+        "title": "PlateInfo",
         "type": "object"
       },
       "PlateSend": {

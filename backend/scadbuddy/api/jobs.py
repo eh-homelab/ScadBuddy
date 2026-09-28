@@ -37,6 +37,7 @@ from scadbuddy.render.jobs import (
     JobState,
     ModelSource,
     PartInfo,
+    PlateInfo,
     QueueFullError,
     RenderQueue,
     resolve_source,
@@ -83,6 +84,8 @@ class JobStatus(BaseModel):
     colors: list[str] | None = None
     warnings: list[str] | None = None
     parts: list[PartInfo] | None = None
+    #: Every plate of a multi-plate render (spec §6.4); empty for a one-plate one.
+    plates: list[PlateInfo] | None = None
 
 
 def _job_status(job: Job, preview_url: str | None) -> JobStatus:
@@ -103,6 +106,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         colors=result.colors if result else None,
         warnings=result.warnings if result else None,
         parts=result.parts if result else None,
+        plates=result.plates if result else None,
     )
 
 

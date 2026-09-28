@@ -77,7 +77,10 @@ async def render_solids(
     work_dir: Path,
     *,
     config: Config,
+    extra_defines: Sequence[str] = (),
 ) -> SolidRender:
+    """One closed solid per colour. ``extra_defines`` reach every wrapper render too:
+    a multi-plate render passes its ``$plate`` this way (spec §6.4)."""
     result = SolidRender()
     wrapper = scad_path.parent / f"{WRAPPER_PREFIX}{secrets.token_hex(8)}.scad"
     wrapper.write_text(wrapper_source(scad_path.name), encoding="utf-8")
@@ -92,7 +95,7 @@ async def render_solids(
                     params,
                     out_path,
                     config=config,
-                    extra_defines=["-D", f"_sb_targets={targets}"],
+                    extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
                 )
                 parts = split_by_material(out_path)
             except OpenSCADError as error:
