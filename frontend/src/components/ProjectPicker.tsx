@@ -76,7 +76,7 @@ export function ProjectPicker({
   inline = false,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
-  const { choices, loading, error: listError, reload, add } = list ?? own
+  const { choices, loading, error: listError, rereadFor, add } = list ?? own
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -100,17 +100,14 @@ export function ProjectPicker({
 
   /**
    * #317 — the other picker on the page may have just created the project in view, which
-   * this one's list predates. Re-read once per such id, so a project deleted in Bambuddy
-   * does not re-fetch forever. The re-read only refreshes the list: `value` is the
-   * parent's, and the remembered `last_project_id` may still be the old project.
+   * this one's list predates. Re-read once per such id across every picker sharing the
+   * list (`rereadFor`). The re-read only refreshes the list: `value` is the parent's, and
+   * the remembered `last_project_id` may still be the old project.
    */
   const missing = choices !== null && value !== null && current === undefined ? value : null
-  const reread = useRef<number | null>(null)
   useEffect(() => {
-    if (missing === null || reread.current === missing) return
-    reread.current = missing
-    void reload()
-  }, [missing, reload])
+    if (missing !== null) rereadFor(missing)
+  }, [missing, rereadFor])
 
   async function create() {
     const body: ProjectRequest = {

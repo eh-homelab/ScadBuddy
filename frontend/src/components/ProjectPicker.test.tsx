@@ -8,6 +8,7 @@ import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 
 /**
@@ -146,6 +147,39 @@ describe('ProjectPicker', () => {
     await new Promise((resolve) => setTimeout(resolve, 200))
     expect(select()).toHaveValue(created)
     expect(screen.getByTestId('first')).toHaveValue(created)
+  })
+
+  it('re-reads a missing project once for pickers sharing a list, together or one after another', async () => {
+    // 99 is remembered but not listed: each picker notices it is missing.
+    withLastProject(99)
+    const fetched = vi.spyOn(api, 'getProjects')
+    function Harness() {
+      const [value, setValue] = useState<number | null>(null)
+      const [second, setSecond] = useState(false)
+      const list = useProjectList(setValue)
+      return (
+        <>
+          <ProjectPicker id="a" testId="picker-a" value={value} onChange={setValue} list={list} />
+          <ProjectPicker id="b" testId="picker-b" value={value} onChange={setValue} list={list} />
+          <button type="button" onClick={() => setSecond(true)}>
+            open
+          </button>
+          {second && (
+            <ProjectPicker id="c" testId="picker-c" value={value} onChange={setValue} list={list} />
+          )}
+        </>
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await screen.findByTestId('picker-b')
+    // The first load, then one re-read for 99 shared by both mounted pickers.
+    await waitFor(() => expect(fetched).toHaveBeenCalledTimes(2))
+
+    // A picker mounted later (the print dialog's) does not re-read 99 again.
+    await user.click(screen.getByRole('button', { name: 'open' }))
+    await screen.findByTestId('picker-c')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(fetched).toHaveBeenCalledTimes(2)
   })
 
   it('opens unset when nothing has been sent yet', async () => {

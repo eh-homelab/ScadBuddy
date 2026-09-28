@@ -12,6 +12,13 @@ export interface ProjectList {
    * the parent, and the remembered id may predate a choice whose `PUT` has not landed.
    */
   reload: () => Promise<void>
+  /**
+   * Re-reads the list because `projectId` is not in it, once per id for every picker
+   * sharing the list, so two pickers noticing the same missing project (together, or
+   * one mounted later) fetch it once, and a project deleted in Bambuddy does not
+   * re-fetch forever.
+   */
+  rereadFor: (projectId: number) => void
   /** A project just created, put at the head of the list without re-reading it. */
   add: (project: ProjectView) => void
 }
@@ -57,7 +64,23 @@ export function useProjectList(
     if (enabled) void fetchList(true)
   }, [enabled, fetchList])
 
-  const reload = useCallback(() => fetchList(false), [fetchList])
+  /** A re-read in flight, which a second caller joins rather than starting another. */
+  const inFlight = useRef<Promise<void> | null>(null)
+  const reload = useCallback(() => {
+    inFlight.current ??= fetchList(false).finally(() => {
+      inFlight.current = null
+    })
+    return inFlight.current
+  }, [fetchList])
+  const reread = useRef(new Set<number>())
+  const rereadFor = useCallback(
+    (projectId: number) => {
+      if (reread.current.has(projectId)) return
+      reread.current.add(projectId)
+      void reload()
+    },
+    [reload],
+  )
   const add = useCallback((project: ProjectView) => {
     // The POST answers with the whole view, folder included, so re-listing would only
     // fetch back what is already in hand.
@@ -67,7 +90,7 @@ export function useProjectList(
   }, [])
 
   return useMemo(
-    () => ({ choices, loading, error, reload, add }),
-    [choices, loading, error, reload, add],
+    () => ({ choices, loading, error, reload, rereadFor, add }),
+    [choices, loading, error, reload, rereadFor, add],
   )
 }
