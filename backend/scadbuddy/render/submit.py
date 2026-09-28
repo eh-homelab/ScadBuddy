@@ -37,6 +37,7 @@ from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_export
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.render_cache import cached_render, prune_render_cache
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,8 @@ class RenderService:
     ) -> None:
         self.store = projection
         self.client = client
+        #: Set in the lifespan once the store is built (Task 8), as `client` is.
+        self.snapshots: SnapshotStore | None = None
         self.task_queue = task_queue
         self.config = config
         self.paths = paths
@@ -126,6 +129,10 @@ class RenderService:
         supersedes: str | None = None,
     ) -> Job:
         """As `RenderQueue.submit`, with the workflow start in place of the wake-up."""
+        if self.snapshots is not None:
+            # The bambuddy store (spec §6.1): workers read the source from the store,
+            # so every job names a revision whose snapshot exists before it starts.
+            model_version = await self.snapshots.pin(slug, model_version)
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,
