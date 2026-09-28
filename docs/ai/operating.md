@@ -196,7 +196,7 @@ reports AI available, which today is the msw-mocked build: nothing routes
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first, each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
 | `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
 | `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
 

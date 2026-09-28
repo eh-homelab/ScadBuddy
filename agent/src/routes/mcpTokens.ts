@@ -55,7 +55,7 @@ export type McpTokenView = {
 export type McpTokenList = {
   /** Null when the auth settings could not be read. */
   auth_mode: McpAuthMode | null
-  /** Newest first. */
+  /** Newest first by `created_at`; a same-microsecond tie falls back to the random `id`. */
   tokens: McpTokenView[]
 }
 
