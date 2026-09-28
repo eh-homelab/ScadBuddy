@@ -1,6 +1,6 @@
 import { socketUrl } from '../../lib/lsp'
 import type { ClientMessage } from './protocol'
-import type { ChatTransport, TransportHandlers } from './transport'
+import type { ChatTransport, SendResult, TransportHandlers } from './transport'
 
 /**
  * The assistant's real transport: the agent's WebSocket `GET /api/v1/ai/chat` (agent
@@ -11,13 +11,18 @@ import type { ChatTransport, TransportHandlers } from './transport'
  *
  * The socket reconnects with back-off when it drops. Each new connection starts with
  * a fresh `sessions.snapshot`, and `onOpen` lets the hook re-attach the open session.
- * Messages sent while disconnected wait for the next connection, up to
- * `MAX_QUEUED`. The agent pings at the WebSocket level (control frames), so nothing
+ * Messages sent while disconnected wait for the next connection, up to `MAX_QUEUED`
+ * each for control frames (approval decisions, interrupts), which go first, and for
+ * everything else. Past that `send` answers `refused` and the caller says so. The agent pings at the WebSocket level (control frames), so nothing
  * extra arrives for the panel to parse.
  */
 
 export const CHAT_SOCKET_PATH = '/api/v1/ai/chat'
+/** Per queue: chat messages and attaches, and control frames, each hold this many. */
 export const MAX_QUEUED = 50
+
+/** Frames that decide or stop something: queued apart from, and sent before, the rest. */
+const CONTROL: ReadonlySet<ClientMessage['type']> = new Set(['approval.decision', 'session.interrupt'])
 
 export interface SocketTransportOptions {
   url?: string
@@ -39,6 +44,7 @@ export function createSocketTransport({
   let attempt = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   const queue: string[] = []
+  const control: string[] = []
 
   const open = () => {
     if (closed) return
@@ -47,6 +53,7 @@ export function createSocketTransport({
     ws.onopen = () => {
       if (socket !== ws) return
       attempt = 0
+      while (control.length && ws.readyState === ws.OPEN) ws.send(control.shift()!)
       while (queue.length && ws.readyState === ws.OPEN) ws.send(queue.shift()!)
       handlers?.onOpen?.()
     }
@@ -72,10 +79,18 @@ export function createSocketTransport({
       handlers = h
       open()
     },
-    send(message: ClientMessage) {
+    send(message: ClientMessage): SendResult {
       const frame = JSON.stringify(message)
-      if (socket && socket.readyState === socket.OPEN) socket.send(frame)
-      else if (queue.length < MAX_QUEUED) queue.push(frame)
+      if (socket && socket.readyState === socket.OPEN) {
+        socket.send(frame)
+        return 'sent'
+      }
+      // Decisions and interrupts have their own queue, sent first: a backlog of
+      // chat text can never crowd out, or delay, the answer an outward call waits on.
+      const target = CONTROL.has(message.type) ? control : queue
+      if (target.length >= MAX_QUEUED) return 'refused'
+      target.push(frame)
+      return 'queued'
     },
     close() {
       closed = true

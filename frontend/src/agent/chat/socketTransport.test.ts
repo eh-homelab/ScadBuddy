@@ -51,7 +51,7 @@ describe('createSocketTransport', () => {
     const ws = FakeSocket.instances[0]!
     expect(ws.url).toBe(`ws://${window.location.host}/api/v1/ai/chat`)
 
-    t.send(attach)
+    expect(t.send(attach)).toBe('queued')
     expect(ws.sent).toEqual([])
     ws.open()
     expect(ws.sent).toEqual([JSON.stringify(attach)])
@@ -91,11 +91,29 @@ describe('createSocketTransport', () => {
     expect(FakeSocket.instances).toHaveLength(3)
   })
 
-  it('caps what it holds while disconnected', () => {
+  it('caps what it holds while disconnected, and says so instead of dropping silently', () => {
     const t = createSocketTransport({ WebSocketImpl: Impl })
     t.connect({ onFrame: () => {} })
-    for (let i = 0; i < MAX_QUEUED + 10; i++) t.send(attach)
+    const results = Array.from({ length: MAX_QUEUED + 10 }, () => t.send(attach))
+    expect(results.filter((r) => r === 'queued')).toHaveLength(MAX_QUEUED)
+    expect(results.slice(MAX_QUEUED)).toEqual(Array(10).fill('refused'))
     FakeSocket.instances[0]!.open()
     expect(FakeSocket.instances[0]!.sent).toHaveLength(MAX_QUEUED)
+    expect(t.send(attach)).toBe('sent')
+  })
+
+  it('never lets a backlog crowd out an approval or an interrupt; they go first on reconnect', () => {
+    const t = createSocketTransport({ WebSocketImpl: Impl })
+    t.connect({ onFrame: () => {} })
+    for (let i = 0; i < MAX_QUEUED; i++) t.send(attach)
+    expect(t.send(attach)).toBe('refused')
+    const decision = clientMessage({ type: 'approval.decision', sessionId: 's1', id: 'a1', approve: true })
+    const stop = clientMessage({ type: 'session.interrupt', sessionId: 's1' })
+    expect(t.send(decision)).toBe('queued')
+    expect(t.send(stop)).toBe('queued')
+    const ws = FakeSocket.instances[0]!
+    ws.open()
+    expect(ws.sent.slice(0, 2)).toEqual([JSON.stringify(decision), JSON.stringify(stop)])
+    expect(ws.sent).toHaveLength(MAX_QUEUED + 2)
   })
 })

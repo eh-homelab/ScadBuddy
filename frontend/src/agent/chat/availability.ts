@@ -55,20 +55,43 @@ const NOT_ROUTED =
   'The agent service did not answer at /api/v1/ai. Check that the ingress routes /api/v1/ai/* ' +
   'and /mcp to the agent sidecar (docs/ai/operating.md §1.1).'
 
-/** One status read, classified. Never throws. */
+/** How long one status read may take; a proxy that accepts and never answers is unreachable. */
+export const STATUS_TIMEOUT_MS = 8_000
+
+/** One status read, classified. Never throws, and settles within `timeoutMs`. */
 export async function fetchAiAvailability(
   fetchImpl: typeof fetch = (input, init) => fetch(input, init),
+  timeoutMs = STATUS_TIMEOUT_MS,
 ): Promise<AiAvailability & { state: AiState }> {
-  let response: Response
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException('timed out', 'TimeoutError')), timeoutMs)
+  // Also raced, not only aborted: a fetch implementation that ignores the signal
+  // must not hold the gate either.
+  const deadline = new Promise<never>((_, reject) => {
+    controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true })
+  })
   try {
-    response = await fetchImpl(AI_STATUS_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+    return await Promise.race([read(fetchImpl, controller.signal), deadline])
   } catch (error) {
+    const timedOut = controller.signal.aborted
     return {
       available: false,
       state: 'unreachable',
-      reason: `Could not reach the agent service (${error instanceof Error ? error.message : String(error)}).`,
+      reason: timedOut
+        ? `The agent service did not answer within ${timeoutMs / 1000} s.`
+        : `Could not reach the agent service (${error instanceof Error ? error.message : String(error)}).`,
     }
+  } finally {
+    clearTimeout(timer)
   }
+}
+
+async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAvailability & { state: AiState }> {
+  const response = await fetchImpl(AI_STATUS_PATH, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+    signal,
+  })
   if (!response.ok) {
     return {
       available: false,

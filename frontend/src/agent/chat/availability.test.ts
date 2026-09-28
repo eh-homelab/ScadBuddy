@@ -63,4 +63,26 @@ describe('fetchAiAvailability', () => {
       reason: 'The agent service answered HTTP 502.',
     })
   })
+
+  it('gives up on a status read that never answers, as unreachable', async () => {
+    const hang: typeof fetch = () => new Promise<Response>(() => {})
+    const started = Date.now()
+    expect(await fetchAiAvailability(hang, 50)).toEqual({
+      available: false,
+      state: 'unreachable',
+      reason: 'The agent service did not answer within 0.05 s.',
+    })
+    expect(Date.now() - started).toBeLessThan(2000)
+    // And one that honours the abort signal is aborted.
+    let aborted = false
+    const listening: typeof fetch = (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true
+          reject(new DOMException('aborted', 'AbortError'))
+        })
+      })
+    expect(await fetchAiAvailability(listening, 50)).toMatchObject({ state: 'unreachable' })
+    expect(aborted).toBe(true)
+  })
 })

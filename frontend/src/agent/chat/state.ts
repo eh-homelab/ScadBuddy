@@ -28,9 +28,11 @@ export type FeedItem =
       summary: string
       /**
        * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `approved`/`denied` from `approval.resolved`.
+       * the server has not confirmed it; `queued` when it is waiting for the connection
+       * to come back (sent first on reconnect); `approved`/`denied` from
+       * `approval.resolved`, the server's confirmation.
        */
-      state: 'pending' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
@@ -64,7 +66,9 @@ export type ChatAction =
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string }
+  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
+  /** The transport refused a message (its queue is full): nothing was sent. */
+  | { type: 'not-sent'; message: string }
 
 export const initialChatState: ChatState = {
   sessions: {},
@@ -262,11 +266,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ? patchSession(next, action.sessionId, (s) => ({ ...s, items: [] }))
         : next
     }
+    case 'not-sent':
+      return { ...state, awaitingStart: false, notice: action.message }
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: 'sent' }
+            ? { ...i, state: action.queued ? 'queued' : 'sent' }
             : i,
         ),
       )

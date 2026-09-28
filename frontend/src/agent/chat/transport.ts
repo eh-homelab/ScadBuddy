@@ -1,5 +1,7 @@
 import type { ClientMessage } from './protocol'
 
+export type SendResult = 'sent' | 'queued' | 'refused'
+
 /**
  * How the panel talks to the agent service. The panel only ever sees this interface:
  * the agent's chat WebSocket (`./socketTransport.ts`) is one implementation, the
@@ -11,7 +13,12 @@ import type { ClientMessage } from './protocol'
 export interface ChatTransport {
   /** Starts delivering server frames. Called once per transport instance. */
   connect(handlers: TransportHandlers): void
-  send(message: ClientMessage): void
+  /**
+   * `sent`: on the wire now. `queued`: held until the connection is back, then sent
+   * before anything else. `refused`: not taken (the queue is full) and it will never
+   * arrive, so the caller must say so and let the user try again.
+   */
+  send(message: ClientMessage): SendResult
   /** Stops delivery; no handler runs after this returns. */
   close(): void
 }

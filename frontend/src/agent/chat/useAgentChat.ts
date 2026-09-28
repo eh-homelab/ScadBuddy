@@ -3,6 +3,8 @@ import { clientMessage, parseServerEvent, type PageContext } from './protocol'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
+const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
+
 export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
@@ -54,7 +56,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         if (open) dispatch({ type: 'disconnected', reason })
       },
     })
-    dispatch({ type: 'connected' })
+    // `connected` comes from onOpen only: the real socket is not open until its
+    // handshake completes, and may close first.
     return () => {
       open = false
       transport.current = null
@@ -67,7 +70,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
     if (!activeId) dispatch({ type: 'started-new' })
-    transport.current.send(
+    const result = transport.current.send(
       clientMessage({
         type: 'user.message',
         ...(activeId ? { sessionId: activeId } : {}),
@@ -75,22 +78,33 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         context,
       }),
     )
+    if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
     if (!transport.current) return
-    transport.current.send(
+    const result = transport.current.send(
       clientMessage({ type: 'approval.decision', sessionId, id: approvalId, approve }),
     )
-    dispatch({ type: 'decided', sessionId, approvalId })
+    // `sent` or `queued` is shown as such until the server's approval.resolved
+    // confirms it; a refused one leaves the card pending, buttons live, to try again.
+    if (result === 'refused') {
+      dispatch({ type: 'not-sent', message: `Your decision was not sent. ${NOT_SENT}` })
+    } else {
+      dispatch({ type: 'decided', sessionId, approvalId, queued: result === 'queued' })
+    }
   }, [])
 
   const interrupt = useCallback((sessionId: string) => {
-    transport.current?.send(clientMessage({ type: 'session.interrupt', sessionId }))
+    if (transport.current?.send(clientMessage({ type: 'session.interrupt', sessionId })) === 'refused') {
+      dispatch({ type: 'not-sent', message: NOT_SENT })
+    }
   }, [])
 
   const takeOver = useCallback((sessionId: string) => {
-    transport.current?.send(clientMessage({ type: 'session.handoff', sessionId }))
+    if (transport.current?.send(clientMessage({ type: 'session.handoff', sessionId })) === 'refused') {
+      dispatch({ type: 'not-sent', message: NOT_SENT })
+    }
   }, [])
 
   const select = useCallback((sessionId: string | null) => {

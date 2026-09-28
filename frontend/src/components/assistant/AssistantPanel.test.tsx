@@ -223,7 +223,7 @@ describe('assistant panel', () => {
       connect: ({ onFrame }: { onFrame: (f: unknown) => void }) => {
         queueMicrotask(() => onFrame({ v: 1, type: 'approval.required', sessionId: 's', id: 'a', tool: 't', summary: 'x', risk: 'write' }))
       },
-      send: () => {},
+      send: () => 'sent' as const,
       close: () => {},
     })
     const { user } = renderPage(
