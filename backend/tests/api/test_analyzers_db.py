@@ -53,7 +53,7 @@ def test_a_fix_whose_target_is_unverified_previews_but_cannot_be_applied(
     assert preview["applicable"] is False and preview["outward"] is True
     assert len(preview["blockers"]) == 2
     assert "outer_wall_speed: unknown \u2192 50 mm/s [derived_process_preset]" in preview["summary"]
-    assert "slicing and queueing" in preview["route_note"]
+    assert "always slices then queues" in preview["route_note"]
 
     events.clear()
     problem = _ok(

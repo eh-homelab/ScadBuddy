@@ -18,7 +18,15 @@ from scadbuddy.analyzers.decisions import (
 from scadbuddy.analyzers.model import Decision, ScopeKind, ScopeRef, fingerprint
 from scadbuddy.analyzers.runner import build_report
 from scadbuddy.bambuddy.models import Printer
-from tests.analyzers.conftest import OUTPUT_ID, context, geometry_of, output, silk_slot, tee
+from tests.analyzers.conftest import (
+    OUTPUT_ID,
+    choices,
+    context,
+    geometry_of,
+    output,
+    silk_slot,
+    tee,
+)
 
 
 def _decision(
@@ -191,14 +199,17 @@ def test_an_accepted_fix_joins_the_effective_diff_until_its_diff_changes() -> No
 
 def test_the_report_lists_inputs_and_the_base() -> None:
     ctx = _silk_context()
-    ctx.request = AnalysisRequest(copies=3, bed_type="Textured PEI Plate")
-    ctx.unavailable["eligibility"] = "this output has not been uploaded to Bambuddy yet"
+    ctx.request = AnalysisRequest(copies=3)
+    ctx.choices = choices("0.2", tier="fine")
+    ctx.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
     report = build_report(ctx, [])
     inputs = {row.name: row for row in report.inputs}
     assert inputs["geometry"].available
-    assert not inputs["eligibility"].available
-    assert inputs["eligibility"].reason == "this output has not been uploaded to Bambuddy yet"
+    assert not inputs["inventory"].available
+    assert inputs["inventory"].reason == "this output has not been uploaded to Bambuddy yet"
     assert report.base.copies == 3 and report.base.bed_type == "Textured PEI Plate"
+    assert report.base.printer_preset_name == "Bambu Lab H2C 0.2 nozzle"
+    assert report.base.process_name == "0.08mm High Quality @BBL H2C 0.2 nozzle"
     assert report.base.printer_model == "H2C"
 
 

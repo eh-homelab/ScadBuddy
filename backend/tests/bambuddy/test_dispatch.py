@@ -1,56 +1,97 @@
-"""Issue #87 — which printer a slice-and-queue run is aimed at.
+"""Slicing a :class:`SlicePlan` and queueing the result against one printer.
 
-Only :func:`target_of` is unit-tested here; the rest of ``dispatch`` is exercised
-end-to-end in ``tests/api/test_print_filaments.py`` against recorded bodies. The
-printer-omitted branch is the one worth its own test: it is the only path that hands
-Bambuddy a ``target_model`` instead of a printer, and every API-level test supplies an
-explicit printer, so nothing else reaches it.
+The route-level behaviour is exercised end-to-end in
+``tests/api/test_print_run_choices.py``; this pins what goes on the wire from the plan
+alone: every preset and the plate type on the slice, and the printer, plate and
+remembered options on the queue item, with no class target.
 """
 
 from __future__ import annotations
 
-from scadbuddy.bambuddy.dispatch import target_of
-from scadbuddy.bambuddy.models import Pipeline
+import json
+
+import httpx
+import respx
+
+from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.dispatch import SlicePlan, slice_and_queue
+from scadbuddy.bambuddy.filaments import QueueFilaments
+from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.options import PrintOptions
+from tests.bambuddy.conftest import BASE_URL, recording
+
+API = f"{BASE_URL}/api/v1"
+
+PLAN = SlicePlan(
+    printer_preset=PresetRef(source="cloud", id="GM042"),
+    process_preset=PresetRef(source="cloud", id="GP243"),
+    filament_presets=[PresetRef(source="cloud", id="GFG99")],
+    filament_colours=["#688197"],
+    bed_type="Supertack Plate",
+)
 
 
-def pipeline(**extra: object) -> Pipeline:
-    base: dict[str, object] = {
-        "id": 1,
-        "name": "Textured PEI",
-        "target_kind": "printer_class",
-        "target_model_class": "H2C",
-        "target_printer_id": None,
-        "printer_preset": {"source": "cloud", "id": "GM041"},
-        "process_preset": {"source": "cloud", "id": "GP001"},
-        "filament_presets": [{"source": "cloud", "id": "GFA00"}],
-    }
-    base.update(extra)
-    return Pipeline.model_validate(base)
-
-
-def test_an_explicit_printer_wins_over_the_pipelines_own_target() -> None:
-    assert target_of(pipeline(), 7) == (7, None)
-
-
-def test_a_class_targeted_pipeline_falls_back_to_the_class() -> None:
-    """Exactly one of the two is sent, and it is the class — so Bambuddy's scheduler
-    picks the machine, matching on the overrides it was given."""
-    assert target_of(pipeline(), None) == (None, "H2C")
-
-
-def test_a_printer_targeted_pipeline_falls_back_to_that_printer() -> None:
-    aimed = pipeline(target_kind="specific_printer", target_printer_id=3, target_model_class=None)
-    assert target_of(aimed, None) == (3, None)
-
-
-def test_a_printer_targeted_pipeline_with_no_printer_falls_through_to_its_class() -> None:
-    """``target_kind`` is not the whole answer: Bambuddy leaves ``target_printer_id``
-    null on a pipeline whose printer has been removed, and aiming at the class is the
-    behaviour that still schedules. Naming neither is what an empty pipeline gets."""
-    stale = pipeline(target_kind="specific_printer", target_printer_id=None)
-    assert target_of(stale, None) == (None, "H2C")
-
-    empty = pipeline(
-        target_kind="specific_printer", target_printer_id=None, target_model_class=None
+def routes() -> tuple[respx.Route, respx.Route]:
+    sliced = respx.post(f"{API}/library/files/41/slice").mock(
+        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
     )
-    assert target_of(empty, None) == (None, None)
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    queued = respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
+    return sliced, queued
+
+
+@respx.mock
+async def test_the_plan_is_what_is_sliced(bambuddy: BambuddyClient) -> None:
+    sliced, _ = routes()
+
+    await slice_and_queue(bambuddy, library_file_id=41, plan=PLAN, printer_id=1, plate_id=2)
+
+    sent = json.loads(sliced.calls.last.request.read())
+    sent.pop("use_embedded_settings")
+    assert sent == {
+        "printer_preset": {"source": "cloud", "id": "GM042"},
+        "process_preset": {"source": "cloud", "id": "GP243"},
+        "filament_presets": [{"source": "cloud", "id": "GFG99"}],
+        "filament_colours": ["#688197"],
+        "bed_type": "Supertack Plate",
+        "plate": 2,
+    }
+
+
+@respx.mock
+async def test_the_item_names_the_printer_and_carries_the_options(
+    bambuddy: BambuddyClient,
+) -> None:
+    """One printer, never a class: the spools are loaded in that machine. ``copies``
+    and ``project_id`` win over the quantity and project the options carry."""
+    _, queued = routes()
+
+    outcome = await slice_and_queue(
+        bambuddy,
+        library_file_id=41,
+        plan=PLAN,
+        printer_id=1,
+        filaments=QueueFilaments(
+            filament_overrides=[{"slot_id": 1, "type": "PETG", "color": "#688197"}],
+            required_filament_types=["PETG"],
+        ),
+        plate_id=2,
+        copies=3,
+        project_id=7,
+        options=PrintOptions(timelapse=False, quantity=5, project_id=4),
+    )
+
+    sent = json.loads(queued.calls.last.request.read())
+    assert sent["printer_id"] == 1
+    assert sent.get("target_model") is None
+    assert (sent["library_file_id"], sent["plate_id"]) == (52, 2)
+    assert (sent["quantity"], sent["project_id"], sent["timelapse"]) == (3, 7, False)
+    assert sent["required_filament_types"] == ["PETG"]
+    assert (outcome.slice_job_id, outcome.sliced_library_file_id) == (9, 52)
+    assert outcome.printer_id == 1

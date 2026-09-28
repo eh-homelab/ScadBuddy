@@ -8,7 +8,6 @@ import pytest
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.builtin import (
-    ELIGIBILITY,
     LOW_FILAMENT,
     NON_MANIFOLD,
     OPEN_EDGES,
@@ -22,18 +21,18 @@ from scadbuddy.analyzers.context import AnalysisRequest
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic
 from scadbuddy.analyzers.runner import run_checks
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
-from scadbuddy.bambuddy.models import EligibilityReport, SlotChoice
+from scadbuddy.bambuddy.models import SlotChoice
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.plate import plate_for
 from tests.analyzers.conftest import (
     basic_slot,
+    choices,
     context,
     cube,
     geometry_of,
     open_box,
     output,
     part,
-    pipeline,
     silk_slot,
     tee,
     touching_cubes,
@@ -128,11 +127,10 @@ def test_silk_by_subtype_counts_and_a_basic_pla_does_not() -> None:
     assert _run(SILK_GLOSS, filaments=[basic_slot()]) == []
 
 
-def test_a_pipeline_preset_named_silk_counts_without_a_spool() -> None:
+def test_a_spool_whose_preset_is_named_silk_counts_without_a_subtype() -> None:
     slot = silk_slot().model_copy(
-        update={"material": None, "subtype": None, "spool_id": None, "origin": "pipeline"}
+        update={"subtype": None, "preset_name": "Bambu PLA Silk @BBL H2C"}
     )
-    slot = slot.model_copy(update={"preset_name": "Bambu PLA Silk @BBL H2C"})
     assert _run(SILK_GLOSS, filaments=[slot])
 
 
@@ -143,19 +141,15 @@ def test_silk_petg_is_not_silk_pla() -> None:
 
 @pytest.mark.parametrize(("nozzle", "hits"), [("0.4", 0), ("0.2", 0), ("0.6", 1), ("0.8", 1)])
 def test_silk_on_a_large_nozzle_is_a_warning(nozzle: str, hits: int) -> None:
-    found = _run(SILK_NOZZLE, filaments=[silk_slot()], pipeline=pipeline(nozzle_diameter=nozzle))
+    found = _run(SILK_NOZZLE, filaments=[silk_slot()], choices=choices(nozzle))
     assert len(found) == hits
     assert all(row.severity == "warning" for row in found)
 
 
-def test_silk_on_supertack_from_the_request_or_the_pipeline() -> None:
-    assert _run(
-        SILK_PLATE,
-        filaments=[silk_slot()],
-        request=AnalysisRequest(bed_type="Supertack Plate"),
-    )
-    assert _run(SILK_PLATE, filaments=[silk_slot()], pipeline=pipeline(bed_type="Supertack Plate"))
-    assert _run(SILK_PLATE, filaments=[silk_slot()], pipeline=pipeline()) == []
+def test_silk_on_supertack_from_the_chosen_plate_type() -> None:
+    [found] = _run(SILK_PLATE, filaments=[silk_slot()], choices=choices(bed_type="Supertack Plate"))
+    assert {e.label: e.origin for e in found.evidence}["bed type"] == "request"
+    assert _run(SILK_PLATE, filaments=[silk_slot()], choices=choices()) == []
 
 
 # --- SB3002 -------------------------------------------------------------------------
@@ -238,48 +232,6 @@ def test_a_multi_plate_output_is_checked_plate_by_plate(tmp_path: Path) -> None:
     [found] = _run(PLATE_FIT, output=wide, model_3mf=too_big, plate=mini)
     assert {e.label: e.value for e in found.evidence}["plates"] == 2
     assert any(e.label == "placement" for e in found.evidence)
-
-
-# --- SB5001 -------------------------------------------------------------------------
-
-
-def test_each_eligibility_issue_is_reported_verbatim() -> None:
-    report = EligibilityReport.model_validate(
-        {
-            "ok": False,
-            "issues": [
-                {
-                    "kind": "filament_type_mismatch",
-                    "slot_index": 1,
-                    "expected": "PLA",
-                    "actual": "PETG",
-                },
-                {"kind": "printer_offline"},
-            ],
-        }
-    )
-    found = _run(ELIGIBILITY, eligibility=report, pipeline=pipeline())
-    assert [row.severity for row in found] == ["error", "error"]
-    assert "filament_type_mismatch for slot 1 (expected 'PLA', actual 'PETG')" in found[0].message
-
-
-def test_a_class_where_one_printer_fails_is_a_warning() -> None:
-    report = EligibilityReport.model_validate(
-        {
-            "ok": True,
-            "target_kind": "printer_class",
-            "printer_reports": [
-                {
-                    "printer_id": 2,
-                    "printer_name": "B",
-                    "ok": False,
-                    "issues": [{"kind": "printer_offline"}],
-                }
-            ],
-        }
-    )
-    [found] = _run(ELIGIBILITY, eligibility=report, pipeline=pipeline())
-    assert found.severity == "warning" and "on B" in found.message
 
 
 # --- the runner ---------------------------------------------------------------------

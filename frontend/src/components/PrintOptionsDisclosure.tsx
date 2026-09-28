@@ -71,7 +71,7 @@ export function PrintOptionsDisclosure({
   useEffect(() => {
     let live = true
     api
-      .getPrintOptions(slug)
+      .getPrintOptions()
       .then((view) => {
         if (!live) return
         setRemembered(view)

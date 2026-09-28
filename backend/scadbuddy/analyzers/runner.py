@@ -27,7 +27,7 @@ from scadbuddy.analyzers.model import (
     fingerprint,
 )
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.pipelines import PipelineView
+from scadbuddy.bambuddy.resolver import PrintChoices
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,12 @@ class AnalysisSummary(BaseModel):
 
 
 class BaseProfile(BaseModel):
-    """What the diffs are against: the pipeline's presets, bed type and plan (#84)."""
+    """What the diffs are against: the print's choices and the presets they resolve
+    to by name (spool-first spec §4.1-4.2), the printer, plate and plan (#84)."""
 
-    pipeline: PipelineView | None = None
+    choices: PrintChoices | None = None
+    printer_preset_name: str | None = None
+    process_name: str | None = None
     printer_id: int | None = None
     printer_model: str | None = None
     bed_type: str | None = None
@@ -281,7 +284,9 @@ def build_report(
         decisions_available=decisions_unavailable is None,
         decisions_reason=decisions_unavailable,
         base=BaseProfile(
-            pipeline=context.pipeline,
+            choices=context.choices,
+            printer_preset_name=context.printer_preset_name,
+            process_name=context.process_name,
             printer_id=printer.id if printer else None,
             printer_model=printer.model if printer else None,
             bed_type=context.bed_type,

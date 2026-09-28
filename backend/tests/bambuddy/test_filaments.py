@@ -29,14 +29,9 @@ from scadbuddy.bambuddy.filaments import (
     colour_distance,
     gather_options,
     normalise_colour,
-    nozzle_warnings,
     queue_filaments,
-    slice_filament_presets,
-    spool_preset_alternatives,
 )
 from scadbuddy.bambuddy.models import (
-    NozzleInfo,
-    PresetRef,
     Printer,
     SlotChoice,
     SlotMaterial,
@@ -337,103 +332,6 @@ def test_required_types_are_deduplicated_in_slot_order() -> None:
     assert queue_filaments(built, plan).required_filament_types == ["PLA"]
 
 
-def test_the_slice_uses_the_preset_the_spool_itself_names() -> None:
-    """``slicer_filament`` is Bambuddy's own field on the spool row; no preset is
-    chosen for the spool here."""
-    built = options()
-    spool = next(row for row in built.spools if row.spool_id == 5)
-    assert spool.slicer_filament is not None
-    ref = PresetRef(source="cloud", id=spool.slicer_filament)
-    presets_out, colours, warnings = slice_filament_presets(
-        built,
-        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
-        pipeline_presets=[PresetRef(source="cloud", id="GFA00")],
-        resolve={spool.slicer_filament: ref},
-    )
-    assert presets_out[0] == ref
-    assert warnings == []
-    assert colours[0] == spool.colour
-
-
-def test_a_preset_id_the_catalogue_does_not_hold_keeps_the_pipelines_own() -> None:
-    """Inventing a ``PresetRef`` source would send Bambuddy an id it cannot look up, and
-    the slice would fail naming a preset nobody chose."""
-    built = options()
-    pipeline_presets = [
-        PresetRef(source="cloud", id="GFA00"),
-        PresetRef(source="cloud", id="GFA00"),
-    ]
-    presets_out, _, warnings = slice_filament_presets(
-        built,
-        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
-        pipeline_presets=pipeline_presets,
-        resolve={},
-    )
-    assert presets_out[0] == PresetRef(source="cloud", id="GFA00")
-    assert any("no slicer preset" in warning.message for warning in warnings)
-
-
-def test_a_spools_default_preset_for_another_nozzle_gives_way_to_its_own_that_fits() -> None:
-    """#161: spool 17's ``slicer_filament`` was its 0.4 preset, and a 0.2 pipeline was
-    sliced with it — 12 mm³/s through a 0.2 nozzle."""
-    built = options()
-    default = PresetRef(source="local", id="31")
-    fitting = PresetRef(source="local", id="60")
-    spool = next(row for row in built.spools if row.spool_id == 5)
-    built.spools[built.spools.index(spool)] = spool.model_copy(update={"slicer_filament": "31"})
-    presets_out, _, warnings = slice_filament_presets(
-        built,
-        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
-        pipeline_presets=[PresetRef(source="cloud", id="GFA00")],
-        resolve={"31": default, "60": fitting},
-        compatible={"60"},
-        alternatives={5: ["31", "60", "38"]},
-    )
-    assert presets_out[0] == fitting
-    assert warnings == []
-
-
-def test_a_spool_with_no_preset_for_the_pipelines_nozzle_keeps_the_pipelines_own() -> None:
-    built = options()
-    pipeline_preset = PresetRef(source="cloud", id="GFA00")
-    presets_out, _, warnings = slice_filament_presets(
-        built,
-        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
-        pipeline_presets=[pipeline_preset],
-        resolve={"GFA05": PresetRef(source="cloud", id="GFA05")},
-        compatible={"GFA00"},
-        alternatives={5: []},
-    )
-    assert presets_out[0] == pipeline_preset
-    assert any("printer and nozzle" in warning.message for warning in warnings)
-
-
-@respx.mock
-async def test_per_nozzle_presets_are_read_only_for_a_spool_whose_default_does_not_fit(
-    bambuddy: BambuddyClient,
-) -> None:
-    built = options()
-    plan = FilamentPlan(
-        slots=[SlotChoice(slot_id=1, spool_id=5), SlotChoice(slot_id=2, spool_id=3)]
-    )
-    route = respx.get(f"{API}/inventory/spools/5/filament-presets").mock(
-        return_value=httpx.Response(
-            200,
-            json=[
-                {
-                    "printer_model": "H2C",
-                    "nozzle_diameter": "0.2",
-                    "slicer_filament": "60",
-                    "slicer_filament_name": "Frosty @H2C 0.2n",
-                }
-            ],
-        )
-    )
-    alternatives = await spool_preset_alternatives(bambuddy, built, plan, {"GFA00", "60"})
-    assert alternatives == {5: ["60"]}
-    assert route.call_count == 1
-
-
 # --- reading it all off a live-shaped Bambuddy --------------------------------
 
 
@@ -564,42 +462,3 @@ def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     )
     assert [choice.spool_id for choice in inside.suggested] == [1]
     assert outside.suggested == []
-
-
-# --- the nozzle (#78) --------------------------------------------------------
-
-
-def h2c_nozzles(*diameters: str) -> list[NozzleInfo]:
-    return [NozzleInfo(nozzle_type="HS00", nozzle_diameter=diameter) for diameter in diameters]
-
-
-def test_a_pipeline_nozzle_mounted_on_either_extruder_is_no_mismatch() -> None:
-    """The H2C reports one nozzle per extruder; a 0.2 pipeline fits the 0.2 one."""
-    assert nozzle_warnings(h2c_nozzles("0.2", "0.4"), "0.2", printer_name="H2C") == []
-    assert nozzle_warnings(h2c_nozzles("0.40"), "0.4", printer_name="H2C") == []
-
-
-def test_a_pipeline_nozzle_the_printer_has_not_mounted_is_said_before_the_click() -> None:
-    [warning] = nozzle_warnings(h2c_nozzles("0.4", "0.4"), "0.2", printer_name="H2C")
-    assert warning.kind == "nozzle-mismatch"
-    assert warning.slot_id is None
-    assert "0.2 mm" in warning.message
-    assert "H2C" in warning.message
-    assert "0.4 mm" in warning.message
-
-
-@pytest.mark.parametrize(
-    ("nozzles", "diameter"),
-    [([], "0.2"), ([NozzleInfo()], "0.2"), ([NozzleInfo(nozzle_diameter="0.4")], None)],
-)
-def test_nothing_to_compare_is_no_warning(nozzles: list[NozzleInfo], diameter: str | None) -> None:
-    """A preset name that states no nozzle, or a printer reporting none, is not a mismatch."""
-    assert nozzle_warnings(nozzles, diameter, printer_name="H2C") == []
-
-
-def test_a_diameter_that_is_not_a_number_is_skipped_rather_than_failing_the_panel() -> None:
-    """Live status is firmware's to spell; a garbled value must not 500 the filaments step."""
-    assert nozzle_warnings(h2c_nozzles("?"), "0.2", printer_name="H2C") == []
-    [warning] = nozzle_warnings(h2c_nozzles("n/a", "0.4"), "0.2", printer_name="H2C")
-    assert "n/a" not in warning.message
-    assert "0.4 mm" in warning.message

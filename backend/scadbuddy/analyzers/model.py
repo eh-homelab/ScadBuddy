@@ -72,7 +72,7 @@ UNVERIFIED_TARGETS: dict[FixTarget, str] = {
     ),
     "project_settings_3mf": (
         "Whether a 3MF that claims Application: BambuStudio-… has its "
-        "project_settings.config override the pipeline's process preset — AI spec §3.2, "
+        "project_settings.config override the resolved process preset — AI spec §3.2, "
         "verified by #284"
     ),
 }
@@ -108,14 +108,14 @@ class Evidence(BaseModel):
     label: str
     value: SettingValue
     unit: str | None = None
-    #: Where the figure came from: ``geometry``, ``bambuddy:<route>``, ``pipeline`` …
+    #: Where the figure came from: ``geometry``, ``bambuddy:<route>``, ``request`` …
     origin: str
 
 
 class DiagnosticLocation(BaseModel):
     """Where the problem is, as precisely as the input allows."""
 
-    kind: Literal["mesh", "plate", "filament_slot", "pipeline", "profile_setting", "analyzer"]
+    kind: Literal["mesh", "plate", "filament_slot", "print_choices", "profile_setting", "analyzer"]
     #: 1-based extruder index of the part, as in ``OutputMeta.parts``.
     part: int | None = None
     colour: str | None = None

@@ -72,9 +72,9 @@ NO_DATABASE = (
 )
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 ROUTE_NOTE = (
-    "Accepting a settings diff sends this print by slicing and queueing rather than "
-    "running the pipeline, because a pipeline run carries no per-print settings "
-    "(AI spec §11, print-flow spec §2)."
+    "An accepted settings diff lands on this print's slice and queue item: the print "
+    "dialog always slices then queues (spool-first print spec §7). The send bar's "
+    "pipeline run carries no per-print settings, so it does not apply one (AI spec §11)."
 )
 
 
@@ -257,11 +257,12 @@ async def post_run(
     decisions: OptionalDecisionsDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
-    with (the #84 base: pipeline, printer, filament plan, plate, options).
+    with (the #84 base: printer, spool plan, nozzles, quality, plate type and options).
 
     Reads only: nothing is uploaded, sliced or queued. An input that cannot be read
-    (no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is
-    listed in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.
+    (no Bambuddy, no nozzle or quality chosen, an output not uploaded yet, a missing
+    API-key scope) is listed in ``inputs`` with the reason, and the analyzers needing it
+    in ``skipped``.
 
     ``detail=simple`` returns the headline and the open findings with their sources and
     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,

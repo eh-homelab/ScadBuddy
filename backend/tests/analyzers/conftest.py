@@ -10,7 +10,7 @@ import numpy as np
 import trimesh
 
 from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest, FilamentSlot
-from scadbuddy.bambuddy.pipelines import PipelineView
+from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.geometry import GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import BoundingBox
@@ -75,20 +75,10 @@ def output(
     )
 
 
-def pipeline(**extra: Any) -> PipelineView:
-    body: dict[str, Any] = {
-        "id": 1,
-        "name": "Default",
-        "target_kind": "specific_printer",
-        "target_printer_id": 1,
-        "fanout_strategy": "max_parallel",
-        "bed_type": "Textured PEI Plate",
-        "process_preset_name": "0.20mm Standard @BBL H2C 0.4 nozzle",
-        "nozzle_diameter": "0.4",
-        "printer_ids": [1],
-    }
-    body.update(extra)
-    return PipelineView.model_validate(body)
+def choices(size: str = "0.4", **extra: Any) -> PrintChoices:
+    """The spool-first dialog's choices: one nozzle size on both sides (spec §2)."""
+    nozzle = NozzleChoice.model_validate({"size": size})
+    return PrintChoices(nozzles=[nozzle, nozzle.model_copy()], **extra)
 
 
 def silk_slot(slot_id: int = 1) -> FilamentSlot:
@@ -101,7 +91,6 @@ def silk_slot(slot_id: int = 1) -> FilamentSlot:
         subtype="Tri Color",
         brand="Bambu",
         preset_name="Bambu PLA Silk",
-        origin="spool",
     )
 
 
@@ -113,7 +102,6 @@ def basic_slot(slot_id: int = 1) -> FilamentSlot:
         subtype="Basic",
         brand="Bambu",
         preset_name="Bambu PLA Basic",
-        origin="spool",
     )
 
 

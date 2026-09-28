@@ -46,9 +46,6 @@ def _ok(response: httpx.Response, status: int = 200) -> Any:
 def bambuddy_routes(*, spools: httpx.Response | None = None) -> dict[str, respx.Route]:
     presets_routes()
     return {
-        "pipelines": respx.get(f"{API}/slicer-pipelines/").mock(
-            return_value=httpx.Response(200, json=recording("slicer-pipelines-configured.json"))
-        ),
         "printers": respx.get(f"{API}/printers/").mock(
             return_value=httpx.Response(200, json=recording("printers.json"))
         ),
@@ -59,9 +56,12 @@ def bambuddy_routes(*, spools: httpx.Response | None = None) -> dict[str, respx.
 
 
 SILK_REQUEST: dict[str, Any] = {
-    "pipeline_id": 1,
     "filament_plan": {"slots": [{"slot_id": 1, "spool_id": SILK_SPOOL}]},
-    "bed_type": "Supertack Plate",
+    "choices": {
+        "nozzles": [{"size": "0.2"}, {"size": "0.2"}],
+        "tier": "fine",
+        "bed_type": "Supertack Plate",
+    },
 }
 
 
@@ -96,13 +96,14 @@ def test_without_bambuddy_the_geometry_analyzers_run_and_the_rest_say_why(
     assert report["summary"]["headline"] == "Nothing to report"
     inputs = {row["name"]: row for row in report["inputs"]}
     assert inputs["geometry"]["available"] is True
-    assert inputs["pipeline"] == {
-        "name": "pipeline",
+    assert inputs["printer"] == {
+        "name": "printer",
         "available": False,
         "reason": "Bambuddy is not configured",
     }
+    assert inputs["choices"]["reason"] == "no nozzle or quality is chosen for this model"
     skipped = {row["id"] for row in report["skipped"]}
-    assert {"SB2001", "SB3002", "SB5001"} <= skipped
+    assert {"SB2001", "SB2002", "SB3002"} <= skipped
     assert "SB1001" not in skipped
     kinds = [scope["kind"] for scope in report["scopes"]]
     assert kinds == ["global", "template", "template_version", "configuration", "print"]
@@ -140,7 +141,7 @@ def test_unknown_subjects_are_404(client: TestClient) -> None:
 
 
 @respx.mock
-def test_silk_on_supertack_is_found_from_the_plan_and_the_pipeline(
+def test_silk_on_supertack_is_found_from_the_plan_and_the_choices(
     client: TestClient, model: str
 ) -> None:
     configure(client)
@@ -162,17 +163,36 @@ def test_silk_on_supertack_is_found_from_the_plan_and_the_pipeline(
     assert silk["evidence"] == [] and silk["why"] is None
     assert silk["fixes"][0]["id"] == "silk-gloss"
 
-    # The recording's pipeline slices for a 0.2 nozzle on printer 1, an H2C.
-    assert report["base"]["pipeline"]["nozzle_diameter"] == "0.2"
+    # No printer named: the configured one, printer 1, an H2C (spool-first spec §7).
+    assert report["base"]["printer_preset_name"] == "Bambu Lab H2C 0.2 nozzle"
+    assert report["base"]["process_name"] == "0.08mm High Quality @BBL H2C 0.2 nozzle"
     assert report["base"]["printer_model"] == "H2C"
     assert report["base"]["bed_type"] == "Supertack Plate"
     scopes = [(scope["kind"], scope["key"]) for scope in report["scopes"]]
     assert ("material", "pla/tri color") in scopes and ("printer", "id:1") in scopes
-    # Not uploaded, so nothing asked Bambuddy's eligibility or plate slots.
+    # Not uploaded, so nothing asked Bambuddy's plate slots.
     inputs = {row["name"]: row for row in report["inputs"]}
-    assert inputs["eligibility"]["reason"] == "this output has not been uploaded to Bambuddy yet"
+    assert inputs["inventory"]["reason"] == "this output has not been uploaded to Bambuddy yet"
     assert routes["spools"].called
     assert not any(call.request.method == "POST" for call in respx.calls)
+
+
+def test_without_choices_the_models_remembered_ones_are_judged(
+    client: TestClient, model: str
+) -> None:
+    """What the print dialog reopens with (spool-first spec §7): the model's nozzles
+    and tier, on the plate remembered for its printer."""
+    remembered = {"printer_id": 1, "nozzles": [{"size": "0.6"}], "tier": "draft"}
+    _ok(client.put(f"/api/v1/print/models/{model}/choices", json=remembered))
+    _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
+    report = _run(client, make_output(client, model), request={"printer_id": 1})
+    base = report["base"]
+    assert base["choices"]["nozzles"] == [
+        {"size": "0.6", "flow": "standard"},
+        {"size": "0.6", "flow": "standard"},
+    ]
+    assert base["process_name"] == "0.30mm Standard @BBL H2C 0.6 nozzle"
+    assert base["bed_type"] == "Supertack Plate"
 
 
 @respx.mock
@@ -232,31 +252,13 @@ VERIFIED = Analyzer(
 
 
 @respx.mock
-def test_an_uploaded_output_is_judged_on_eligibility_and_inventory_too(
+def test_an_uploaded_output_is_judged_on_inventory_too(
     client: TestClient, model: str, app: FastAPI
 ) -> None:
     configure(client)
     bambuddy_routes()
     output_id = make_output(client, model)
     getattr(app.state, STATE_ATTR).outputs.record_send(output_id, library_file_id=41)
-    check = respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "ok": False,
-                "target_kind": "specific_printer",
-                "issues": [
-                    {
-                        "kind": "filament_type_mismatch",
-                        "slot_index": 1,
-                        "expected": "PETG",
-                        "actual": "PLA",
-                    }
-                ],
-                "printer_reports": [],
-            },
-        )
-    )
     respx.get(f"{API}/library/files/41/filament-requirements").mock(
         return_value=httpx.Response(
             200,
@@ -279,15 +281,12 @@ def test_an_uploaded_output_is_judged_on_eligibility_and_inventory_too(
     )
 
     report = _run(client, output_id, request=SILK_REQUEST, detail="advanced")
-    assert check.calls.last.request.read() == b'{"source_library_file_id":41,"force":false}'
     found = {row["key"]: row for row in report["diagnostics"]}
-    assert found["SB5001:1"]["severity"] == "error"
     low = found["SB3002:slot-1"]
     assert {e["label"]: e["value"] for e in low["evidence"]}["needed per copy"] == 2000
-    assert report["summary"]["errors"] == 1
-    # Reads only: the eligibility check is the one POST, and it starts nothing.
-    posts = [call.request.url.path for call in respx.calls if call.request.method != "GET"]
-    assert posts == ["/api/v1/slicer-pipelines/1/check-eligibility"]
+    assert report["summary"]["errors"] == 0
+    # Reads only: nothing is uploaded, sliced or queued.
+    assert not any(call.request.method != "GET" for call in respx.calls)
 
 
 # --- without a database -------------------------------------------------------------
