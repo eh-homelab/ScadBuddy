@@ -105,6 +105,19 @@ test.describe('customizer', () => {
     await page.getByRole('textbox', { name: 'Name on the tag' }).fill('boom')
     await expect(page.getByTestId('render-log')).toContainText('Compilation failed')
   })
+
+  test("shows the notes a successful render's template echoed (#285)", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-notes')).toHaveCount(0)
+
+    await page.getByRole('textbox', { name: 'Name on the tag' }).fill('Alexandra')
+    const notes = page.getByRole('region', { name: 'Notes from the template' })
+    await expect(notes).toContainText('text_size reduced from 14 to 9.5 mm')
+    await expect(notes).toContainText('0.4 mm nozzle cannot print them cleanly')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-log')).toHaveCount(0)
+  })
 })
 
 test.describe('font picker', () => {

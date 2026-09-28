@@ -92,7 +92,7 @@ some sag; raise it if the first bridge layer droops onto the back plate.
 | Parameter | Default | What it does |
 |---|---|---|
 | `mask_file` | `sample-lattice.svg` | Upload an SVG or PNG (`// file:svg,png`), or a file name in this model's directory. Empty = off. |
-| `mask_type` | `auto` | `auto` reads a name ending `.png` through `surface()` and anything else with `import()`; `svg` / `image_threshold` force one. `image_threshold` keeps the pixels darker than `image_threshold`. |
+| `mask_type` | `auto` | `auto` reads a name ending `.png` through `surface()` and anything else with `import()`; `svg` / `png_threshold` force one. `png_threshold` keeps the pixels darker than `image_threshold`. The old value `image_threshold` still works (see below). |
 | `mask_mode` | `cutout` | `outline`, `cutout`, `inlay`, `emboss`, `deboss` — see below. |
 | `mask_fit` | `fit` | `fit`: largest size that fits the area, aspect kept. `fill`: covers the area, aspect kept, cropped. `stretch`: exactly the area. |
 | `mask_scale` | `100` | Picture size as % of the fitted size. |
@@ -106,6 +106,14 @@ some sag; raise it if the first bridge layer droops onto the back plate.
 | `outline_border` | `1.5` | Outline mode: grow the picture by this much so thin lines become printable. |
 | `tie_bars` | `auto` | Cutout: bars tying loose pieces to the rest. `auto` = centre cross when inverted, none otherwise. |
 | `tie_pitch` | `15` | Spacing of the `grid` tie bars, mm. |
+
+**`mask_type` / `overlay_type` value renamed (#318).** The PNG choice's value is
+`png_threshold`; it was `image_threshold`, the same spelling as the numeric `image_threshold` parameter. The
+model still reads the old value as `png_threshold`, so saved presets and past outputs
+that hold it render exactly as before, with no migration step. The customizer does
+not offer the old value, so a preset that holds it shows no matching dropdown
+choice, and saving that preset again is refused (422, not one of the options) until
+the PNG choice is re-picked.
 
 The **mask area** is the strip inside the cutout margin, below the cord hole
 and below a star / heart topper (on the page corner: the triangle's square
@@ -268,7 +276,7 @@ tie bars; ScadBuddy renders once more per colour for the closed parts.
 ## Verifying
 
 ```bash
-./verify.sh                      # 33 cases
+./verify.sh                      # 35 cases
 ONLY='corner|missing' ./verify.sh    # a subset by name regex
 ```
 
@@ -277,7 +285,9 @@ PNG, fit / fill / stretch, repeat, invert with centre and grid tie bars, a
 cutout together with a raised PNG overlay, missing mask / outline / overlay
 files, refused names (`../model.scad`, `/etc/hostname`, `sub/x.svg`,
 `.hidden.svg`), upload-style names (`_scadbuddy_solid_asset_<hex>.svg` /
-`.png`, copied in for the run and removed after), and the largest bookmark. For each it checks:
+`.png`, copied in for the run and removed after), the PNG reader forced with
+`png_threshold` and with the pre-#318 value `image_threshold` (which must
+render the same parts, of the same volume), and the largest bookmark. For each it checks:
 
 - no uncoloured geometry, and exactly the expected colour parts;
 - on z=0, exactly as tall as the layers imply, inside and filling its extent,
@@ -299,7 +309,7 @@ files, refused names (`../model.scad`, `/etc/hostname`, `sub/x.svg`,
   the classic `width` x `length`); refused names are never opened and are
   logged with a NOTE.
 
-Last run: `OK: all cases passed` (33 cases, 390 checks).
+Last run: `OK: all cases passed` (35 cases, 415 checks).
 
 ## Upload widget (#204)
 

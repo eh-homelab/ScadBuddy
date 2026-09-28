@@ -163,6 +163,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],
         warnings=["a warning"],
+        notes=["a note"],
     )
 
 

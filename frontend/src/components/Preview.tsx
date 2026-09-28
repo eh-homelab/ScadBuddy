@@ -54,8 +54,9 @@ interface Props {
 
 export function Preview({ job, rendering, plate, captureRef }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
+  // Its notes travel with it: they explain the model on screen, not the one rendering.
   const [shown, setShown] = useState<
-    { url: string; bbox?: BoundingBox; colors: string[]; plates: number } | undefined
+    { url: string; bbox?: BoundingBox; colors: string[]; notes: string[]; plates: number } | undefined
   >()
 
   useEffect(() => {
@@ -64,6 +65,7 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
         url: job.preview_url,
         bbox: job.bbox_mm ?? undefined,
         colors: job.colors ?? [],
+        notes: job.notes ?? [],
         plates: Math.max(job.plates?.length ?? 0, 1),
       })
     }
@@ -124,7 +126,12 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
           )}
         </div>
 
-        {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
+        {!failed && (
+          <div className="flex flex-col items-start gap-2">
+            {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
+            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
+          </div>
+        )}
       </div>
 
       {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
@@ -167,6 +174,28 @@ function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
         </>
       )}
     </dl>
+  )
+}
+
+/**
+ * #285 — what the template echoed as `NOTE:`/`WARNING:` on a successful render: a
+ * size it capped or text it shrank to fit the plate. Without it the result simply
+ * differs from the parameters, with nothing to say why.
+ */
+export function RenderNotes({ notes }: { notes: string[] }) {
+  return (
+    <section
+      data-testid="render-notes"
+      aria-label="Notes from the template"
+      className="pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
+    >
+      <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
+      <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
+        {notes.map((note) => (
+          <li key={note}>{note}</li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

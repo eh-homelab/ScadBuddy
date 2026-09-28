@@ -623,6 +623,7 @@ async def render_job(
         colors=list(layout.colours),
         warnings=warnings,
         plates=result_plates(layout),
+        notes=list(output.notes),
     )
     return result, output.log_tail
 

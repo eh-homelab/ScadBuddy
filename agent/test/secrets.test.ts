@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createCipheriv, randomBytes } from 'node:crypto'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,7 +11,10 @@ import {
   openSecret,
   redact,
   rewrap,
+  SEAL_V1,
+  SEAL_VERSION,
   SealError,
+  sealedVersion,
   sealSecret,
   SecretKeyError,
 } from '../src/secrets.js'
@@ -91,6 +94,44 @@ describe('envelope encryption', () => {
     expect(() => openSecret(oldKek, rotated, AAD)).toThrow(SealError)
   })
 
+  it('writes version 2, which authenticates its version byte', () => {
+    const kek = newKek()
+    const envelope = sealSecret(kek, SECRET, AAD)
+    expect(sealedVersion(envelope.secretSealed)).toBe(SEAL_VERSION)
+    expect(sealedVersion(envelope.dekSealed)).toBe(SEAL_VERSION)
+    // Relabelled as v1, the v2 value fails: the version byte is inside the AAD.
+    const downgraded = Buffer.from(envelope.secretSealed)
+    downgraded[0] = SEAL_V1
+    expect(() => openSecret(kek, { ...envelope, secretSealed: downgraded }, AAD)).toThrow(SealError)
+    const unknown = Buffer.from(envelope.secretSealed)
+    unknown[0] = 0x03
+    expect(() => openSecret(kek, { ...envelope, secretSealed: unknown }, AAD)).toThrow(/unknown version/)
+  })
+
+  it('still opens a version 1 value (#354), whose AAD is the context alone', () => {
+    const kek = newKek()
+    const sealV1 = (key: Buffer, plaintext: Buffer, aad: string) => {
+      const iv = randomBytes(12)
+      const cipher = createCipheriv('aes-256-gcm', key, iv)
+      cipher.setAAD(Buffer.from(aad, 'utf8'))
+      const ct = Buffer.concat([cipher.update(plaintext), cipher.final()])
+      return Buffer.concat([Buffer.from([SEAL_V1]), iv, cipher.getAuthTag(), ct])
+    }
+    const dek = randomBytes(32)
+    const v1: Envelope = {
+      secretSealed: sealV1(dek, Buffer.from(SECRET), AAD),
+      dekSealed: sealV1(kek.key, dek, `dek:${AAD}`),
+      kekId: kek.id,
+    }
+    expect(openSecret(kek, v1, AAD)).toBe(SECRET)
+    // Rotation re-wraps the data key in v2 and leaves the v1 secret as it was.
+    const next = newKek()
+    const rotated = rewrap(kek, next, v1, AAD)
+    expect(sealedVersion(rotated.dekSealed)).toBe(SEAL_VERSION)
+    expect(rotated.secretSealed.equals(v1.secretSealed)).toBe(true)
+    expect(openSecret(next, rotated, AAD)).toBe(SECRET)
+  })
+
   it('error messages never contain the secret', () => {
     const kek = newKek()
     const envelope = sealSecret(kek, SECRET, AAD)
@@ -124,12 +165,21 @@ describe('the key file', () => {
 
     const missing = await loadKek(path.join(dir, 'missing.key'))
     expect(missing.ok).toBe(false)
-    expect(!missing.ok && missing.reason).toMatch(/cannot be read \(ENOENT\)/)
+    // The public reason names the variable only; the path and errno are for the log.
+    expect(!missing.ok && missing.reason).toBe('SCADBUDDY_SECRET_KEY_FILE cannot be read')
+    expect(!missing.ok && missing.detail).toMatch(/missing\.key cannot be read \(ENOENT\)/)
 
     const bad = path.join(dir, 'bad.key')
     await writeFile(bad, 'not a key')
     const badStatus = await loadKek(bad)
-    expect(!badStatus.ok && badStatus.reason).toMatch(/not base64/)
+    expect(!badStatus.ok && badStatus.reason).toBe(
+      'SCADBUDDY_SECRET_KEY_FILE does not hold a valid key (32 random bytes, base64)',
+    )
+    expect(!badStatus.ok && badStatus.detail).toMatch(/bad\.key: .*not base64/)
+    expect(await loadKek(undefined, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE')).toEqual({
+      ok: false,
+      reason: 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE is not set',
+    })
 
     const good = path.join(dir, 'good.key')
     await writeFile(good, randomBytes(32).toString('base64') + '\n')

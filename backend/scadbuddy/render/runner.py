@@ -26,6 +26,8 @@ from scadbuddy.render.schema import (
 )
 
 LOG_TAIL_LINES = 50
+#: A template echoing a note inside a loop must not grow a job without bound.
+MAX_NOTES = 20
 
 _ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
@@ -39,6 +41,14 @@ _MISSING_FILE = re.compile(
 
 #: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
 _PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+
+
+#: A message a template echoes for the person customizing it (#285): `NOTE:` by
+#: convention, `WARNING:` in the templates that predate it. A single string, so
+#: `echo("NOTE:", x)` -- and every debug echo -- stays in the log only. OpenSCAD
+#: prints the string raw, embedded quotes and backslashes unescaped (measured on
+#: 2026.09.23), so the text is everything between the first and the last quote.
+_TEMPLATE_NOTE = re.compile(r'^ECHO: "(?:NOTE|WARNING): (?P<text>.*)"$')
 
 
 class OpenSCADError(RuntimeError):
@@ -64,6 +74,9 @@ class ProcessOutput:
     #: Base names of the files the run could not open, in first-seen order. Read off
     #: the whole log, not the tail: the message comes early and a long log drops it.
     missing_files: tuple[str, ...] = ()
+    #: What the template echoed for the user (`template_note`), in first-seen order
+    #: and once each. Read off the whole log for the same reason as `missing_files`.
+    notes: tuple[str, ...] = ()
     #: The last `echo(plates = N)` the run logged, or ``None`` when it logged none.
     #: Also read off the whole log: an echo at the top of a long model is not in
     #: the tail.
@@ -74,6 +87,14 @@ def plate_count(line: str) -> int | None:
     """The plate count ``line`` states, if it is a template's `echo(plates = N)`."""
     match = _PLATES.match(line)
     return int(match["count"]) if match else None
+
+
+def template_note(line: str) -> str | None:
+    """The text of a `NOTE:`/`WARNING:` echo on ``line``, without prefix or quoting."""
+    match = _TEMPLATE_NOTE.match(line)
+    if match is None:
+        return None
+    return match["text"].strip() or None
 
 
 def missing_file(line: str) -> str | None:
@@ -142,7 +163,11 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
 
 
 async def _drain(
-    stream: asyncio.StreamReader, tail: deque[str], missing: list[str], plates: list[int]
+    stream: asyncio.StreamReader,
+    tail: deque[str],
+    missing: list[str],
+    notes: list[str],
+    plates: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -150,6 +175,9 @@ async def _drain(
         name = missing_file(line)
         if name is not None and name not in missing:
             missing.append(name)
+        note = template_note(line)
+        if note is not None and note not in notes and len(notes) < MAX_NOTES:
+            notes.append(note)
         count = plate_count(line)
         if count is not None:
             plates.append(count)
@@ -176,9 +204,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     missing: list[str] = []
+    notes: list[str] = []
     plates: list[int] = []
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, plates))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, plates))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -204,6 +233,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         log_tail=list(tail),
         duration_s=duration,
         missing_files=tuple(missing),
+        notes=tuple(notes),
         plates=plates[-1] if plates else None,
     )
 

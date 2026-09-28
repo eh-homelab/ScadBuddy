@@ -1390,6 +1390,8 @@ export const handlers = [
     job.plates = state.plates[job.slug] ?? []
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+    job.notes =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
     return HttpResponse.json(jobView(job))
   }),
 
