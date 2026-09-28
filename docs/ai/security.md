@@ -105,6 +105,10 @@ the UI approval". As built:
 - **Bounds.** A caller keeps at most 50 pending actions; a 51st cancels that caller's
   oldest. At 10,000 pending sessionless rows, a new prepare is refused and nobody's row
   is evicted. These are the in-memory store's bounds from #368, applied to the table.
+  `ApprovalService.createPrepared` checks and applies both bounds in the insert's own
+  transaction, under one `pg_advisory_xact_lock`, so concurrent prepares cannot
+  overshoot them (covered by a concurrent-burst test in
+  `agent/test/mcpConfirm.pg.test.ts`).
 - **Anonymous callers.** In `disabled` mode the principal id is
   `anonymous:<Mcp-Session-Id>`, and the session id is that client's capability
   (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits

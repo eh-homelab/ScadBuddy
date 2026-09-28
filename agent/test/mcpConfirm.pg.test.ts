@@ -7,6 +7,9 @@ import { ApprovalService } from '../src/approvals/service.js'
 import { type Principal, tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
 import { EventLog } from '../src/sessions/eventLog.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
+import { defineTool, json, runTool } from '../src/tools/registry.js'
+import { z } from 'zod'
 import { appFetch, BACKEND, connect, firstText, INGRESS, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
@@ -155,6 +158,73 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const principalC: Principal = { id: 'token:c', kind: 'bearer', tiers: tiersUpTo('outward') }
       await prepare(principalC)
       await expect(prepare({ ...principalC, id: 'token:d' })).rejects.toThrow('too many actions')
+    })
+
+    it('holds both bounds under concurrent prepares (one transaction under an advisory lock)', async () => {
+      const pendingOf = async (id?: string) => {
+        const [row] = await db.sql<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM ai_approvals
+          WHERE session_id IS NULL AND decision IS NULL AND (${id ?? null}::text IS NULL OR requested_by_id = ${id ?? null})`
+        return row!.n
+      }
+      // One caller bursting: never more than its 3 pending, the rest cancelled.
+      const burst = await Promise.allSettled(
+        Array.from({ length: 20 }, (_, i) => prepare(principalA, { output_id: `${i}`.padStart(32, '0') })),
+      )
+      expect(burst.every((r) => r.status === 'fulfilled')).toBe(true)
+      expect(await pendingOf('token:a')).toBe(3)
+
+      // Many callers bursting at the global bound (5): exactly 2 more fit.
+      const others = await Promise.allSettled(
+        Array.from({ length: 12 }, (_, i) => prepare({ ...principalB, id: `token:x${i}` })),
+      )
+      expect(others.filter((r) => r.status === 'fulfilled')).toHaveLength(2)
+      expect(others.filter((r) => r.status === 'rejected').every((r) => String(r.reason).includes('too many actions'))).toBe(true)
+      expect(await pendingOf()).toBe(5)
+    })
+
+    it('confirm parses with the tool\'s own schema: a top-level strict() or refine() is not dropped', async () => {
+      const ran: unknown[] = []
+      const guarded = defineTool({
+        name: 'guarded_send',
+        description: 'test: an outward tool with a strict, refined top-level input',
+        input: z
+          .object({ from: z.number(), to: z.number() })
+          .strict()
+          .refine((v) => v.from < v.to, { message: 'from must be below to' }),
+        risk: 'outward',
+        routes: [],
+        handler: async (args) => {
+          ran.push(args)
+          return json({ ok: true })
+        },
+      })
+      const confirmTool = ALL_TOOLS.find((t) => t.name === 'confirm_action')!
+      const byName = new Map([guarded, confirmTool].map((t) => [t.name, t]))
+      const ctx = {
+        ...services({ pending: actions }),
+        principal: principalA,
+        progress: async () => {},
+        signal: new AbortController().signal,
+        lookup: (name: string) => byName.get(name),
+      }
+      const prepared = firstText(await runTool(guarded, { from: 1, to: 2 }, ctx)) as { pending_action_id: string }
+      await approvals.decide(browser, prepared.pending_action_id, true)
+      const confirm = (args: Record<string, unknown>) =>
+        runTool(confirmTool, { pending_action_id: prepared.pending_action_id, arguments: args }, ctx)
+
+      // An extra key: z.object(tool.shape) would have stripped it and run the call.
+      const extra = await confirm({ from: 1, to: 2, sneaky: true })
+      expect(extra.isError).toBe(true)
+      expect(firstText(extra)).toContain('not valid for guarded_send')
+      // The refinement holds too.
+      const refined = await confirm({ from: 3, to: 2 })
+      expect(refined.isError).toBe(true)
+      expect(firstText(refined)).toContain('from must be below to')
+      expect(ran).toEqual([])
+      // The approved input still runs, once.
+      expect((await confirm({ from: 1, to: 2 })).isError).toBeFalsy()
+      expect(ran).toEqual([{ from: 1, to: 2 }])
     })
   },
 )

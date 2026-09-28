@@ -67,27 +67,21 @@ export class ApprovalActions implements OutwardActions {
   }
 
   async prepare(principal: Principal, call: PrepareCall): Promise<PreparedAction> {
-    const by = ownerOf(principal)
-    // The same bounds as the in-memory store: a full queue evicts the
-    // caller's own oldest; a full table refuses rather than evict anyone's.
-    const own = await this.#approvals.listPrepared(by)
-    if (own.length >= this.#perPrincipal) {
-      for (const stale of own.slice(0, own.length - this.#perPrincipal + 1)) {
-        await this.#approvals.cancel(stale.id, 'superseded: the caller prepared too many actions')
-      }
-    } else if ((await this.#approvals.countPrepared()) >= this.#total) {
-      throw new PendingStoreFullError(PENDING_STORE_FULL)
-    }
-    const approval = await this.#approvals.create({
-      sessionId: null,
-      turnId: null,
-      // No SDK tool_use block exists for an MCP call; the column wants an id.
-      toolUseId: `mcp:${randomUUID()}`,
-      tool: call.tool,
-      input: call.input,
-      tier: 'outward',
-      requestedBy: by,
-    })
+    // The same bounds as the in-memory store, checked and applied in the
+    // insert's own transaction (ApprovalService.createPrepared): a full queue
+    // cancels the caller's own oldest; a full table refuses rather than evict anyone's.
+    const approval = await this.#approvals.createPrepared(
+      {
+        // No SDK tool_use block exists for an MCP call; the column wants an id.
+        toolUseId: `mcp:${randomUUID()}`,
+        tool: call.tool,
+        input: call.input,
+        tier: 'outward',
+        requestedBy: ownerOf(principal),
+      },
+      { perPrincipal: this.#perPrincipal, total: this.#total, evictReason: 'superseded: the caller prepared too many actions' },
+    )
+    if (!approval) throw new PendingStoreFullError(PENDING_STORE_FULL)
     return asAction(approval, call.summary)
   }
 

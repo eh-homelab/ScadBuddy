@@ -1,5 +1,5 @@
 import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import type { Kek } from '../secrets.js'
@@ -116,6 +116,8 @@ export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
 export const DEFAULT_APPROVAL_POLL_MS = 1000
 /** The longest `approval.required` summary. */
 export const APPROVAL_SUMMARY_MAX = 500
+/** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
+const PREPARE_LOCK = 'scadbuddy:ai_approvals:mcp_prepare'
 
 export const DECISIONS = ['approved', 'denied', 'expired', 'cancelled'] as const
 export type Decision = (typeof DECISIONS)[number]
@@ -492,20 +494,17 @@ export class ApprovalService {
     await this.deps.events.append(sessionId, events.map((e) => scrubForLog(e, secrets)))
   }
 
-  /** Records a pending approval (and, in a session, emits `approval.required`). */
-  async create(request: CreateApproval): Promise<ApprovalRecord> {
-    const secrets = request.secrets ?? []
-    const id = randomUUID()
-    const summary = summariseInput(request.tool, request.input, secrets)
+  /** The INSERT of a pending approval, on `db` (the pool, or a transaction). */
+  private async insert(db: Sql | TransactionSql, request: CreateApproval, summary: string): Promise<Row | undefined> {
     const ttl = await this.expirySeconds()
     const { requestedBy: by } = request
-    const [row] = await this.deps.sql.unsafe<Row[]>(
+    const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
                                  requested_by_kind, requested_by_id, requested_by_label, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + ($12 * interval '1 second'))
        RETURNING ${COLUMNS}`,
       [
-        id,
+        randomUUID(),
         request.sessionId,
         request.turnId,
         request.toolUseId,
@@ -519,8 +518,17 @@ export class ApprovalService {
         ttl,
       ],
     )
-    if (!row) throw new Error(`approval ${id} vanished after insert`)
+    return row
+  }
+
+  /** Records a pending approval (and, in a session, emits `approval.required`). */
+  async create(request: CreateApproval): Promise<ApprovalRecord> {
+    const secrets = request.secrets ?? []
+    const summary = summariseInput(request.tool, request.input, secrets)
+    const row = await this.insert(this.deps.sql, request, summary)
+    if (!row) throw new Error('approval vanished after insert')
     const approval = record(row)
+    const id = approval.id
     if (approval.sessionId !== null) {
       const tail: ServerEvent[] = [
         event({
@@ -811,19 +819,44 @@ export class ApprovalService {
     return rows.map(record)
   }
 
-  /** How many sessionless approvals, from anyone, are waiting for a decision. */
-  async countPrepared(): Promise<number> {
-    const [row] = await this.deps.sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM ai_approvals
-      WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
-    return row?.n ?? 0
-  }
-
-  /** Cancels one pending approval; false when it was already decided. */
-  async cancel(id: string, reason: string): Promise<boolean> {
-    const settled = await this.settle(id, 'cancelled', undefined, reason)
-    if (settled?.sessionId) await this.refreshStatus(settled.sessionId)
-    return settled !== undefined
+  /**
+   * Records a sessionless pending approval (an MCP prepare) within bounds, in
+   * one transaction under one advisory lock, so concurrent prepares cannot
+   * overshoot them: the requester's oldest pending ones are cancelled to keep
+   * it under `perPrincipal`; at `total` pending sessionless rows from anyone,
+   * nothing is inserted and `undefined` is returned (nobody's row is evicted).
+   */
+  async createPrepared(
+    request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
+    bounds: { perPrincipal: number; total: number; evictReason: string },
+  ): Promise<ApprovalRecord | undefined> {
+    const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
+    const by = request.requestedBy
+    const row = await this.deps.sql.begin(async (tx) => {
+      // One key for every MCP prepare: the per-principal and the global
+      // bound are both read and written under it. Held until commit.
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
+      const own = await tx<{ id: string }[]>`
+        SELECT id FROM ai_approvals
+        WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
+          AND decision IS NULL AND expires_at > now()
+        ORDER BY created_at, id`
+      const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
+      if (evict.length > 0) {
+        await tx`
+          UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = ${bounds.evictReason}
+          WHERE id = ANY(${evict}::uuid[]) AND decision IS NULL`
+      } else {
+        const [n] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM ai_approvals
+          WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+        if ((n?.n ?? 0) >= bounds.total) return undefined
+      }
+      const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
+      if (!inserted) throw new Error('approval vanished after insert')
+      return inserted
+    })
+    return row ? record(row) : undefined
   }
 
   /** Expires this one approval if it is pending and past its time. */
