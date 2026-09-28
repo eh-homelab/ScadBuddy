@@ -30,9 +30,15 @@ export function EditSourcePage() {
   const builtin = model.data?.origin === 'builtin'
   // The preview is worked out afresh, so the source and the revision it merges agree.
   const merge =
-    // #235: an update or a dismissed one, which still merges.
+    // #235: an update or a dismissed one, which still merges. The backend sets
+    // `preview` exactly when the state is 'update' or 'dismissed' (see
+    // Catalogue.upstream_status), so checking `preview` stands in for the state.
     upstream.data?.preview && upstream.data.revision
-      ? { merged: upstream.data.preview.merged, base: upstream.data.revision, id: upstream.data.upstream.id }
+      ? {
+          merged: upstream.data.preview.merged,
+          base: upstream.data.revision,
+          id: upstream.data.upstream.id,
+        }
       : null
   const [source, setSource] = useState<string | null>(null)
   const navigate = useNavigate()
