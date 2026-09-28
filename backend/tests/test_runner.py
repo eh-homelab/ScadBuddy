@@ -11,6 +11,7 @@ from scadbuddy.core.fontconfig import conf_path, write_conf
 from scadbuddy.render.diagnostics import MAX_DIAGNOSTICS
 from scadbuddy.render.runner import (
     OpenSCADError,
+    ParameterValueError,
     RenderTimeoutError,
     UnknownParameterError,
     build_defines,
@@ -54,7 +55,7 @@ def test_format_scad_value_select_follows_option_type() -> None:
     words = Parameter(name="a", type="select", options=[Option(name="x", value="x")])
     numbers = Parameter(name="b", type="select", options=[Option(name="1", value=1.0)])
     assert format_scad_value(words, "x") == '"x"'
-    assert format_scad_value(numbers, 4) == "4.0"
+    assert format_scad_value(numbers, 1) == "1.0"
 
 
 @pytest.mark.parametrize(
@@ -466,6 +467,59 @@ async def test_a_real_render_reports_the_notes_it_echoed(tmp_path: Path) -> None
         ["-o", str(tmp_path / "out.stl"), scad.name], cwd=tmp_path, config=load_config()
     )
     assert output.notes == ('overlay_file "x.svg" ignored', "plaque too thin")
+
+
+# -- the customizer's range and options (#432) -------------------------------------
+
+
+def _slider(**changes: object) -> Parameter:
+    return Parameter(name="n", type="slider", min=1, max=64, step=1).model_copy(update=changes)
+
+
+@pytest.mark.parametrize("value", [1, 64, 32.5])
+def test_a_value_inside_the_range_is_taken(value: float) -> None:
+    format_scad_value(_slider(), value)
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value", "message"),
+    [
+        (_slider(), 65, "'n' must be between 1 and 64, got 65"),
+        (_slider(), 0, "'n' must be between 1 and 64, got 0"),
+        (_slider(type="integer"), 1000, "'n' must be between 1 and 64, got 1000"),
+        (_slider(max=None), -1, "'n' must be at least 1, got -1"),
+        (_slider(min=None), 100, "'n' must be at most 64, got 100"),
+    ],
+)
+def test_a_value_outside_the_range_is_refused_by_name(
+    parameter: Parameter, value: float, message: str
+) -> None:
+    with pytest.raises(ParameterValueError, match=message) as refused:
+        format_scad_value(parameter, value)
+    assert refused.value.parameter == "n"
+
+
+def test_the_step_is_not_enforced() -> None:
+    # plant-label ships `thickness = 2.5; // [1.6:0.2:5]`, off its own grid.
+    assert format_scad_value(_slider(min=1.6, max=5, step=0.2), 2.5) == "2.5"
+
+
+def test_a_select_value_has_to_be_an_option_or_retired() -> None:
+    words = Parameter(
+        name="kind",
+        type="select",
+        options=[Option(name="Auto", value="auto"), Option(name="PNG", value="png_threshold")],
+        retired=["image_threshold"],
+    )
+    assert format_scad_value(words, "image_threshold") == '"image_threshold"'
+    with pytest.raises(ParameterValueError, match='must be one of "auto", "png_threshold"'):
+        format_scad_value(words, "stl")
+    numbers = Parameter(
+        name="count", type="select", options=[Option(name="1", value=1), Option(name="2", value=2)]
+    )
+    assert format_scad_value(numbers, 2.0) == "2.0"
+    with pytest.raises(ParameterValueError, match="'count' must be one of 1, 2, got 999"):
+        format_scad_value(numbers, 999)
 
 
 # ── #289: a template states its plate count with `echo(plates = N)` ───────────
