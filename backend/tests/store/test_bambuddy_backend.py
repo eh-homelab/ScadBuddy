@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from psycopg import Connection
@@ -24,6 +26,7 @@ from scadbuddy.store.bambuddy import (
     BambuddyTarget,
     RefusedDeleteError,
     RenderSettingsSource,
+    folder_lock_key,
     folder_name,
 )
 from scadbuddy.store.content import BlobMissingError, BlobScope
@@ -268,15 +271,62 @@ async def test_first_uploads_to_more_templates_than_connections_do_not_starve_th
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     created = respx.post(f"{API}/library/folders/").mock(side_effect=create)
     respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    # Fewer default-executor threads than finders, as on a small pod: a finder that
+    # waits for its lock in a thread would take them all. (The loop is this test's own.)
+    executor = ThreadPoolExecutor(4)
+    asyncio.get_running_loop().set_default_executor(executor)
     workers = [BambuddyContentBackend(target(), small_pool) for _ in range(3)]
     scopes = [BlobScope(slug=f"kit-{n}", title=f"Kit {n}") for n in range(3)]
     uploads = [
         w.upload("piece", b"z", name="p.zip", scope=scope) for w in workers for scope in scopes
     ]
-    await asyncio.wait_for(asyncio.gather(*uploads), 10)
+    try:
+        await asyncio.wait_for(asyncio.gather(*uploads), 10)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     assert created.call_count == 6  # a template folder and a Work per template
     for w in workers:
         await w.aclose()
+
+
+def _advisory_locks(conninfo: str, key: int) -> int:
+    """Held or awaited locks on `key` in the whole cluster: a bigint key is split into
+    `classid` (high half) and `objid` (low half)."""
+    unsigned = key & 0xFFFFFFFFFFFFFFFF
+    with psycopg.connect(conninfo) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
+            " AND classid = %s AND objid = %s AND objsubid = 1",
+            (unsigned >> 32, unsigned & 0xFFFFFFFF),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@respx.mock
+async def test_a_find_cancelled_while_waiting_for_the_lock_leaves_none_held(
+    pool: Pool, pg_conninfo: str
+) -> None:
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded())
+    key = folder_lock_key(INBOX, SCOPE.slug or "", "template")
+    with psycopg.connect(pg_conninfo, autocommit=True) as holder:
+        holder.execute("SELECT pg_advisory_lock(%s)", (key,))
+        assert _advisory_locks(pg_conninfo, key) == 1  # the key maps onto pg_locks as assumed
+        first = BambuddyContentBackend(target(), pool)
+        waiting = asyncio.create_task(first.upload("piece", b"a", name="a.zip", scope=SCOPE))
+        await asyncio.sleep(0.5)  # blocked on the lock the holder has
+        assert not waiting.done()
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        holder.execute("SELECT pg_advisory_unlock(%s)", (key,))
+    second = BambuddyContentBackend(target(), pool)
+    await asyncio.wait_for(second.upload("piece", b"b", name="b.zip", scope=SCOPE), 5)
+    assert _advisory_locks(pg_conninfo, key) == 0
+    for backend in (first, second):
+        await backend.aclose()
 
 
 @respx.mock
