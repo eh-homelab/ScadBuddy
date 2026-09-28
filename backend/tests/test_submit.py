@@ -265,11 +265,13 @@ class FakePreview:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.revisions: list[str | None] = []
         self.release = asyncio.Event()
 
     @activity.defn(name="render_preview_png")
-    async def render_preview_png(self, slug: str) -> bytes:
+    async def render_preview_png(self, slug: str, revision: str | None = None) -> bytes:
         self.calls += 1
+        self.revisions.append(revision)
         await self.release.wait()
         return PNG + slug.encode()
 
@@ -308,6 +310,43 @@ async def test_a_preview_renders_on_the_worker_and_one_slug_runs_once(
 
     assert list(pngs) == [PNG + SLUG.encode()] * 2
     assert fake.calls == 1
+
+
+class _Pinning:
+    """`SnapshotStore.pin` as the API's: the slug's last commit, stored."""
+
+    def __init__(self) -> None:
+        self.pinned: list[tuple[str, str | None]] = []
+
+    async def pin(self, slug: str, revision: str | None) -> str | None:
+        self.pinned.append((slug, revision))
+        return "b" * 40
+
+
+async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_worker(
+    make_service: ServiceFactory,
+) -> None:
+    """Final review C1: the worker renders the snapshot of the revision the API pinned,
+    not a live source it does not have."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        pinning = _Pinning()
+        service.snapshots = pinning  # type: ignore[assignment]
+        fake = FakePreview()
+        fake.release.set()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            png = await service.render_preview(SLUG, 30.0)
+        await service.aclose()
+
+    assert png == PNG + SLUG.encode()
+    assert pinning.pinned == [(SLUG, None)]
+    assert fake.revisions == ["b" * 40]
 
 
 async def test_a_preview_past_its_timeout_is_cancelled_on_the_worker(

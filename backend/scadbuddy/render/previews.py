@@ -31,7 +31,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import CheckoutGate
+from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
@@ -94,6 +94,8 @@ async def render_preview(
     assets: AssetStore,
     executor: Executor | None = None,
     checkouts: CheckoutGate | None = None,
+    revision: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> bytes:
     """The plate image of ``slug`` rendered at its default parameters.
 
@@ -102,8 +104,11 @@ async def render_preview(
     ``cache/preview-work/``, and gone when this returns. As `render_job`, it holds a
     lease on the library checkouts it resolved for every openscad run (#253), and
     stages a `// file` parameter's default from the shared upload store (#204).
+    ``revision`` renders that revision's export instead of the live source: a worker
+    without the volume renders the snapshot it materialized (phase 3). With a
+    ``fetcher``, a pinned library checkout missing here is cloned back, as for a piece.
     """
-    source = await resolve_source(slug, None, paths=paths, history=history)
+    source = await resolve_source(slug, revision, paths=paths, history=history, fetcher=fetcher)
     config = source.configure(config)
     work = new_work_dir(paths)
     async with library_lease(checkouts, f"preview:{slug}", source.library_path):

@@ -38,7 +38,7 @@ from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.render_cache import cached_render, prune_render_cache
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -248,10 +248,17 @@ class RenderService:
         preview that timed out stops rendering; the activity's own bound, the margin
         later, is the backstop should that cancel never arrive."""
         assert self.client is not None
+        revision: str | None = None
+        wait = timeout
+        if self.snapshots is not None:
+            # The bambuddy store: the worker has no volume, so it renders the snapshot
+            # of the last commit (as `submit`), and may first bring it and its fonts in.
+            revision = await self.snapshots.pin(slug, None)
+            wait += PREVIEW_TRANSFER.total_seconds()
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
-            slug,
+            args=[slug, revision],
             id=f"preview-{slug}",
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
@@ -259,7 +266,7 @@ class RenderService:
             rpc_timeout=RPC_TIMEOUT,
         )
         try:
-            png: bytes = await asyncio.wait_for(handle.result(), timeout)
+            png: bytes = await asyncio.wait_for(handle.result(), wait)
         except TimeoutError:
             with suppress(RPCError):
                 await handle.cancel()
