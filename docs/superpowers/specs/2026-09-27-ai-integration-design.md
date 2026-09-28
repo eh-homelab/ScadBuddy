@@ -223,7 +223,13 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   - `network.allowedOrigins` blocks navigations, subresources and page `fetch` to other
     origins (`net::ERR_BLOCKED_BY_CLIENT`; the other origin receives nothing). A
     **redirect** off the origin is followed: the tool usually returns an error, but the
-    other origin has received the request.
+    other origin has received the request. Chromium follows a 3xx handed to it by a route
+    handler, and every further hop, without calling the handler again; and after an
+    aborted navigation every later fulfilled one fails. So the harness adds a redirect
+    guard (`browser.initPage`) that makes each request with `maxRedirects: 0`, refuses
+    off-origin hops (navigations with a 403 page), and turns a same-origin 3xx on a GET
+    navigation into a new navigation; with it an off-origin redirect and an on→off chain
+    reach nothing.
   - `browser.contextOptions.extraHTTPHeaders` from the config file reaches every request
     of the isolated context, and a page `fetch` that sets the same header gets the
     context's value, not its own.
@@ -236,7 +242,10 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
     credential); `/usr/bin/env -i` in the server's `command` leaves only what is listed.
   - With `browserName: "chromium"` and no `channel`, the server launches Playwright's
     `chromium-headless-shell` and sets `chromiumSandbox: false` on Linux
-    (`--no-sandbox`). It runs as uid 10001 with a read-only root, `/tmp` and the state
+    (`--no-sandbox`) unless asked. With `chromiumSandbox: true` it starts under
+    `--security-opt seccomp=unconfined` and fails under Docker's default seccomp profile
+    ("Chromium sandboxing failed!", user namespaces); the agent probes and asks for it
+    where it works. It runs as uid 10001 with a read-only root, `/tmp` and the state
     directory on tmpfs, and no network, and reports WebGL available. Its profile goes
     under `TMPDIR`, whose path must stay short (the `SingletonSocket` Unix-socket
     limit): under the session directory the launch fails. Installed with
@@ -448,8 +457,8 @@ headless browser never sees it.
   depend on it. `--allow-unrestricted-file-access` is never passed; `outputDir` is the
   session's scratch directory; `--caps` is left empty and `--no-webmcp` is set. The
   harness also refuses, before the server sees the call, any tool `url` off the origin
-  and any `filename` with a directory part. Redirects off the origin are followed
-  (§3.1), so the backend's origin must not serve open redirects.
+  and any `filename` with a directory part. Redirects off the origin would be followed
+  (§3.1), so a redirect guard on every page refuses them, and the backend serves none.
 - **Tools the model can't see.** `browser_run_code_unsafe` is RCE-equivalent in the
   agent container (§3.1), which D7 rules out, and `browser_evaluate`,
   `browser_file_upload` and `browser_drop` reach page JavaScript or the filesystem. All

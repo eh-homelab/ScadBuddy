@@ -246,8 +246,11 @@ origins or files", as built. Details and measurements are in
 - **Origins**: the harness denies any `url` not on the backend's origin before the
   server sees it (`browserInputProblem()`, using `normaliseOrigin()` from
   `origins.ts`), and the server's `network.allowedOrigins` blocks navigations,
-  subresources and page `fetch` to other origins. **Redirects are not blocked**
-  (measured): a same-origin URL that redirects elsewhere reaches the other origin.
+  subresources and page `fetch` to other origins. That list does not cover redirects
+  (measured), so a **redirect guard** loaded on every page routes each request itself
+  with `maxRedirects: 0` and refuses any hop off the origin, including one added by a
+  proxy in front of the backend (measured: an off-origin redirect and an on→off chain
+  reach nothing).
 - **Files**: `filename` arguments must be plain names; the server's own
   workspace-root restriction refuses `../` and outside absolute paths too. No
   `--allow-unrestricted-file-access`, no downloads (`acceptDownloads: false`).
@@ -266,16 +269,24 @@ origins or files", as built. Details and measurements are in
   refused (a request without it is as trusted as today), and a forged marker cannot use
   a grant without knowing the session id, the grant's exact path, and landing inside its
   turn and two-minute window, for a request a human already approved.
-- **No open redirects**: the server's allow-list does not cover redirects, so the
-  backend's origin must not redirect off itself. `backend/tests/api/test_no_open_redirect.py`
-  checks the backend; anything placed in front of `SCADBUDDY_BACKEND_URL` is a
-  deployment requirement ([headless-browser.md](headless-browser.md#deployment-requirement-no-open-redirects)).
+- **The grant check cannot be flooded** (review of #518): the marker is free for anyone
+  to send, so the lookup it triggers is bounded. It runs on its own async pool of 2
+  Postgres connections (`PostgresGrants`), at most 4 checks at once, and one more is
+  refused at once without touching the database; a pooled connection that is not free
+  within 2 s refuses too. Markers that are not UUIDs, and paths outside `/api/v1/`,
+  are refused before any of that. Measured: 200 concurrent bogus markers opened at most
+  2 connections, and a real grant still worked right after
+  (`backend/tests/api/test_agent_actor_grants.py`).
+- **No open redirects from the backend** either, as defence in depth:
+  `backend/tests/api/test_no_open_redirect.py`
+  ([headless-browser.md](headless-browser.md#redirects-guarded-in-the-browser-and-none-from-the-backend)).
 - **Isolation**: `--isolated`, no profile on disk, one server per query, so no state
   crosses sessions (or turns).
-- **Chromium runs without its sandbox** (`--no-sandbox`, Playwright's default for
-  Chromium; the server does not change it). It only ever loads ScadBuddy's own origin,
-  but a renderer exploit there would land in the agent container. Enabling the sandbox
-  needs user namespaces in the pod; not measured.
+- **Chromium's sandbox is on where the pod allows it**: the agent probes it once and
+  asks for it (`chromiumSandbox: true`) when it starts; otherwise it warns and runs with
+  `--no-sandbox`, where a renderer exploit would land in the agent container. It needs
+  a seccomp profile that allows user namespaces, not `RuntimeDefault`
+  ([headless-browser.md](headless-browser.md#sandbox)).
 
 ## Event-log scrubbing (#377)
 
@@ -327,9 +338,8 @@ From the merged code and PR bodies:
    `main.ts` today, and the headless browser is not wired in either.
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **The headless browser follows redirects off its origin** (see above): the
-   backend is tested to serve none, and a proxy in front of `SCADBUDDY_BACKEND_URL`
-   must not add one.
+9. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
+   without its sandbox** (see above).
 
 ## Spec §3.2 items still open
 

@@ -51,8 +51,9 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 
-import anyio
 import psycopg
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -131,31 +132,90 @@ RETURNING id
 #: Asks whether a grant lets (session, method, path) through, using it if so.
 GrantCheck = Callable[[str, str, str], Awaitable[bool]]
 
-CONNECT_TIMEOUT = 5
+#: Postgres connections the grant check may hold at once (its own small pool).
+GRANT_POOL_MAX = 2
+#: Grant checks in flight at once; one more is refused without touching the database.
+GRANT_CONCURRENCY = 4
+#: Seconds to connect, and to wait for a pooled connection, before refusing.
+GRANT_TIMEOUT = 2.0
 
 
-def postgres_grants(conninfo: str) -> GrantCheck:
-    """A :data:`GrantCheck` on the shared database: one short connection per check.
+class PostgresGrants:
+    """A :data:`GrantCheck` on the shared database, bounded so it cannot be flooded.
 
-    Marked outward requests are rare (one per human approval), so no pool is kept.
-    Any database error refuses the request.
+    The marker header is not authentication: anyone can send a random UUID in it on a
+    non-safe request, and each such request reaches this check. So (review of #518):
+
+    - it runs on its own small async pool (:data:`GRANT_POOL_MAX` connections, opened on
+      first use, no worker threads), never one connection per request;
+    - at most :data:`GRANT_CONCURRENCY` checks run at once; while that many are in
+      flight, another is refused (the request gets the gate's 403) without waiting and
+      without touching the database;
+    - a pooled connection that is not free within :data:`GRANT_TIMEOUT` refuses too.
+
+    Any database error refuses. The render queue's pool is not shared: a flood of bogus
+    markers can at worst use these few connections, never the queue's.
     """
 
-    def use(session: str, method: str, path: str) -> bool:
-        with psycopg.connect(conninfo, autocommit=True, connect_timeout=CONNECT_TIMEOUT) as conn:
-            row = conn.execute(
-                GRANT_SQL.encode(), {"session": session, "method": method, "path": path}
-            ).fetchone()
-            return row is not None
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        max_size: int = GRANT_POOL_MAX,
+        concurrency: int = GRANT_CONCURRENCY,
+        timeout: float = GRANT_TIMEOUT,
+    ) -> None:
+        self.pool: AsyncConnectionPool[AsyncConnection[tuple[object, ...]]] = AsyncConnectionPool(
+            conninfo,
+            min_size=0,
+            max_size=max_size,
+            open=False,
+            timeout=timeout,
+            kwargs={
+                "autocommit": True,
+                "connect_timeout": max(1, int(timeout)),
+                "application_name": "scadbuddy-agent-grants",
+            },
+            name="scadbuddy-agent-grants",
+        )
+        self.concurrency = concurrency
+        self.in_flight = 0
+        self.refused_busy = 0
+        self._opened = False
 
-    async def check(session: str, method: str, path: str) -> bool:
+    async def _open(self) -> None:
+        if not self._opened:
+            self._opened = True
+            await self.pool.open(wait=False)
+
+    async def __call__(self, session: str, method: str, path: str) -> bool:
+        # Checked and taken with no await in between: the event loop runs one
+        # coroutine at a time, so this is the semaphore, and it never queues.
+        if self.in_flight >= self.concurrency:
+            self.refused_busy += 1
+            return False
+        self.in_flight += 1
         try:
-            return await anyio.to_thread.run_sync(use, session, method, path)
-        except psycopg.Error as err:
+            await self._open()
+            async with self.pool.connection() as conn:
+                cursor = await conn.execute(
+                    GRANT_SQL.encode(), {"session": session, "method": method, "path": path}
+                )
+                return await cursor.fetchone() is not None
+        except (psycopg.Error, PoolTimeout) as err:
             logger.warning("grant check failed; refusing", extra={"error": str(err)})
             return False
+        finally:
+            self.in_flight -= 1
 
-    return check
+    async def aclose(self) -> None:
+        if self._opened:
+            await self.pool.close()
+
+
+def postgres_grants(conninfo: str) -> PostgresGrants:
+    """The grant check the app uses; see :class:`PostgresGrants`."""
+    return PostgresGrants(conninfo)
 
 
 def _session_id(value: str) -> str | None:
@@ -187,8 +247,10 @@ class AgentActorGate:
         return any(m == method and p.fullmatch(path) for m, p in self.allowed)
 
     async def granted(self, marker: str, method: str, path: str) -> bool:
+        # Cheap rejects first, no database work: a marker that is not a session id, and
+        # a path no grant can name (the agent's migration only allows /api/v1/...).
         session = _session_id(marker)
-        if session is None or self.grants is None:
+        if session is None or self.grants is None or not path.startswith("/api/v1/"):
             return False
         return await self.grants(session, method, path)
 

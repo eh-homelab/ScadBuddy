@@ -192,7 +192,13 @@ export type SessionManagerDeps = {
    * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
    * is the one origin the browser may open.
    */
-  headlessBrowser?: { backendUrl: string; /** Tests only: a Chromium other than the pinned one. */ executablePath?: string }
+  headlessBrowser?: {
+    backendUrl: string
+    /** Tests only: a Chromium other than the pinned one. */
+    executablePath?: string
+    /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
+    sandbox?: () => Promise<boolean>
+  }
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -653,9 +659,14 @@ export class SessionManager {
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const sandbox =
+        this.deps.headlessBrowser?.sandbox && browserSetting === true
+          ? await this.deps.headlessBrowser.sandbox()
+          : false
       const browser =
         this.deps.headlessBrowser && browserSetting === true
           ? {
+              ...(sandbox ? { sandbox: true } : {}),
               sessionId: id,
               backendUrl: this.deps.headlessBrowser.backendUrl,
               dir: sessionBrowserDir(this.deps.paths, id),

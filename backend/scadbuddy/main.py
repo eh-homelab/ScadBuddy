@@ -337,6 +337,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
+        grants = getattr(app.state, "agent_grants", None)
+        if grants is not None:
+            await grants.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
 
@@ -357,10 +360,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
     # refused on the method, path and marker header alone, before any body is read.
-    app.add_middleware(
-        AgentActorGate,
-        grants=postgres_grants(app_settings.database_url) if app_settings.database_url else None,
-    )
+    grants = postgres_grants(app_settings.database_url) if app_settings.database_url else None
+    # Closed by the lifespan, after everything else has stopped.
+    app.state.agent_grants = grants
+    app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(

@@ -9,6 +9,7 @@ import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { probeChromiumSandbox } from './harness/headlessSandbox.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
@@ -98,6 +99,22 @@ const paths = { stateDir: DEFAULT_STATE_DIR }
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
 // expiry sweep are live so that approvals left pending by a restart can be
 // seen, decided or expired.
+// Whether the headless browser's Chromium can keep its sandbox in this pod
+// (harness/headlessSandbox.ts): probed once, on the first turn that uses the
+// browser, and said loudly either way.
+let sandboxProbe: Promise<boolean> | undefined
+const chromiumSandbox = (): Promise<boolean> =>
+  (sandboxProbe ??= probeChromiumSandbox().then((probe) => {
+    if (probe.available) console.log(`headless browser: Chromium runs with its sandbox (${probe.detail})`)
+    else {
+      console.warn(
+        `headless browser: Chromium's sandbox is unavailable here, so it runs with --no-sandbox (${probe.detail}); ` +
+          'allow user namespaces in the pod to enable it (docs/ai/headless-browser.md, "Sandbox")',
+      )
+    }
+    return probe.available
+  }))
+
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -117,7 +134,7 @@ const sessions =
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
         // It may open only this origin, which serves the SPA.
-        headlessBrowser: { backendUrl: config.backendUrl },
+        headlessBrowser: { backendUrl: config.backendUrl, sandbox: chromiumSandbox },
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)

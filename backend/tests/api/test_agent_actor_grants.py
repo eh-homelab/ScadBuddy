@@ -4,11 +4,12 @@ outward action for that session authorises that request; the backend consumes it
 The agent writes a grant only after a human approved that exact method and path
 (``agent/src/harness/headlessGrants.ts``); the agent's own test runs :data:`GRANT_SQL`
 against its real schema (``agent/test/headlessGrants.pg.test.ts``). Here: the gate's use
-of a grant check, and :func:`postgres_grants` against a cut-down copy of that schema.
+of a grant check, and :class:`PostgresGrants` against a cut-down copy of that schema.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import psycopg
@@ -21,9 +22,11 @@ from starlette.routing import Route
 
 from scadbuddy.api.agent_actor import (
     AGENT_ACTOR_HEADER,
+    GRANT_CONCURRENCY,
+    GRANT_POOL_MAX,
     AgentActorGate,
     GrantCheck,
-    postgres_grants,
+    PostgresGrants,
 )
 
 SESSION = "0b0e5bd7-1f38-4c1e-9a55-3c1b1f2a9d10"
@@ -140,15 +143,28 @@ def _seed(
         )
 
 
+async def _check(
+    conninfo: str, session: str = SESSION, method: str = "POST", path: str = RUN
+) -> bool:
+    grants = PostgresGrants(conninfo)
+    try:
+        return await grants(session, method, path)
+    finally:
+        await grants.aclose()
+
+
 @pytest.mark.requires_postgres
 async def test_a_postgres_grant_is_used_once_for_its_exact_request(pg_conninfo: str) -> None:
     _seed(pg_conninfo)
-    grants = postgres_grants(pg_conninfo)
-    assert not await grants(SESSION, "POST", RUN + "/x")
-    assert not await grants(SESSION, "PUT", RUN)
-    assert not await grants(str(uuid.uuid4()), "POST", RUN)
-    assert await grants(SESSION, "POST", RUN)
-    assert not await grants(SESSION, "POST", RUN), "a grant is used at most once"
+    grants = PostgresGrants(pg_conninfo)
+    try:
+        assert not await grants(SESSION, "POST", RUN + "/x")
+        assert not await grants(SESSION, "PUT", RUN)
+        assert not await grants(str(uuid.uuid4()), "POST", RUN)
+        assert await grants(SESSION, "POST", RUN)
+        assert not await grants(SESSION, "POST", RUN), "a grant is used at most once"
+    finally:
+        await grants.aclose()
 
 
 @pytest.mark.requires_postgres
@@ -164,7 +180,7 @@ async def test_a_postgres_grant_needs_a_live_turn_time_and_an_approval(
     pg_conninfo: str, lease: str, expires: str, decision: str
 ) -> None:
     _seed(pg_conninfo, lease=lease, expires=expires, decision=decision)
-    assert not await postgres_grants(pg_conninfo)(SESSION, "POST", RUN)
+    assert not await _check(pg_conninfo)
 
 
 @pytest.mark.requires_postgres
@@ -172,14 +188,65 @@ async def test_a_postgres_grant_from_another_turn_is_refused(pg_conninfo: str) -
     _seed(pg_conninfo)
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute("UPDATE ai_sessions SET turn_id = %s", (str(uuid.uuid4()),))
-    assert not await postgres_grants(pg_conninfo)(SESSION, "POST", RUN)
+    assert not await _check(pg_conninfo)
 
 
 @pytest.mark.requires_postgres
 async def test_a_database_without_the_agent_tables_refuses(pg_conninfo: str) -> None:
-    assert not await postgres_grants(pg_conninfo)(SESSION, "POST", RUN)
+    assert not await _check(pg_conninfo)
 
 
 async def test_an_unreachable_database_refuses() -> None:
-    grants = postgres_grants("postgresql://nobody@127.0.0.1:1/none?connect_timeout=1")
-    assert not await grants(SESSION, "POST", RUN)
+    grants = PostgresGrants("postgresql://nobody@127.0.0.1:1/none", timeout=1.0)
+    try:
+        assert not await grants(SESSION, "POST", RUN)
+    finally:
+        await grants.aclose()
+
+
+# -- a flood of bogus markers (review of #518: one connection per request was a DoS) --
+
+
+@pytest.mark.requires_postgres
+async def test_a_flood_of_bogus_markers_opens_at_most_the_pool_and_a_real_grant_still_works(
+    pg_conninfo: str,
+) -> None:
+    _seed(pg_conninfo)
+    grants = PostgresGrants(pg_conninfo)
+    try:
+        flood = [grants(str(uuid.uuid4()), "DELETE", f"/api/v1/x/{i}") for i in range(200)]
+        assert not any(await asyncio.gather(*flood))
+        stats = grants.pool.get_stats()
+        # Never more connections than the pool holds, however many requests came.
+        assert stats.get("connections_num", 0) <= GRANT_POOL_MAX
+        # Past the concurrency cap, requests were refused without touching the database.
+        assert grants.refused_busy >= 200 - GRANT_CONCURRENCY
+        assert await grants(SESSION, "POST", RUN)
+    finally:
+        await grants.aclose()
+
+
+@pytest.mark.requires_postgres
+async def test_checks_past_the_cap_are_refused_at_once_not_queued(pg_conninfo: str) -> None:
+    grants = PostgresGrants(pg_conninfo, concurrency=1)
+    try:
+        results = await asyncio.gather(*(grants(str(uuid.uuid4()), "POST", RUN) for _ in range(10)))
+        assert results == [False] * 10
+        assert grants.refused_busy == 9
+        assert grants.in_flight == 0
+    finally:
+        await grants.aclose()
+
+
+def test_the_cheap_rejects_need_no_database() -> None:
+    asked: list[str] = []
+
+    async def grants(session: str, method: str, path: str) -> bool:
+        asked.append(path)
+        return True
+
+    client = _gated(grants)
+    # A path no grant can name (the agent only grants /api/v1/... paths).
+    assert client.post("/not-api/x", headers=MARKED).status_code == 403
+    assert client.delete("/", headers=MARKED).status_code == 403
+    assert asked == []

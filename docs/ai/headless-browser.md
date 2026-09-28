@@ -94,8 +94,14 @@ In order, from the model outwards:
 2. **The server's allow-list** (`network.allowedOrigins`): a navigation, subresource or
    page `fetch` to another origin fails with `net::ERR_BLOCKED_BY_CLIENT`. The README
    says it "does not serve as a security boundary and does not affect redirects", and
-   the redirect half is measured (below).
-3. **The backend's agent-actor gate.** Every request from the headless context carries
+   the redirect half is measured (below), so:
+3. **The redirect guard** (`redirectGuardSource()`, loaded on every page through the
+   server's `browser.initPage`) routes every request itself: another origin is refused;
+   a same-origin request is made with `maxRedirects: 0`, a 3xx off the origin is
+   refused, a same-origin 3xx on a GET navigation becomes a new navigation (which the
+   guard sees again), and any other 3xx is refused. No request and no redirect hop
+   leaves the origin, whatever sits in front of the backend (measured, below).
+4. **The backend's agent-actor gate.** Every request from the headless context carries
    `X-ScadBuddy-Agent-Session`. `AgentActorGate` lets such a request through for
    `GET`/`HEAD`/`OPTIONS`, and for the non-safe routes in `AGENT_ALLOWED_WRITES` (the
    read/write tools' routes that no outward tool shares; `agent/test/agentActor.test.ts`
@@ -160,10 +166,16 @@ headless shell before the tests.
   header itself: the context's value arrives, not the page's.
 - **Page JavaScript cannot reach another origin**: a `fetch` to it never arrives.
 - **A direct navigation off the origin** fails with `net::ERR_BLOCKED_BY_CLIENT` (and the
-  harness refuses it before that). **A redirect off the origin is followed**: the
-  tool usually reports an interrupted navigation, but the other origin has already
-  received the request, marker included. ScadBuddy's origin must therefore not serve
-  open redirects (see "Deployment requirement" below).
+  harness refuses it before that). **The allow-list alone follows a redirect off the
+  origin**: the tool usually reports an interrupted navigation, but the other origin has
+  already received the request, marker included. With the redirect guard (Guards, 3)
+  it is refused and the other origin receives nothing, a same-origin redirect still
+  lands, and a chain that stays on the origin for one hop and then leaves it is refused
+  at the second hop. Two things measured on the way, which shaped the guard: handing a
+  same-origin 3xx to the browser is not safe, since Chromium then follows it and every
+  further hop without calling the route handler again; and a navigation must be refused
+  with a page, not an abort, since after an aborted navigation the tab sits on
+  `chrome-error://` and every later fulfilled navigation fails.
 - **Isolation**: two servers (two sessions) do not share `localStorage`. A server lives
   as long as its Claude Code process, which is **one query**, so a session's second turn
   starts with a fresh browser (and has to navigate again).
@@ -179,33 +191,53 @@ headless shell before the tests.
 - **In the image** (`docker build --target agent`, then run as uid 10001 with
   `--read-only --network none --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent`):
   `chromium_headless_shell-1246` launches, types, clicks, screenshots, reports WebGL
-  available, sends the marker, and blocks off-origin navigation.
+  available, sends the marker, and blocks off-origin navigation and an off-origin
+  redirect.
 - **Sandbox**: with `browserName` set and no `channel`, the server leaves
-  `chromiumSandbox` false on Linux (its `validateBrowserConfig`), so Chromium runs with
-  `--no-sandbox`, which is Playwright's default for Chromium. Enabling it needs user
-  namespaces in the pod; not measured.
+  `chromiumSandbox` false on Linux (its `validateBrowserConfig`), i.e. `--no-sandbox`,
+  unless the config asks for it. See "Sandbox" below.
 - **Image size**: the Chromium layer (headless shell plus its Debian libraries) is
   **603 MB** uncompressed, of which `/opt/pw-browsers` is 268 MB and the rest the
   libraries `--with-deps` installs; full Chromium would be 740 MB. `@playwright/mcp`
   and `playwright`/`playwright-core` add about 19 MB to `node_modules`.
 
-## Deployment requirement: no open redirects
+## Sandbox
 
-Because the server's allow-list does not apply to redirects, **nothing served at the
-backend's origin (`SCADBUDDY_BACKEND_URL`) may redirect to another origin**. For the
-backend itself this is tested: `backend/tests/api/test_no_open_redirect.py` sends paths
+Chromium's sandbox needs unprivileged user namespaces. Measured in the `agent` image
+(uid 10001, read-only root, `chromium_headless_shell-1246`): under Docker's default
+seccomp profile it fails ("Chromium sandboxing failed!"), because that profile only
+lets a process with `CAP_SYS_ADMIN` create namespaces; with
+`--security-opt seccomp=unconfined` it starts and the renderer runs without
+`--no-sandbox`. The agent probes this once, on the first turn that uses the browser
+(`agent/src/harness/headlessSandbox.ts`), asks for the sandbox (`chromiumSandbox: true`)
+when it works, and otherwise logs a warning and runs with `--no-sandbox`. To get the
+sandbox in Kubernetes, the agent container needs a seccomp profile that allows
+`clone`/`unshare` with `CLONE_NEWUSER` (`securityContext.seccompProfile.type:
+Unconfined`, or a `Localhost` profile derived from the runtime default with those
+allowed; [Kubernetes seccomp](https://kubernetes.io/docs/tutorials/security/seccomp/),
+[Docker's default profile](https://docs.docker.com/engine/security/seccomp/)), and a node
+with `user.max_user_namespaces` above 0 (and, on Ubuntu 23.10+, AppArmor not restricting
+unprivileged user namespaces). No capability and no privileged container is needed.
+`RuntimeDefault` keeps it off. Tracked in #543.
+
+## Redirects: guarded in the browser, and none from the backend
+
+The redirect guard (Guards, 3) is what stops an off-origin redirect, including one
+added by an ingress, auth proxy or CDN in front of `SCADBUDDY_BACKEND_URL`. The backend
+also serves none of its own, as defence in depth: `backend/tests/api/test_no_open_redirect.py` sends paths
 shaped to provoke a redirect (`//evil.example/`, `/%2F%2Fevil.example/`, trailing
 slashes, the SPA's directories) to the app with a built SPA mounted and asserts every
 `Location` stays on the origin, and it fails when any backend module starts building a
-redirect by hand until that redirect is reviewed. What the test cannot see is anything
-in front of the backend on that origin. If `SCADBUDDY_BACKEND_URL` points at a proxy
-(an ingress, an auth proxy, a CDN), that proxy must not redirect off the origin either
-(for example to a login page on another host). In the pod layout of spec §4.1 it is
-`http://127.0.0.1:<backend port>`, the backend alone.
+redirect by hand until that redirect is reviewed. A proxy in front of the backend
+that redirects off the origin (a login bounce, a canonical-host redirect) no longer
+leaks anything, but it does make the headless browser useless there: its pages are
+refused. In the pod layout of spec §4.1 `SCADBUDDY_BACKEND_URL` is
+`http://127.0.0.1:<backend port>`, the backend alone, with no proxy in between.
 
 ## Status and what is not done
 
-- **Chromium runs without its sandbox** (above); enabling it is not measured.
+- **Chromium's sandbox depends on the pod** (see "Sandbox"): off under a
+  `RuntimeDefault` seccomp profile.
 - **Not tested against the real SPA and backend in one container run.** The pieces
   are tested: the gate and `GRANT_SQL` against Postgres (pytest and the agent's pg
   test), the marker on a page's own `fetch` (server test), and a real session turn

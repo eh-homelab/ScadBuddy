@@ -71,9 +71,23 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <p id="status">idle</p>
   <button id="probe" onclick="fetch('${otherOrigin}/probe').then(r => r.text()).then(() => document.getElementById('probe-result').textContent = 'probe reached', () => document.getElementById('probe-result').textContent = 'probe blocked')">Probe</button>
   <p id="probe-result">probe not run</p>
+  <button id="redirected-fetch" onclick="fetch('/redirect-home').then(() => document.getElementById('fetch-result').textContent = 'fetch followed', () => document.getElementById('fetch-result').textContent = 'fetch failed')">Redirected fetch</button>
+  <p id="fetch-result">fetch not run</p>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {
+    if (url === '/redirect-chain') {
+      // On the origin first, then off it: a browser that follows the first hop
+      // on its own would follow the second too.
+      res.writeHead(302, { location: '/redirect-away' })
+      res.end()
+      return
+    }
+    if (url === '/redirect-home') {
+      res.writeHead(302, { location: '/?from=redirect' })
+      res.end()
+      return
+    }
     if (url === '/redirect-away') {
       res.writeHead(302, { location: `${otherOrigin}/` })
       res.end()

@@ -16,9 +16,11 @@ import {
   materializeHeadlessBrowser,
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
+  redirectGuardSource,
   TOOL_PREFIX,
   VENDORED_PLUGIN_DIR,
 } from '../src/harness/headlessBrowser.js'
+import { probeChromiumSandbox } from '../src/harness/headlessSandbox.js'
 import { decide } from '../src/harness/permissions.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
 
@@ -167,6 +169,26 @@ describe('the per-session plugin', () => {
     expect(config.capabilities).toBeUndefined()
   })
 
+  it('loads the redirect guard on every page, for this origin only', async () => {
+    const { configFile } = await materialized()
+    const config = JSON.parse(readFileSync(configFile, 'utf8')) as { browser: { initPage?: string[] } }
+    expect(config.browser.initPage).toHaveLength(1)
+    const guard = readFileSync(config.browser.initPage![0]!, 'utf8')
+    expect(guard).toContain(`const ALLOWED = ${JSON.stringify(ORIGIN)}`)
+    expect(guard).toContain('maxRedirects: 0')
+    expect(guard).toBe(redirectGuardSource(ORIGIN))
+  })
+
+  it('asks for the Chromium sandbox only when told it works', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    type Launch = { browser: { launchOptions: { chromiumSandbox?: boolean } } }
+    const read = (file: string) => (JSON.parse(readFileSync(file, 'utf8')) as Launch).browser.launchOptions
+    const off = materializeHeadlessBrowser({ sessionId: randomUUID(), backendUrl: ORIGIN, dir: path.join(dir, 'a') })
+    expect(read(off.configFile).chromiumSandbox).toBeUndefined()
+    const on = materializeHeadlessBrowser({ sessionId: randomUUID(), backendUrl: ORIGIN, dir: path.join(dir, 'b'), sandbox: true })
+    expect(read(on.configFile).chromiumSandbox).toBe(true)
+  })
+
   it('starts the pinned server under `env -i`, and passes its own check', async () => {
     const { pluginDir, configFile } = await materialized()
     const mcp = JSON.parse(readFileSync(path.join(pluginDir, '.mcp.json'), 'utf8')) as {
@@ -262,5 +284,29 @@ describe('buildHarnessOptions with the headless browser', () => {
       behavior: 'allow',
     })
     await expect(options.canUseTool!(t('browser_click'), { target: 'e3' }, ctx)).resolves.toMatchObject({ behavior: 'allow' })
+  })
+})
+
+describe('the sandbox probe', () => {
+  const page = { setContent: () => Promise.resolve() }
+
+  it('says available when Chromium starts with its sandbox', async () => {
+    let asked: unknown
+    const launcher = {
+      launch: (options: unknown) => {
+        asked = options
+        return Promise.resolve({ newPage: () => Promise.resolve(page), close: () => Promise.resolve() })
+      },
+    }
+    expect(await probeChromiumSandbox({ launcher })).toEqual({ available: true, detail: expect.any(String) })
+    expect(asked).toMatchObject({ headless: true, chromiumSandbox: true })
+  })
+
+  it('says unavailable, with the sandbox line of the error, and never throws', async () => {
+    const launcher = {
+      launch: () =>
+        Promise.reject(new Error('browserType.launch: closed\nBrowser logs:\nChromium sandboxing failed!\nmore')),
+    }
+    expect(await probeChromiumSandbox({ launcher })).toEqual({ available: false, detail: 'Chromium sandboxing failed!' })
   })
 })

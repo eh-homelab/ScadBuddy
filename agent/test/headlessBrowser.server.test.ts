@@ -139,19 +139,42 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(other.hits).toEqual([])
   }, 60_000)
 
-  it('refuses a direct navigation off the origin, but NOT a redirect off it', async () => {
+  it('refuses a direct navigation off the origin, and a redirect off it, but follows one on it', async () => {
     const { call, sessionId } = await connect(ui.origin)
+    // A blocked navigation gets the guard's 403 page, not an abort (an abort
+    // leaves the tab on chrome-error:// and breaks later navigations).
     const direct = await call('browser_navigate', { url: `${other.origin}/` })
-    expect(direct.isError).toBe(true)
-    expect(direct.text).toContain('net::ERR_BLOCKED_BY_CLIENT')
+    expect(direct.text).toContain('Blocked')
     expect(other.hits).toEqual([])
-    // The README's warning, measured: the list "does not affect redirects". The
-    // request reaches the other origin, marker and all (the tool mostly, but not
-    // always, reports an interrupted navigation, so that is not asserted). The
-    // harness cannot see redirects, so ScadBuddy's origin must not serve an
-    // open redirect (docs/ai/headless-browser.md).
-    await call('browser_navigate', { url: `${ui.origin}/redirect-away` })
-    expect(other.hits.map((h) => [h.url, marker(h)])).toEqual([['/', sessionId]])
+    // Without the redirect guard (headlessBrowser.ts redirectGuardSource) this
+    // reached the other origin, marker and all: the allow-list "does not
+    // affect redirects". With it, the 3xx is fetched with maxRedirects 0 and
+    // aborted because its Location is off the origin.
+    const redirect = await call('browser_navigate', { url: `${ui.origin}/redirect-away` })
+    expect(redirect.text).toContain('Blocked')
+    expect(other.hits).toEqual([])
+    // A redirect on the origin still works, and still carries the marker.
+    ui.hits.length = 0
+    const home = await call('browser_navigate', { url: `${ui.origin}/redirect-home` })
+    expect(home.isError).toBe(false)
+    expect(home.text).toContain(`${ui.origin}/?from=redirect`)
+    expect(ui.hits.map((h) => [h.url, marker(h)])).toEqual([
+      ['/redirect-home', sessionId],
+      ['/?from=redirect', sessionId],
+    ])
+    // A chain that stays on the origin for one hop and then leaves it.
+    const chain = await call('browser_navigate', { url: `${ui.origin}/redirect-chain` })
+    await call('browser_wait_for', { time: 1 })
+    expect(chain.text).not.toContain('other origin reached')
+    expect(other.hits).toEqual([])
+  }, 60_000)
+
+  it('aborts a redirect answered to page JavaScript', async () => {
+    const { call } = await connect(ui.origin)
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    await call('browser_click', { element: 'Redirected fetch', target: '#redirected-fetch' })
+    await call('browser_wait_for', { text: 'fetch failed' })
+    expect(ui.hits.filter((h) => h.url === '/?from=redirect')).toEqual([])
   }, 60_000)
 
   it('keeps two sessions apart: storage does not carry over', async () => {

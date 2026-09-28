@@ -386,10 +386,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
   writes), and the image carries its Chromium (about 600 MB of the image). The
   backend refuses its outward requests unless a human approved that exact one
-  (`backend/scadbuddy/api/agent_actor.py`). **Deployment requirement:**
-  nothing at `SCADBUDDY_BACKEND_URL`'s origin may redirect to another origin,
-  because the browser follows redirects past its origin allow-list; the
-  backend is tested for this, a proxy in front of it is on you.
+  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
+  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
+  Chromium keeps its sandbox only where the pod's seccomp profile allows user
+  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
+  browser turn and runs it with `--no-sandbox`
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session

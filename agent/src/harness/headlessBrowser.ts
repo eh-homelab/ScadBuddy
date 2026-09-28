@@ -201,6 +201,12 @@ export type HeadlessBrowserOptions = {
    * `browsersPath`. Tests only, for a machine with another revision installed.
    */
   executablePath?: string
+  /**
+   * Run Chromium WITH its sandbox (`chromiumSandbox: true`). Only when
+   * headlessSandbox.ts `probeChromiumSandbox` found that it starts here;
+   * otherwise Chromium runs with `--no-sandbox` (docs/ai/headless-browser.md).
+   */
+  sandbox?: boolean
 }
 
 export type HeadlessBrowserPlugin = {
@@ -230,11 +236,100 @@ export function playwrightMcpCli(): string {
 }
 
 /** The server's `--config` file contents (config.d.ts `Config`, 0.0.82). */
+/**
+ * The redirect guard (review of #518): `network.allowedOrigins` "does not affect
+ * redirects", and measured, a same-origin URL that redirects elsewhere reaches
+ * the other origin with the agent-actor marker. So every request of every page
+ * goes through this route handler, loaded by the server's `browser.initPage`
+ * (0.0.82 `require`s each file and calls its default export with `{ page }`):
+ *
+ *   - a request to another origin is refused: a navigation gets a small 403
+ *     page, anything else is aborted (`blockedbyclient`, as the allow-list
+ *     does). Not an abort for navigations: measured, after one the tab is on
+ *     chrome-error:// and every later fulfilled navigation fails;
+ *   - a request to the allowed origin is made by Playwright itself with
+ *     `maxRedirects: 0` (`route.fetch`), so no redirect is followed blindly;
+ *   - a 3xx whose `Location` resolves off the origin is refused;
+ *   - a same-origin 3xx on a GET navigation is answered with a tiny page that
+ *     does `location.replace(target)`: a NEW navigation, which comes back
+ *     through here. Handing the 3xx itself to the browser would not do:
+ *     measured, Chromium then follows it, and every further hop, without
+ *     calling the route handler again, so a chain on→on→off would escape;
+ *   - any other 3xx (a fetch, XHR or form POST that redirects) is refused;
+ *     the UI's API calls do not redirect;
+ *   - every other response is handed to the page as it came.
+ *
+ * So no request, and no redirect hop, leaves the origin, whatever sits in
+ * front of the backend. Measured in test/headlessBrowser.server.test.ts.
+ */
+export function redirectGuardSource(allowedOrigin: string): string {
+  return `'use strict'
+// Written by agent/src/harness/headlessBrowser.ts (redirectGuardSource); do not edit.
+const ALLOWED = ${JSON.stringify(allowedOrigin)}
+const originOf = (url) => {
+  try {
+    const u = new URL(url)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.origin : null
+  } catch {
+    return null
+  }
+}
+// A blocked NAVIGATION gets a small 403 page, not an abort. Measured: after an
+// aborted navigation the tab sits on chrome-error://, and every later navigation
+// that this handler fulfills fails ("interrupted by another navigation to
+// chrome-error://chromewebdata/"). Subresources and fetches are aborted.
+const refuse = (route, status, why) =>
+  route.request().isNavigationRequest()
+    ? route.fulfill({
+        status,
+        contentType: 'text/html',
+        body: '<!doctype html><title>Blocked</title><p>' + why + '</p>',
+      })
+    : route.abort(status === 502 ? 'failed' : 'blockedbyclient')
+module.exports.default = async function redirectGuard({ page }) {
+  await page.route('**/*', async (route) => {
+    const request = route.request()
+    if (originOf(request.url()) !== ALLOWED) {
+      return refuse(route, 403, 'Blocked: the headless browser may only open ' + ALLOWED + '.')
+    }
+    let response
+    try {
+      response = await route.fetch({ maxRedirects: 0 })
+    } catch {
+      return refuse(route, 502, 'The request to ' + ALLOWED + ' failed.')
+    }
+    const status = response.status()
+    if (status < 300 || status >= 400) return route.fulfill({ response })
+    const location = response.headers()['location']
+    if (location === undefined) return route.fulfill({ response })
+    let target = null
+    try {
+      target = new URL(location, request.url())
+    } catch {}
+    if (target === null || originOf(target.href) !== ALLOWED) {
+      return refuse(route, 403, 'Blocked: a redirect off ' + ALLOWED + '.')
+    }
+    if (!request.isNavigationRequest() || request.method() !== 'GET') {
+      return refuse(route, 403, 'Blocked: a redirect of a non-navigation request.')
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><script>location.replace(' + JSON.stringify(target.href) + ')</script>',
+    })
+  })
+}
+`
+}
+
 export function playwrightConfig(options: {
   sessionId: string
   allowedOrigin: string
   outputDir: string
+  /** The redirect guard's file (redirectGuardSource); every page loads it. */
+  initPage?: string
   executablePath?: string
+  sandbox?: boolean
 }): Record<string, unknown> {
   return {
     browser: {
@@ -244,11 +339,14 @@ export function playwrightConfig(options: {
       // not default to branded Chrome, and Playwright launches its
       // chromium-headless-shell (the one build the image installs, Dockerfile
       // `agent`). It then leaves `chromiumSandbox` false on Linux (its
-      // `validateBrowserConfig`), i.e. Chromium runs with `--no-sandbox`.
+      // `validateBrowserConfig`), i.e. Chromium runs with `--no-sandbox`,
+      // unless `sandbox` asks for it (only where the probe found it works).
       launchOptions: {
         headless: true,
+        ...(options.sandbox ? { chromiumSandbox: true } : {}),
         ...(options.executablePath ? { executablePath: options.executablePath } : {}),
       },
+      ...(options.initPage ? { initPage: [options.initPage] } : {}),
       contextOptions: {
         extraHTTPHeaders: { [AGENT_ACTOR_HEADER]: options.sessionId },
         acceptDownloads: false,
@@ -313,12 +411,14 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const outputDir = path.join(dir, 'output')
   const home = path.join(dir, 'home')
   const configFile = path.join(dir, 'playwright-mcp.json')
+  const guardFile = path.join(dir, 'redirect-guard.cjs')
   for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home]) {
     mkdirSync(d, { recursive: true })
   }
 
   const manifest = readFileSync(path.join(VENDORED_PLUGIN_DIR, '.claude-plugin', 'plugin.json'), 'utf8')
   writeFileSync(path.join(pluginDir, '.claude-plugin', 'plugin.json'), manifest)
+  writeFileSync(guardFile, redirectGuardSource(allowedOrigin))
   writeFileSync(
     configFile,
     JSON.stringify(
@@ -326,6 +426,8 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
         sessionId: options.sessionId,
         allowedOrigin,
         outputDir,
+        initPage: guardFile,
+        ...(options.sandbox ? { sandbox: true } : {}),
         ...(options.executablePath ? { executablePath: options.executablePath } : {}),
       }),
       null,
