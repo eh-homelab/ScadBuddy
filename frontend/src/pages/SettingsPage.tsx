@@ -7,6 +7,8 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
+import type { McpAuthMode } from '../api/mcpTokens'
+import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
@@ -148,6 +150,7 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   const webMcp = useWebMcpEnabled()
+  const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
   const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
@@ -963,7 +966,12 @@ export function SettingsPage() {
             <HeadlessBrowserSetting />
             {/* The agent service serves these routes, so the section shows only where the
                 assistant would (#251). */}
-            {ai.available && <McpTokensSection />}
+            {ai.available && (
+              <>
+                <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
+                <McpTokensSection authMode={mcpAuthMode} />
+              </>
+            )}
             {ai.available && (
               <div>
                 <p className="text-[13px]">MCP sign-in (OIDC)</p>

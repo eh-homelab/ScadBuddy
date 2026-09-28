@@ -228,6 +228,76 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(await screen.findByTestId('where')).toHaveTextContent(`/m/${COPY}/source?merge`)
   })
 
+  it('offers a newer update when a dismissed one was superseded (#404)', async () => {
+    await duplicateWithUpdate()
+    const newer = await api.getUpstream(COPY)
+    await api.dismissUpstream(COPY)
+    const { user } = await renderButton()
+    // The server now reports an update that is not dismissed.
+    server.use(http.get('/api/v1/models/:slug/upstream', () => HttpResponse.json(newer)))
+
+    await user.click(screen.getByRole('button', { name: 'Update dismissed — review' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Update available' })
+    expect(await within(dialog).findByTestId('diff')).toHaveTextContent('+text_size = 16;')
+    expect(dialog).not.toHaveTextContent('There is no update to take any more')
+    expect(dialog).not.toHaveTextContent('you can still take it')
+    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeEnabled()
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeEnabled()
+  })
+
+  it('says there is no update when the server reports current (#404)', async () => {
+    await duplicateWithUpdate()
+    const status = await api.getUpstream(COPY)
+    const { user } = await renderButton()
+    server.use(
+      http.get('/api/v1/models/:slug/upstream', () =>
+        HttpResponse.json({ ...status, state: 'current', preview: null }),
+      ),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog')
+    expect(
+      await within(dialog).findByText('There is no update to take any more.'),
+    ).toBeInTheDocument()
+    expect(dialog).toHaveAccessibleName('No update')
+    expect(dialog).toHaveTextContent(`This copy is up to date with ${UPSTREAM}.`)
+    expect(dialog).not.toHaveTextContent('has changed')
+    expect(within(dialog).queryByTestId('merge-result')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeDisabled()
+    expect(within(dialog).queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeEnabled()
+  })
+
+  it('says the upstream is gone when it went while the dialog loaded (#404)', async () => {
+    await duplicateWithUpdate()
+    const status = await api.getUpstream(COPY)
+    const { user } = await renderButton()
+    let answer: (() => void) | undefined
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('/api/v1/models/:slug/upstream', async () => {
+        await answered
+        return HttpResponse.json({ ...status, state: 'gone', revision: null, preview: null })
+      }),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    // In flight: framed by the state it was opened from.
+    const dialog = screen.getByRole('dialog', { name: 'Update available' })
+    expect(within(dialog).getByText('Working out the merge')).toBeInTheDocument()
+    answer?.()
+
+    expect(
+      await within(dialog).findByText('There is no update to take any more.'),
+    ).toBeInTheDocument()
+    expect(dialog).toHaveAccessibleName('No update')
+    expect(dialog).toHaveTextContent(`${UPSTREAM} no longer exists.`)
+    expect(dialog).not.toHaveTextContent('has changed')
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeDisabled()
+    expect(within(dialog).queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
+  })
+
   it('offers Detach for an upstream that is gone', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
     await api.deleteModel(UPSTREAM, true)
