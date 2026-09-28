@@ -8,7 +8,7 @@ import type {
   ScopeRef,
   SettingChange,
 } from '../../api/types'
-import { scopeLabel } from '../../lib/analyzers'
+import { scopeLabel, scopesForFinding } from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAsync } from '../../lib/useAsync'
@@ -100,18 +100,24 @@ interface Props {
  * Clicking Apply on the diff shown is the confirmation. Applying records a decision and
  * sends nothing (`route_note`); the outward approval of AI spec §8.2 belongs to the send
  * that will one day consume it.
+ *
+ * "Accept for" lists only the scopes the backend resolves this finding at
+ * (`scopesForFinding`), and the chosen one is checked against them on every render, as
+ * `SuppressForm` does: a scope the report no longer lists falls back to this print.
  */
 export function FixPreviewCard({
   outputId,
   request,
   diagnostic,
   fix,
-  scopes,
+  scopes: offered,
   onApplied,
   onClose,
 }: Props) {
   const id = useId()
-  const [scope, setScope] = useState<ScopeRef | undefined>(scopes.at(-1))
+  const scopes = scopesForFinding(offered, diagnostic)
+  const [choice, setChoice] = useState<string | undefined>(undefined)
+  const scope = scopes.find((row) => scopeValue(row) === choice) ?? scopes.at(-1)
   const [refusedStale, setRefusedStale] = useState<string | null>(null)
   const [refusal, setRefusal] = useState<string | null>(null)
   const [applying, setApplying] = useState(false)
@@ -184,7 +190,7 @@ export function FixPreviewCard({
           value={scope ? scopeValue(scope) : ''}
           onChange={(event) => {
             setRefusedStale(null)
-            setScope(scopes.find((row) => scopeValue(row) === event.target.value))
+            setChoice(event.target.value)
           }}
           className="sb-field"
         >

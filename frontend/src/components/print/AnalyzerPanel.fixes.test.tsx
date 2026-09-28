@@ -18,6 +18,7 @@ function request(size: Size = '0.4'): AnalysisRequest {
   return {
     printer_id: 1,
     plate_id: 1,
+    all_plates: false,
     choices: {
       nozzles: [{ size, flow: 'standard' }],
       tier: 'standard',
@@ -92,6 +93,26 @@ describe('AnalyzerPanel · fixes', () => {
     expect(screen.getByTestId('accepted-changes')).toHaveTextContent(
       '1 accepted change is recorded; nothing sends it to Bambuddy yet.',
     )
+  })
+
+  it('offers a finding about some slots no material scope to accept at', async () => {
+    const options = async (slots: number[]) => {
+      setMockAnalyzerDiagnostics([{ ...verifiedFixDiagnostic, slots }])
+      const { user, unmount } = renderPanel()
+      const row = await screen.findByTestId('diagnostic-SB9901')
+      await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+      const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+      const labels = within(within(preview).getByLabelText('Accept for'))
+        .getAllByRole('option')
+        .map((option) => option.textContent)
+      unmount()
+      return labels
+    }
+
+    expect(await options([])).toEqual(expect.arrayContaining(['Every pla print', 'Every petg print']))
+    const slotted = await options([2])
+    expect(slotted.some((label) => /^Every (pla|petg) print$/.test(label ?? ''))).toBe(false)
+    expect(slotted).toContain('This template')
   })
 
   it('marks a preview stale when the print changes under it, and previews again', async () => {
