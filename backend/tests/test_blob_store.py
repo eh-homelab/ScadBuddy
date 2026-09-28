@@ -26,6 +26,27 @@ def test_keys_are_confined_to_the_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.requires_postgres
+def test_dir_for_touches_an_existing_blob_so_a_claim_survives_the_sweep(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    from scadbuddy.render.projection import JobProjection
+
+    projection = JobProjection(pg_conninfo, pool_size=2)
+    projection.open()
+    try:
+        refs = BlobRefs(projection.pool)
+        store = LocalBlobStore(tmp_path / "blobs")
+        old = time.time() - 7200
+        import os
+
+        os.utime(store.dir_for("claimed"), (old, old))
+        store.dir_for("claimed")  # a new holder claims it, about to add its ref
+        assert sweep_blobs(store, refs, grace=3600) == []
+    finally:
+        projection.close()
+
+
+@pytest.mark.requires_postgres
 def test_sweep_removes_only_unreferenced_blobs_past_grace(tmp_path: Path, pg_conninfo: str) -> None:
     from scadbuddy.render.projection import JobProjection
 

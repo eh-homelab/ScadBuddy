@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -21,6 +22,7 @@ class LocalBlobStore:
     def dir_for(self, key: str) -> Path:
         path = self._path(key)
         path.mkdir(parents=True, exist_ok=True)
+        os.utime(path, None)
         return path
 
     def exists(self, key: str) -> bool:
