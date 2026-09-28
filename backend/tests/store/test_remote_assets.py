@@ -157,3 +157,49 @@ async def test_drop_swept_assets_drops_the_stores_copies(tmp_path: Path, pool: P
 async def test_nothing_to_drop_without_a_store(tmp_path: Path) -> None:
     state: Any = SimpleNamespace()
     await drop_swept_assets(cast(AppState, state), ["a" * 64], cutoff=datetime.now(UTC))
+
+
+def _mark_swept(pool: Pool, key: str) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE store_blobs SET meta = meta || '{\"swept\": true}' WHERE key = %s", (key,)
+        )
+
+
+async def test_reconcile_leaves_a_copy_the_sweep_never_decided_to_drop(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A volume restored from a backup lacks recent uploads: their copies are all left."""
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    api = AssetStore(tmp_path / "api" / "assets")
+    meta = api.put(SVG, "logo.svg")
+    await remote.mirror(api, meta, slug="demo", title="Demo")
+    _age(pool, asset_key(meta.id))
+    restored = AssetStore(tmp_path / "restored" / "assets")
+    assert await remote.reconcile(restored, cutoff=await remote.clock()) == []
+    assert remote.content.index.get(asset_key(meta.id)) is not None
+
+
+async def test_reconcile_spares_a_marked_copy_touched_after_the_cutoff(
+    tmp_path: Path, pool: Pool
+) -> None:
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    api = AssetStore(tmp_path / "api" / "assets")
+    cutoff = await remote.clock()
+    meta = api.put(SVG, "logo.svg")
+    await remote.mirror(api, meta, slug="demo", title="Demo")  # after the cutoff
+    _mark_swept(pool, asset_key(meta.id))
+    elsewhere = AssetStore(tmp_path / "elsewhere" / "assets")  # not (yet) local here
+    assert await remote.reconcile(elsewhere, cutoff=cutoff) == []
+    assert remote.content.index.get(asset_key(meta.id)) is not None
+
+
+async def test_a_re_upload_clears_the_swept_mark(tmp_path: Path, pool: Pool) -> None:
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    api = AssetStore(tmp_path / "api" / "assets")
+    meta = api.put(SVG, "logo.svg")
+    await remote.mirror(api, meta, slug="demo", title="Demo")
+    _mark_swept(pool, asset_key(meta.id))
+    await remote.mirror(api, api.put(SVG, "logo.svg"), slug="demo", title="Demo")
+    row = remote.content.index.get(asset_key(meta.id))
+    assert row is not None and "swept" not in row.meta
