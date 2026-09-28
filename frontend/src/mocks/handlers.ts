@@ -1582,36 +1582,24 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
+  http.post(`${base}/outputs/:id/send`, async ({ params }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
     if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
+    // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
     const libraryFileId = output.library_file_id ?? nextNumber()
-    const queued = body.mode === 'queue'
-    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
-    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
     state.outputs = state.outputs.map((o) =>
-      o.id === id
-        ? {
-            ...o,
-            library_file_id: libraryFileId,
-            pipeline_run_id: pipelineRunId,
-            queue_item_id: queueItemId,
-          }
-        : o,
+      o.id === id ? { ...o, library_file_id: libraryFileId } : o,
     )
     const result: SendResult = {
-      mode: body.mode,
+      mode: 'library',
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
-      pipeline_run_id: pipelineRunId,
-      queue_item_id: queueItemId,
-      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
         ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
         : null,

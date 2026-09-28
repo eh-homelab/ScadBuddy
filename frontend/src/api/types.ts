@@ -148,7 +148,6 @@ export type PlateFit = Schemas['PlateFit']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
-export type SendMode = SendResult['mode']
 
 /**
  * A view model, not a wire type: the API returns a flat `parameters` list plus the
