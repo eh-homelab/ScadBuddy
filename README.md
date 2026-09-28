@@ -131,7 +131,13 @@ for the project picker).
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
-  requests share one job.
+  requests share one job. A finished render is kept under its template
+  (`models/<slug>/.renders/<key>/`, beside the source like its media) and a
+  later request for the same parameters at the same revision is answered from it
+  without running OpenSCAD; an entry with a file missing is rendered again, and
+  entries unused for `SCADBUDDY_JOB_TTL` are removed with the jobs. Installing a
+  font or moving a library pin does not change the key, so a render kept before
+  that is served until it expires or the template is edited.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.

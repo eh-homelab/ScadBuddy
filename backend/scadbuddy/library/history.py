@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -180,12 +180,14 @@ def git_env() -> dict[str, str]:
 
 def _gitignore_body(wrapper_prefix: str) -> str:
     # Every transient file a render drops beside a model: the colour wrappers and,
-    # since #204, the uploaded assets staged for `import()` -- which are not .scad.
+    # since #204, the uploaded assets staged for `import()` -- which are not .scad
+    # -- and the finished renders kept under the template (`render_cache`).
     transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
         "# source, so versioning it would only add noise to the history.\n"
         f"{transient}\n"
+        f"{RENDERS_DIR_NAME}/\n"
         f"{LOCK_NAME}\n"
     )
 

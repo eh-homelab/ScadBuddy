@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 import pytest
 import trimesh
 
+from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
 from scadbuddy.render.bambu3mf import CORE_NS, PRODUCTION_NS, write_bambu_3mf
 from scadbuddy.render.provenance import (
@@ -167,6 +168,20 @@ def test_the_version_is_a_content_hash_of_every_scad_in_the_model(tmp_path: Path
     assert included != edited
     (model / "parts" / "hole.scad").rename(model / "hole.scad")
     assert source_version(model) != included
+
+
+def test_the_version_leaves_out_the_renders_kept_under_the_model(tmp_path: Path) -> None:
+    """A render's own output must not feed the hash that names what was rendered."""
+    model = tmp_path / "keychain"
+    model.mkdir()
+    (model / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    before = source_version(model)
+
+    entry = model / RENDERS_DIR_NAME / "0123abcd"
+    entry.mkdir(parents=True)
+    (entry / "model.3mf").write_bytes(b"3mf")
+
+    assert source_version(model) == before
 
 
 def test_the_version_covers_what_a_model_imports(tmp_path: Path) -> None:
