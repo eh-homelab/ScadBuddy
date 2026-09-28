@@ -576,6 +576,32 @@ def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
     assert (checkout / "BOSL2").is_dir()
 
 
+def test_a_preset_save_fetches_a_checkout_that_is_gone(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """Create, update and duplicate check the values against the schema, which reads
+    the pins: each fetches a missing checkout again, as a render does."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    presets = f"/api/v1/models/{SLUG}/presets"
+
+    shutil.rmtree(checkout)
+    created = lib_client.post(presets, json={"name": "Small", "params": {}})
+    assert created.status_code == 201, created.text
+    assert (checkout / "BOSL2").is_dir()
+    preset = f"{presets}/{created.json()['id']}"
+    shutil.rmtree(checkout)
+    updated = lib_client.patch(preset, json={"params": {}})
+    assert updated.status_code == 200, updated.text
+    assert (checkout / "BOSL2").is_dir()
+    shutil.rmtree(checkout)
+    duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
+    assert duplicated.status_code == 201, duplicated.text
+    assert (checkout / "BOSL2").is_dir()
+
+
 def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:

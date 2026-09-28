@@ -11,6 +11,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    FetcherDep,
     HistoryDep,
     PathsDep,
     PresetsDep,
@@ -23,6 +24,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
     MAX_PRESET_NAME,
     TEMPLATE_ID_PREFIX,
@@ -50,10 +52,13 @@ async def _require_valid(
     history: ModelHistory,
     config: Config,
     assets: AssetStore,
+    fetcher: CheckoutFetcher,
 ) -> None:
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
-    source, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
+    source, schema = await schema_of(
+        slug, None, paths=paths, history=history, config=config, fetcher=fetcher
+    )
     require_valid_params(schema, params)
     # A `file` value names an upload or a sample, as a render requires (#204); and
     # checking it marks the upload used, so the sweep cannot take it from under the
@@ -138,10 +143,17 @@ async def create_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     await _require_valid(
-        slug, body.params, paths=paths, history=history, config=config, assets=assets
+        slug,
+        body.params,
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
     )
     try:
         return await asyncio.to_thread(presets.create, slug, body)
@@ -176,6 +188,7 @@ async def duplicate_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     try:
@@ -185,7 +198,13 @@ async def duplicate_preset(
     except InvalidPresetsFileError as error:
         raise _unreadable(error) from None
     await _require_valid(
-        slug, source.params, paths=paths, history=history, config=config, assets=assets
+        slug,
+        source.params,
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
     )
     copy = ParamPresetCreate(name=body.name, params=source.params)
     try:
@@ -217,12 +236,19 @@ async def update_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
     if body.params is not None:
         await _require_valid(
-            slug, body.params, paths=paths, history=history, config=config, assets=assets
+            slug,
+            body.params,
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+            fetcher=fetcher,
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)
