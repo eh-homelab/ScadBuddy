@@ -412,14 +412,21 @@ async def create_model(
         try:
             pasted = PastedSource.model_validate(await request.json())
         except ValidationError as error:
-            # A malformed library name reads as the multipart form's does (#437).
-            require_library_names(
+            details = error.errors()
+            bad_names = [
                 str(detail["input"])
-                for detail in error.errors()
+                for detail in details
                 if detail["loc"][:1] == ("libraries",)
                 and detail["type"] == "string_pattern_mismatch"
-            )
-            raise _malformed_body(error) from None
+            ]
+            if len(bad_names) == len(details):
+                # A malformed library name reads as the multipart form's does (#437).
+                require_library_names(bad_names)
+            problem = _malformed_body(error)
+            if bad_names:
+                # Other errors too: all of them, with the names listed as #437 lists them.
+                problem.extensions["libraries"] = list(dict.fromkeys(bad_names))
+            raise problem from None
         except _BAD_JSON as error:
             raise _malformed_body(error) from None
         # Everything that can fail without the network, before any library is cloned.

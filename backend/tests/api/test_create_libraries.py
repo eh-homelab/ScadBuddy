@@ -115,6 +115,25 @@ def test_a_create_naming_something_that_is_not_a_library_name_is_a_422(
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
+def test_a_malformed_library_name_keeps_the_bodys_other_errors(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """A bad name beside another invalid field lists both, not only the name."""
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post(
+            "/api/v1/models",
+            json={"source": SOURCE, "libraries": ["BOSL2", "../etc", "../etc"]},
+        )
+
+    assert refused.status_code == 422, refused.text
+    body = refused.json()
+    assert body["libraries"] == ["../etc"]
+    locs = [error["loc"] for error in body["errors"]]
+    assert ["body", "name"] in locs
+    assert ["body", "libraries", "1"] in locs
+    resolve.assert_not_called()
+
+
 @pytest.mark.parametrize("multipart", [False, True], ids=["json", "multipart"])
 def test_a_create_that_would_conflict_clones_nothing(
     lib_client: TestClient, libraries_app: FastAPI, multipart: bool
