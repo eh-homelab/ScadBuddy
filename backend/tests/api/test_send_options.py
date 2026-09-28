@@ -11,13 +11,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS
-from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.api.test_send import (
     API,
     PRESETS,
@@ -86,6 +86,7 @@ def pipeline_route(pipeline_id: int = 4, body: dict[str, Any] | None = None) -> 
 # --- the queue path ------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_option_never_set_goes_out_as_bambuddys_own_default(
     client: TestClient, model: str
@@ -109,6 +110,7 @@ def test_an_option_never_set_goes_out_as_bambuddys_own_default(
     assert "preheat_chamber_target_override" not in queued
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_scopes_merge_least_specific_first(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, **PRESETS)
@@ -136,6 +138,7 @@ def test_the_scopes_merge_least_specific_first(client: TestClient, model: str) -
     assert body["options"]["manual_start"] is True
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_printer_override_for_another_printer_is_ignored(
     client: TestClient, model: str
@@ -152,6 +155,7 @@ def test_a_per_printer_override_for_another_printer_is_ignored(
     assert json.loads(queue.calls.last.request.read())["timelapse"] == (BAMBUDDY_DEFAULTS.timelapse)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, **PRESETS)
@@ -166,6 +170,7 @@ def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, m
     assert json.loads(queue.calls.last.request.read())["timelapse"] == (BAMBUDDY_DEFAULTS.timelapse)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_copies_still_drives_the_quantity_and_beats_a_remembered_one(
     client: TestClient, model: str
@@ -182,6 +187,7 @@ def test_copies_still_drives_the_quantity_and_beats_a_remembered_one(
     assert json.loads(queue.calls.last.request.read())["quantity"] == 2
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_quantity_applies_when_no_copies_is_sent(
     client: TestClient, model: str
@@ -201,6 +207,7 @@ def test_a_remembered_quantity_applies_when_no_copies_is_sent(
 # --- the pipeline path ---------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_with_no_options_set_the_pipeline_still_runs_and_is_never_even_read(
     client: TestClient, model: str
@@ -221,6 +228,7 @@ def test_with_no_options_set_the_pipeline_still_runs_and_is_never_even_read(
     assert json.loads(run.calls.last.request.read())["copies"] == 1
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_quantity_rides_a_pipeline_run_as_copies(
     client: TestClient, model: str
@@ -250,6 +258,7 @@ def test_a_remembered_quantity_rides_a_pipeline_run_as_copies(
     assert not queue.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_option_a_run_cannot_carry_slices_with_the_pipelines_own_presets(
     client: TestClient, model: str
@@ -280,6 +289,7 @@ def test_an_option_a_run_cannot_carry_slices_with_the_pipelines_own_presets(
     assert body["pipeline_run_id"] is None
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_printer_class_pipeline_queues_by_target_model(client: TestClient, model: str) -> None:
     configure(client, pipeline_id=4)
@@ -303,6 +313,7 @@ def test_a_printer_class_pipeline_queues_by_target_model(client: TestClient, mod
     assert "printer_id" not in queued
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_printer_override_finds_the_pipelines_target_printer(
     client: TestClient, model: str
@@ -329,6 +340,7 @@ def test_a_per_printer_override_finds_the_pipelines_target_printer(
     assert json.loads(queue.calls.last.request.read())["timelapse"] is True
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_pipeline_with_no_presets_says_so_rather_than_dropping_the_options(
     client: TestClient, model: str
@@ -347,6 +359,7 @@ def test_a_pipeline_with_no_presets_says_so_rather_than_dropping_the_options(
     assert not sliced.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_another_printers_override_does_not_cost_a_pipeline_read(
     client: TestClient, model: str
@@ -369,6 +382,7 @@ def test_another_printers_override_does_not_cost_a_pipeline_read(
     assert not read.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_targeted_printers_override_still_takes_the_queue_path(
     client: TestClient, model: str
@@ -389,17 +403,17 @@ def test_the_targeted_printers_override_still_takes_the_queue_path(
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_models_stored_pipeline_is_ignored_for_the_settings_one(
-    client: TestClient, model: str, paths: DataPaths, settings: Settings
+    client: TestClient, app: FastAPI, model: str
 ) -> None:
     """Final review 3: a per-model pipeline (#86) can no longer be set or seen — its
-    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale entry in an
-    existing ``settings.json`` must not quietly override the one Settings shows. It stays
-    stored, unread.
+    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale stored entry
+    must not quietly override the one Settings shows. It stays stored, unread.
     """
     configure(client, pipeline_id=4)
-    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
+    getattr(app.state, STATE_ATTR).settings_store.set_model_pipeline(model, 9)
     remember(client, "global", {"timelapse": False})
     output_id = make_output(client, model)
     upload_route()
@@ -414,6 +428,7 @@ def test_a_models_stored_pipeline_is_ignored_for_the_settings_one(
     assert not model_pipeline.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_printer_class_pipelines_fanout_survives_a_configured_printer(
     client: TestClient, model: str
@@ -451,6 +466,7 @@ def test_a_printer_class_pipelines_fanout_survives_a_configured_printer(
 # --- the acceptance case ------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_timelapse_turned_off_once_for_the_h2c_sticks_for_every_later_send(
     client: TestClient, model: str

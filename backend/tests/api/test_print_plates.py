@@ -15,10 +15,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from tests.api.conftest import read_stored
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_routes
@@ -38,12 +41,12 @@ def _output_3mf(paths: DataPaths, output_id: str) -> Path:
 # --- plate type ---------------------------------------------------------------------
 
 
-def test_the_plate_type_is_remembered_per_printer(client: TestClient, data_dir: Path) -> None:
+def test_the_plate_type_is_remembered_per_printer(client: TestClient, settings: Settings) -> None:
     """The plate lives on the machine, not on any one model, so the route takes only a
     printer id (#83) — no pipeline resolves it any more, and ``printer_bed_types`` has
     no model key to begin with, so there is nothing for a model to leak into.
 
-    Verified by reading the persisted file back: a store that ignored the printer id
+    Verified by reading the stored rows back: a store that ignored the printer id
     would still echo each PUT's own response correctly while sharing one entry between
     printers, and only a real readback of both keys together catches that.
     """
@@ -52,16 +55,17 @@ def test_the_plate_type_is_remembered_per_printer(client: TestClient, data_dir: 
     other = client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Cool Plate"})
     assert other.json() == {"printer_id": 2, "bed_type": "Cool Plate"}
 
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"1": "Supertack Plate", "2": "Cool Plate"}
 
     cleared = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": None})
     assert cleared.json() == {"printer_id": 1, "bed_type": None}
 
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"2": "Cool Plate"}
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_chosen_plate_type_is_sliced_with_and_queued_on_the_printer(
     client: TestClient, model: str
@@ -87,6 +91,7 @@ def test_a_chosen_plate_type_is_sliced_with_and_queued_on_the_printer(
     assert result["route"] == "slice_queue"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_no_plate_type_slices_on_textured_pei(client: TestClient, model: str) -> None:
     """Textured PEI is the default when the dialog names no plate (spec §4.4)."""
@@ -133,6 +138,7 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
     assert client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail").status_code == 404
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
     client: TestClient, model: str, paths: DataPaths
@@ -154,6 +160,7 @@ def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
     assert body["route"] == "slice_queue"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_all_plates_are_queued_as_one_item_each(
     client: TestClient, model: str, paths: DataPaths
@@ -178,6 +185,7 @@ def test_all_plates_are_queued_as_one_item_each(
     assert body["copies"] == 2
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     client: TestClient, model: str, paths: DataPaths
@@ -217,6 +225,7 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     assert meta["plates"] == [{"plate_id": 1, "queue_item_id": 9, "slice_job_id": 9}]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_every_plate_of_an_all_plates_print_is_recorded(
     client: TestClient, model: str, paths: DataPaths
@@ -297,6 +306,7 @@ def _drop_plates(path: Path) -> None:
             archive.writestr(name, payload)
 
 
+@pytest.mark.requires_postgres
 def test_a_meta_json_without_plates_still_loads(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -361,6 +371,7 @@ def _plan_run(
     ]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_one_plan_maps_the_same_slot_on_every_plate(
     client: TestClient, model: str, paths: DataPaths
@@ -381,6 +392,7 @@ def test_one_plan_maps_the_same_slot_on_every_plate(
     assert not any(warning["kind"] == "no-choice" for warning in body["warnings"])
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_slot_only_a_later_plate_uses_is_refused_before_anything_is_queued(
     client: TestClient, model: str, paths: DataPaths
@@ -396,6 +408,7 @@ def test_a_slot_only_a_later_plate_uses_is_refused_before_anything_is_queued(
     assert queued == []
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_check_sums_what_every_plate_needs(
     client: TestClient, model: str, paths: DataPaths
@@ -409,6 +422,7 @@ def test_the_filament_check_sums_what_every_plate_needs(
     assert "needs 1200 g" in warning["message"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_one_plate_short_of_filament_is_still_warned_about(
     client: TestClient, model: str, paths: DataPaths
@@ -422,6 +436,7 @@ def test_one_plate_short_of_filament_is_still_warned_about(
     assert "needs 1200 g" in warning["message"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_plates_that_fit_the_spool_together_say_nothing_about_it(
     client: TestClient, model: str, paths: DataPaths

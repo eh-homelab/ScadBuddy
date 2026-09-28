@@ -16,6 +16,8 @@ import type { Principal } from '../auth/principal.js'
 import { FailClosedTokenStore, type TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { requestFacts, type RemoteAddress } from '../routes/guard.js'
+import { installResources } from '../resources/server.js'
+import type { ResourceHub } from '../resources/hub.js'
 import { createExternalServer } from '../tools/projections.js'
 import type { Tool, ToolServices } from '../tools/registry.js'
 import { BoundedEventStore } from './eventStore.js'
@@ -23,7 +25,8 @@ import { BoundedEventStore } from './eventStore.js'
 // `/mcp`: the external projection over the MCP Streamable HTTP transport
 // (spec D5, §8.3–§8.4; https://modelcontextprotocol.io/specification/2025-06-18/basic/transports).
 // POST carries requests and is answered as SSE when a call streams progress;
-// GET opens the server→client stream (resource notifications, #264); DELETE
+// GET opens the server→client stream (resource notifications, #264,
+// src/resources/); DELETE
 // ends the session. Every request, on every method, passes the same gates in
 // this order: HTTPS → Origin → auth mode → principal; only then does the MCP
 // SDK's web-standard transport see it. HTTPS and Origin come from the one shared
@@ -52,6 +55,11 @@ export type McpEndpointDeps = {
    * URL are made from it, never from the request's Host.
    */
   publicUrl?: string | undefined
+  /**
+   * The `scadbuddy://` resources and their subscriptions (#264,
+   * src/resources/). Left out, the server offers tools only.
+   */
+  resources?: ResourceHub | undefined
   /** Open sessions across everyone: a backstop (default 200). */
   maxSessions?: number
   /**
@@ -69,6 +77,8 @@ export type McpEndpointDeps = {
 type Session = {
   transport: WebStandardStreamableHTTPServerTransport
   server: McpServer
+  /** Stops this session's resource notifications. */
+  detach: () => void
   principalId: string
   /** What `maxSessionsPerCaller` counts by. */
   callerKey: string
@@ -141,6 +151,7 @@ export function mountMcp(
   async function end(id: string): Promise<void> {
     const session = sessions.get(id)
     sessions.delete(id)
+    session?.detach()
     await session?.server.close().catch(() => {})
   }
 
@@ -228,11 +239,14 @@ export function mountMcp(
     const id = newSessionId()
     const principal = sessionPrincipal(auth.principal, id)
     const server = createExternalServer(deps.tools, deps.services)
+    const { detach } = deps.resources
+      ? installResources(server, { tools: deps.tools, services: deps.services, hub: deps.resources })
+      : { detach: () => {} }
     const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => id,
       eventStore: new BoundedEventStore(),
       onsessioninitialized: (sid) => {
-        sessions.set(sid, { transport, server, principalId: principal.id, callerKey: key, lastSeen: Date.now() })
+        sessions.set(sid, { transport, server, detach, principalId: principal.id, callerKey: key, lastSeen: Date.now() })
       },
       onsessionclosed: (sid) => {
         void end(sid)
@@ -241,7 +255,10 @@ export function mountMcp(
     await server.connect(transport)
     const response = await transport.handleRequest(request, { authInfo: authInfoFor(principal) })
     // Not an initialize request: the transport answered 400 and no session exists.
-    if (transport.sessionId === undefined) await server.close().catch(() => {})
+    if (transport.sessionId === undefined) {
+      detach()
+      await server.close().catch(() => {})
+    }
     return response
   })
 

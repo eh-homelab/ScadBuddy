@@ -8,9 +8,11 @@ Two kinds, listed together:
   the image -- and are read-only here; a template of mine edits them through its
   metadata. A legacy ``presets.json`` (:data:`LEGACY_PRESETS_NAME`) beside the source
   is still read, below ``model.json``.
-- **mine** are the ones saved through the API, one file per template under
-  ``data/presets/`` (:meth:`DataPaths.model_presets`), for built-ins as much as for
-  templates of mine.
+- **mine** are the ones saved through the API, in Postgres (``saved_presets``, #332),
+  for built-ins as much as for templates of mine. The server always has a database
+  (#401); a store built without one reads only a template's own presets, as the
+  bundled-template checks do, and refuses a save
+  (:class:`SavedPresetsUnavailableError`).
 
 A preset holds only the values it sets. Applying one starts from the template's
 defaults, so a default the template changes later still reaches every preset that
@@ -21,14 +23,16 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, TypeVar
 
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 from pydantic import (
     BaseModel,
     Field,
@@ -38,9 +42,9 @@ from pydantic import (
     field_validator,
 )
 
-from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugError, slugify
+from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
 
 logger = logging.getLogger(__name__)
@@ -60,6 +64,9 @@ MAX_PRESET_TAG = 40
 #: never be taken for the id of a saved one (32 hex digits) and a write addressed to
 #: it can be refused.
 TEMPLATE_ID_PREFIX = "template-"
+#: Prefixed to a template's id for its advisory lock's key, so no other lock hashed
+#: from a slug is ever the same one.
+PRESET_LOCK_PREFIX = "scadbuddy-presets:"
 #: The key in ``model.json`` that holds a template's own presets.
 PRESETS_KEY = "presets"
 
@@ -78,8 +85,8 @@ class TooManyPresetsError(ValueError):
     pass
 
 
-class InvalidPresetsFileError(ValueError):
-    """The saved presets file on disk is not one this store wrote."""
+class SavedPresetsUnavailableError(RuntimeError):
+    """Saved presets live in Postgres, and this server has no database."""
 
 
 def _clean_name(name: str) -> str:
@@ -127,16 +134,6 @@ class ParamPresetDuplicate(BaseModel):
     @classmethod
     def _name(cls, name: str) -> str:
         return _clean_name(name)
-
-
-class _StoredPreset(_PresetBody):
-    id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class _StoredPresets(BaseModel):
-    presets: list[_StoredPreset] = Field(default_factory=list)
 
 
 class TemplatePreset(_PresetBody):
@@ -237,42 +234,51 @@ def _same_name(a: str, b: str) -> bool:
     return a.casefold() == b.casefold()
 
 
-@dataclass
-class _TemplateLock:
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    #: Holders and waiters: the entry is dropped when this reaches none.
-    users: int = 0
-
-
 class PresetStore:
     """Reads a template's presets and writes the saved ones.
 
-    One lock per template: every write is a read-modify-write of that template's one
-    small file, and this process is the only writer. Per template, not one for the
-    store, because :meth:`with_names_free` holds it across a git commit, and that must
-    not stall a save on some other template.
+    The saved ones are rows of ``saved_presets``. Every write to a template's presets,
+    saved or its own (:meth:`with_names_free`), runs in a transaction holding that
+    template's advisory lock, so the checks that span both kinds -- one name per
+    preset, the count -- hold across every process sharing the database.
     """
 
-    def __init__(self, paths: DataPaths) -> None:
+    def __init__(
+        self,
+        paths: DataPaths,
+        conninfo: str | None = None,
+        *,
+        pool_size: int = 4,
+        connect_timeout: float = 30.0,
+    ) -> None:
         self.paths = paths
-        #: Only the templates someone holds or waits on: an entry goes with its last
-        #: user, so a slug created and deleted leaves nothing behind.
-        self._locks: dict[str, _TemplateLock] = {}
-        self._locks_lock = threading.Lock()
+        self.connect_timeout = connect_timeout
+        self._pool: ConnectionPool[Connection[DictRow]] | None = (
+            ConnectionPool(
+                conninfo,
+                min_size=1,
+                max_size=pool_size,
+                open=False,
+                connection_class=Connection[DictRow],
+                kwargs={"autocommit": True, "row_factory": dict_row},
+                name="scadbuddy-presets",
+            )
+            if conninfo
+            else None
+        )
 
-    @contextmanager
-    def _lock(self, model_id: str) -> Iterator[None]:
-        with self._locks_lock:
-            entry = self._locks.setdefault(model_id, _TemplateLock())
-            entry.users += 1
-        try:
-            with entry.lock:
-                yield
-        finally:
-            with self._locks_lock:
-                entry.users -= 1
-                if entry.users == 0:
-                    del self._locks[model_id]
+    def open(self) -> None:
+        """Connect, and apply the migrations (the render queue's list, which is the
+        backend's one list) if the queue has not yet."""
+        if self._pool is None:
+            return
+        self._pool.open(wait=True, timeout=self.connect_timeout)
+        with self._pool.connection() as conn:
+            migrate(conn)
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
 
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
@@ -329,40 +335,50 @@ class PresetStore:
             for preset, key in zip(defined, template_preset_keys(defined), strict=True)
         ]
 
-    def _read(self, model_id: str) -> _StoredPresets:
-        path = self.paths.model_presets(model_id)
-        try:
-            return _StoredPresets.model_validate_json(path.read_bytes())
-        except FileNotFoundError:
-            return _StoredPresets()
-        except (ValidationError, RecursionError) as error:
-            # Left where it is, not overwritten: the next save would otherwise
-            # replace every preset in it with the one being saved.
-            raise InvalidPresetsFileError(
-                f"presets/{path.name} is not a valid presets file: {error}"
-            ) from None
-
-    def _write(self, model_id: str, stored: _StoredPresets) -> None:
-        path = self.paths.model_presets(model_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not stored.presets:
-            path.unlink(missing_ok=True)
-            return
-        payload: dict[str, Any] = stored.model_dump(mode="json")
-        write_atomic(path, (json.dumps(payload, indent=2) + "\n").encode())
+    @contextmanager
+    def _locked(self, model_id: str) -> Iterator[Connection[DictRow]]:
+        """A transaction holding ``model_id``'s preset lock, released at its end."""
+        if self._pool is None:
+            raise SavedPresetsUnavailableError(
+                "saved presets need a database: set SCADBUDDY_DATABASE_URL"
+            )
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"{PRESET_LOCK_PREFIX}{model_id}",),
+            )
+            yield conn
 
     @staticmethod
-    def _view(preset: _StoredPreset) -> ParamPreset:
+    def _view(row: DictRow) -> ParamPreset:
         return ParamPreset(
-            id=preset.id,
-            name=preset.name,
-            params=preset.params,
+            id=row["id"],
+            name=row["name"],
+            params=row["params"],
             origin="mine",
-            updated_at=preset.updated_at,
+            updated_at=row["updated_at"],
         )
 
+    @staticmethod
+    def _saved(conn: Connection[DictRow], model_id: str) -> list[DictRow]:
+        return conn.execute(
+            "SELECT * FROM saved_presets WHERE model_id = %s ORDER BY position",
+            (model_id,),
+        ).fetchall()
+
     def saved_presets(self, model_id: str) -> list[ParamPreset]:
-        return [self._view(preset) for preset in self._read(model_id).presets]
+        if self._pool is None:
+            return []
+        with self._pool.connection() as conn:
+            return [self._view(row) for row in self._saved(conn, model_id)]
+
+    def saved_params(self) -> list[dict[str, ParamValue]]:
+        """Every saved preset's values, of every template: references the upload sweep
+        keeps. Raises when the database cannot be read, so that sweep removes nothing."""
+        if self._pool is None:
+            return []
+        with self._pool.connection() as conn:
+            return [row["params"] for row in conn.execute("SELECT params FROM saved_presets")]
 
     def presets(self, model_id: str) -> list[ParamPreset]:
         """The template's presets, then the saved ones, each in their own order."""
@@ -378,76 +394,114 @@ class PresetStore:
     def with_names_free(self, model_id: str, names: Iterable[str], write: Callable[[], T]) -> T:
         """Run ``write`` -- a change to the template's own presets -- once none of
         ``names`` is a saved preset's, ignoring case: the other direction of
-        :meth:`_require_free`. Under the template's lock, as a save is, so a save and the
-        template's list can never each pass their check before the other lands."""
-        with self._lock(model_id):
-            saved = [preset.name for preset in self._read(model_id).presets]
+        :meth:`_require_free`. Under the template's preset lock, as a save is, so a
+        save and the template's list can never each pass their check before the
+        other lands. Without a database there are no saved presets to clash with."""
+        if self._pool is None:
+            return write()
+        with self._locked(model_id) as conn:
+            saved = [row["name"] for row in self._saved(conn, model_id)]
             for name in names:
                 if any(_same_name(name, other) for other in saved):
                     raise PresetExistsError(name)
             return write()
 
-    def _require_free(self, model_id: str, stored: _StoredPresets, name: str, own: str) -> None:
+    def _require_free(self, model_id: str, saved: list[DictRow], name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""
-        taken = [p.name for p in stored.presets if p.id != own]
+        taken = [row["name"] for row in saved if row["id"] != own]
         taken += [p.name for p in self.template_presets(model_id)]
         if any(_same_name(name, other) for other in taken):
             raise PresetExistsError(name)
 
     def create(self, model_id: str, body: ParamPresetCreate) -> ParamPreset:
-        now = datetime.now(UTC)
-        with self._lock(model_id):
-            stored = self._read(model_id)
-            if len(stored.presets) >= MAX_PRESETS:
+        with self._locked(model_id) as conn:
+            saved = self._saved(conn, model_id)
+            if len(saved) >= MAX_PRESETS:
                 raise TooManyPresetsError(f"a template keeps at most {MAX_PRESETS} presets")
-            self._require_free(model_id, stored, body.name, own="")
-            preset = _StoredPreset(
-                id=uuid.uuid4().hex,
-                name=body.name,
-                params=body.params,
-                created_at=now,
-                updated_at=now,
-            )
-            stored.presets.append(preset)
-            self._write(model_id, stored)
-        return self._view(preset)
+            self._require_free(model_id, saved, body.name, own="")
+            now = datetime.now(UTC)
+            row = conn.execute(
+                "INSERT INTO saved_presets (model_id, id, name, params, created_at, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+                (model_id, uuid.uuid4().hex, body.name, Jsonb(body.params), now, now),
+            ).fetchone()
+        assert row is not None
+        return self._view(row)
 
     def update(self, model_id: str, preset_id: str, patch: ParamPresetUpdate) -> ParamPreset:
-        with self._lock(model_id):
-            stored = self._read(model_id)
-            preset = next((p for p in stored.presets if p.id == preset_id), None)
-            if preset is None:
+        with self._locked(model_id) as conn:
+            saved = self._saved(conn, model_id)
+            current = next((row for row in saved if row["id"] == preset_id), None)
+            if current is None:
                 raise PresetNotFoundError(preset_id)
             if patch.name is not None:
-                self._require_free(model_id, stored, patch.name, own=preset_id)
-                preset.name = patch.name
-            if patch.params is not None:
-                preset.params = patch.params
-            preset.updated_at = datetime.now(UTC)
-            self._write(model_id, stored)
-        return self._view(preset)
+                self._require_free(model_id, saved, patch.name, own=preset_id)
+            row = conn.execute(
+                "UPDATE saved_presets SET name = %s, params = %s, updated_at = %s"
+                " WHERE model_id = %s AND id = %s RETURNING *",
+                (
+                    patch.name if patch.name is not None else current["name"],
+                    Jsonb(patch.params if patch.params is not None else current["params"]),
+                    datetime.now(UTC),
+                    model_id,
+                    preset_id,
+                ),
+            ).fetchone()
+        assert row is not None
+        return self._view(row)
 
     def delete(self, model_id: str, preset_id: str) -> None:
-        with self._lock(model_id):
-            stored = self._read(model_id)
-            kept = [p for p in stored.presets if p.id != preset_id]
-            if len(kept) == len(stored.presets):
+        with self._locked(model_id) as conn:
+            deleted = conn.execute(
+                "DELETE FROM saved_presets WHERE model_id = %s AND id = %s",
+                (model_id, preset_id),
+            )
+            if deleted.rowcount == 0:
                 raise PresetNotFoundError(preset_id)
-            self._write(model_id, _StoredPresets(presets=kept))
 
     def copy(self, source_id: str, target_id: str) -> None:
         """Give a duplicate the presets saved on the template it was copied from.
 
         The duplicate's own template presets came with its directory; these are the
-        ones kept beside it. Fresh ids, so the two sets are edited independently.
+        ones kept beside it. Fresh ids, so the two sets are edited independently, in
+        the original's order. Nothing to copy without a database.
         """
-        # Both, in a fixed order, so two copies the other way round cannot deadlock.
-        first, second = sorted((source_id, target_id))
-        with self._lock(first), self._lock(second):
-            source = self._read(source_id)
-            if not source.presets:
-                return
-            copies = [
-                preset.model_copy(update={"id": uuid.uuid4().hex}) for preset in source.presets
+        if self._pool is None:
+            return
+        with self._locked(target_id) as conn:
+            for row in self._saved(conn, source_id):
+                conn.execute(
+                    "INSERT INTO saved_presets"
+                    " (model_id, id, name, params, created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        target_id,
+                        uuid.uuid4().hex,
+                        row["name"],
+                        Jsonb(row["params"]),
+                        row["created_at"],
+                        row["updated_at"],
+                    ),
+                )
+
+    def forget(self, model_id: str) -> None:
+        """Drop a template's saved presets: it is gone, or its slug is being reused."""
+        if self._pool is None:
+            return
+        with self._locked(model_id) as conn:
+            conn.execute("DELETE FROM saved_presets WHERE model_id = %s", (model_id,))
+
+    def sweep_orphans(self, is_live: Callable[[str], bool]) -> list[str]:
+        """Forget the saved presets of every template ``is_live`` says is gone: a
+        delete's own cleanup can fail, as the catalogue's orphan sweep explains."""
+        if self._pool is None:
+            return []
+        with self._pool.connection() as conn:
+            model_ids = [
+                row["model_id"]
+                for row in conn.execute("SELECT DISTINCT model_id FROM saved_presets")
             ]
-            self._write(target_id, _StoredPresets(presets=copies))
+        gone = [model_id for model_id in sorted(model_ids) if not is_live(model_id)]
+        for model_id in gone:
+            self.forget(model_id)
+        return gone

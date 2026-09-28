@@ -346,6 +346,9 @@ def test_a_built_in_that_fails_to_sync_does_not_stop_the_boot(
     # A previous boot's mirror of `tag`, which this one cannot clear.
     (paths.builtins / "tag").mkdir(parents=True)
     (paths.builtins / "tag" / "model.scad").write_text("// tag v1\n", encoding="utf-8")
+    # Written in the same clock tick as the seed's v2, the same-size v1 can share its
+    # mtime, and the sync's size-and-mtime check then skips `tag` as unchanged (#499).
+    os.utime(paths.builtins / "tag" / "model.scad", (0, 0))
     real_replace = os.replace
 
     def fail_on_tag(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:

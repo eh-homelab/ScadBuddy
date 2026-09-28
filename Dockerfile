@@ -28,10 +28,14 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
-FROM openscad/openscad:dev AS base
+# Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
+# cannot move under a build. OpenSCAD's only stable release (2021.01) has no
+# Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
+# OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
+FROM openscad/openscad:dev.2026-09-28@sha256:992508950d86ed5ea6a6ed19934e7d65aa6b1959df69823666f575e9c1579b49 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
-# a rolling nightly on Debian trixie, so a pinned version here would break the
+# a nightly on Debian trixie, so a pinned version here would break the
 # build the first time trixie moves, which is the opposite of reproducibility.
 #
 # Fonts are runtime dependencies, not niceties — `text()` in a .scad silently
@@ -325,11 +329,11 @@ FROM base AS app
 # The assertion is deliberate and it is meant to break the build. Every
 # structural fact the render pipeline depends on (the .param schema fields, the
 # basematerials + per-triangle `p1` index, the `displaycolor` alpha quirk) was
-# measured against one nightly. `:dev` is a rolling tag, so a silent OpenSCAD
-# swap would change render output with nothing anywhere reporting it. When this
-# fires, re-verify §3 of the design spec against the new build and bump the
-# default below in the same commit.
-ARG OPENSCAD_VERSION=2026.09.23
+# measured against one nightly. The base is pinned by digest, so this should
+# never fire; it stays as the check that the tag, digest and version agree. When
+# bumping the base, re-verify §3 of the design spec against the new build and
+# change the FROM line and the default below in the same commit.
+ARG OPENSCAD_VERSION=2026.09.28
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
@@ -474,7 +478,9 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # 8 MiB ceiling `api/limits.py` puts on a text body, because the LSP bridge carries a
 # whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
 # frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
-CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
+# A factory, not a module-level app: building one reads Settings, which refuses to
+# start without SCADBUDDY_DATABASE_URL (#401), and importing the module must not.
+CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.

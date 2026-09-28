@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
@@ -340,7 +341,9 @@ def from_plates(
     )
 
 
-async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgress | None:
+async def progress_for(
+    client: BambuddyClient, meta: OutputMeta, *, uploads: BambuddyUploadStore | None = None
+) -> PrintProgress | None:
     """Read the progress of whatever this output last printed, or ``None``.
 
     ``None`` means the output has never been printed — not an error, and not something
@@ -349,6 +352,10 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
 
     A read that 404s is reported as such rather than swallowed: an id ScadBuddy recorded
     and Bambuddy no longer has is a real thing to tell the user, not a blank panel.
+
+    With ``uploads``, a pipeline run's sliced file is recorded against its source copy
+    once the run reports one (#316). The run's 202 carries none — the slice happens in
+    Bambuddy's background task — so this read is the first place it can be seen.
     """
     route = meta.print_route
     if route is None:
@@ -362,7 +369,21 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
     if route == "pipeline":
         if meta.pipeline_run_id is None:
             return None
-        return from_run(await client.pipeline_run(meta.pipeline_run_id), bambuddy_url=url)
+        run = await client.pipeline_run(meta.pipeline_run_id)
+        if (
+            uploads is not None
+            and run.sliced_library_file_id is not None
+            and run.source_library_file_id is not None
+        ):
+            await uploads.record_sliced(
+                meta.id,
+                run.source_library_file_id,
+                SlicedCopy(
+                    id=run.sliced_library_file_id,
+                    preset_key=str(run.pipeline_id) if run.pipeline_id is not None else None,
+                ),
+            )
+        return from_run(run, bambuddy_url=url)
 
     if route == "slice_queue":
         if len(meta.plates) > 1:
@@ -406,11 +427,12 @@ OBSERVED_OUTPUTS = 256
 class ProgressObserver:
     """Turns the progress reads the backend makes into ``print.*`` events.
 
-    Until the per-print watcher (#268) exists, the only time the backend sees a
-    print move is when someone asks: the progress route, a send or a run. Each
-    read is compared with the last one seen for that output, so a poll that finds
-    nothing new publishes nothing, and ``print.settled`` is published once, on the
-    read that first finds the print settled.
+    Its reads come from the per-print watcher (#268, ``bambuddy/watcher.py``) and
+    from the progress route, which the UI still calls when it subscribes and
+    while its realtime socket is down. Each read is compared with the last one seen
+    for that output, so a read that finds nothing new publishes nothing, and
+    ``print.settled`` is published once, on the read that first finds the print
+    settled.
     """
 
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
@@ -426,9 +448,10 @@ class ProgressObserver:
             self._seen.pop(meta.id, None)
         emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
 
-    def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> None:
+    def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> bool:
+        """Publish what changed since the last read of ``meta``; True if anything did."""
         if progress is None:
-            return
+            return False
         fingerprint = progress.model_dump_json()
         # Compare, decide and record under one hold of the lock, so two reads of the
         # same output racing each other (two tabs polling) cannot both decide they are
@@ -446,3 +469,4 @@ class ProgressObserver:
                     kinds.append("print.settled")
         for kind in kinds:
             emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))
+        return bool(kinds)

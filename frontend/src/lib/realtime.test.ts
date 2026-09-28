@@ -1,4 +1,3 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RealtimeClient, type RealtimeSignal } from './realtime'
 
@@ -235,60 +234,5 @@ describe('RealtimeClient', () => {
     last().onmessage?.({ data: '{nope' })
     last().deliver(event('model.created', ['models']))
     expect(seen).toHaveLength(1)
-  })
-})
-
-describe('useLiveQuery', () => {
-  beforeEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('reads once on mount and again on each signal, coalescing a burst', async () => {
-    const { getRealtime, resetRealtime, useLiveQuery } = await import('./realtime')
-    resetRealtime()
-    const realtime = getRealtime()
-    const signals: ((signal: RealtimeSignal) => void)[] = []
-    vi.spyOn(realtime, 'subscribe').mockImplementation((_topic, listener) => {
-      signals.push(listener)
-      return () => {}
-    })
-    let reads = 0
-    const { result } = renderHook(() =>
-      useLiveQuery('k', () => Promise.resolve(++reads), ['models']),
-    )
-    await waitFor(() => expect(result.current.data).toBe(1))
-    act(() => {
-      signals[0]?.('resync')
-      signals[0]?.('resync')
-      signals[0]?.('resync')
-    })
-    await waitFor(() => expect(result.current.data).toBe(2))
-    expect(reads).toBe(2)
-    resetRealtime()
-  })
-
-  it('never lets an older read overwrite a newer one', async () => {
-    const { getRealtime, resetRealtime, useLiveQuery } = await import('./realtime')
-    resetRealtime()
-    const realtime = getRealtime()
-    let signal: ((signal: RealtimeSignal) => void) | undefined
-    vi.spyOn(realtime, 'subscribe').mockImplementation((_topic, listener) => {
-      signal = listener
-      return () => {}
-    })
-    const resolvers: ((value: string) => void)[] = []
-    const { result } = renderHook(() =>
-      useLiveQuery('k', () => new Promise<string>((resolve) => resolvers.push(resolve)), ['m']),
-    )
-    await waitFor(() => expect(resolvers).toHaveLength(1))
-    act(() => signal?.('resync'))
-    await waitFor(() => expect(resolvers).toHaveLength(2))
-    await act(async () => {
-      resolvers[1]?.('new')
-      await Promise.resolve()
-      resolvers[0]?.('old')
-    })
-    expect(result.current.data).toBe('new')
-    resetRealtime()
   })
 })

@@ -9,11 +9,18 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
+import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
+import { approvalHashKey } from './approvals/service.js'
+import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -22,6 +29,8 @@ import { PendingActionStore } from './tools/pending.js'
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
 // spec §9 keeps the environment surface to the infrastructure variables in config.ts.
 const PORT = 8081
+/** How often approvals nobody is waiting on are expired (approvals/service.ts). */
+const APPROVAL_SWEEP_MS = 30_000
 
 const config = loadConfig()
 
@@ -67,6 +76,13 @@ const database = config.databaseUrl
               (failed ? `; ${failed} could not be opened with the previous key and were left as they are` : ''),
           )
         }
+        const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (plugins.rewrapped || plugins.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
+              (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -81,19 +97,68 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
+const plugins = database ? new PluginStore(database.sql) : undefined
+// Plugin traffic (connection tests, and each session turn's enabled plugins)
+// goes through this loopback forwarder (plugins/forwarder.ts).
+const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
+
+// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
+// of its own, retried in the background, feeding MCP resource subscriptions.
+const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+events?.start()
+const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
+
+// Sessions (#300) and their approvals (#258). Nothing starts a session over
+// HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
+// expiry sweep are live so that approvals left pending by a restart can be
+// seen, decided or expired.
+const sessions =
+  database && credentials
+    ? new SessionManager({
+        sql: database.sql,
+        paths,
+        ...(settings ? { settings } : {}),
+        // Input hashes are HMACs under a key derived from the KEK, so they
+        // compare across restarts (approvals/service.ts BINDING).
+        ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Enabled plugins (#297), per turn, through the loopback forwarder.
+        ...(plugins
+          ? {
+              remotePlugins: async () =>
+                forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
+            }
+          : {}),
+        credential: async () => {
+          if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
+          const credential = await credentials.reveal(kek.kek)
+          if (!credential) throw new Error('no Claude credential is configured')
+          return credential
+        },
+      })
+    : undefined
+const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+})
 
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  plugins,
+  pluginForwarder,
+  tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies),
+  ...(sessions ? { approvals: sessions.approvals } : {}),
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -103,9 +168,12 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
+    resources,
     services: {
       backend,
-      pending: new PendingActionStore(),
+      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
+      // database, an in-memory store whose actions are never confirmed.
+      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
@@ -113,7 +181,7 @@ const app = createApp({
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
-    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
+    tokens,
     // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
     // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
     // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
@@ -139,12 +207,21 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 // then exit: non-zero when the drain timed out and requests were cut.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
+    stopSweeper?.()
+    // Running turns stop; their pending approvals stay pending (approvals/service.ts).
+    sessions?.abortAll()
     void shutdown({
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
-      closeSessions: () => app.close(),
-      closeServer: () =>
-        new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+      closeSessions: async () => {
+        await app.close()
+        resources.close()
+        await events?.close()
+      },
+      closeServer: async () => {
+        await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+        await pluginForwarder.close()
+      },
       closeDatabase: database ? () => database.close() : undefined,
       timeoutMs: 10_000,
     }).then((result) => {

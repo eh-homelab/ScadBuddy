@@ -119,11 +119,21 @@ def _skip_without_postgres(request: pytest.FixtureRequest) -> None:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
 
 
+#: For a `Settings` whose app never starts: the database URL is required (#401), but
+#: nothing is dialled until the lifespan opens the stores.
+UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
+
+
 @pytest.fixture
 def pg_conninfo() -> Iterator[str]:
-    """A throwaway schema on the test Postgres, dropped afterwards."""
+    """A throwaway schema on the test Postgres, dropped afterwards.
+
+    Skips the test without one: every test that starts the app needs it, since the
+    settings live in Postgres (#401).
+    """
     url = postgres_url()
-    assert url is not None
+    if url is None:
+        pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
     schema = f"test_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute(f'CREATE SCHEMA "{schema}"'.encode())

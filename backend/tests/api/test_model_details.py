@@ -21,7 +21,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 SLUG = "widget"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -68,7 +68,7 @@ def _generate(client: TestClient, paths: DataPaths, slug: str, cover: bytes | No
     ).json()["job_id"]
     wait_for_job(client, job_id)
     if cover is not None:
-        with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+        with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
             archive.writestr(PLATE_THUMBNAIL, cover)
     response = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text
@@ -216,6 +216,7 @@ def test_a_stale_copy_gets_the_image(client: TestClient) -> None:
     assert (response.status_code, response.content) == (200, PNG_BYTES)
 
 
+@pytest.mark.requires_postgres
 def test_the_etag_follows_every_change_of_image(client: TestClient, paths: DataPaths) -> None:
     _create(client)
     first = _generate(client, paths, SLUG, COVER_ONE)
@@ -537,6 +538,7 @@ def test_a_cover_scan_in_flight_across_a_model_delete_is_not_stored(
     assert not store.remembers_plate_cover(SLUG)
 
 
+@pytest.mark.requires_postgres
 def test_the_record_names_the_output_behind_the_fallback(
     client: TestClient, paths: DataPaths
 ) -> None:
@@ -575,6 +577,7 @@ def test_a_thumbnail_of_its_own_names_no_output(client: TestClient, paths: DataP
     assert (record["thumbnail_source"], record["thumbnail_output_id"]) == ("model", None)
 
 
+@pytest.mark.requires_postgres
 def test_deleting_the_covering_output_falls_back_to_the_next(
     client: TestClient, paths: DataPaths
 ) -> None:
@@ -588,6 +591,7 @@ def test_deleting_the_covering_output_falls_back_to_the_next(
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_TWO
 
 
+@pytest.mark.requires_postgres
 def test_deleting_the_only_covering_output_leaves_no_thumbnail(
     client: TestClient, paths: DataPaths
 ) -> None:

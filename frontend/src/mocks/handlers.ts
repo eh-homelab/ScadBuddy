@@ -11,6 +11,7 @@ import type {
   FontFamily,
   Job,
   CatalogueLibrary,
+  MediaView,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -42,7 +43,8 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { realtimeHandler } from './realtime'
+import { emitRealtime, realtimeHandler } from './realtime'
+import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -57,10 +59,6 @@ import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
-
-interface MockJob extends Job {
-  polls: number
-}
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -96,7 +94,7 @@ const state = {
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
-  jobs: new Map<string, MockJob>(),
+  jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
@@ -117,6 +115,8 @@ const state = {
   mergeFiles: {} as Record<string, MergeFiles>,
   /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
   plates: {} as Record<string, NonNullable<Job['plates']>>,
+  /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
+  mediaFiles: new Map<string, ArrayBuffer>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -126,6 +126,68 @@ const state = {
    * it and a later read has it (`landPreviews`).
    */
   pendingPreviews: new Set<string>(),
+}
+
+/** Milliseconds a mock render spends pending, then running. */
+export const MOCK_JOB_STEP_MS = 15
+
+/**
+ * #267 — a mock render moves on by itself, as a real one does, and announces each
+ * state over the mock socket (`emitRealtime`), as `render/jobs.py` publishes it.
+ * `GET /jobs/:id` only reports.
+ */
+function runJob(jobId: string): void {
+  const announce = (kind: string) => {
+    const job = state.jobs.get(jobId)
+    if (job) emitRealtime(kind, [`job:${jobId}`], { job_id: jobId, slug: job.slug })
+  }
+  // Ids restart at every resetMockState, so a timer left by an earlier test checks
+  // it is still acting on the job it was started for.
+  const started = state.jobs.get(jobId)
+  setTimeout(() => {
+    const job = state.jobs.get(jobId)
+    if (!job || job !== started || job.status !== 'pending') return
+    job.status = 'running'
+    job.log_tail = ['Compiling design (CSG Tree generation)...']
+    announce('job.running')
+    emitRealtime('job.progress', [`job:${jobId}`], { job_id: jobId, slug: job.slug, stage: 'render' })
+    setTimeout(() => {
+      if (state.jobs.get(jobId) !== job || job.status !== 'running') return
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = fixtures.OPENSCAD_LOG_TAIL
+        announce('job.failed')
+        return
+      }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = [
+          "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
+          'Current top level object is empty.',
+        ]
+        job.warnings = fixtures.FAILED_JOB_WARNINGS
+        announce('job.failed')
+        return
+      }
+      job.status = 'done'
+      job.bbox_mm = bboxOf(job.params ?? {})
+      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.plates = state.plates[job.slug] ?? []
+      job.preview_url = `${base}/jobs/${job.id}/preview.glb`
+      job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+      job.notes =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
+          ? fixtures.TEMPLATE_NOTES
+          : []
+      job.warnings =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME
+          ? fixtures.JOB_WARNINGS
+          : []
+      announce('job.done')
+    }, MOCK_JOB_STEP_MS)
+  }, MOCK_JOB_STEP_MS)
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -155,10 +217,12 @@ export function resetMockState(): void {
   state.assets.clear()
   state.mergeFiles = {}
   state.plates = {}
+  state.mediaFiles.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
+  resetMcpTokens()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -211,6 +275,16 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
+/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+export function setMockUploadLimit(bytes: number): void {
+  state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
+export function setMockMedia(slug: string, media: MediaView[]): void {
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
 }
@@ -395,6 +469,29 @@ function nextNumber(): number {
   return 8800 + state.seq
 }
 
+/**
+ * #316 — the output's library copy in `folderId` (the inbox when null), recording a new
+ * one when there is none. The mock has one target, so the folder alone is the key.
+ */
+function copyIn(output: Output, folderId: number | null): number {
+  const folder = folderId ?? state.settings.library_folder_id ?? null
+  const existing = (output.library_files ?? []).find((copy) => copy.folder_id === folder)
+  if (existing) return existing.id
+  const id = nextNumber()
+  state.outputs = state.outputs.map((o) =>
+    o.id === output.id
+      ? {
+          ...o,
+          library_files: [
+            ...(o.library_files ?? []),
+            { id, folder_id: folder, target_key: 'Bambu Lab H2C', sliced: [] },
+          ],
+        }
+      : o,
+  )
+  return id
+}
+
 function num(params: Record<string, ParamValue>, key: string, fallback: number): number {
   const value = params[key]
   return typeof value === 'number' ? value : fallback
@@ -442,11 +539,6 @@ function plateFor(model: string | null): Plate | undefined {
 
 function round(value: number): number {
   return Math.round(value * 10) / 10
-}
-
-function jobView(job: MockJob): Job {
-  const { polls: _polls, ...rest } = job
-  return rest
 }
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -569,6 +661,129 @@ function firstName(...candidates: (string | undefined)[]): string {
     if (candidate?.trim()) return candidate.trim()
   }
   return ''
+}
+
+// ── #274: media, as `library/media.py` and `api/media.py` hold it ────────────
+
+const MiB = 1024 * 1024
+/** `MAX_IMAGE_BYTES`: images are committed to the template's history. */
+const MAX_MEDIA_IMAGE_BYTES = 10 * MiB
+const MEDIA_ACCEPTED = 'a PNG, JPEG or WebP image, or an MP4 or WebM video'
+const IMMUTABLE_CACHE_CONTROL = 'private, max-age=31536000, immutable'
+
+interface SniffedMedia {
+  kind: MediaView['kind']
+  extension: string
+  contentType: string
+}
+
+/** `sniff_kind`: the type comes from the bytes, never the name. */
+function sniffMedia(bytes: Uint8Array): SniffedMedia | undefined {
+  const at = (offset: number, magic: number[]) => magic.every((byte, i) => bytes[offset + i] === byte)
+  const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0))
+  if (at(0, PNG_MAGIC)) return { kind: 'image', extension: 'png', contentType: 'image/png' }
+  if (at(0, [0xff, 0xd8, 0xff])) return { kind: 'image', extension: 'jpg', contentType: 'image/jpeg' }
+  if (at(0, ascii('RIFF')) && at(8, ascii('WEBP'))) {
+    return { kind: 'image', extension: 'webp', contentType: 'image/webp' }
+  }
+  if (at(4, ascii('ftyp'))) return { kind: 'video', extension: 'mp4', contentType: 'video/mp4' }
+  if (at(0, [0x1a, 0x45, 0xdf, 0xa3])) {
+    return { kind: 'video', extension: 'webm', contentType: 'video/webm' }
+  }
+  return undefined
+}
+
+function legacyItem(): MediaView {
+  return {
+    id: 'thumbnail',
+    file: 'thumbnail.png',
+    kind: 'image',
+    caption: '',
+    poster: null,
+    missing: false,
+    content_type: 'image/png',
+    size: 67,
+  }
+}
+
+/** A model's media: a model with no `media` lists its own thumbnail as the legacy item. */
+function mediaOf(model: ModelSummary): MediaView[] {
+  return model.media ?? (model.thumbnail_source === 'model' ? [legacyItem()] : [])
+}
+
+/** The first write gives the legacy item an id of its own, as `_edit_media` does. */
+function converted(media: MediaView[]): MediaView[] {
+  return media.map((item) => {
+    if (item.id !== 'thumbnail') return item
+    const id = nextMediaId()
+    return { ...item, id, file: `${id}.png` }
+  })
+}
+
+function nextMediaId(): string {
+  return nextHexId().slice(-12)
+}
+
+/** Where the catalogue thumbnail comes from once the media is `media` (`_cover`). */
+function coverOf(slug: string, media: MediaView[]): Partial<ModelSummary> {
+  const cover = media.some((item) => !item.missing && (item.kind === 'image' || item.poster))
+  if (cover) {
+    return {
+      has_thumbnail: true,
+      thumbnail_source: 'model',
+      thumbnail_output_id: null,
+      thumbnail_preview_id: null,
+    }
+  }
+  const first = state.outputs
+    .filter((o) => o.slug === slug)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+  return {
+    has_thumbnail: first !== undefined,
+    thumbnail_source: first ? 'output' : null,
+    thumbnail_output_id: first?.id ?? null,
+  }
+}
+
+type ChangedFiles = NonNullable<ModelVersion['files']>
+
+function writeMedia(
+  slug: string,
+  message: string,
+  files: ChangedFiles,
+  media: MediaView[],
+): ModelSummary | null {
+  return reviseModel(slug, message, [{ status: 'M', path: 'model.json' }, ...files], {
+    media,
+    ...coverOf(slug, media),
+  })
+}
+
+/** The model a media write is for, or the problem the backend answers first. */
+function mediaTarget(slug: string, write: boolean): ModelSummary | Response {
+  const refused = write ? refuseBuiltin(slug) : undefined
+  if (refused) return refused
+  const model = state.models.find((m) => m.slug === slug)
+  return model ?? problem(404, 'Not Found', `no model named '${slug}'`)
+}
+
+function noMediaItem(slug: string, id: string) {
+  return problem(404, 'Not Found', `'${slug}' has no media item '${id}'`)
+}
+
+function mediaBytes(slug: string, file: string, kind: MediaView['kind']): ArrayBuffer {
+  const stored = state.mediaFiles.get(`${slug}/${file}`)
+  if (stored) return stored
+  const base64 = kind === 'video' ? fixtures.MEDIA_MP4_BASE64 : fixtures.MEDIA_PNG_BASE64
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer
+}
+
+/** A multipart file part as `_staged` reads it: absent, or sent empty, is none. */
+async function stagedPart(form: FormData, name: string) {
+  const part = form.get(name)
+  if (part === null || typeof part === 'string' || part.size === 0) return undefined
+  const bytes = await part.arrayBuffer()
+  return { bytes, size: bytes.byteLength, sniffed: sniffMedia(new Uint8Array(bytes.slice(0, 64))) }
 }
 
 /**
@@ -730,6 +945,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's routes (#251); the rest of this list is the backend.
+  ...mcpTokenHandlers,
   ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
@@ -966,6 +1183,10 @@ export const handlers = [
       },
     }
     state.models = [copy, ...state.models]
+    // #274: `duplicate` copies `media/`, videos (which are not in git) included.
+    for (const [key, bytes] of [...state.mediaFiles]) {
+      if (key.startsWith(`${id}/`)) state.mediaFiles.set(`${slug}/${key.slice(id.length + 1)}`, bytes)
+    }
     renderPreviewLater(copy)
     const schema = state.schemas[id]
     if (schema) state.schemas[slug] = { ...schema, title: body.name }
@@ -1228,6 +1449,154 @@ export const handlers = [
     return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
   }),
 
+  // #274 — a template's images and videos (`api/media.py`).
+  http.get(`${base}/models/:slug/media/:id`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug, false)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item || item.missing) return noMediaItem(slug, id)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, item.file, item.kind), {
+      headers: {
+        'Content-Type': item.content_type,
+        'Cache-Control': item.id === 'thumbnail' ? 'no-cache' : IMMUTABLE_CACHE_CONTROL,
+      },
+    })
+  }),
+
+  http.get(`${base}/models/:slug/media/:id/poster`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug, false)
+    if (model instanceof Response) return model
+    const item = mediaOf(model).find((entry) => entry.id === id)
+    if (!item?.poster) return problem(404, 'Not Found', `'${slug}' has no poster for '${id}'`)
+    return HttpResponse.arrayBuffer(mediaBytes(slug, item.poster, 'image'), {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': IMMUTABLE_CACHE_CONTROL },
+    })
+  }),
+
+  http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = mediaTarget(slug, true)
+    if (model instanceof Response) return model
+    const form = await request.formData()
+    const upload = await stagedPart(form, 'file')
+    if (!upload) return problem(422, 'Unprocessable Content', 'the upload has no `file` part')
+    const limit = state.settings.media_upload_max_bytes
+    if (upload.size > limit) {
+      return problem(
+        413,
+        'Content Too Large',
+        `a media upload is at most ${limit / MiB} MB (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES), and this one is larger`,
+      )
+    }
+    const poster = await stagedPart(form, 'poster')
+    for (const [part, what] of [[upload, 'the upload'], [poster, 'the poster']] as const) {
+      if (part && !part.sniffed) {
+        return problem(415, 'Unsupported Media Type', `${what} is not ${MEDIA_ACCEPTED}`)
+      }
+      if (part?.sniffed?.kind === 'image' && part.size > MAX_MEDIA_IMAGE_BYTES) {
+        return problem(
+          413,
+          'Content Too Large',
+          'an image is at most 10 MB: images are kept in the template\'s history',
+        )
+      }
+    }
+    const kind = upload.sniffed!
+    if (poster && kind.kind !== 'video') {
+      return problem(422, 'Unprocessable Content', 'only a video takes a poster')
+    }
+    if (poster && poster.sniffed!.kind !== 'image') {
+      return problem(415, 'Unsupported Media Type', 'the poster is not a PNG, JPEG or WebP image')
+    }
+    const id = nextMediaId()
+    const item: MediaView = {
+      id,
+      file: `${id}.${kind.extension}`,
+      kind: kind.kind,
+      caption: formText(form, 'caption') ?? '',
+      poster: poster ? `${id}-poster.${poster.sniffed!.extension}` : null,
+      missing: false,
+      content_type: kind.contentType,
+      size: upload.size,
+    }
+    state.mediaFiles.set(`${slug}/${item.file}`, upload.bytes)
+    if (poster && item.poster) state.mediaFiles.set(`${slug}/${item.poster}`, poster.bytes)
+    // Videos are not committed (the models' `.gitignore`); images and posters are.
+    const files: ChangedFiles = [
+      ...(item.kind === 'image' ? [{ status: 'A', path: `media/${item.file}` }] : []),
+      ...(item.poster ? [{ status: 'A', path: `media/${item.poster}` }] : []),
+    ]
+    const updated = writeMedia(slug, `Add media to ${slug}`, files, [
+      ...converted(mediaOf(model)),
+      item,
+    ])
+    await delay(120)
+    return updated ? HttpResponse.json(updated) : problem(404, 'Not Found')
+  }),
+
+  http.patch(`${base}/models/:slug/media/:id`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug, true)
+    if (model instanceof Response) return model
+    const { caption } = (await request.json()) as { caption: string }
+    const media = mediaOf(model)
+    if (!media.some((item) => item.id === id)) return noMediaItem(slug, id)
+    const updated = writeMedia(
+      slug,
+      `Caption ${slug} media`,
+      [],
+      converted(media.map((item) => (item.id === id ? { ...item, caption } : item))),
+    )
+    return HttpResponse.json(updated)
+  }),
+
+  http.put(`${base}/models/:slug/media/order`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = mediaTarget(slug, true)
+    if (model instanceof Response) return model
+    const { ids } = (await request.json()) as { ids: string[] }
+    const media = mediaOf(model)
+    const byId = new Map(media.map((item) => [item.id, item]))
+    const permutation =
+      ids.length === media.length && new Set(ids).size === ids.length && ids.every((id) => byId.has(id))
+    if (!permutation) {
+      return problem(422, 'Unprocessable Content', 'the order must name every media item exactly once')
+    }
+    const updated = writeMedia(
+      slug,
+      `Reorder ${slug} media`,
+      [],
+      converted(ids.map((id) => byId.get(id)!)),
+    )
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/media/:id`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    const model = mediaTarget(slug, true)
+    if (model instanceof Response) return model
+    const media = mediaOf(model)
+    const gone = media.find((item) => item.id === id)
+    if (!gone) return noMediaItem(slug, id)
+    const files: ChangedFiles = [
+      ...(gone.kind === 'image' ? [{ status: 'D', path: gone.id === 'thumbnail' ? gone.file : `media/${gone.file}` }] : []),
+      ...(gone.poster ? [{ status: 'D', path: `media/${gone.poster}` }] : []),
+    ]
+    const updated = writeMedia(
+      slug,
+      `Remove media from ${slug}`,
+      files,
+      converted(media.filter((item) => item.id !== id)),
+    )
+    return HttpResponse.json(updated)
+  }),
+
   // Multipart with a `file` part, like the output thumbnail PUT.
   http.put(`${base}/models/:slug/thumbnail`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -1240,7 +1609,14 @@ export const handlers = [
     }
     const notPng = await thumbnailRefusal(upload as File)
     if (notPng) return notPng
-    const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
+    const model = state.models.find((m) => m.slug === slug)!
+    const had = model.thumbnail_source === 'model'
+    // #274: with media, the PNG is the cover: it replaces a first image, or goes in
+    // front of a first video, under a new id (`write_thumbnail`).
+    const media = mediaOf(model)
+    const legacy = media.length === 0 || (media.length === 1 && media[0]!.id === 'thumbnail')
+    const id = nextMediaId()
+    const cover: MediaView = { ...legacyItem(), id, file: `${id}.png` }
     const updated = reviseModel(
       slug,
       `Set ${slug} thumbnail`,
@@ -1250,6 +1626,9 @@ export const handlers = [
         has_thumbnail: true,
         thumbnail_source: 'model',
         thumbnail_output_id: null,
+        media: legacy
+          ? [legacyItem()]
+          : [cover, ...converted(media[0]!.kind === 'image' ? media.slice(1) : media)],
         thumbnail_preview_id: null,
       },
     )
@@ -1262,8 +1641,15 @@ export const handlers = [
     if (refused) return refused
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Model not found')
-    if (model.thumbnail_source !== 'model') {
+    const media = mediaOf(model)
+    if (model.thumbnail_source !== 'model' || media[0]?.kind !== 'image') {
       return problem(404, 'Not Found', `'${slug}' has no thumbnail of its own to remove`)
+    }
+    // #274: with more media, the next item may be the cover now (`delete_thumbnail`).
+    if (media.length > 1) {
+      return HttpResponse.json(
+        writeMedia(slug, `Remove ${slug} thumbnail`, [], converted(media.slice(1))),
+      )
     }
     // The fixtures' generated models fall back to their first output's plate image.
     // Which is the first output: the one whose plate image the backend serves.
@@ -1273,6 +1659,7 @@ export const handlers = [
     const updated = reviseModel(slug, `Remove ${slug} thumbnail`, [
       { status: 'D', path: 'thumbnail.png' },
     ], {
+      media: [],
       has_thumbnail: first !== undefined,
       thumbnail_source: first ? 'output' : null,
       thumbnail_output_id: first?.id ?? null,
@@ -1535,8 +1922,8 @@ export const handlers = [
       created_at: new Date().toISOString(),
       params: body.params,
       log_tail: [],
-      polls: 0,
     })
+    runJob(jobId)
     return HttpResponse.json(
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
@@ -1597,43 +1984,7 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
-
-    job.polls += 1
-    if (job.polls === 1) {
-      job.status = 'running'
-      job.log_tail = ['Compiling design (CSG Tree generation)...']
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = fixtures.OPENSCAD_LOG_TAIL
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = [
-        "ERROR: Can't open file '/data/models/name-keychain/pic.svg', import() at line 12",
-        'Current top level object is empty.',
-      ]
-      job.warnings = fixtures.FAILED_JOB_WARNINGS
-      return HttpResponse.json(jobView(job))
-    }
-
-    job.status = 'done'
-    job.bbox_mm = bboxOf(job.params ?? {})
-    job.colors = colorsOf(job.slug, job.params ?? {})
-    job.plates = state.plates[job.slug] ?? []
-    job.preview_url = `${base}/jobs/${job.id}/preview.glb`
-    job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-    job.notes =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
-    job.warnings =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.WARNED_NAME ? fixtures.JOB_WARNINGS : []
-    return HttpResponse.json(jobView(job))
+    return HttpResponse.json(job)
   }),
 
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
@@ -1735,7 +2086,7 @@ export const handlers = [
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, null)
     const queued = body.mode === 'queue'
     const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
     const queueItemId = queued && !pipelineRunId ? nextNumber() : null
@@ -1743,7 +2094,6 @@ export const handlers = [
       o.id === id
         ? {
             ...o,
-            library_file_id: libraryFileId,
             pipeline_run_id: pipelineRunId,
             queue_item_id: queueItemId,
           }
@@ -1825,7 +2175,8 @@ export const handlers = [
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
-      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      library_file_id:
+        output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
   }),
@@ -1866,11 +2217,11 @@ export const handlers = [
       projectId === null
         ? null
         : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, folderId)
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -2096,6 +2447,8 @@ export const handlers = [
     state.settings = {
       ...state.settings,
       ...body,
+      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
+      media_upload_max_bytes: state.settings.media_upload_max_bytes,
       display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
       has_api_key:
         body.bambuddy_api_key === undefined

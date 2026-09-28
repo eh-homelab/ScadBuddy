@@ -1,5 +1,6 @@
 import path from 'node:path'
 import {
+  type McpHttpServerConfig,
   type McpSdkServerConfigWithInstance,
   type Options,
   type Query,
@@ -9,9 +10,17 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
-import { type DecisionListener, makeCanUseTool, makePreToolUseHook, type TierResolver } from './permissions.js'
+import {
+  type ApprovalGate,
+  type DecisionListener,
+  makeCanUseTool,
+  makePreToolUseHook,
+  type TierResolver,
+} from './permissions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import type { HarnessPlugin } from '../plugins/forwarder.js'
+import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
 
 // The harness loop (issue #255): one `query()` of the Claude Agent SDK per turn,
 // built on buildQueryOptions() so every query keeps `tools: []`,
@@ -37,11 +46,15 @@ import { type LineRedactor, lineRedactor } from './redactLines.js'
 //     exceeded, returning an `error_max_budget_usd` result", sdk.d.ts) and an
 //     abort signal for the panel's stop button;
 //   - the permission seam (permissions.ts) as both `canUseTool` and a
-//     `PreToolUse` hook;
+//     `PreToolUse` hook, with the session's approval gate when it has one
+//     (#258: outward calls park until a human decides);
 //   - in-process MCP servers (#251's registry plugs in here) and local plugin
 //     paths (#297, #299), each vetted by plugins.ts: a plugin that would start
 //     a process of its own (command hook, stdio MCP server, LSP server,
 //     monitor) is refused, since that process would inherit the credential env;
+//   - registered remote MCP plugins (#297, `remotePlugins`, via the loopback
+//     forwarder in src/plugins/forwarder.ts), as Streamable
+//     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -71,9 +84,23 @@ export type HarnessRun = {
    * would inherit the credential env, throws PluginRefusedError.
    */
   pluginPaths?: string[]
+  /**
+   * Registered remote MCP plugins (#297), each already registered with the
+   * loopback forwarder (src/plugins/forwarder.ts `forwardForRun`), so `url` is
+   * the forwarder's and carries no secret. Each is loaded as an SDK
+   * `{ type: 'http' }` server named after the plugin. Their tiers come from the
+   * plugin's own `tool_tiers` (unlisted: outward), ahead of `tierOf`; their
+   * disabled tools go in `disallowedTools`.
+   */
+  remotePlugins?: HarnessPlugin[]
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   onDecision?: DecisionListener
+  /**
+   * Parks outward calls until a human decides (#258, src/approvals/). Without
+   * one, outward calls are denied as needing approval.
+   */
+  approvalGate?: ApprovalGate
   /** Appended to the SDK's default system prompt: route, model, diagnostics (#256). */
   systemPromptAppend?: string
   /** Session id to resume (#300). */
@@ -108,6 +135,56 @@ export function credentialEnv(credential: Credential): Record<string, string> {
   }
 }
 
+export class PluginConfigError extends Error {
+  override name = 'PluginConfigError'
+}
+
+/**
+ * The SDK options for the remote plugins: `mcpServers` entries and
+ * `disallowedTools`.
+ *
+ * - `{ type: 'http', url }` is the SDK's `McpHttpServerConfig` (sdk.d.ts
+ *   0.3.283), the Streamable HTTP transport (spec D5); `'sse'` is the legacy
+ *   transport D5 rejects and is never produced. The URL is the loopback
+ *   forwarder's, and no header is configured: the forwarder adds the plugin's
+ *   own. The SDK passes this config on Claude Code's argv (`--mcp-config`,
+ *   sdk.mjs 0.3.283), where the forwarder token is all there is to see.
+ * - `alwaysLoad: true`: "all tools from this server are always included in
+ *   the prompt and never deferred behind tool search ... this also blocks
+ *   startup until the server is connected (capped at the standard 5s connect
+ *   timeout)" (sdk.d.ts). Without it MCP startup is non-blocking and the first
+ *   turn may not see the plugin's tools.
+ * - disabled tools: `disallowedTools` "will be removed from the model's
+ *   context and cannot be used" (sdk.d.ts), by the name Claude Code gives the
+ *   tool (`harnessToolName`); the forwarder also hides them from tools/list.
+ */
+export function remotePluginOptions(
+  plugins: readonly HarnessPlugin[],
+  taken: ReadonlySet<string>,
+): { mcpServers: Record<string, McpHttpServerConfig>; disallowedTools: string[] } {
+  const mcpServers: Record<string, McpHttpServerConfig> = {}
+  const disallowedTools: string[] = []
+  for (const plugin of plugins) {
+    if (taken.has(plugin.name) || Object.hasOwn(mcpServers, plugin.name)) {
+      throw new PluginConfigError(`MCP server name "${plugin.name}" is used twice`)
+    }
+    mcpServers[plugin.name] = { type: 'http', url: plugin.url, alwaysLoad: true }
+    for (const tool of plugin.disabledTools) {
+      const name = `${toolPrefix(plugin.name)}${harnessToolName(tool)}`
+      if (!disallowedTools.includes(name)) disallowedTools.push(name)
+    }
+  }
+  return { mcpServers, disallowedTools }
+}
+
+/** The tier resolver a run uses: its plugins' tiers first, then `run.tierOf`. */
+export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>): TierResolver {
+  const base = run.tierOf ?? (() => undefined)
+  if (!run.remotePlugins?.length) return base
+  const plugins = pluginTierResolver(run.remotePlugins)
+  return (toolName) => plugins(toolName) ?? base(toolName)
+}
+
 function linkedController(signal: AbortSignal | undefined): AbortController {
   const controller = new AbortController()
   if (signal) {
@@ -124,7 +201,8 @@ export function buildHarnessOptions(run: HarnessRun): Options {
 
 function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
   const base = buildQueryOptions(run.paths)
-  const tierOf = run.tierOf ?? (() => undefined)
+  const tierOf = harnessTierOf(run)
+  const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   const options: Options = {
     ...base,
     env: {
@@ -132,14 +210,15 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     },
-    mcpServers: { ...(run.mcpServers ?? {}) },
+    mcpServers: { ...(run.mcpServers ?? {}), ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate),
+    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate)] },
     permissionMode: 'default',
   }
+  if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId

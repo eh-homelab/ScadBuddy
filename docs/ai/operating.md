@@ -183,6 +183,53 @@ This works because the loopback pair is always accepted from a loopback peer
 (`checkOrigin()`, `origins.ts`). Through the ingress, the browser's own `Origin` must
 match `SCADBUDDY_PUBLIC_URL`.
 
+### 4.1 MCP access tokens
+
+An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth mode,
+spec §8.3). Tokens are managed in Settings → **MCP access tokens**, which calls the
+routes in `registerMcpTokenRoutes()` in
+[`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
+stored in `ai_mcp_tokens` (§7). The Settings section renders only where
+`useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
+reports AI available, which today is the msw-mocked build: nothing routes
+`/api/v1/ai/*` to the sidecar yet. Until then, the routes below are the interface.
+
+| Route | Guarded | What it does |
+|---|---|---|
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
+| `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
+
+"Read guard" is `uiReadProblem()` in
+[`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts). It requires HTTPS
+transport as in §6. When an `Origin` is sent, it must be allowed. Otherwise the
+request's own origin must be the public URL, or the loopback pair from a loopback peer,
+and a `Sec-Fetch-Site` other than `same-origin` or `none` is refused. Every route
+answers `503` while there is no database, or while migrations have not applied.
+
+Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
+Settings warns about that; they take effect again when the mode returns to `bearer`.
+The mode is not stored yet: `main.ts` passes `DEFAULT_MCP_AUTH` (`bearer`).
+
+To give a client a token, create one with a name that says where it will live, copy it
+from the panel, and paste it into the client's MCP configuration as
+`Authorization: Bearer sbmcp_…`. Choose **Done** once it is saved. The token cannot be
+shown again; if it is lost, revoke it and create another. Inside Bambuddy's iframe, the
+browser may refuse the Clipboard API (the frame has no `allow="clipboard-write"`).
+**Copy token** then falls back to `document.execCommand('copy')`. If that fails too,
+the token is left selected for Ctrl+C
+([`frontend/src/lib/clipboard.ts`](../../frontend/src/lib/clipboard.ts)).
+
+From a loopback shell on the pod:
+
+```bash
+curl -sS -X POST http://localhost:8081/api/v1/ai/mcp-tokens \
+  -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
+  -d '{"name":"ops laptop","tier":"read","expires_in":2592000}'
+curl -sS http://localhost:8081/api/v1/ai/mcp-tokens
+curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: http://localhost:8081'
+```
+
 ## 5. Health
 
 `GET /healthz` is in `createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts).
@@ -368,7 +415,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
   `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
-  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` answers 503.
+  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
+  (§4.1) answer 503. Settings writes this table through §4.1's routes.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).

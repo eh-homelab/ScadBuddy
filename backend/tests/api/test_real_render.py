@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import io
+import time
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.config import load_config
+from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, JobProgress
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
@@ -26,8 +31,9 @@ color("#0000FF") translate([size, 0, 0]) cube(size);
 
 
 @pytest.fixture
-def client(data_dir: Path, seed_dir: Path) -> Iterator[TestClient]:
+def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestClient]:
     settings = Settings(
+        database_url=pg_conninfo,
         openscad=load_config().openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
@@ -219,6 +225,43 @@ def test_a_sample_the_template_ships_is_rendered_into_every_part(
         "model.json",
         "model.scad",
         "sample-triangle.svg",
+    ]
+
+
+def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None:
+    """#267: `job.progress` names each step as it starts, between `job.running` and
+    `job.done`, so the preview can say what a slow render is doing."""
+    app = client.app
+    assert isinstance(app, FastAPI)
+    bus = getattr(app.state, STATE_ATTR).events
+    # With a database (required since #467) the bus is Postgres's, which delivers
+    # through its in-process bus once LISTEN hands an event back (#374).
+    local = bus.local if isinstance(bus, PgNotifyEventBus) else bus
+    assert isinstance(local, InProcessEventBus)
+    seen: list[Event] = []
+    local.add_listener(seen.append)
+    client.post(
+        "/api/v1/models",
+        files={"file": ("Stages.scad", TWO_COLOUR.encode(), "application/octet-stream")},
+    )
+    accepted = client.post("/api/v1/models/stages/render", json={"params": {"size": 6}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job["error"]
+    deadline = time.monotonic() + 5
+    while not any(event.kind == "job.done" for event in seen) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    mine = [event for event in seen if isinstance(event, JobEvent | JobProgress)]
+    assert [event.stage if isinstance(event, JobProgress) else event.kind for event in mine] == [
+        "job.pending",
+        "job.running",
+        "source",
+        "render",
+        "split",
+        "solids",
+        "thumbnail",
+        "write",
+        "job.done",
     ]
 
 

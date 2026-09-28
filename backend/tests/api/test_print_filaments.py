@@ -11,6 +11,7 @@ uses these helpers.
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -79,6 +80,7 @@ def prepared(client: TestClient, model: str) -> str:
     return make_output(client, model)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     client: TestClient, model: str
@@ -105,6 +107,7 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     assert "global_tray_id" not in loaded[0]["loaded"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model: str) -> None:
     """The inventory does not need a printer; only the reconciled weights do."""
@@ -129,6 +132,7 @@ def nozzle_routes(*diameters: str) -> respx.Route:
     return respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: str) -> None:
     """#78 — the recorded H2C carries a 0.2 and a 0.4.
@@ -159,6 +163,7 @@ def test_the_filament_step_takes_no_nozzle_diameter(client: TestClient) -> None:
     assert "nozzle_diameter" not in {param["name"] for param in route["parameters"]}
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     client: TestClient, model: str

@@ -1,17 +1,28 @@
 import { Hono } from 'hono'
+import type { ApprovalService } from './approvals/service.js'
+import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import type { TokenStore } from './auth/tokens.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
+import type { PluginForwarder } from './plugins/forwarder.js'
+import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
+import { type PluginTest, testPlugin } from './plugins/testConnection.js'
+import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
+import { registerPluginRoutes } from './routes/plugins.js'
+import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
+// plugin registry routes (#297, routes/plugins.ts), the MCP token routes (#251,
+// routes/mcpTokens.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -23,7 +34,19 @@ export type AppDeps = {
   kek: KekStatus
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
+  /** The plugin registry (#297); undefined when there is no database. */
+  plugins?: PluginRepo | undefined
+  /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
+  testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
+  /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
+  pluginForwarder?: PluginForwarder
   testConnection: (credential: Credential) => Promise<ConnectionTest>
+  /**
+   * The MCP bearer-token store Settings manages (routes/mcpTokens.ts). Pass the
+   * same instance as `mcp.tokens`. Undefined (or left out) when there is no
+   * database: the routes then answer 503.
+   */
+  tokens?: TokenStore | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
@@ -35,6 +58,8 @@ export type AppDeps = {
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
+  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+  approvals?: ApprovalService
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
@@ -170,6 +195,42 @@ export function createApp(deps: AppDeps): AgentApp {
       origins: deps.origins,
     })
   }
+  registerPluginRoutes(app, {
+    plugins: deps.plugins,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    kek: deps.kek,
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+    testPlugin:
+      deps.testPlugin ??
+      ((plugin, address) =>
+        deps.pluginForwarder
+          ? testPlugin(plugin, address, deps.pluginForwarder)
+          : Promise.resolve({
+              ok: false,
+              detail: 'the plugin forwarder is not running',
+              duration_ms: 0,
+              server: null,
+              tools: [],
+              truncated: false,
+            })),
+    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+  })
+
+  registerMcpTokenRoutes(app, {
+    tokens: deps.database ? deps.tokens : undefined,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerApprovalRoutes(app, {
+    approvals: deps.approvals,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
 
   if (deps.mcp) {
     const database = deps.database

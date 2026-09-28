@@ -46,11 +46,13 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import (
+    copy_to_read,
     ensure_uploaded,
     request_scope,
     resolve_print_options,
     target_for,
 )
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
@@ -136,6 +138,7 @@ class PrintRunResult(BaseModel):
 async def filament_options_for_output(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     *,
@@ -149,15 +152,16 @@ async def filament_options_for_output(
     plate uses, in place of ``plate_id``'s own — which is what an all-plates print
     needs a spool for.
 
-    Uploads the 3MF if Bambuddy has not got it: the plate's slots are read out of a
-    *library file*, so there is no answer before one exists. An output is immutable,
-    so this uploads once.
+    Uploads the 3MF only if Bambuddy has no copy of it at all: the plate's slots are
+    read out of a *library file*, and any copy of this output has the same slots, so a
+    run's copy is reused (#457).
 
     With a printer it also carries that printer's mounted nozzles (#78). Without one
     there are no nozzles to read. An offline printer's status is unreadable the same way (spec §3):
     the step still opens, with no mounted nozzles to compare against.
     """
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    copy = await copy_to_read(client, store, uploads, meta, settings)
+    library_file_id = copy.id
     plate_ids = (
         [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)] or [1]
         if all_plates
@@ -170,6 +174,7 @@ async def filament_options_for_output(
             printer_id=printer_id,
             plate_id=plate,
             fallback_colours=list(meta.colors),
+            own_colours=list(meta.colors) if copy.recolored else None,
         )
         for plate in plate_ids
     ]
@@ -202,6 +207,7 @@ async def _spool_colours(
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
@@ -259,12 +265,12 @@ async def run_for_output(
     )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
-    # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
-    # there.
+    # the copy is looked up by (folder, target): a project gets a copy of its own, and
+    # one another project printed from is neither moved nor deleted (#316).
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
-    meta, library_file_id = await ensure_uploaded(
-        client, store, meta, settings, target=target, folder_id=folder_id
+    library_file_id = await ensure_uploaded(
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id
     )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
@@ -339,7 +345,9 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
-        sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
+        sent = await _record_queued(
+            store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
+        )
         outcomes.append(outcome)
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
             # Checked once below, against what every plate needs together.
@@ -413,9 +421,11 @@ async def _hardware_warnings(
     return [warning for warning in found if warning is not None]
 
 
-def _record_queued(
+async def _record_queued(
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
+    library_file_id: int,
     plate_id: int,
     outcome: QueueOutcome,
     project_id: int | None,
@@ -425,8 +435,14 @@ def _record_queued(
 
     Recorded per plate, not after the last one: a later plate failing to slice must not
     leave the plates already on Bambuddy's queue unknown to the output (#83). ``plates``
-    carries every plate of this print, since the single ids hold only the last.
+    carries every plate of this print, since the single ids hold only the last. The
+    plate's sliced file is recorded against the copy it was sliced from (#316).
     """
+    await uploads.record_sliced(
+        meta.id,
+        library_file_id,
+        SlicedCopy(id=outcome.sliced_library_file_id, preset_key=outcome.preset_key),
+    )
     sent = sent + [
         PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
         for item in outcome.queue_item_ids

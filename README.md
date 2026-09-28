@@ -27,7 +27,8 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own.
+  saved preset, to an editable preset of your own. Saved presets are kept in the
+  database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -56,8 +57,14 @@ multi-colour rules, connecting Bambuddy and each feature.
 
 ```bash
 docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
+  -e SCADBUDDY_DATABASE_URL=postgresql://scadbuddy:secret@db:5432/scadbuddy \
   ghcr.io/eh-homelab/scadbuddy:main
 ```
+
+**A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
+the backend refuses to start and says so. Settings and the render queue live
+there; the schema is created and migrated at startup, so an empty database is
+enough.
 
 Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 [Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
@@ -72,14 +79,21 @@ for the project picker).
   Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, saved presets (`presets/`, outside the git repository), settings,
-  downloaded fonts and caches. Back up the volume. The image carries BOSL2 at the
-  catalogue's ref and copies it into `/data/libraries` at start when it is not
-  there, so a fresh install renders BOSL2 models without network access (licence:
+  outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
+  database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
+  (it used to be a 0600 file on the volume), so it is in every database backup;
+  supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
+  image carries BOSL2 at the catalogue's ref and copies it into
+  `/data/libraries` at start when it is not there, so a fresh install renders
+  BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-- **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
-  `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
-  for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
+- **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
+  1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
+  from the UI it wins; a field the UI never saved keeps following the variable,
+  and one it cleared stays cleared (the upload limit instead goes back to the
+  variable). `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
@@ -88,7 +102,9 @@ for the project picker).
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
   catalogue thumbnail; `false` renders nothing, and such a model shows no image
-  until one is set or generated);
+  until one is set or generated. The previews are kept in the
+  `SCADBUDDY_DATABASE_URL` database's `model_previews` table, so without a
+  database there are none);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -128,20 +144,32 @@ for the project picker).
     next duplicate.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
+- **Template media** (images and videos, in `/data/models/<slug>/media`):
+  `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default 1073741824, 1 GiB) is the largest
+  single upload. It is set only here (no Settings override); `GET /api/v1/settings`
+  reports it read-only as `media_upload_max_bytes`.
+  The upload is streamed to the data volume, never held in memory. Images (and
+  posters) are also capped at 10 MiB, since they are committed to the models'
+  history; videos are not committed.
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
-  requests share one job.
+  requests share one job. A finished render is kept under its template
+  (`models/<slug>/.renders/<key>/`, beside the source like its media) and a
+  later request for the same parameters at the same revision is answered from it
+  without running OpenSCAD; an entry with a file missing is rendered again, and
+  entries unused for `SCADBUDDY_JOB_TTL` are removed with the jobs. Installing a
+  font or moving a library pin does not change the key, so a render kept before
+  that is served until it expires or the template is edited.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.
-  - `SCADBUDDY_DATABASE_URL` (libpq URL): keep the queue in Postgres. Accepted
-    renders then survive a restart. Unset, it lives in `/data/jobs` and this
-    process, and a restart fails what was unfinished. Several replicas can share
-    one queue only if they also share `/data` (a ReadWriteMany volume): a job's
-    files are written there by whichever replica renders it. On a ReadWriteOnce
-    PVC run one replica, as the design does.
-    `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
+  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the queue is in Postgres, so
+    accepted renders survive a restart. Several replicas can share one queue only
+    if they also share `/data` (a ReadWriteMany volume): a job's files are written
+    there by whichever replica renders it. On a ReadWriteOnce PVC run one replica,
+    as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
+    and the settings each hold one). The schema is created and migrated at
     startup.
   - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
     Postgres too: each change is appended to an `events` table and sent with
@@ -197,11 +225,20 @@ ScadBuddy runs on the homelab cluster from
 pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
-With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
-database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
-`events` log). The event log's retention
-is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
-(see the render queue settings above); the defaults need no manifest change.
+The backend needs its database (#401): the manifest must set
+`SCADBUDDY_DATABASE_URL` (the cluster's `scadbuddy-db`), or the pod never
+becomes ready and its log names the missing variable. The settings live in that
+database, so the Bambuddy connection a deployment needs from the first start
+comes from `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY` (from a Secret)
+and `SCADBUDDY_PUBLIC_URL`.
+
+A deploy that rolls the pod also migrates the database at startup
+(`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
+log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
+`analyzer_decisions`, and `20260928T0840Z_settings.sql` the settings tables). The
+event log's retention is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` /
+`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (see the render queue settings above); the
+defaults need no manifest change.
 
 ```mermaid
 flowchart LR
@@ -343,6 +380,88 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
   credential's environment.
+- **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
+  harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
+  no files) and managed through `/api/v1/ai/plugins` (below). The session
+  manager takes enabled plugins for each turn (`remotePlugins`), as
+  Streamable HTTP MCP servers named after the plugin, so their tools reach
+  the model as `mcp__<name>__<tool>` (`main.ts` passes
+  `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
+  plugin tool parks for approval like any other, #258). Nothing starts a
+  session over HTTP yet, so for now the connection test is what reaches a
+  plugin. Rules (`agent/src/plugins/registry.ts`):
+  - The URL must be `https://`; plain `http://` only when every address the
+    host resolves to is loopback. Link-local and cloud metadata hosts are
+    refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
+    for gateway base URLs. It is checked at save, at test, and again each
+    time a run loads the plugin. No query string, no credentials in the URL,
+    no `$`.
+  - **Claude Code never gets the plugin's URL or secret.** Each run registers
+    its plugins with a loopback forwarder in the agent
+    (`agent/src/plugins/forwarder.ts`) and hands Claude Code
+    `http://127.0.0.1:<port>/p/<random token>`. The forwarder connects to the
+    address the check passed (no second DNS lookup; TLS still verified
+    against the hostname), follows no redirect, turns a 401 into a failure
+    instead of starting OAuth discovery, and adds the auth header itself.
+    This matters because Claude Code's own MCP client follows redirects and
+    `WWW-Authenticate` `resource_metadata` URLs with the configured header.
+    An egress NetworkPolicy on the pod is still the real boundary.
+  - An optional auth header (name in the clear, value sealed with the same
+    key-encryption key as the Claude credential and bound to the plugin's
+    name, URL and header name). Changing the URL or the header name needs the
+    value again. No route returns it; views show the header name and the last
+    four characters.
+  - **Every tool is `outward`, so it needs approval, until you set its tier.**
+    `tool_tiers` sets tools to `read` or `write` (or `outward` explicitly).
+    `disabled_tools` removes tools from the model's view entirely. MCP
+    annotations such as `readOnlyHint` are only shown as a suggestion by the
+    test; they never change a tier.
+  - Claude Code renames every character outside `[A-Za-z0-9_-]` in a tool
+    name to `_` (`files.list` becomes `mcp__<name>__files_list`). So only
+    tools already named in that alphabet can take a tier; others stay
+    `outward` (or disable them, by their real name). When two tools end up
+    with the same name, both are hidden from the model, and the test marks
+    them `collision`.
+  - New plugins start disabled (`enabled: true` on create is refused). Run
+    the test, review the tools, then enable.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
+  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `tool_tiers`, `disabled_tools` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
+  | `DELETE /api/v1/ai/plugins/{name}` | remove |
+  | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
+
+  Writes and the test go through the same guard as credential writes (next
+  bullet). Reads are guarded too (`uiReadProblem`): HTTPS through the trusted
+  proxy or loopback, addressed to the public origin (or loopback), `Origin`
+  checked when present, and a cross-site `Sec-Fetch-Site` refused. A generic example against a loopback peer (a shell in the pod, or
+  `kubectl port-forward … 8081`; the `Origin` must match the address used):
+
+  ```bash
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"name": "memory", "url": "https://memory.internal.example/mcp/",
+         "secret": "Bearer <token>"}'
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins/memory/test \
+    -H 'Origin: http://127.0.0.1:8081'
+  curl -sS -X PATCH http://127.0.0.1:8081/api/v1/ai/plugins/memory \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"tool_tiers": {"search": "read"}, "enabled": true}'
+  ```
+
+  **Hindsight** (the motivating example, #297). Its docs give a per-bank MCP
+  endpoint at `…/mcp/<bank_id>/`, transport `http`, an optional
+  `Authorization: Bearer <api key>` header for Hindsight Cloud (none for a
+  local Docker deployment), and the tools `retain`, `recall` and `reflect`
+  among others ([MCP memory server](https://hindsight.vectorize.io/blog/2026/03/04/mcp-agent-memory)).
+  Registered as a plugin that is `{"name": "hindsight", "url":
+  "https://<hindsight host>/mcp/<bank_id>/", "secret": "Bearer <api key>"}`.
+  Which of its tools to lower to `read` is your call after the test lists
+  them; `recall` is the obvious candidate. Not yet verified against a running
+  Hindsight: the tool names and annotations a real server lists, and whether
+  `reflect` writes anything.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
@@ -414,7 +533,8 @@ what makes the running image knowable.
   `frontend/public/mockServiceWorker.js` is committed and checked against
   msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.

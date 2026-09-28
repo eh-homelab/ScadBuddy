@@ -7,10 +7,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
-from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -22,16 +26,18 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.media_store import PostgresMediaStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
@@ -57,6 +63,9 @@ class AppState:
     history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
+    #: An output's uploads to Bambuddy's file library (#455), on the render queue's
+    #: Postgres pool. Without a database every use raises (#401).
+    uploads: BambuddyUploadStore
     presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
@@ -65,13 +74,19 @@ class AppState:
     assets: AssetStore
     queue: RenderQueue
     #: Default-render previews: the thumbnail of a model with none and no output.
-    previews: PreviewScheduler
+    #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
+    previews: PreviewScheduler | None
     #: Where every state change is published (spec §7): `PgNotifyEventBus` on
     #: #241's database when one is configured, `InProcessEventBus` otherwise.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
+    #: Follows each started print until it settles (#268).
+    print_watcher: PrintWatcher
     metrics: Metrics
+    #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
+    #: (until #401 makes one required): the routes that persist answer 503.
+    decisions: DecisionStore | None
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -130,10 +145,12 @@ def build_state(settings: Settings) -> AppState:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the job pool opens in `RenderQueue.start` and the event
-    # bus's in `PgNotifyEventBus.start`, both from the lifespan.
+    # Nothing connects here: the job pool opens in `RenderQueue.open_store` and the
+    # event bus's in `PgNotifyEventBus.start`, both from the lifespan. The previews
+    # share the job pool, and there are none without a database (#454, #401).
     store: JobBackend
     events: EventBus
+    preview_store: PreviewStore | None = None
     if settings.database_url:
         pg_store = PostgresJobStore(
             settings.database_url, paths, pool_size=settings.database_pool_size
@@ -151,10 +168,15 @@ def build_state(settings: Settings) -> AppState:
         # Job events commit with the job change that they describe.
         pg_store.events = pg_events
         store, events = pg_store, pg_events
+        preview_store = PreviewStore(pg_store.connection)
     else:
         # No database: the UI keeps working, events reach this process only.
         store, events = JobStore(paths), InProcessEventBus()
+    decisions: DecisionStore | None = (
+        PostgresDecisionStore(settings.database_url) if settings.database_url else None
+    )
     outputs = OutputStore(paths)
+    uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -166,16 +188,25 @@ def build_state(settings: Settings) -> AppState:
         max_count=config.asset_max_count,
     )
     # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
-    # stand in behind them.
-    preview_store = PreviewStore(paths)
-    # Off, the catalogue serves no preview at all -- including ones rendered while it
-    # was on, which stay on disk until their model goes (the sweeps work by path).
+    # stand in behind them. Off, the catalogue serves no preview at all -- including
+    # ones rendered while it was on, which stay stored until their model goes.
+    # The media list (#274) shares the render queue's pool, opened in the lifespan.
+    # Nothing connects here either: the lifespan opens it.
+    presets = PresetStore(
+        paths, settings.database_url, pool_size=min(4, settings.database_pool_size)
+    )
     catalogue = Catalogue(
         paths,
         history,
         outputs,
-        preview_store if settings.preview_renders else None,
+        preview_store,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        presets=presets,
+        wrapper_prefix=WRAPPER_PREFIX,
+        serve_previews=settings.preview_renders,
+        media_store=(
+            PostgresMediaStore(store.pool) if isinstance(store, PostgresJobStore) else None
+        ),
     )
     history.on_commit = announce_commits(events, catalogue)
     queue = RenderQueue(
@@ -189,25 +220,34 @@ def build_state(settings: Settings) -> AppState:
         fetcher=fetcher,
         assets=assets,
     )
-    previews = PreviewScheduler(
-        catalogue,
-        preview_store,
-        queue,
-        lambda slug: render_preview(
-            slug,
-            config=config,
-            paths=paths,
-            history=history,
-            assets=assets,
-            executor=queue.thumbnail_executor,
-            checkouts=checkouts,
-        ),
-        timeout=config.render_timeout * TIMEOUT_FACTOR,
-    )
-    if settings.preview_renders:
+    previews: PreviewScheduler | None = None
+    if settings.preview_renders and preview_store is not None:
+        previews = PreviewScheduler(
+            catalogue,
+            preview_store,
+            queue,
+            lambda slug: render_preview(
+                slug,
+                config=config,
+                paths=paths,
+                history=history,
+                assets=assets,
+                executor=queue.thumbnail_executor,
+                checkouts=checkouts,
+            ),
+            timeout=config.render_timeout * TIMEOUT_FACTOR,
+        )
         # Everything that can change whether a model needs a preview, or which one.
         catalogue.on_change = previews.request
         outputs.on_change = previews.request
+    # Nothing connects here either: the lifespan opens it first thing.
+    settings_store = SettingsStore(settings, events=events)
+    print_progress = ProgressObserver(events)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(client, meta)
+
     return AppState(
         settings=settings,
         config=config,
@@ -215,8 +255,9 @@ def build_state(settings: Settings) -> AppState:
         history=history,
         catalogue=catalogue,
         outputs=outputs,
-        presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
+        uploads=uploads,
+        presets=presets,
+        settings_store=settings_store,
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
@@ -227,8 +268,17 @@ def build_state(settings: Settings) -> AppState:
         queue=queue,
         previews=previews,
         metrics=metrics,
+        decisions=decisions,
         events=events,
-        print_progress=ProgressObserver(events),
+        print_progress=print_progress,
+        print_watcher=PrintWatcher(
+            outputs=outputs,
+            observer=print_progress,
+            read=read_progress,
+            events=events,
+            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
+            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
+        ),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -287,6 +337,10 @@ def get_outputs(state: StateDep) -> OutputStore:
     return state.outputs
 
 
+def get_uploads(state: StateDep) -> BambuddyUploadStore:
+    return state.uploads
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -319,6 +373,29 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
+def get_print_watcher(state: StateDep) -> PrintWatcher:
+    return state.print_watcher
+
+
+#: Problem ``type`` for a route that needs the database when none is configured.
+DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
+
+
+def get_decisions(state: StateDep) -> DecisionStore | None:
+    return state.decisions
+
+
+def require_decisions(state: StateDep) -> DecisionStore:
+    """The decision store, or a 503 naming what is missing. There is no file fallback."""
+    if state.decisions is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
+            type_=DATABASE_REQUIRED_PROBLEM,
+        )
+    return state.decisions
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -336,6 +413,7 @@ PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
+UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
@@ -344,6 +422,9 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
+PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
+OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
+DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]

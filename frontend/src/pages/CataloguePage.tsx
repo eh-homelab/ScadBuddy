@@ -8,6 +8,9 @@ import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
+import { MediaCarousel } from '../components/media/MediaCarousel'
+import { MediaLightbox } from '../components/media/MediaLightbox'
+import { toSlides, type Slide } from '../components/media/slides'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
@@ -28,9 +31,12 @@ import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
-  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [])
+  // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
+  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  // One lightbox for the page: whichever card's media was clicked, at that item.
+  const [lightbox, setLightbox] = useState<{ slides: Slide[]; index: number } | null>(null)
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
@@ -138,12 +144,18 @@ export function CataloguePage() {
                 model={model}
                 upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
                 onTag={addTag}
+                onOpenMedia={(slides, index) => setLightbox({ slides, index })}
               />
             ))}
           </ul>
         )}
       </div>
 
+      <MediaLightbox
+        slides={lightbox?.slides ?? []}
+        index={lightbox?.index ?? null}
+        onClose={() => setLightbox(null)}
+      />
       <UploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
@@ -168,24 +180,57 @@ function ModelCard({
   model,
   upstreamName,
   onTag,
+  onOpenMedia,
 }: {
   model: ModelSummary
   upstreamName?: string
   onTag: (tag: string) => void
+  onOpenMedia: (slides: Slide[], index: number) => void
 }) {
   const origin = safeHttpUrl(model.origin_url)
+  // A slide with no caption is named after the template, not just "Image 1 of 1".
+  const slides = useMemo(() => {
+    const all = toSlides(model.slug, model.media ?? [])
+    return all.map((slide, index) => ({
+      ...slide,
+      alt:
+        slide.caption ??
+        (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),
+    }))
+  }, [model.slug, model.name, model.media])
+  // The title is the card's one link, and its ::after stretches over the card. What
+  // must not follow it (the carousel, the tag chips, the origin link, the action row)
+  // sits above that on `relative z-10`: a carousel's buttons cannot nest in an anchor.
+  const raised = 'relative z-10'
   return (
     <li
       data-model-card={model.slug}
-      className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
-      <Link to={modelPath(model.slug)} className="block p-3 pb-0 focus-visible:rounded-[6px]">
-        <ModelThumbnail
-          src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
-          alt={model.name}
+      className="relative rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
+      <div className="p-3 pb-0">
+        <MediaCarousel
+          slides={slides}
+          onOpen={(index) => onOpenMedia(slides, index)}
+          label={model.name}
+          className={raised}
+          fallback={
+            <ModelThumbnail
+              src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
+              alt={model.name}
+            />
+          }
         />
+      </div>
 
+      <div className="px-3 pb-3">
         <div className="mt-3 flex items-center gap-2">
-          <h2 className="min-w-0 truncate text-[14px] font-medium">{model.name}</h2>
+          <h2 className="min-w-0 truncate text-[14px] font-medium">
+            <Link
+              to={modelPath(model.slug)}
+              className="outline-none after:absolute after:inset-0 after:rounded-[6px] after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-accent"
+            >
+              {model.name}
+            </Link>
+          </h2>
           <UpstreamBadge state={model.upstream_state} />
         </div>
         {model.origin === 'builtin' && (
@@ -198,13 +243,11 @@ function ModelCard({
             {model.description}
           </p>
         )}
-      </Link>
-      {/* Outside the card's link too: a tag is a button that adds it to the filter. */}
-      <div className="px-3 pb-3">
+        {/* Above the stretched link: a tag is a button that adds it to the filter. */}
         {(model.tags ?? []).length > 0 && (
           <ul className="mt-2.5 flex flex-wrap gap-1">
             {(model.tags ?? []).map((tag) => (
-              <li key={tag}>
+              <li key={tag} className={raised}>
                 <button
                   type="button"
                   aria-label={`Filter by ${tag}`}
@@ -222,10 +265,9 @@ function ModelCard({
           Updated {timeAgo(model.updated_at)}
         </p>
       </div>
-      {/* Outside the card's link: an anchor cannot nest inside another. Only an
-          http(s) origin is linked at all; anything else is not shown (#179). */}
+      {/* Only an http(s) origin is linked at all; anything else is not shown (#179). */}
       {origin && (
-        <p className="truncate px-3 pb-2.5 text-[12px] text-faint">
+        <p className={`${raised} truncate px-3 pb-2.5 text-[12px] text-faint`}>
           From{' '}
           <a
             href={origin}
@@ -237,7 +279,7 @@ function ModelCard({
           </a>
         </p>
       )}
-      <div className="flex items-center justify-between gap-2 px-3 pb-2">
+      <div className={`${raised} flex items-center justify-between gap-2 px-3 pb-2`}>
         <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
         <span className="ml-auto">
           <DuplicateModelButton slug={model.slug} name={model.name} />
