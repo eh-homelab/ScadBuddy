@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -303,6 +303,61 @@ def test_the_item_limit_is_enforced(catalogue: Catalogue, store: PostgresMediaSt
     with pytest.raises(TooManyMediaError):
         catalogue.add_media("demo", staged)
     assert staged.path.exists()
+
+
+class _CountingStore:
+    """The store, counting its queries."""
+
+    def __init__(self, store: PostgresMediaStore) -> None:
+        self.store = store
+        self.queries: list[str] = []
+
+    def items(self, template_id: str) -> list[MediaItem]:
+        self.queries.append("items")
+        return self.store.items(template_id)
+
+    def items_for(self, template_ids: Sequence[str]) -> dict[str, list[MediaItem]]:
+        self.queries.append("items_for")
+        return self.store.items_for(template_ids)
+
+    def replace(self, template_id: str, items: list[MediaItem]) -> None:
+        self.store.replace(template_id, items)
+
+    def delete(self, template_id: str) -> None:
+        self.store.delete(template_id)
+
+
+@pytest.mark.requires_postgres
+def test_the_store_reads_many_templates_in_one_query(store: PostgresMediaStore) -> None:
+    store.replace("a", [_item("one"), _item("two")])
+    store.replace("b", [_item("three")])
+
+    listed = store.items_for(["a", "b", "c"])
+
+    assert {key: [item.id for item in value] for key, value in listed.items()} == {
+        "a": ["one", "two"],
+        "b": ["three"],
+    }
+    assert store.items_for([]) == {}
+
+
+@pytest.mark.requires_postgres
+def test_the_listing_reads_every_templates_media_in_one_query(
+    data: DataPaths, store: PostgresMediaStore
+) -> None:
+    """ONE media query for the page, not one per model, as with the git walk."""
+    counting = _CountingStore(store)
+    catalogue = Catalogue(data, media_store=counting)
+    for slug in ("one", "two", "three"):
+        catalogue.create(slug, "cube(1);\n", ModelMeta(name=slug))
+    catalogue.add_media("two", _stage(catalogue, PNG, "image", "png"), caption="Two")
+    counting.queries.clear()
+
+    records = {record.slug: record for record in catalogue.list_models()}
+
+    assert counting.queries == ["items_for"]
+    assert [item.caption for item in records["two"].media] == ["Two"]
+    assert records["one"].media == []
 
 
 @pytest.mark.requires_postgres

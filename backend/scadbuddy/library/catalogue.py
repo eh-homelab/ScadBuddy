@@ -472,10 +472,16 @@ class Catalogue:
         return self._record(slug, self.version, self._has_history)
 
     def _record(
-        self, slug: str, version_of: Callable[[str], str | None], history: bool
+        self,
+        slug: str,
+        version_of: Callable[[str], str | None],
+        history: bool,
+        media_of: Callable[[str], list[MediaItem]] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
-        walk a listing makes -- and is asked for an upstream's as well as this one's."""
+        walk a listing makes -- and is asked for an upstream's as well as this one's.
+        ``media_of`` answers a template of mine's media rows from the listing's one
+        query; without it they are read for this template alone."""
         self._require(slug)
         raw = self.read_raw_meta(slug)
         if is_builtin(slug):
@@ -502,7 +508,7 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        media = self._views(slug, self._stored_media(slug, meta))
+        media = self._views(slug, self._stored_media(slug, meta, media_of))
         thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug, media)
         return ModelRecord(
             **meta.model_dump(exclude={"media"}),
@@ -566,10 +572,20 @@ class Catalogue:
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
+        # And ONE media query (#274), for every template of mine on the page.
+        rows = (
+            self.media_store.items_for([slug for slug in slugs if not is_builtin(slug)])
+            if self.media_store is not None
+            else {}
+        )
+
+        def media_of(slug: str) -> list[MediaItem]:
+            return rows.get(slug, [])
+
         records: list[ModelRecord] = []
         for slug in slugs:
             try:
-                records.append(self._record(slug, versions.get, history))
+                records.append(self._record(slug, versions.get, history, media_of))
             except InvalidModelMetaError as error:
                 # One broken model.json costs its own model, never the whole page;
                 # `GET /models/{slug}` says what is wrong with it.
@@ -849,14 +865,22 @@ class Catalogue:
             return self.thumbnail_path(slug)
         return self.media_dir(slug) / file
 
-    def _stored_media(self, slug: str, meta: ModelMeta | None = None) -> list[MediaItem]:
+    def _stored_media(
+        self,
+        slug: str,
+        meta: ModelMeta | None = None,
+        media_of: Callable[[str], list[MediaItem]] | None = None,
+    ) -> list[MediaItem]:
         """The list as stored: a built-in's bundled model.json ``media``, shipped
         read-only; a template of mine's `template_media` rows, or none without a
-        database. ``meta`` is the model's, when the caller has already read it."""
+        database. ``meta`` is the model's and ``media_of`` a listing's rows, when
+        the caller already has them."""
         if is_builtin(slug):
             return (meta or self._meta(slug, self.read_raw_meta(slug))).media
         if self.media_store is None:
             return []
+        if media_of is not None:
+            return media_of(slug)
         return self.media_store.items(slug)
 
     def _views(self, slug: str, items: list[MediaItem]) -> list[MediaView]:

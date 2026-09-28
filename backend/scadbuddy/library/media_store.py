@@ -8,6 +8,7 @@ with no file is reported ``missing``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from psycopg import Connection
@@ -19,6 +20,8 @@ from scadbuddy.library.media import MediaItem
 
 class MediaStore(Protocol):
     def items(self, template_id: str) -> list[MediaItem]: ...
+
+    def items_for(self, template_ids: Sequence[str]) -> dict[str, list[MediaItem]]: ...
 
     def replace(self, template_id: str, items: list[MediaItem]) -> None: ...
 
@@ -39,6 +42,23 @@ class PostgresMediaStore:
                 (template_id,),
             ).fetchall()
         return [MediaItem.model_validate(row) for row in rows]
+
+    def items_for(self, template_ids: Sequence[str]) -> dict[str, list[MediaItem]]:
+        """Every listed template's items in ONE query, for a page of the catalogue;
+        a template with none is absent from the answer."""
+        if not template_ids:
+            return {}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT template_id, id, file, kind, caption, poster FROM template_media"
+                " WHERE template_id = ANY(%s) ORDER BY template_id, position",
+                (list(template_ids),),
+            ).fetchall()
+        listed: dict[str, list[MediaItem]] = {}
+        for row in rows:
+            template_id = row.pop("template_id")
+            listed.setdefault(template_id, []).append(MediaItem.model_validate(row))
+        return listed
 
     def replace(self, template_id: str, items: list[MediaItem]) -> None:
         """Make ``items`` the template's whole list, in one transaction."""
