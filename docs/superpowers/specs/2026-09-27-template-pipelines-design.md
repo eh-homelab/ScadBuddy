@@ -82,9 +82,12 @@ Non-goals
 
 ### 3.1 Topology
 
-- A Temporal server deployed from `eh-homelab/clusters`, with its own database on the
-  same Postgres ScadBuddy already requires for the render queue. Namespace
-  `scadbuddy`.
+- A Temporal server deployed from `eh-homelab/clusters` with the **Temporal
+  operator**, its persistence and visibility databases on a **CloudNativePG (CNPG)**
+  cluster — the same way that repo runs Postgres for ScadBuddy today. Namespace
+  `scadbuddy`. The manifests are that repo's change, made with its maintainers; this
+  spec only names what ScadBuddy needs from them (address, namespace, the two task
+  queues).
 - The backend image gains a **worker** entrypoint (`python -m scadbuddy.worker`), run
   as its own Deployment so renders scale apart from the API. Same image, so the
   measured OpenSCAD facts (base spec §3) hold on every worker.
@@ -102,18 +105,30 @@ Non-goals
 
 `render_jobs` stays, and stays the thing the API reads. It stops being a queue.
 
-Kept: `id`, `slug`, `render_key`, `status`, `progress`, `result`, `error`, `claims`,
-`attempts`, timestamps, and the partial unique index on `render_key` over pending rows
-that coalesces identical requests.
+The table today is `pg_store.py`'s `MIGRATIONS`: `id`, `slug`, `params`,
+`model_version`, `state` (`pending` | `running` | `done` | `failed`), `created_at`,
+`started_at`, `finished_at`, `log_tail`, `error`, `result`, `render_key`, `claims`,
+`attempts`, `heartbeat_at`, `diagnostics`, `diagnostics_dropped`. The `Job` model
+(`render/job_models.py`) mirrors it. This spec keeps the name `state` and its
+values, and adds one: `cancelled`.
 
-Removed: `heartbeat_at`, the lease, `reap`, the `FOR UPDATE SKIP LOCKED` claim, the
-`NOTIFY`/`QueueListener` wake-up, the worker poll loop, and the startup step that
-fails unfinished jobs (Temporal resumes them). The Prometheus metric names in
-`core/metrics.py` are unchanged; `scadbuddy_render_jobs_running` is derived from the
-projection.
+Kept as they are: `id`, `slug`, `model_version` (the revision the job pinned),
+`state`, `created_at`, `started_at`, `finished_at`, `log_tail`, `error`, `result`,
+`render_key`, `claims`, `attempts`, `diagnostics`, `diagnostics_dropped`, and the
+partial unique index on `render_key` over `pending` rows that coalesces identical
+requests.
+
+Removed: `heartbeat_at` and its `render_jobs_running` index, the lease, `reap`, the
+`FOR UPDATE SKIP LOCKED` claim, the `NOTIFY`/`QueueListener` wake-up, the worker poll
+loop, and the startup step that fails unfinished jobs (Temporal resumes them). The
+Prometheus metric names in `core/metrics.py` are unchanged;
+`scadbuddy_render_jobs_running` is derived from the projection.
 
 Added: `workflow_id` (always `render-<job_id>`), `kind` (`render` | `arrange`),
-`inputs` (jsonb), `revision`, `pipeline_version`, `started_at`.
+`inputs` (jsonb; §4.3), `pipeline_version`, `steps` (jsonb, `[{name, state, done,
+total}]`, what `ctx.progress` writes and `GET /jobs/{id}` shows). `params` stays
+through phase 1 as the default pipeline's `inputs.params`, and is dropped by phase
+2's migration once every reader uses `inputs`.
 
 ### 3.3 Submit: insert, start, reconcile
 
@@ -158,8 +173,9 @@ Arrange            id render-<job_id>          objects → plates (§7); render_
 
 Two keys with two jobs: `render_jobs.render_key` is the **job** key (slug, revision,
 canonical inputs) that coalesces identical requests, as today. `piece_key =
-sha256(revision, file, canonical params)` names one `openscad` invocation and is
-what dedups `RenderPiece` children across jobs. They are never interchangeable.
+sha256(slug, revision, file, canonical params)` names one `openscad` invocation and is
+what dedups `RenderPiece` children across jobs. They are never interchangeable, and
+both carry the slug for the reason `resolve_source` does (§3.4 step 1).
 
 `Arrange` is submitted through the same insert → start → reconcile path as a render
 (§3.3), so `GET /jobs/{id}` works for it unchanged; the row's `kind` says which
@@ -175,12 +191,17 @@ activity directly, not the workflow.
 2. Execute that source inside Temporal's Python workflow sandbox and call
    `run(ctx, inputs)`. The `ctx` primitives (§5.2) are the only way out of the
    sandbox: each is an activity or a child workflow.
-3. Every status change is a `project(job_id, …)` activity that updates the row in
-   place, guarded by status order so a retried activity cannot move a job backwards.
+3. Every state change is a `project(job_id, …)` activity that updates the row in
+   place, guarded by state order (`pending < running < done | failed | cancelled`)
+   so a retried activity cannot move a job backwards.
 
 `RenderPiece.run(req)`:
 
-1. `resolve_source(revision)` — the template snapshot from the store (§6).
+1. `resolve_source(slug, revision)` — the template snapshot from the store (§6).
+   Always with the slug: a revision is the template's own last commit
+   (`library/history.py` `last_commit`), and one commit that touched several
+   templates — the seed of the bundled ones, a repo-wide reformat — gives them all
+   the same value.
 2. `export_schema(file)` — `.param` → `CustomizerSchema`, cached by source sha (as
    today, `render/runner.py:cached_schema`), now per file.
 3. `validate(params, schema)` — the `require_valid_params` rule; a bad param fails
@@ -200,9 +221,16 @@ walls but not floors or corner posts. Children are started with
 another job may be sharing, and a Part nothing references is swept by the store's
 grace rule (§6.2).
 
-Activity defaults: `start_to_close` 10 min for `openscad_*`, heartbeat every 5 s,
-retry policy 3 attempts with backoff. `openscad` itself is killed at
-`SCADBUDDY_RENDER_TIMEOUT` as today.
+Activity timeouts, and who kills what. `SCADBUDDY_RENDER_TIMEOUT` (operator-set,
+default 120 s) stays the one number an operator tunes: the `openscad_*` activities
+run the subprocess under it exactly as `runner.py` does today, and their
+`start_to_close` is **derived** from it — `render_timeout + 60 s` — so the two can
+never invert; the spec forbids a separate activity-timeout setting. On
+cancellation, heartbeat failure or the activity's own timeout, the activity's
+cancellation path kills the `openscad` process group before returning (the child
+is killed, not awaited — the base spec's rule for the runner carries over); a
+Temporal timeout alone does not stop a subprocess. Heartbeat every 5 s; retry
+policy 3 attempts with backoff.
 
 ### 3.5 Worker versioning
 
@@ -335,8 +363,11 @@ class Ctx:
 - `activity(name, …)` runs `pipeline/activities.py:<name>` through one generic
   `run_template_activity(slug, revision, name, args)` on the `render` queue. Arguments
   and results are JSON plus `Blob` references; a template activity that needs a mesh
-  gets it from the store. Heartbeat is automatic every 5 s; default 10 min
-  `start_to_close`, overridable per call.
+  gets it from the store. Heartbeat is automatic every 5 s; `start_to_close`
+  defaults to `SCADBUDDY_RENDER_TIMEOUT + 60 s`, overridable per call up to
+  `SCADBUDDY_TEMPLATE_ACTIVITY_MAX_TIMEOUT` (default 30 min). The generic activity
+  runs the template function in a subprocess it kills on cancellation, like the
+  `openscad_*` activities (§3.4).
 - `pack` is the Arrange packing activity (§7) — `async`, because it reads footprints
   from the store and, for filament-aware goals, spool state from Bambuddy.
   `plate_of` is pure in-workflow construction of an explicit plate. Both yield a
@@ -426,7 +457,7 @@ any worker. Today it all sits on one pod's volume:
 | What | Today | Now |
 |---|---|---|
 | `// file` assets viewers upload (#204, #296, #384) | `data/assets`, content-addressed, reference-kept, grace-swept, capped | the store |
-| Template source at a revision | git in `data/models` | a snapshot blob per revision |
+| Template source at a revision | git in `data/models` | a snapshot blob per (slug, revision) |
 | Pinned libraries, Google Fonts | data volume | **fetched by each worker from their pin** (git `url@commit`, or an external URL with a sha256), cached locally; optionally mirrored into the store |
 | Per-piece Parts (meshes, GLB) | attempt work dir | the store |
 | Final outputs (3MF, extras) | `outputs/` | the store, in the folder #317 assigns |
@@ -574,7 +605,8 @@ Containment is by reach, not by restriction:
 
 - `POST /models/{slug}/render`: body `{inputs, version?, supersedes?}`; `params` still
   accepted and wrapped as `{"params": …}`.
-- `GET /jobs/{id}`: unchanged shape, plus `steps: [{name, status, done, total}]` from
+- `GET /jobs/{id}`: unchanged shape (`state` gains the value `cancelled`), plus
+  `steps: [{name, state, done, total}]` from
   the projection.
 - `GET /models/{slug}/schema?file=parts/roof.scad`.
 - `GET /models/{slug}/files` — the template's files with kinds (`scad`, `ui`,
@@ -602,7 +634,8 @@ leaves every template working.
    `RenderPiece` running only the default pipeline; projection; reconciler; worker
    Deployment at **one replica** sharing the API's data volume, with the `BlobStore`
    interface over the `local` backend (§6.2); worker versioning; `clusters`
-   manifests; `bambuddy_render_api_key` in Settings (§9). Visible change: none,
+   manifests (Temporal operator + CNPG, §3.1); `bambuddy_render_api_key` in
+   Settings (§9). Visible change: none,
    except a worker restart no longer loses a render. Scaling render workers past one
    waits for phase 3.
 2. **Template UI** (§4, §8.1). `ui` in `model.json`, served modules, `Host` v1,
