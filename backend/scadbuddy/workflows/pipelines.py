@@ -54,6 +54,11 @@ HEARTBEAT = timedelta(seconds=30)
 #: worker without the API's volume (phase 3): a transfer, heartbeated, so a stalled
 #: download is noticed within `HEARTBEAT` rather than at the budget's end.
 PREPARE_TIMEOUT = timedelta(minutes=10)
+#: A preview on a worker without the API's volume first brings in what `prepare` does
+#: for a piece: the revision's snapshot and the font families it names, one transfer
+#: each. (Its default parameters name no upload: `file_assets` skips a file
+#: parameter's own default, so there is no assets transfer.)
+PREVIEW_TRANSFER = 2 * TRANSFER
 
 
 def _openscad_timeout() -> timedelta:
@@ -209,16 +214,17 @@ class RenderPreview:
     the openscad budget. Id ``preview-<slug>``: a second request joins the first."""
 
     @workflow.run
-    async def run(self, slug: str) -> bytes:
+    async def run(self, slug: str, revision: str | None = None) -> bytes:
         # Schema, render and plate image, each bounded by `render_timeout`, plus the
-        # margin: `RenderService.render_preview` sets it.
+        # margin: `RenderService.render_preview` sets it. Then the snapshot and fonts
+        # it brings in first, on a worker without the volume.
         timeout = workflow.memo_value("preview_timeout", default=3 * 120.0 + 60.0, type_hint=float)
         png: bytes = await workflow.execute_activity(
             "render_preview_png",
-            slug,
+            args=[slug, revision],
             result_type=bytes,
-            start_to_close_timeout=timedelta(seconds=timeout),
-            heartbeat_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=timeout) + PREVIEW_TRANSFER,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
         return png

@@ -36,7 +36,7 @@ from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_export
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
+from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -222,18 +222,27 @@ class RenderService:
         the run is shared, so it is not cancelled (another caller may still be waiting
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
-        includes any wait for a free worker."""
+        includes any wait for a free worker. On the bambuddy store the worker renders
+        the snapshot of the slug's last commit, which it may first have to bring in:
+        the caller then waits `PREVIEW_TRANSFER` longer."""
+        revision: str | None = None
+        wait = timeout
+        if self.snapshots is not None:
+            # The bambuddy store: the worker has no volume, so it renders the snapshot
+            # of the last commit (as `submit`), and may first bring it and its fonts in.
+            revision = await self.snapshots.pin(slug, None)
+            wait += PREVIEW_TRANSFER.total_seconds()
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
-            slug,
+            args=[slug, revision],
             id=f"preview-{slug}",
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
             rpc_timeout=RPC_TIMEOUT,
         )
-        png: bytes = await asyncio.wait_for(handle.result(), timeout)
+        png: bytes = await asyncio.wait_for(handle.result(), wait)
         return png
 
     def retry_after(self) -> int:
