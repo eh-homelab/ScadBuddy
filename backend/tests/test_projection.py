@@ -17,7 +17,7 @@ from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import SUPERSEDED_ERROR, QueueFullError, render_key
 from scadbuddy.render.pg_store import PostgresJobStore
-from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection
 from scadbuddy.render.schema import ParamValue
 
 pytestmark = pytest.mark.requires_postgres
@@ -41,6 +41,18 @@ def _result() -> JobResult:
 def _kinds(conninfo: str) -> list[str]:
     with psycopg.connect(conninfo) as conn:
         return [row[0] for row in conn.execute("SELECT kind FROM events ORDER BY seq")]
+
+
+@pytest.fixture
+def announcing(pg_conninfo: str) -> Iterator[JobProjection]:
+    """A projection publishing on a real (unstarted) bus: its events land in `events`."""
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+    store = JobProjection(pg_conninfo, pool_size=2, events=bus)
+    store.open()
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 @pytest.fixture
@@ -257,3 +269,86 @@ def test_the_legacy_queue_still_works_on_the_migrated_table(
         assert store.read(job.id).state == "done"
     finally:
         store.close()
+
+
+def test_a_newer_render_supersedes_a_running_one(
+    pg_conninfo: str, announcing: JobProjection
+) -> None:
+    first = announcing.submit(_job(width=19), render_key("demo", {"width": 19}, None)).job
+    announcing.mark_started(first.id)
+    submitted = announcing.submit(
+        _job(width=20), render_key("demo", {"width": 20}, None), supersedes=first.id
+    )
+    assert submitted.superseded is not None and submitted.superseded.id == first.id
+    dropped = announcing.read(first.id)
+    assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
+    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded", "job.pending"]
+
+
+def test_a_workflow_that_fails_before_starting_settles_from_pending(
+    pg_conninfo: str, announcing: JobProjection
+) -> None:
+    job = announcing.submit(_job(width=21), render_key("demo", {"width": 21}, None)).job
+    job.state, job.error, job.finished_at = "failed", "pipeline did not load", datetime.now(UTC)
+    assert announcing.finish(job)
+    stored = announcing.read(job.id)
+    assert stored.state == "failed" and stored.started_at is None
+    assert announcing.stale_pending(older_than=0) == []
+    assert _kinds(pg_conninfo) == ["job.pending", "job.failed"]
+
+
+def test_the_cancellation_handler_writes_the_final_projection_once_announced(
+    pg_conninfo: str, announcing: JobProjection
+) -> None:
+    job = announcing.submit(_job(width=22), render_key("demo", {"width": 22}, None)).job
+    announcing.mark_started(job.id)
+    assert announcing.release_claim(job.id, slug="demo") is not None
+    job.state, job.error, job.finished_at = "cancelled", "", datetime.now(UTC)
+    job.steps = [StepInfo(name="render", state="failed")]
+    job.log_tail = ["cancelled mid-render"]
+    assert announcing.finish(job)
+    stored = announcing.read(job.id)
+    assert stored.state == "cancelled" and stored.error == CANCELLED_ERROR
+    assert stored.steps == job.steps and stored.log_tail == job.log_tail
+    assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
+
+
+def test_a_cache_hit_is_recorded_done_without_a_workflow(
+    pg_conninfo: str, announcing: JobProjection
+) -> None:
+    waiting = announcing.submit(_job(width=23), render_key("demo", {"width": 23}, None)).job
+    hit = _job(width=24)
+    hit.state, hit.result = "done", _result()
+    hit.started_at = hit.finished_at = datetime.now(UTC)
+    submitted = announcing.submit(hit, render_key("demo", {"width": 24}, None), max_pending=1)
+    assert submitted.cached and not submitted.coalesced
+    stored = announcing.read(hit.id)
+    assert stored.state == "done" and stored.result == hit.result
+    assert stored.workflow_id is None and stored.finished_at is not None
+    assert announcing.read(waiting.id).state == "pending"
+    assert _kinds(pg_conninfo) == ["job.pending", "job.done"]
+
+
+def test_the_legacy_queue_never_claims_a_workflow_row(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    projection.submit(_job(width=25), render_key("demo", {"width": 25}, None))
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        assert store.claim() is None
+    finally:
+        store.close()
+
+
+def test_a_legacy_submit_writes_inputs(
+    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+) -> None:
+    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
+    store.open()
+    try:
+        job = _job(width=26)
+        store.submit(job, render_key("demo", {"width": 26}, None))
+    finally:
+        store.close()
+    assert projection.read(job.id).inputs == {"params": {"width": 26}}

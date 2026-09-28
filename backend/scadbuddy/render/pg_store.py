@@ -352,7 +352,7 @@ class PostgresJobStore:
             # transaction below, so one another replica is reaping (locked, hence
             # skipped) or one whose worker heartbeated since is left alone.
             candidates = conn.execute(
-                "SELECT id FROM render_jobs WHERE state = 'running'"
+                "SELECT id FROM render_jobs WHERE state = 'running' AND workflow_id IS NULL"
                 " AND heartbeat_at < now() - make_interval(secs => %s)"
                 " ORDER BY heartbeat_at, id",
                 (lease,),
@@ -361,6 +361,7 @@ class PostgresJobStore:
                 with conn.transaction():
                     row = conn.execute(
                         "SELECT * FROM render_jobs WHERE id = %s AND state = 'running'"
+                        " AND workflow_id IS NULL"
                         " AND heartbeat_at < now() - make_interval(secs => %s)"
                         " FOR UPDATE SKIP LOCKED",
                         (candidate["id"], lease),
@@ -445,14 +446,15 @@ class PostgresJobStore:
                 # row for the status poll, past the pending-key index and the limit.
                 conn.execute(
                     "INSERT INTO render_jobs"
-                    " (id, slug, params, model_version, state, created_at, started_at,"
+                    " (id, slug, params, inputs, model_version, state, created_at, started_at,"
                     "  finished_at, log_tail, result, diagnostics, diagnostics_dropped,"
                     "  render_key)"
-                    " VALUES (%s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s)",
+                    " VALUES (%s, %s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         job.id,
                         job.slug,
                         Jsonb(job.params),
+                        Jsonb({"params": job.params}),
                         job.model_version,
                         job.created_at,
                         job.started_at,
@@ -483,8 +485,8 @@ class PostgresJobStore:
                         raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs"
-                " (id, slug, params, model_version, state, created_at, render_key)"
-                " VALUES (%s, %s, %s, %s, 'pending', %s, %s)"
+                " (id, slug, params, inputs, model_version, state, created_at, render_key)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s)"
                 " ON CONFLICT (render_key) WHERE state = 'pending'"
                 " DO UPDATE SET claims = render_jobs.claims + 1"
                 " RETURNING *, (xmax = 0) AS inserted",
@@ -492,6 +494,7 @@ class PostgresJobStore:
                     job.id,
                     job.slug,
                     Jsonb(job.params),
+                    Jsonb({"params": job.params}),
                     job.model_version,
                     job.created_at,
                     key,
@@ -510,7 +513,7 @@ class PostgresJobStore:
                 "UPDATE render_jobs SET state = 'running', started_at = now(),"
                 " heartbeat_at = now(), attempts = attempts + 1"
                 " WHERE id = ("
-                "  SELECT id FROM render_jobs WHERE state = 'pending'"
+                "  SELECT id FROM render_jobs WHERE state = 'pending' AND workflow_id IS NULL"
                 "  ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT 1"
                 " ) RETURNING *"
             ).fetchone()

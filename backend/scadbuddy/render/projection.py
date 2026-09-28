@@ -8,7 +8,9 @@ publishes its ``job.*`` event on the bus inside its own transaction
 commit or not at all.
 
 Used only with ``SCADBUDDY_TEMPORAL_ADDRESS`` set; the legacy queue
-(`PostgresJobStore`) shares the table until the final phase-1 PR removes it.
+(`PostgresJobStore`) shares the table until the final phase-1 PR removes it. The two
+share the unique pending-key index, so a deployment runs exactly one of them (the
+flag); the legacy claim and reap skip rows that carry a ``workflow_id``.
 """
 
 from __future__ import annotations
@@ -115,7 +117,7 @@ class JobProjection:
         with self._pool.connection() as conn, conn.transaction():
             if supersedes is not None:
                 previous = conn.execute(
-                    "SELECT * FROM render_jobs WHERE id = %s AND state = 'pending'"
+                    "SELECT * FROM render_jobs WHERE id = %s AND state IN ('pending', 'running')"
                     " AND slug = %s FOR UPDATE",
                     (supersedes, job.slug),
                 ).fetchone()
@@ -123,6 +125,37 @@ class JobProjection:
                     return Submitted(_job(previous), coalesced=True)
                 if previous is not None:
                     superseded = self._release(conn, previous, error=SUPERSEDED_ERROR)
+            if job.state == "done":
+                # Answered from the render kept under the template (`render_cache`):
+                # recorded settled, with no workflow, past the pending-key index and
+                # the limit.
+                cached = conn.execute(
+                    "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
+                    " created_at, started_at, finished_at, log_tail, result, diagnostics,"
+                    " diagnostics_dropped, warnings, render_key, kind)"
+                    " VALUES (%s, %s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                    " RETURNING *",
+                    (
+                        job.id,
+                        job.slug,
+                        Jsonb(job.params),
+                        Jsonb(job.inputs or {"params": job.params}),
+                        job.model_version,
+                        job.created_at,
+                        job.started_at,
+                        job.finished_at,
+                        Jsonb(job.log_tail),
+                        Jsonb(job.result.model_dump(mode="json")) if job.result else None,
+                        Jsonb([d.model_dump(mode="json") for d in job.diagnostics]),
+                        job.diagnostics_dropped,
+                        Jsonb(job.warnings),
+                        key,
+                        job.kind,
+                    ),
+                ).fetchone()
+                assert cached is not None
+                self._announce(conn, job.id, job.slug, "job.done")
+                return Submitted(_job(cached), cached=True, superseded=superseded)
             if max_pending:
                 twin = conn.execute(
                     "SELECT 1 FROM render_jobs WHERE state = 'pending' AND render_key = %s", (key,)
@@ -159,7 +192,7 @@ class JobProjection:
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
 
     def _release(self, conn: Connection[Any], row: DictRow, *, error: str) -> Job | None:
-        """Take one claim off a pending row; the last one cancels it. Returns the
+        """Take one claim off an unfinished row; the last one cancels it. Returns the
         cancelled job, or None while claims remain."""
         if row["claims"] > 1:
             conn.execute("UPDATE render_jobs SET claims = claims - 1 WHERE id = %s", (row["id"],))
@@ -206,13 +239,17 @@ class JobProjection:
             )
 
     def finish(self, job: Job) -> bool:
+        """Settle an unfinished job: any terminal state is a forward move from pending
+        or running (spec §3.4). A job the API already cancelled (`release_claim`)
+        takes the cancellation handler's final projection -- log, steps, its error if
+        it has one -- without a second event. A done or failed job is left alone."""
         assert job.state in ("done", "failed", "cancelled")
         with self._pool.connection() as conn, conn.transaction():
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, finished_at = %s, log_tail = %s,"
                 " error = %s, result = %s, diagnostics = %s, diagnostics_dropped = %s,"
                 " warnings = %s, steps = %s, pipeline_version = %s"
-                " WHERE id = %s AND state = 'running'",
+                " WHERE id = %s AND state IN ('pending', 'running')",
                 (
                     job.state,
                     job.finished_at or now(),
@@ -227,10 +264,24 @@ class JobProjection:
                     job.id,
                 ),
             )
-            landed = cursor.rowcount == 1
-            if landed:
+            if cursor.rowcount == 1:
                 self._announce(conn, job.id, job.slug, _FINISHED_KINDS[job.state])
-        return landed
+                return True
+            if job.state != "cancelled":
+                return False
+            cursor = conn.execute(
+                "UPDATE render_jobs SET finished_at = %s, log_tail = %s, steps = %s,"
+                " error = coalesce(nullif(%s, ''), error)"
+                " WHERE id = %s AND state = 'cancelled'",
+                (
+                    job.finished_at or now(),
+                    Jsonb(job.log_tail),
+                    Jsonb([s.model_dump(mode="json") for s in job.steps]),
+                    job.error,
+                    job.id,
+                ),
+            )
+            return cursor.rowcount == 1
 
     # -- reads ------------------------------------------------------------------
 
