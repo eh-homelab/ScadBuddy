@@ -179,7 +179,7 @@ describe('/mcp resources (#264)', () => {
     await expect(client.readResource({ uri: 'scadbuddy://nothing' })).rejects.toMatchObject({ code: -32002 })
     await expect(client.readResource({ uri: 'scadbuddy://models/nope' })).rejects.toMatchObject({
       code: -32002,
-      message: expect.stringContaining('no model "nope"'),
+      message: expect.stringContaining('"content": "no model \\"nope\\""'),
     })
   })
 

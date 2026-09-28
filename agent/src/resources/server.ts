@@ -17,7 +17,7 @@ import type { AuditLog, AuditOutcome } from '../audit/log.js'
 import { hasTier, type Principal } from '../auth/principal.js'
 import { markUntrustedResourceContents } from '../safety/untrusted.js'
 import { principalFrom } from '../tools/projections.js'
-import { type Tool, type ToolContext, ToolError, type ToolServices } from '../tools/registry.js'
+import { type Tool, type ToolContext, ToolError, toolErrorText, type ToolServices } from '../tools/registry.js'
 import { expand, isTemplate, matchUri, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
 import { type ResourceHub, SubscriptionLimitError } from './hub.js'
 
@@ -228,8 +228,13 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
       if (err instanceof z.ZodError) {
         throw new McpError(ErrorCode.InvalidParams, `invalid resource URI ${uri}: ${z.prettifyError(err)}`, { uri })
       }
-      if (err instanceof ToolError && err.status === 404) throw notFound(requested, `Resource not found: ${err.message}`)
-      if (err instanceof ToolError && err.status === 422) throw new McpError(ErrorCode.InvalidParams, err.message, { uri })
+      // The backend's reason is wrapped as untrusted data, as in a tool's error (#258).
+      if (err instanceof ToolError && err.status === 404) {
+        throw notFound(requested, `Resource not found: ${toolErrorText(err, toolOf(def).name)}`)
+      }
+      if (err instanceof ToolError && err.status === 422) {
+        throw new McpError(ErrorCode.InvalidParams, toolErrorText(err, toolOf(def).name), { uri })
+      }
       throw new McpError(ErrorCode.InternalError, err instanceof Error ? err.message : String(err), { uri })
     }
   }

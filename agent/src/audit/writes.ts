@@ -1,7 +1,7 @@
 import type { MiddlewareHandler } from 'hono'
 import type { MintRequest, TokenStore } from '../auth/tokens.js'
 import type { RemoteAddress } from '../routes/guard.js'
-import type { AuditActor, AuditContext, AuditKind, AuditOutcome, AuditSink } from './log.js'
+import type { AuditActor, AuditContext, AuditEntry, AuditKind, AuditOutcome, AuditSink } from './log.js'
 
 // Auditing the writes that are not tool calls (#258): credential and plugin
 // writes over HTTP (`auditWrites`, mounted in app.ts) and MCP token mint and
@@ -24,6 +24,65 @@ function outcomeOf(status: number): AuditOutcome {
   return 'error'
 }
 
+/** How long refused writes from one peer to one action are coalesced into one row. */
+export const REFUSAL_WINDOW_MS = 60_000
+/** Peers tracked one by one per window; beyond it, every other peer shares one row per action. */
+export const REFUSAL_MAX_PEERS = 64
+
+/**
+ * Refused (403) writes, coalesced so an unauthenticated peer cannot grow
+ * `ai_audit` at its request rate (#258): the first refusal per peer and
+ * action in a window is recorded at once; the rest are counted, and one more
+ * row with the count is written when the window closes. At most
+ * REFUSAL_MAX_PEERS peers are tracked apart; more share one `*` key, so a
+ * flood from many addresses still costs a bounded number of rows a minute.
+ */
+export class RefusalCoalescer {
+  private readonly windows = new Map<string, { entry: AuditEntry; more: number; shared: boolean }>()
+
+  private readonly audit: AuditSink
+  private readonly windowMs: number
+  private readonly maxPeers: number
+
+  constructor(audit: AuditSink, windowMs: number = REFUSAL_WINDOW_MS, maxPeers: number = REFUSAL_MAX_PEERS) {
+    this.audit = audit
+    this.windowMs = windowMs
+    this.maxPeers = maxPeers
+  }
+
+  async record(entry: AuditEntry): Promise<void> {
+    const scope = `${entry.kind}|${entry.action}|`
+    let key = scope + (entry.clientIp ?? '')
+    let shared = false
+    if (!this.windows.has(key) && this.windows.size >= this.maxPeers) {
+      key = `${scope}*`
+      shared = true
+    }
+    const open = this.windows.get(key)
+    if (open) {
+      open.more += 1
+      return
+    }
+    this.windows.set(key, { entry, more: 0, shared })
+    setTimeout(() => void this.close(key), this.windowMs).unref()
+    await this.audit.record(shared ? { ...entry, clientIp: undefined, detail: `${entry.detail ?? ''} (one of many peers)` } : entry)
+  }
+
+  private async close(key: string): Promise<void> {
+    const open = this.windows.get(key)
+    this.windows.delete(key)
+    if (!open || open.more === 0) return
+    const { entry, more, shared } = open
+    await this.audit.record({
+      ...entry,
+      ...(shared ? { clientIp: undefined } : {}),
+      detail: `${more} more refused ${entry.action} request${more === 1 ? '' : 's'} ${shared ? 'from other peers' : 'from this peer'} within ${Math.round(this.windowMs / 1000)}s of the first, coalesced`,
+      startedAt: entry.startedAt,
+      finishedAt: new Date(),
+    })
+  }
+}
+
 /**
  * Records every request `verb` maps to an action (`undefined`: not a write,
  * not recorded) after the route has answered: the outcome from the status
@@ -42,6 +101,8 @@ export function auditWrites(options: {
    * its own successes with more detail (MCP tokens: `auditedTokenStore`).
    */
   failuresOnly?: boolean
+  /** Where refused (403) writes go, coalesced; shared by every mount so the bound is global. */
+  refusals: RefusalCoalescer
 }): MiddlewareHandler {
   return async (c, next) => {
     const action = options.verb(c.req.method, c.req.path)
@@ -50,7 +111,7 @@ export function auditWrites(options: {
     if (action === undefined) return
     const status = c.res.status
     if (options.failuresOnly && status < 400) return
-    await options.audit.record({
+    const entry: AuditEntry = {
       kind: options.kind,
       action,
       surface: 'http',
@@ -60,15 +121,19 @@ export function auditWrites(options: {
       detail: `${c.req.method} ${c.req.path} → ${status}`,
       startedAt,
       finishedAt: new Date(),
-    })
+    }
+    await (status === 403 ? options.refusals.record(entry) : options.audit.record(entry))
   }
 }
 
 /**
- * `store` with mint and revoke recorded. Tokens are minted in Settings (spec
- * §8.1), so the actor is the browser user unless the caller says otherwise.
- * The plaintext token is never passed to the log: only the name, tier,
- * expiry and id.
+ * `store` with successful mints and revokes recorded, with the token's id.
+ * Tokens are minted in Settings (spec §8.1), so the actor is the browser user
+ * unless the caller says otherwise. The plaintext token is never passed to
+ * the log: only the name, tier, expiry and id. A mint or revoke that fails
+ * (throws, or finds no live token) is not recorded here: the route answers
+ * an error status, and app.ts's `auditWrites` records that once, with the
+ * request's client_ip.
  */
 export function auditedTokenStore(store: TokenStore, audit: AuditSink, context: AuditContext = { actor: UI_ACTOR, surface: 'http' }): TokenStore {
   const base = { kind: 'token' as const, surface: context.surface, actor: context.actor, clientIp: context.clientIp }
@@ -78,39 +143,21 @@ export function auditedTokenStore(store: TokenStore, audit: AuditSink, context: 
     async mint(request: MintRequest) {
       const startedAt = new Date()
       const describe = `"${request.name}" (${request.tier}${request.expiresAt ? `, expires ${request.expiresAt.toISOString()}` : ''})`
-      try {
-        const minted = await store.mint(request)
-        await audit.record({
-          ...base,
-          action: 'mint',
-          outcome: 'ok',
-          detail: `token ${minted.record.id} ${describe}`,
-          startedAt,
-          finishedAt: new Date(),
-        })
-        return minted
-      } catch (err) {
-        await audit.record({ ...base, action: 'mint', outcome: 'error', detail: `token ${describe}: ${(err as Error).message}`, startedAt, finishedAt: new Date() })
-        throw err
-      }
-    },
-    async revoke(id: string) {
-      const startedAt = new Date()
-      let revoked: boolean
-      try {
-        revoked = await store.revoke(id)
-      } catch (err) {
-        await audit.record({ ...base, action: 'revoke', outcome: 'error', detail: `token ${id}: ${(err as Error).message}`, startedAt, finishedAt: new Date() })
-        throw err
-      }
+      const minted = await store.mint(request)
       await audit.record({
         ...base,
-        action: 'revoke',
-        outcome: revoked ? 'ok' : 'error',
-        detail: revoked ? `token ${id}` : `token ${id}: not a live token`,
+        action: 'mint',
+        outcome: 'ok',
+        detail: `token ${minted.record.id} ${describe}`,
         startedAt,
         finishedAt: new Date(),
       })
+      return minted
+    },
+    async revoke(id: string) {
+      const startedAt = new Date()
+      const revoked = await store.revoke(id)
+      if (revoked) await audit.record({ ...base, action: 'revoke', outcome: 'ok', detail: `token ${id}`, startedAt, finishedAt: new Date() })
       return revoked
     },
   }

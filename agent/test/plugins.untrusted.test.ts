@@ -1,3 +1,5 @@
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -89,5 +91,89 @@ describe('plugin tool results through the forwarder', () => {
     expect(out.startsWith('event: message\ndata: ')).toBe(true)
     const message = JSON.parse(out.split('\ndata: ')[1]!) as { result: { content: { text: string }[] } }
     expect(unwrapUntrusted(message.result.content[0]!.text)).toBe('hi')
+  })
+})
+
+describe('plugin replies the rewrite cannot mark', () => {
+  // A plugin that answers every request with `status`, `type` and `body`.
+  const rawPlugin = async (status: number, type: string, body: string) => {
+    const server = createServer((req, res) => {
+      req.resume()
+      req.on('end', () => {
+        res.writeHead(status, { 'content-type': type, 'mcp-session-id': 's1' })
+        res.end(body)
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    return {
+      url: `http://127.0.0.1:${port}/mcp`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    }
+  }
+  const toolCall = { jsonrpc: '2.0' as const, id: 3, method: 'tools/call', params: { name: 'recall', arguments: {} } }
+  const call = (url: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify(toolCall),
+    })
+
+  it.each([
+    [500, 'application/json', JSON.stringify({ jsonrpc: '2.0', id: 3, error: { code: -1, message: INJECTED } })],
+    [500, 'text/plain', INJECTED],
+    [403, 'text/plain', INJECTED],
+  ])('withholds an HTTP %i (%s) tool-call reply, keeping the status', async (status, type, body) => {
+    const upstream = await rawPlugin(status, type, body)
+    const registration = forwarder.register(plugin(upstream.url), '127.0.0.1')
+    try {
+      const res = await call(registration.url)
+      expect(res.status).toBe(status)
+      expect(res.headers.get('mcp-session-id')).toBe('s1')
+      const text = await res.text()
+      expect(text).not.toContain('SYSTEM')
+      expect(text).toContain(`HTTP ${status}`)
+    } finally {
+      registration.release()
+      await upstream.close()
+    }
+  })
+
+  it('withholds a 200 tool-call reply that is neither JSON nor SSE, or is not valid JSON', async () => {
+    for (const [type, body] of [
+      ['text/plain', INJECTED],
+      ['application/json', `not json: ${INJECTED}`],
+    ] as const) {
+      const upstream = await rawPlugin(200, type, body)
+      const registration = forwarder.register(plugin(upstream.url), '127.0.0.1')
+      try {
+        const res = await call(registration.url)
+        expect(res.status).toBe(502)
+        expect(await res.text()).not.toContain('SYSTEM')
+      } finally {
+        registration.release()
+        await upstream.close()
+      }
+    }
+  })
+
+  it("the MCP SDK client's error for a 500 carries none of the plugin's text", async () => {
+    const upstream = await rawPlugin(500, 'text/plain', INJECTED)
+    const registration = forwarder.register(plugin(upstream.url), '127.0.0.1')
+    const transport = new StreamableHTTPClientTransport(new URL(registration.url))
+    try {
+      await transport.start()
+      // The client folds a non-OK body into this error, which the model reads as the tool's failure.
+      const err = await transport.send(toolCall).then(
+        () => undefined,
+        (e: unknown) => e as Error,
+      )
+      expect(err?.message).toContain('HTTP 500')
+      expect(err?.message).not.toContain('SYSTEM')
+    } finally {
+      await transport.close()
+      registration.release()
+      await upstream.close()
+    }
   })
 })

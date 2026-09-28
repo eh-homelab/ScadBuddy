@@ -339,7 +339,8 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     // … and once executed, the scope error reaches the agent verbatim.
     const executed = await runTool({ ...tool('send_to_bambuddy'), gated: false }, { output_id: '0123456789abcdef0123456789abcdef' }, ctx())
     expect(executed.isError).toBe(true)
-    expect(firstText(executed)).toContain('needs "Manage Library"')
+    expect(firstText(executed)).toContain('"untrusted_data"')
+    expect(firstText(executed)).toContain('needs \\"Manage Library\\"')
   })
 })
 

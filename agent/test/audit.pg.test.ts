@@ -157,12 +157,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
     expect(await tokens.revoke(record.id)).toBe(true)
     expect(await tokens.revoke(record.id)).toBe(false)
     const entries = (await audit.list({ kind: 'token' })).entries
+    // The second revoke found no live token: the route's 404 records that (app.ts auditWrites), not the store.
     expect(entries.map((e) => [e.action, e.outcome])).toEqual([
-      ['revoke', 'error'],
       ['revoke', 'ok'],
       ['mint', 'ok'],
     ])
-    expect(entries[2]?.detail).toBe(`token ${record.id} "Claude Desktop" (write)`)
+    expect(entries[1]?.detail).toBe(`token ${record.id} "Claude Desktop" (write)`)
     expect(JSON.stringify(entries)).not.toContain(token)
   })
 

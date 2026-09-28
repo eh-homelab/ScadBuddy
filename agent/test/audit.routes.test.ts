@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
-import { UI_ACTOR, UNVERIFIED_ACTOR } from '../src/audit/writes.js'
+import { auditedTokenStore, REFUSAL_WINDOW_MS, RefusalCoalescer, UI_ACTOR, UNVERIFIED_ACTOR } from '../src/audit/writes.js'
+import type { TokenStore } from '../src/auth/tokens.js'
 import { originPolicy } from '../src/http/origins.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryAudit } from './support/memoryAudit.js'
@@ -143,5 +144,78 @@ describe('credential and plugin writes are audited', () => {
       ['plugin', 'create', 'error'],
     ])
     expect(audit.entries[0]?.detail).toBe('DELETE /api/v1/ai/plugins/mem → 503')
+  })
+})
+
+describe('refused writes are coalesced, so they cannot grow the log without bound', () => {
+  const refusedPut = (a: ReturnType<typeof app>) =>
+    a.request('/api/v1/ai/credentials', { method: 'PUT', headers: { host: UI.host, 'x-forwarded-proto': 'https' } })
+
+  it('records the first refusal per peer at once and the rest as one counted row per window', async () => {
+    vi.useFakeTimers()
+    try {
+      const audit = new MemoryAudit()
+      let peer = '10.0.0.7'
+      const a = app({ audit, remoteAddress: () => peer })
+      for (let i = 0; i < 50; i++) expect((await refusedPut(a)).status).toBe(403)
+      peer = '10.0.0.8'
+      await refusedPut(a)
+      expect(audit.entries.map((e) => [e.action, e.outcome, e.clientIp])).toEqual([
+        ['save', 'refused', '10.0.0.7'],
+        ['save', 'refused', '10.0.0.8'],
+      ])
+      await vi.advanceTimersByTimeAsync(REFUSAL_WINDOW_MS)
+      expect(audit.entries).toHaveLength(3)
+      expect(audit.entries[2]).toMatchObject({ outcome: 'refused', actor: UNVERIFIED_ACTOR, clientIp: '10.0.0.7' })
+      expect(audit.entries[2]?.detail).toMatch(/^49 more refused save requests from this peer/)
+      // A new window starts over.
+      peer = '10.0.0.7'
+      await refusedPut(a)
+      expect(audit.entries).toHaveLength(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shares one row among peers beyond the cap', async () => {
+    vi.useFakeTimers()
+    try {
+      const audit = new MemoryAudit()
+      const refusals = new RefusalCoalescer(audit, 1000, 2)
+      const entry = (ip: string) => ({ kind: 'credential' as const, action: 'save', surface: 'http' as const, actor: UNVERIFIED_ACTOR, outcome: 'refused' as const, clientIp: ip })
+      for (let i = 0; i < 100; i++) await refusals.record(entry(`10.1.0.${i}`))
+      expect(audit.entries.map((e) => e.clientIp)).toEqual(['10.1.0.0', '10.1.0.1', undefined])
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(audit.entries).toHaveLength(4)
+      expect(audit.entries[3]?.detail).toMatch(/^97 more refused save requests from other peers/)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('MCP token writes', () => {
+  it('records a failed mint once, with the client address', async () => {
+    const audit = new MemoryAudit()
+    const store: TokenStore = {
+      verify: () => Promise.resolve(null),
+      list: () => Promise.resolve([]),
+      mint: () => Promise.reject(new Error('database down')),
+      revoke: () => Promise.resolve(false),
+    }
+    const tokens = auditedTokenStore(store, audit)
+    const a = app({ audit, tokens })
+    const minted = await a.request('/api/v1/ai/mcp-tokens', {
+      method: 'POST',
+      headers: { ...UI, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Desk', tier: 'read' }),
+    })
+    expect(minted.status).toBeGreaterThanOrEqual(500)
+    const revoked = await a.request('/api/v1/ai/mcp-tokens/nope', { method: 'DELETE', headers: UI })
+    expect(revoked.status).toBe(404)
+    expect(audit.entries.map((e) => [e.kind, e.action, e.outcome, e.clientIp])).toEqual([
+      ['token', 'mint', 'error', '10.0.0.7'],
+      ['token', 'revoke', 'error', '10.0.0.7'],
+    ])
   })
 })

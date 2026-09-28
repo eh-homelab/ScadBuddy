@@ -12,7 +12,7 @@ import type { PluginForwarder } from './plugins/forwarder.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import type { AuditRepo } from './audit/log.js'
-import { auditWrites } from './audit/writes.js'
+import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerAuditRoutes } from './routes/audit.js'
 import { registerChatRoute } from './routes/chat.js'
@@ -268,15 +268,16 @@ export function createApp(deps: AppDeps): AgentApp {
   // log (#258). Mounted before the routes so they run around them.
   if (deps.audit) {
     const audit = deps.audit
-    app.use('/api/v1/ai/credentials', auditWrites({ audit, kind: 'credential', remoteAddress: deps.remoteAddress, verb: credentialVerb }))
+    // Refusals need no authentication, so they are coalesced per peer and
+    // action rather than written one row per request (audit/writes.ts).
+    const refusals = new RefusalCoalescer(audit)
+    const writes = { audit, remoteAddress: deps.remoteAddress, refusals }
+    app.use('/api/v1/ai/credentials', auditWrites({ ...writes, kind: 'credential', verb: credentialVerb }))
     // Refused or failed token writes; successful ones are recorded by the
     // token store itself (audit/writes.ts auditedTokenStore), with the token's id.
-    app.use(
-      '/api/v1/ai/mcp-tokens/*',
-      auditWrites({ audit, kind: 'token', remoteAddress: deps.remoteAddress, verb: tokenVerb, failuresOnly: true }),
-    )
+    app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
     // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
-    app.use('/api/v1/ai/plugins/*', auditWrites({ audit, kind: 'plugin', remoteAddress: deps.remoteAddress, verb: pluginVerb }))
+    app.use('/api/v1/ai/plugins/*', auditWrites({ ...writes, kind: 'plugin', verb: pluginVerb }))
   }
 
   registerAuditRoutes(app, {

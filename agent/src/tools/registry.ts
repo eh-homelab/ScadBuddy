@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
-import { DEFAULT_SOURCE, markUntrusted } from '../safety/untrusted.js'
+import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
@@ -141,11 +141,32 @@ export class ToolError extends Error {
   override name = 'ToolError'
   /** The backend's HTTP status, when the error is a backend answer (call.ts `ok`). */
   readonly status: number | undefined
+  /**
+   * Text ScadBuddy did not write (the backend's problem `detail`, which can
+   * relay Bambuddy's own message): the model sees it inside the untrusted-data
+   * envelope, after the bare `message` (#258).
+   */
+  readonly untrusted: string | undefined
+  /** The ScadBuddy-authored part of the message. */
+  readonly summary: string
 
-  constructor(message: string, status?: number) {
-    super(message)
+  constructor(message: string, status?: number, untrusted?: string) {
+    super(untrusted ? `${message}: ${untrusted}` : message)
     this.status = status
+    this.untrusted = untrusted
+    this.summary = message
   }
+}
+
+/** Where a backend error's reason comes from, for the envelope around it. */
+export const ERROR_DETAIL_SOURCE =
+  "the backend's error detail, which can relay Bambuddy's or another upstream's own message"
+
+/** A ToolError's message as the model may see it: the summary bare, the upstream reason wrapped. */
+export function toolErrorText(err: ToolError, tool: string): string {
+  return err.untrusted === undefined
+    ? err.message
+    : `${err.summary}: ${wrapUntrustedText(tool, ERROR_DETAIL_SOURCE, err.untrusted)}`
 }
 
 export function errorResult(message: string): CallToolResult {
@@ -171,6 +192,18 @@ function failed(message: string): ToolRun {
 }
 
 /**
+ * An error whose `reason` ScadBuddy did not write: the model gets `summary`
+ * bare and `reason` in the untrusted-data envelope; the audit row keeps both.
+ */
+function failedWith(tool: Tool, summary: string, reason: string, source: string): ToolRun {
+  return {
+    result: errorResult(`${summary}: ${wrapUntrustedText(tool.name, source, reason)}`),
+    outcome: 'error',
+    detail: `${summary}: ${reason}`,
+  }
+}
+
+/**
  * The one entry point both projections use: tier check, then the approval
  * gate for outward tools, then the handler. Errors become `isError` results
  * so the model sees them; they are never thrown into the transport.
@@ -179,7 +212,9 @@ function failed(message: string): ToolRun {
  * (safety/untrusted.ts `markUntrusted`, #258): tools hand back READMEs,
  * OpenSCAD source, render logs, library and Bambuddy data, any of which can
  * carry a prompt injection. ScadBuddy's own messages (the tier refusal, the
- * pending-approval notice, a thrown ToolError's summary) are not wrapped.
+ * pending-approval notice, a thrown ToolError's summary) are not wrapped;
+ * the upstream reason an error carries (ToolError `untrusted`, or an
+ * unexpected error's message) is.
  */
 export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolContext): Promise<ToolRun> {
   if (!hasTier(ctx.principal, tool.risk)) {
@@ -213,9 +248,18 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
       : { result, outcome: 'ok' }
   } catch (err) {
     if (err instanceof z.ZodError) return failed(`invalid arguments: ${z.prettifyError(err)}`)
+    if (err instanceof ToolError && err.untrusted !== undefined) {
+      return failedWith(tool, err.summary, err.untrusted, ERROR_DETAIL_SOURCE)
+    }
     if (err instanceof ToolError || err instanceof PendingStoreFullError) return failed(err.message)
     if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
-    return failed(`${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`)
+    // An unexpected error's message can quote anything (a response body, a path).
+    return failedWith(
+      tool,
+      `${tool.name} failed`,
+      err instanceof Error ? err.message : String(err),
+      'the error raised while the tool ran, whose message can quote upstream responses',
+    )
   }
 }
 

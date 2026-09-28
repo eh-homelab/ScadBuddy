@@ -15,7 +15,8 @@ import {
 import { SdkEventMapper } from '../src/sessions/sdkEvents.js'
 import { tierOf } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { defineTool, runToolWithOutcome, text } from '../src/tools/registry.js'
+import { ok } from '../src/tools/call.js'
+import { defineTool, runToolWithOutcome, text, ToolError } from '../src/tools/registry.js'
 import { z } from 'zod'
 import { services } from './helpers/mcp.js'
 
@@ -123,6 +124,42 @@ describe('runTool marks handler output, not its own messages', () => {
     expect(run.outcome).toBe('ok')
     const block = run.result.content[0] as { text: string }
     expect(JSON.parse(block.text)).toEqual({ [UNTRUSTED_KEY]: { tool: 'readme_stub', source: 'a README', content: INJECTED } })
+  })
+
+  it("wraps an upstream error's reason, and an unexpected error's message; keeps ScadBuddy's own errors bare", async () => {
+    const stub = (handler: () => Promise<never>) =>
+      defineTool({ name: 'err_stub', description: 'stub', input: z.object({}), risk: 'read', routes: [], handler })
+    const envelopeAfter = (text: string, prefix: string) => {
+      expect(text.startsWith(`${prefix}: `)).toBe(true)
+      return JSON.parse(text.slice(prefix.length + 2)) as Record<string, { tool: string; source: string; content: unknown }>
+    }
+
+    // The backend relays Bambuddy's own `detail` (call.ts `ok`).
+    const upstream = await runToolWithOutcome(
+      stub(() =>
+        ok(
+          Promise.resolve({
+            error: { title: 'Bambuddy error', detail: INJECTED },
+            response: new Response(null, { status: 502 }),
+          }),
+          'send',
+        ),
+      ),
+      {},
+      ctx(),
+    )
+    expect(upstream.outcome).toBe('error')
+    const wrapped = envelopeAfter((upstream.result.content[0] as { text: string }).text, 'send failed (HTTP 502)')
+    expect(wrapped[UNTRUSTED_KEY]).toMatchObject({ tool: 'err_stub', content: `Bambuddy error: ${INJECTED}` })
+    // The audit row keeps the reason as it was.
+    expect(upstream.detail).toBe(`send failed (HTTP 502): Bambuddy error: ${INJECTED}`)
+
+    const thrown = await runToolWithOutcome(stub(() => Promise.reject(new Error(INJECTED))), {}, ctx())
+    const inner = envelopeAfter((thrown.result.content[0] as { text: string }).text, 'err_stub failed')
+    expect(inner[UNTRUSTED_KEY]?.content).toBe(INJECTED)
+
+    const own = await runToolWithOutcome(stub(() => Promise.reject(new ToolError('give a photo or a plate'))), {}, ctx())
+    expect((own.result.content[0] as { text: string }).text).toBe('give a photo or a plate')
   })
 
   it('an outward call is only prepared, whatever its arguments say about approval', async () => {

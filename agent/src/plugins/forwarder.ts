@@ -143,6 +143,10 @@ function fail(res: ServerResponse, status: number, message: string): void {
   res.end(JSON.stringify({ error: message }))
 }
 
+function isRewritable(type: string): boolean {
+  return type.startsWith('application/json') || type.startsWith('text/event-stream')
+}
+
 function pick(headers: IncomingHttpHeaders, names: readonly string[]): OutgoingHttpHeaders {
   const out: OutgoingHttpHeaders = {}
   for (const name of names) {
@@ -337,6 +341,17 @@ export class PluginForwarder {
       }
       const out = pick(up.headers, RESPONSE_HEADERS)
       const type = String(up.headers['content-type'] ?? '').toLowerCase()
+      // A tool call's reply the rewrite cannot mark (#258): an error status (the
+      // MCP client folds the body into the error the model reads) or a body
+      // that is neither JSON nor SSE. Withheld; the status and session header
+      // stay, so a client still sees a 404's expired session.
+      if (rewrites.calls.size > 0 && (status !== 200 || !isRewritable(type))) {
+        up.resume()
+        const kept = pick(up.headers, ['mcp-session-id'])
+        res.writeHead(status === 200 ? 502 : status, { ...kept, 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: `plugin answered a tool call with HTTP ${status} (${type || 'no content type'}); ScadBuddy does not pass that reply on` }))
+        return
+      }
       if ((rewrites.lists.size === 0 && rewrites.calls.size === 0) || status !== 200) {
         res.writeHead(status, out)
         up.pipe(res)
@@ -350,7 +365,10 @@ export class PluginForwarder {
           try {
             text = JSON.stringify(rewriteMessages(JSON.parse(text), rewrites, route))
           } catch {
-            // not JSON: pass through as is
+            // Not JSON: passed through for a listing, withheld from a tool call (#258).
+            if (rewrites.calls.size > 0) {
+              return fail(res, 502, 'plugin answered a tool call with a body that is not JSON; ScadBuddy does not pass it on')
+            }
           }
           res.writeHead(status, out)
           res.end(text)
