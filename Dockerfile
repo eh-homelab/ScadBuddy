@@ -520,7 +520,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
 # + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
 # terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
-# 660 s at the default.
+# plus a little slack for teardown (e.g. 30 s): 690 s at the default.
 CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short
