@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# Fail when a `docker run` in a models/*/verify.sh does not carry the
+# per-template label (#302):
+#
+#   shell:   docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" ...
+#   python:  ["docker", "run", "--rm", "--label",
+#             "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), ...]
+#
+# verify-models.sh sets SCADBUDDY_VERIFY_LABEL to the slug and, when a template
+# times out, force-removes its containers by that label. An unlabelled
+# container that mounts nothing (the `fc-list` font probe, say) would outlive
+# the timeout and keep burning the runner's cores.
+#
+# The rule is per line: the line that starts the `docker run` (the shell form
+# or the Python argv form) must name both `scadbuddy-verify=` and
+# `SCADBUDDY_VERIFY_LABEL`, so a hard-coded value that no timeout would ever
+# reap by does not pass. Comment lines are skipped. Its cases are in
+# lint-verify-labels.test.sh; both run in ci.yml's `lint` job.
+set -euo pipefail
+
+MODELS_DIR="${MODELS_DIR:-models}"
+
+run_re='(^|[^[:alnum:]_-])docker[[:space:]]+(container[[:space:]]+)?run([[:space:]]|$)|"docker",[[:space:]]*("container",[[:space:]]*)?"run"'
+
+bad=0
+checked=0
+for f in "$MODELS_DIR"/*/verify.sh; do
+  [ -f "$f" ] || continue
+  checked=$((checked + 1))
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ $run_re ]] || continue
+    if [[ "$line" != *scadbuddy-verify=* || "$line" != *SCADBUDDY_VERIFY_LABEL* ]]; then
+      echo "$f:$n: docker run without --label scadbuddy-verify=\$SCADBUDDY_VERIFY_LABEL"
+      echo "    $line"
+      bad=$((bad + 1))
+    fi
+  done <"$f"
+done
+
+if [ "$bad" -ne 0 ]; then
+  echo "$bad unlabelled docker run(s). verify-models.sh cannot reap them after a timeout (#302)."
+  exit 1
+fi
+echo "lint-verify-labels: every docker run in $checked verify.sh script(s) is labelled."

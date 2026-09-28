@@ -49,7 +49,7 @@ IMAGE="$FONTS_IMAGE"
 echo "==> rendering with $IMAGE"
 
 # Run a shell script in the image, in this directory.
-in_image() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" sh -c "$1"; }
+in_image() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" sh -c "$1"; }
 
 # name | expected colour parameters (comma list) | -D overrides separated by ";"
 CASES=(

@@ -31,7 +31,7 @@ mkdir -p "$OUT"
 # image installs. If the family is missing, derive a throwaway image that has
 # it -- otherwise OpenSCAD silently falls back and text widths change.
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if ! docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE
@@ -44,7 +44,7 @@ DOCKERFILE
     IMAGE="$FONTS_IMAGE"
 fi
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 # Values of a dropdown annotation: `name = "x"; // [a:Label, b, ...]` -> a b ...
 options() {
