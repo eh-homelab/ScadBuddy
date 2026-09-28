@@ -234,8 +234,9 @@ Added for #313 on 2026-09-28, from Bambuddy 1.2.5.6 over the ingress (every requ
   ...}`. An STL answers `plates: []`.
 - **An STL's `filament-requirements` is `filaments: []`.**
 - **A plate-scoped read of an unsliced 3MF marks every slot `used_in_plate: true`**
-  (file 89), so it cannot narrow the slots a plate uses. **The first plate-scoped read of
-  a large file can 504 after 15 s** while Bambuddy parses it (file 67, 2026-09-28); the
-  same read answers in under a second after that. The whole-file read did not.
+  (file 89), so it cannot narrow the slots a plate uses. **Over the ingress, the first
+  plate-scoped read of a large file can 504 after 15 s** (Envoy's route timeout) while
+  Bambuddy parses it (file 67, 2026-09-28); it answers in under a second after that.
+  ScadBuddy reaches Bambuddy by its Service URL, which has no such limit.
 - **Slicing a raw STL (#313 probe, the only write):** PASS: job 24 completed, sliced file
   177 left in the library. STL_PRINTABLE = yes.
