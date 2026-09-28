@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { claudeConfigDir, scratchDir } from '../src/harness/options.js'
-import { ensureStateDirs, StateDirError } from '../src/harness/stateDirs.js'
+import { ensureSessionDir, ensureStateDirs, sessionWorkDir, StateDirError } from '../src/harness/stateDirs.js'
 
 describe('ensureStateDirs', () => {
   let root: string
@@ -36,5 +36,21 @@ describe('ensureStateDirs', () => {
     expect(err).toBeInstanceOf(StateDirError)
     expect((err as Error).message).toContain(path.join(stateDir, 'claude'))
     expect((err as Error).message).toContain('ENOTDIR')
+  })
+
+  it('gives each session a stable working directory under work/sessions', async () => {
+    const paths = { stateDir: root }
+    const id = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    expect(sessionWorkDir(paths, id)).toBe(path.join(scratchDir(paths), 'sessions', id))
+    expect(sessionWorkDir(paths, id.toUpperCase())).toBe(sessionWorkDir(paths, id))
+    expect(await ensureSessionDir(paths, id)).toBe(sessionWorkDir(paths, id))
+    expect((await stat(sessionWorkDir(paths, id))).isDirectory()).toBe(true)
+    await expect(ensureSessionDir(paths, id)).resolves.toBe(sessionWorkDir(paths, id))
+  })
+
+  it('refuses anything but a UUID as a session directory name', () => {
+    for (const bad of ['../../etc', '', 'abc', '0f8fad5b-d9cb-469f-a165-70867728950e/..']) {
+      expect(() => sessionWorkDir({ stateDir: root }, bad)).toThrow(StateDirError)
+    }
   })
 })

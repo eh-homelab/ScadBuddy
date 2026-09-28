@@ -81,6 +81,20 @@ dependency of `agent/`.
   the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
   `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
   filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
+  SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
+  `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
+  `listSubkeys?({projectKey, sessionId})` are optional. `SessionKey` is
+  `{ projectKey, sessionId, subpath? }` (projectKey "Default: sanitized cwd"; no option
+  sets it). `append` "SHOULD treat `uuid` as an idempotency key"; `load` returns `null`
+  for a key "never written", and entries must be "deep-equal to what was appended". The
+  `forkSession()` function and `getSessionMessages()` take the same `sessionStore`. The
+  query option `sessionId` gives a new session a caller-chosen UUID. Measured against the
+  local fake endpoint (`agent/test/sessions.e2e.test.ts`): a session resumes on a fresh
+  `CLAUDE_CONFIG_DIR` with a different `cwd` when the store's lookups ignore projectKey;
+  the last transcript entries (`last-prompt`, `cost-state`) are appended after the
+  `result` message and before the iterator ends; a resumed query's `total_cost_usd`
+  includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -156,7 +170,6 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 
 | Item | Where it matters | Verified by |
 |---|---|---|
-| The exact `SessionStore` adapter interface in the pinned TypeScript SDK version (the `cwd` keying is in §3.1) | §6 | #300 |
 | Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
@@ -350,7 +363,7 @@ tools.
 
 ## 6. Sessions (#300)
 
-- **Storage.** A Postgres `SessionStore` adapter (§3.2) mirrors SDK transcripts, so any
+- **Storage.** A Postgres `SessionStore` adapter (§3.1) mirrors SDK transcripts, so any
   replica can resume a session. A metadata table `ai_sessions` holds the id, owner
   principal, origin (`chat` / `mcp` / `analyzer` / `hook`), scope (model, output, job),
   status (`running` / `waiting_input` / `waiting_approval` / `idle` / `done` /

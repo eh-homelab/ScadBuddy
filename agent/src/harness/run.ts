@@ -5,6 +5,7 @@ import {
   type Query,
   query,
   type SDKUserMessage,
+  type SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
@@ -67,6 +68,22 @@ export type HarnessRun = {
   systemPromptAppend?: string
   /** Session id to resume (#300). */
   resume?: string
+  /**
+   * The id a NEW session gets (#300). sdk.d.ts: "Use a specific session ID for
+   * the conversation instead of an auto-generated one. Must be a valid UUID.
+   * Cannot be used with `continue` or `resume` unless `forkSession` is also set".
+   */
+  sessionId?: string
+  /**
+   * Transcript mirror (#300, sessions/store.ts). sdk.d.ts: "the subprocess
+   * still writes to CLAUDE_CONFIG_DIR ... AND emits entries to this adapter";
+   * resume `load()`s from it "before subprocess spawn".
+   */
+  sessionStore?: SessionStore
+  /** The query's working directory; the service-wide scratch dir when omitted. */
+  cwd?: string
+  /** Yield `stream_event` messages (text deltas) as well as complete messages. */
+  includePartialMessages?: boolean
   /** Claude Code's stderr, already redacted of the credential. */
   stderr?: (line: string) => void
 }
@@ -112,6 +129,10 @@ export function buildHarnessOptions(run: HarnessRun): Options {
   }
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
+  if (run.sessionId !== undefined) options.sessionId = run.sessionId
+  if (run.sessionStore !== undefined) options.sessionStore = run.sessionStore
+  if (run.cwd !== undefined) options.cwd = run.cwd
+  if (run.includePartialMessages) options.includePartialMessages = true
   if (run.pluginPaths?.length) {
     options.plugins = run.pluginPaths.map((p) => ({ type: 'local' as const, path: path.resolve(p) }))
   }
