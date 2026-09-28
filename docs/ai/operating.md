@@ -281,6 +281,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
   "HTTP routes").
+- `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
+  name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
+  SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
+  `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
+  [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
+  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` answers 503.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content

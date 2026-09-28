@@ -1,0 +1,91 @@
+---
+name: OpenSCAD Bump
+
+# Opens ONE pull request when a newer dated OpenSCAD nightly exists (#508 item
+# 9). The Dockerfile pins `openscad/openscad:dev.<date>@sha256:<index digest>`
+# (#507), so a new nightly no longer turns every PR red at once; this workflow
+# brings it in as a single, reviewable change instead.
+#
+# The PR moves the tag, the digest and OPENSCAD_VERSION together
+# (`.github/scripts/openscad-bump.sh`). Its own CI is the re-verification: a
+# Dockerfile change runs every template's verify.sh (the `models` job) and the
+# image's requires_openscad tests. It is never auto-merged: a human reads the
+# result, records it in spec §3, and merges.
+#
+# The PR is opened with the eh-homelab-org-runners App token, not GITHUB_TOKEN:
+# a push or PR made with GITHUB_TOKEN starts no workflow, so the PR would sit
+# with no CI at all.
+
+on:
+  schedule:
+    # Mondays, after the Sunday nightlies and before Dependabot's 04:00 run.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Look for a newer nightly
+        id: bump
+        run: .github/scripts/openscad-bump.sh . | tee -a "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        if: ${{ steps.bump.outputs.bump == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          DIGEST: ${{ steps.bump.outputs.digest }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="chore/openscad-$TAG"
+          # One PR per nightly: a rerun, or next week's run while this one is
+          # still open, finds the branch and leaves it alone.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; nothing to do."
+            exit 0
+          fi
+          git switch -c "$branch"
+          git -c user.name="scadbuddy-openscad-bump" \
+              -c user.email="scadbuddy-openscad-bump@users.noreply.github.com" \
+              commit -am "fix(docker): bump the OpenSCAD base to $TAG"
+          git push origin "$branch"
+          body="$RUNNER_TEMP/body.md"
+          cat > "$body" <<EOF
+          A newer dated OpenSCAD nightly is out. This moves the pinned base to it, changing the tag, digest and \`OPENSCAD_VERSION\` together:
+
+          \`\`\`
+          FROM openscad/openscad:$TAG@$DIGEST
+          ARG OPENSCAD_VERSION=$VERSION
+          \`\`\`
+
+          Opened by \`.github/workflows/openscad-bump.yml\` (#508). This PR is **not** auto-merged. Before merging, re-verify spec §3 (\`docs/superpowers/specs/2026-09-22-scadbuddy-design.md\`):
+
+          - [ ] The \`models\` job passes. A Dockerfile change runs every template's \`verify.sh\`.
+          - [ ] The image job passes, including the \`requires_openscad\` tests.
+          - [ ] If anything failed, find which §3 fact moved. Fix it here, or stop and raise it.
+          - [ ] Add a "Re-verified <date> against OpenSCAD $VERSION" note to §3, with the evidence.
+          EOF
+          gh pr create --base main --head "$branch" \
+            --title "fix(docker): bump the OpenSCAD base to $TAG" \
+            --body-file "$body"
