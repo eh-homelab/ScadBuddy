@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
+from unittest import mock
 
 import pytest
 from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
+from trimesh.creation import box
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.render import previews as previews_module
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
@@ -23,6 +29,7 @@ from scadbuddy.store.refs import BlobRefs
 from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
+from tests.conftest import write_openscad_3mf
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
@@ -219,3 +226,63 @@ def test_a_piece_in_a_subdirectory_scans_the_templates_root_files(tmp_path: Path
     assert root == source
     assert "lobstertwo" in wanted_families(root, {})
     assert model_dir(source / "model.scad", "model.scad") == source
+
+
+async def test_a_worker_without_the_volume_renders_a_preview_from_the_stored_snapshot(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    """Final review C1: nothing is read from the worker's `models/`, which is empty;
+    the source comes from the snapshot, the font it names from the store."""
+    rev = "f" * 40
+    api_paths = DataPaths(tmp_path / "api")
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text('text("hi", font = "Lobster Two");')
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    await FontMirror(content, api_fonts).publish("Lobster Two")
+
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker_fonts = FontService(tmp_path / "worker")
+    deps = replace(
+        _worker_deps(tmp_path, pool, SnapshotStore(content, worker_paths, history=None)),
+        fonts_mirror=FontMirror(content, worker_fonts),
+    )
+    rendered: list[Path] = []
+
+    async def one_box(*args: object, **kwargs: object) -> object:
+        rendered.append(cast(Path, args[0]))
+        write_openscad_3mf(cast(Path, args[3]), [("Color 1", "#0047BB00", box())])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def no_parameters(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", one_box),
+        mock.patch.object(previews_module, "cached_schema", no_parameters),
+    ):
+        png = await ActivityEnvironment().run(
+            RenderActivities(deps).render_preview_png, "demo", rev
+        )
+
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert rendered == [worker_paths.model_revision_dir("demo", rev) / "model.scad"]
+    assert not worker_paths.model_source("demo").exists()
+    assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"ttf"
+
+
+async def test_a_preview_whose_snapshot_is_gone_fails_clearly_on_a_worker(
+    tmp_path: Path, content: ContentStore, pool: Pool
+) -> None:
+    worker = SnapshotStore(content, DataPaths(tmp_path / "worker"), history=None)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(
+            RenderActivities(_worker_deps(tmp_path, pool, worker)).render_preview_png,
+            "demo",
+            "0" * 40,
+        )
+    assert raised.value.non_retryable and raised.value.type == "SnapshotUnavailableError"

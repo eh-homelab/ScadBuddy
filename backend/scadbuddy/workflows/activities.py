@@ -250,22 +250,25 @@ class RenderActivities:
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
+    async def _materialize(self, slug: str, revision: str | None) -> None:
+        """The revision's snapshot, from the store onto this worker's volume."""
+        d = self.deps
+        if d.snapshots is None or revision is None:
+            return
+        found = await _heartbeating(asyncio.create_task(d.snapshots.materialize(slug, revision)))
+        if not found and (d.history is None or not d.history.available):
+            # Nothing to export it from here, and no retry will find it: fail now. The
+            # next submit's `pin` (on the API, with git) stores it.
+            raise ApplicationError(
+                f"the template's source at {revision} is no longer in the store; render again",
+                type=SnapshotUnavailableError.__name__,
+                non_retryable=True,
+            )
+
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
-        if d.snapshots is not None and req.revision is not None:
-            found = await _heartbeating(
-                asyncio.create_task(d.snapshots.materialize(req.slug, req.revision))
-            )
-            if not found and (d.history is None or not d.history.available):
-                # Nothing to export it from here, and no retry will find it: fail the
-                # piece now. The next submit's `pin` (on the API, with git) stores it.
-                raise ApplicationError(
-                    f"the template's source at {req.revision} is no longer in the store;"
-                    " render again",
-                    type=SnapshotUnavailableError.__name__,
-                    non_retryable=True,
-                )
+        await self._materialize(req.slug, req.revision)
         try:
             with timed_stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
@@ -401,17 +404,32 @@ class RenderActivities:
         return piece
 
     @activity.defn(name="render_preview_png")
-    async def render_preview_png(self, slug: str) -> bytes:
+    async def render_preview_png(self, slug: str, revision: str | None = None) -> bytes:
+        """As `prepare` then the render, for the default parameters: on the bambuddy
+        store the worker has no volume, so the source is the pinned revision's
+        snapshot and its fonts come from the store (final review C1). The defaults
+        name no upload (`file_assets` skips a file parameter's own default)."""
         d = self.deps
+        await self._materialize(slug, revision)
+        if d.fonts_mirror is not None:
+            source = (
+                d.paths.model_revision_dir(slug, revision)
+                if revision is not None
+                else d.paths.model_dir(slug)
+            )
+            families = await asyncio.to_thread(wanted_families, source, {})
+            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         work = asyncio.create_task(
             render_preview(
                 slug,
+                revision=revision,
                 config=d.config,
                 paths=d.paths,
                 history=d.history,
                 assets=d.assets,
                 executor=d.thumbnail_executor,
                 checkouts=d.checkouts,
+                fetcher=d.fetcher,
             )
         )
         try:
