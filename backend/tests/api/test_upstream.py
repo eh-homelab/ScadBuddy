@@ -221,9 +221,12 @@ def test_a_merge_base_is_refused_where_it_cannot_apply(
     assert "not a duplicate" in not_a_duplicate.json()["detail"]
 
 
-def test_dismissing_hides_the_update_until_the_upstream_moves_again(
+def test_dismissing_marks_the_update_dismissed_until_the_upstream_moves_again(
     client: TestClient, settings: Settings, bundled: Path
 ) -> None:
+    """Dismissing only moves the listing's state off ``update`` (so no badge): the
+    update itself stays previewed and mergeable, and the next upstream move brings
+    ``update`` back."""
     _duplicate(client)
     refused = client.post(f"/api/v1/models/{MINE}/upstream/dismiss")
     assert refused.status_code == 409, refused.text
@@ -526,8 +529,11 @@ def test_an_edit_racing_a_merges_write_waits_for_it(
 
     monkeypatch.setattr(MergePlan, "still_applies", check_then_edit)
 
-    _, plan = catalogue.merge_upstream("copy")
-    edit.join()
+    try:
+        _, plan = catalogue.merge_upstream("copy")
+    finally:
+        if edit.is_alive():
+            edit.join()
 
     assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edited
     assert history.show("HEAD", "copy/model.scad").decode() == edited

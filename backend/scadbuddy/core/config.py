@@ -76,6 +76,9 @@ DEFAULT_ASSET_SWEEP_GRACE = 7 * 86400.0
 MIN_ASSET_SWEEP_GRACE = 3600.0
 # How often the sweep runs after the one at boot; 0 turns the sweep off entirely.
 DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
+# How old a duplicate's staging folder must be before a sweep treats it as a crashed
+# copy rather than another replica's copy in flight (#212).
+DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,7 @@ class Config:
     asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
+    duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
@@ -157,6 +161,12 @@ class Config:
             raise ValueError(
                 f"SCADBUDDY_ASSET_SWEEP_GRACE must be at least {MIN_ASSET_SWEEP_GRACE:g}, "
                 f"not {self.asset_sweep_grace:g}"
+            )
+        # Zero would sweep a copy another replica is still writing.
+        if self.duplicate_staging_max_age < 1:
+            raise ValueError(
+                "SCADBUDDY_DUPLICATE_STAGING_MAX_AGE must be at least 1, "
+                f"not {self.duplicate_staging_max_age:g}"
             )
 
     def solid_slots(self) -> int:
@@ -299,6 +309,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         asset_sweep_interval=_float_or(
             source.get("SCADBUDDY_ASSET_SWEEP_INTERVAL"), DEFAULT_ASSET_SWEEP_INTERVAL
+        ),
+        # Not `or`: a 0 is refused, not quietly turned into the default.
+        duplicate_staging_max_age=_float_or(
+            source.get("SCADBUDDY_DUPLICATE_STAGING_MAX_AGE"), DEFAULT_DUPLICATE_STAGING_MAX_AGE
         ),
     )
 
