@@ -29,6 +29,7 @@ from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import activities
@@ -37,6 +38,8 @@ from scadbuddy.workflows.activities import (
     RenderActivities,
     WorkerDeps,
     _heartbeating,
+    _main_result,
+    _process_output,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -46,6 +49,7 @@ from scadbuddy.workflows.models import (
     PieceResult,
     PrepareResult,
     Projection,
+    RenderMainResult,
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
@@ -165,7 +169,7 @@ async def test_each_stage_activity_holds_the_library_lease_for_itself(
     assert gate.leased(checkout) == []
 
 
-@pytest.mark.parametrize("stage", ["render_solids", "finish_piece"])
+@pytest.mark.parametrize("stage", ["render_main", "render_solids", "finish_piece"])
 async def test_a_checkout_removed_between_activities_fails_the_next_one(
     tmp_path: Path, stage: str
 ) -> None:
@@ -180,7 +184,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
     req = _request()
     checkout = _checkout(paths)
     prepared = await _prepared_with_library(acts, env, req, checkout)
-    main = await env.run(acts.render_main, req, prepared)
+    main = RenderMainResult()
+    if stage != "render_main":
+        main = await env.run(acts.render_main, req, prepared)
     if stage == "finish_piece":
         await env.run(acts.render_solids, req, prepared, main)
 
@@ -188,7 +194,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
         shutil.rmtree(checkout)
 
     with pytest.raises(LibraryNotInstalledError, match="bosl"):
-        if stage == "render_solids":
+        if stage == "render_main":
+            await env.run(acts.render_main, req, prepared)
+        elif stage == "render_solids":
             await env.run(acts.render_solids, req, prepared, main)
         else:
             await env.run(acts.finish_piece, req, prepared, main)
@@ -197,6 +205,17 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
 
 
 # ── the stage activities ───────────────────────────────────────────────────────
+
+
+def test_a_render_that_echoed_no_plates_carries_none_between_activities() -> None:
+    """`RenderMainResult` mirrors `ProcessOutput`: no `echo(plates = N)` is None in
+    both, never a count the template did not state."""
+    output = ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
+    assert output.plates is None
+    main = _main_result(output)
+    assert main.plates is None
+    assert _process_output(RenderMainResult.model_validate_json(main.model_dump_json())) == output
+    assert RenderMainResult().plates == output.plates
 
 
 async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> None:

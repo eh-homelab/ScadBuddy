@@ -63,7 +63,7 @@ class PrepareResult(BaseModel):
 
 
 class RenderMainResult(BaseModel):
-    plates: int | None = 1
+    plates: int | None = None
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
