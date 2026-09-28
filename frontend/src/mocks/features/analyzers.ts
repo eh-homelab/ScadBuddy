@@ -1,7 +1,7 @@
 import { HttpResponse, http } from 'msw'
 import type { AnalysisRun, AnalyzerDecision, DecisionCreate } from '../../api/types'
 import { analysisReport } from '../analyzers'
-import { mockOutput, problem, shapeRefusal } from '../handlers'
+import { mockOutput, nextHexId, problem, shapeRefusal } from '../handlers'
 import { emitRealtime } from '../realtime'
 
 /**
@@ -15,12 +15,10 @@ const base = '/api/v1/analyzers'
 const state = {
   /** The `analyzer_decisions` table: ignores and suppressions at a scope. */
   decisions: [] as AnalyzerDecision[],
-  seq: 0,
 }
 
 export function reset(): void {
   state.decisions = []
-  state.seq = 0
 }
 
 /** `analyzer.decision` on the `analyzers` topic, ids only (`core/events.py`). */
@@ -74,9 +72,8 @@ export const handlers = [
         row.scope.kind === body.scope.kind &&
         row.scope.key === body.scope.key,
     )
-    state.seq += 1
     const decision: AnalyzerDecision = {
-      id: state.seq.toString(16).padStart(32, '0'),
+      id: nextHexId(),
       diagnostic_id: body.diagnostic_id,
       instance,
       kind: body.kind,
