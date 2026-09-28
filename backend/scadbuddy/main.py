@@ -25,10 +25,8 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
-from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
 API_PREFIX = "/api/v1"
@@ -113,18 +111,14 @@ def sweep_assets(state: AppState) -> list[str]:
 def _sweep_checkouts(state: AppState) -> list[str]:
     """The thread half of :func:`sweep_library_checkouts`."""
     # Every id any revision of any model.json -- live or deleted model, mine or a
-    # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
+    # built-in -- ever held: ONE `git log -p`. A restore
     # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
     # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
     # no file of that name inside a model's folder.
     named = state.history.object_ids_in(
         f":(glob)*/{MODEL_META_NAME}",
         f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
-        f":(literal){LOCKFILE_NAME}",
     )
-    lock = read_lock(state.paths)
-    if lock is not None:
-        named |= {pin.commit for pin in lock.pins.values()}
     # The image's seed (#169) is kept pinned or not: the boot would copy it back.
     seed_dir = state.settings.resolve_seed_libraries_dir()
     seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
@@ -134,8 +128,8 @@ def _sweep_checkouts(state: AppState) -> list[str]:
             commit in named
             or (name, commit) in seeded
             or bool(state.checkouts.leased(state.paths.libraries / name / commit))
-            # The live pins as a removal counts them: uncommitted edits, and a bare
-            # name or an unreadable model.json keeps every checkout of the library.
+            # The live pins as a removal counts them: uncommitted edits, and an
+            # entry with no commit or an unreadable model.json keeps every checkout.
             or bool(state.catalogue.library_users(name, commit))
         )
 
@@ -186,29 +180,18 @@ async def _asset_sweeper(state: AppState) -> None:
         await _sweep_duplicate_staging_logged(state)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    state: AppState = getattr(app.state, STATE_ATTR)
-    state.paths.ensure()
-    # First, when there is a database: the catalogue reads template media rows
-    # (#274) from here on (the lockfile migration below lists every model), and
-    # this applies the migrations. `RenderQueue.start` opening it again is a no-op.
-    if isinstance(state.queue.store, PostgresJobStore):
-        await asyncio.to_thread(state.queue.store.open)
-    # Before the built-in sync: an existing models directory becomes revision 1,
-    # so what a newer image changes in a built-in is a commit on top of it rather
-    # than an unversioned overwrite.
-    await asyncio.to_thread(state.history.ensure_repo)
-    # Before anything shells out to openscad or fc-list: it is what points
-    # fontconfig at the fonts on the data volume.
-    state.fonts.prepare()
-    state.openscad_version = await probe_openscad_version(state.config)
+async def _prepare_catalogue(state: AppState) -> None:
+    """The boot's passes over the catalogue, run before the render queue starts."""
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
     # After the sync, so the built-ins exist: a model the old seed copied in
     # becomes a duplicate of its built-in (#158). Contains its own failures.
     await asyncio.to_thread(state.catalogue.link_seeded)
+    # A create or duplicate that died between claiming its slug and writing it left
+    # an empty directory; it becomes a tombstone for the sweep below. Logs and skips
+    # whatever it cannot read or move, so it never stops the boot.
+    await asyncio.to_thread(state.catalogue.sweep_stranded_claims)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:
@@ -221,6 +204,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # And their previews, which are rows in the database rather than files.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_orphan_previews)
+    except Exception:
+        logger.exception("could not sweep orphaned previews")
     # A default render the process died in left its scratch directory, which the
     # orphan sweep never reads: no slug names it. Only one older than any render may
     # run goes, since another replica may be rendering into it. Whether or not
@@ -231,13 +219,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     except OSError:
         logger.exception("could not sweep preview scratch directories")
-    # Pins from before they moved into each model (#93): once, then the shared
-    # lockfile is gone. It logs what it cannot record, so it never stops the boot.
-    try:
-        slugs = [record.slug for record in await asyncio.to_thread(state.catalogue.list_models)]
-        await asyncio.to_thread(migrate_lockfile, state.paths, state.history, slugs)
-    except (OSError, ValueError, GitError):
-        logger.exception("could not migrate the library lockfile")
     # A library clone the process died in the middle of. Nothing is cloning yet:
     # no request has been served.
     try:
@@ -252,8 +233,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
         except OSError:
             logger.exception("could not seed library checkouts from the image")
-    # After the migration, so every pin is where the sweep reads it. It logs and
-    # keeps what it cannot remove; one that cannot read the history removes nothing.
+    # It logs and keeps what it cannot remove; one that cannot read the history removes nothing.
     try:
         await sweep_library_checkouts(state)
     except (OSError, GitError):
@@ -265,9 +245,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.assets.rebuild_usage)
     except OSError:
         logger.exception("could not recount the upload store")
-    # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
-    # spawns its workers, so a restart never leaves a job stuck "running".
-    await state.queue.start()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    # First: without its database ScadBuddy has no settings, so it does not start.
+    # It also brings the schema up to date, before the queue's store opens.
+    await asyncio.to_thread(state.settings_store.open)
+    state.paths.ensure()
+    # Before the built-in sync: an existing models directory becomes revision 1,
+    # so what a newer image changes in a built-in is a commit on top of it rather
+    # than an unversioned overwrite.
+    await asyncio.to_thread(state.history.ensure_repo)
+    # Before anything shells out to openscad or fc-list: it is what points
+    # fontconfig at the fonts on the data volume.
+    state.fonts.prepare()
+    state.openscad_version = await probe_openscad_version(state.config)
+    # Before the first catalogue listing: that reads the previews, which live in the
+    # database when there is one. Closed again if the boot fails before the queue
+    # has started and taken it over.
+    await state.queue.open_store()
+    try:
+        await _prepare_catalogue(state)
+        # RenderQueue.start() fails unfinished jobs and prunes expired ones before
+        # it spawns its workers, so a restart never leaves a job stuck "running".
+        await state.queue.start()
+    except BaseException:
+        await state.queue.close_store()
+        raise
     # After the queue, whose store migrated the database: the bus writes the event
     # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
     # was published before now (the built-in sync's commits) waited.
@@ -293,7 +299,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
             sweeper = asyncio.create_task(_asset_sweeper(state))
-        if state.settings.preview_renders:
+        if state.previews is not None:
             state.previews.start()
             # Every model without a thumbnail gets its default render, one at a time
             # and behind any render someone asks for; one already made from the
@@ -319,7 +325,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         yield
     finally:
-        await state.previews.aclose()
+        if state.previews is not None:
+            await state.previews.aclose()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
@@ -329,6 +336,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
+        await asyncio.to_thread(state.settings_store.close)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -378,6 +386,3 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     else:
         logger.info("no frontend bundle found; serving the API only")
     return app
-
-
-app = create_app()

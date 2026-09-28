@@ -22,9 +22,18 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. Tests marked `requires_postgres` (the render queue's Postgres store and template media's `template_media`) skip
-unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
-CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
+PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
+live only in Postgres), so every test that builds the app takes the `pg_conninfo`
+fixture (a throwaway schema), and it and the `requires_postgres` tests (the render
+queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
+points at a Postgres they can create schemas in, e.g.
+`docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
+postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
+container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Backend schema changes are new files in `backend/scadbuddy/migrations/`
+(`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
+`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):
@@ -95,7 +104,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per-triangle material), `solids.py` (one closed solid per colour via a `color()`
   wrapper), `bambu3mf.py` (Bambu-style 3MF writer), `glb.py`, `thumbnail.py` (numpy
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
-  (`render_job` ties the steps together; job queue).
+  (`render_job` ties the steps together; job queue), `render_cache.py` (finished
+  renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
+  parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
@@ -192,7 +203,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
   Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
-  digest and `OPENSCAD_VERSION` in the same commit.
+  digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
+  workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
+  is the re-verification, and it is never auto-merged.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv
   provides 3.12. Do not switch to a Python base with OpenSCAD installed beside it —
   the facts below were measured on this exact image.

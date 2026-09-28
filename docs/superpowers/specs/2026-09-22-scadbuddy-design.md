@@ -260,7 +260,7 @@ outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
-cache/previews/<id>.png|.json     the default-render preview and what it was rendered from (§6.2.2)
+cache/preview-work/.work-<uuid>/  a default-render preview's scratch space while it renders (§6.2.2)
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
 assets/<sha256>.json              its original name, kind and size; swept once unreferenced
 .assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
@@ -758,6 +758,34 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 - `-D` values are constructed from the schema, never from raw user strings:
   numbers are formatted, strings are quoted and escaped, booleans are
   `true`/`false`. A parameter not in the schema is rejected (422).
+- **The customizer's range and options are enforced (#432).** A number outside its
+  `[min:max]` (inclusive), and a dropdown value that is not one of its options,
+  is refused with a 422 problem document whose `detail` names the parameter and
+  the range or options and whose `parameters` extension is `[name]`. The render
+  submit and a preset save make the same check (`require_valid_params`), and the
+  worker's `-D` construction repeats it. A template that turns a count into a loop
+  is then bounded by its own customizer range, not by the render timeout.
+  - *Refuse, never clamp.* A clamped value renders something the viewer did not
+    ask for and records it as though they had; a 422 naming the setting is
+    something the customize view can show. This applies to saved values too: a
+    preset, or an output reopened for editing, is applied to the template as it is
+    now, so a value outside a range that has since narrowed is refused, naming the
+    setting, until the viewer moves it back inside. Ranges are rarely narrowed, and
+    a silent change to a saved design is the worse failure. A value a template
+    renames rather than narrows is kept working with `retired` (below).
+  - *The step is not enforced.* It is the widget's increment; OpenSCAD renders any
+    value, and a bundled default sits off its own grid (plant-label's
+    `thickness = 2.5` on `[1.6:0.2:5]`).
+  - *Retired dropdown values.* A value a template renamed but still renders is
+    declared on a comment line of its own, `// retired <name> = "<value>"` (or a
+    number), and is accepted by a render and a preset save without being offered
+    in the dropdown (the schema's `retired`). The pre-#318 `image_threshold` value
+    of `overlay_type` / `mask_type` in bookmark, coaster-set and flexi-fabric is
+    declared that way, so presets and outputs saved before the rename still
+    render. Before this, a render took any value of the right type and only a
+    preset save checked a dropdown's options.
+  - A test derives the schema of every `models/*/model.scad` and runs its
+    defaults, and every shipped `presets.json`, through the same check.
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the
   model's directory so `include`/`import` resolve.
 - **Template notes (#285).** A template tells the user what it changed from the
@@ -872,10 +900,18 @@ source declares them -- is rendered in the background, and that render's
   not a job: never a `render_jobs` row or job file, never listed, never counted by
   admission (`SCADBUDDY_RENDER_QUEUE_MAX`) or the queue metrics, never a `job.*`
   event, and never makes a model's delete wait.
-- **Storage.** `cache/previews/<id>.png`, beside a `<id>.json` recording the source
-  key it was rendered from. It is never in the model's directory, so never
-  committed, and never among the outputs, so never in a print flow. The orphan
-  sweep and a reused slug's cleanup remove it like the schema cache.
+- **Storage (#454).** In Postgres (`SCADBUDDY_DATABASE_URL`): a `model_previews` row per
+  model id (`builtin:` ids included): the source key it was rendered from, whether
+  it rendered, the error if not, and the PNG as `bytea`, on the render queue's
+  pool and created by its migrations (`20260928T0721Z_model_previews.sql`). A rendered
+  row always has its image and a failed one never does (a CHECK constraint), so the
+  record and the image cannot
+  disagree. Without a database there are no previews at all; the database becomes
+  required with #401. A preview is never in the model's
+  directory, so never committed, and never among the outputs, so never in a print
+  flow. A delete, a reused slug's cleanup and the boot's orphan sweep drop it. The
+  files #293 wrote under `cache/previews/` are ignored, not migrated: the previews
+  regenerate on their own.
 - **Precedence.** Own thumbnail, then the first output's plate, then the preview,
   then none. Setting a thumbnail drops the preview at once. A model that has an
   output drops it on its next change, and gets it back if the output is deleted.
@@ -884,16 +920,16 @@ source declares them -- is rendered in the background, and that render's
   metadata edit re-renders nothing. A model is rendered only when its key differs
   from the recorded one. Requests are debounced (2 s) and coalesced per model, so
   a burst of changes is one render. A render whose model changed, was deleted, or
-  gained a thumbnail or an output while it ran is discarded. That check and the write run under one store-wide lock that a drop also takes, so a thumbnail set mid-write never leaves a record without its image; and a record whose image is missing anyway counts as no record, so it is rendered again.
+  gained a thumbnail or an output while it ran is discarded. That check and the write run in one transaction under a per-model advisory lock (`pg_advisory_xact_lock`) that a drop also takes, so a thumbnail set or a delete landing mid-write is never undone by it, on any replica.
 - **Failure.** A render that fails or times out leaves no image and is logged. Its
   key is recorded as failed, so the same source is never retried, at boot
   included. The next source edit tries again.
 - **Built-ins and existing models.** Built-ins get previews too; they are derived
-  files, so a read-only template is untouched. At boot, every model is passed to
+  state, so a read-only template is untouched. At boot, every model is passed to
   the scheduler once. A preview already current is left alone, so only the first
   boot after an upgrade renders anything, and it renders one model at a time
   behind requested renders, with a pause (1 s) after each.
-- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay on disk until their model goes, and the orphan sweep removes them by path either way.
+- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay stored until their model goes; a delete, a reused slug and the orphan sweep still drop them.
 - **Frontend.** Only the new `preview` value (the Edit details dialog says a render
   of the default settings stands in) and `thumbnail_preview_id` in the image's
   cache key. There is no "rendering…" placeholder: the card shows no image until
@@ -1122,7 +1158,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must already be a per-model pin `{name, url, ref, commit}` (#93): a bare name is a 422 naming it (no shared lockfile is left to resolve it against), a malformed pin a 422, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them in `libraries` before anything is cloned (the same body for either content type, #437; a JSON body with other validation errors as well gets the usual `errors` list with that `libraries` key beside it, so neither is lost). Nothing is cloned for a create that would fail without the network: the slug is derived and checked for a conflict (a 422 when it yields no slug, a 409 when the slug is taken) before any clone (#436). Each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must be a per-model pin `{name, url, ref, commit}` (#93): a bare name or a malformed pin is a 422 naming it, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them in `libraries` before anything is cloned (the same body for either content type, #437; a JSON body with other validation errors as well gets the usual `errors` list with that `libraries` key beside it, so neither is lost). Nothing is cloned for a create that would fail without the network: the slug is derived and checked for a conflict (a 422 when it yields no slug, a 409 when the slug is taken) before any clone (#436). Each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |
@@ -1142,7 +1178,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | POST | `/models/{slug}/upstream/dismiss` | sets `dismissed` to the upstream's current revision; one commit, `Dismiss <upstream id> update in <slug>`. 409 unless there is an update |
 | POST | `/models/{slug}/upstream/detach` | clears `upstream` from a duplicate whose upstream is `gone`; one commit, `Detach <slug> from <upstream id>`. 409 while the upstream exists |
 | GET | `/libraries` | the curated catalogue of third-party OpenSCAD libraries (#93): `{name, url, ref, licence, homepage}`, `ref` being the suggested default |
-| PUT/DELETE | `/models/{slug}/libraries/{name}` | PUT body `{url?, ref?}` → clones the library at `ref` (the catalogue's `url`/`ref` when omitted; any other URL is vetted as the URL import's) into `<data>/libraries/<name>/<commit>/` and pins `{name, url, ref, commit}` in **this model's** `model.json`, one commit, `Pin <name> to <ref> (<commit>) for <slug>`. No other model moves: two models can pin one library at two refs, or a fork under the same name. DELETE removes the pin (the checkout stays for older revisions). The model's render, check and schema put only its own pins on `OPENSCADPATH`; restore, duplicate and old-revision renders carry the pins with `model.json`. A pre-per-model `libraries.lock` is migrated into the models once at boot |
+| PUT/DELETE | `/models/{slug}/libraries/{name}` | PUT body `{url?, ref?}` → clones the library at `ref` (the catalogue's `url`/`ref` when omitted; any other URL is vetted as the URL import's) into `<data>/libraries/<name>/<commit>/` and pins `{name, url, ref, commit}` in **this model's** `model.json`, one commit, `Pin <name> to <ref> (<commit>) for <slug>`. No other model moves: two models can pin one library at two refs, or a fork under the same name. DELETE removes the pin (the checkout stays for older revisions). The model's render, check and schema put only its own pins on `OPENSCADPATH`; restore, duplicate and old-revision renders carry the pins with `model.json`. There is no shared lockfile: a model's pins are its `model.json` alone, and an entry that is not a pin (a bare name, a hand edit) makes the model's render, check and schema a 409 until it is pinned again |
 | GET | `/models/{slug}/versions` | the model's git history: commit, date, author, message, changed files |
 | GET | `/models/{slug}/versions/{commit}/source` | that revision's `.scad` |
 | GET | `/models/{slug}/versions/{commit}/schema` | that revision's customizer schema |

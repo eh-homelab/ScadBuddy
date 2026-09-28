@@ -13,7 +13,7 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.jobs import Job, JobStore
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import FAIL_WIDTH, wait_for_job
+from tests.api.conftest import FAIL_WIDTH, job_file, wait_for_job
 from tests.conftest import read_png
 
 ERROR = Diagnostic(
@@ -36,7 +36,7 @@ def _real_preview(paths: DataPaths, job_id: str) -> None:
     """The stub render writes placeholder bytes; a view needs a mesh to draw."""
     write_glb(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(40, 10, 10)))],
-        paths.job_work_dir(job_id) / "preview.glb",
+        job_file(paths, job_id, "preview.glb"),
     )
 
 

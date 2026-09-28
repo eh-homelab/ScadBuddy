@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import psycopg
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
@@ -37,7 +38,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.libraries import ModelLibrary, entry_name
 from scadbuddy.library.media import (
     LEGACY_ID,
     MAX_MEDIA_ITEMS,
@@ -53,7 +54,7 @@ from scadbuddy.library.media import (
 )
 from scadbuddy.library.media_store import MediaStore
 from scadbuddy.library.presets import TemplatePreset, TemplatePresets
-from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
@@ -67,7 +68,6 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
-from scadbuddy.render.solids import WRAPPER_PREFIX
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -213,9 +213,9 @@ class ModelMeta(BaseModel):
     @field_validator("libraries", mode="before")
     @classmethod
     def _readable_pins(cls, value: Any) -> Any:
-        """Only the entries that are pins. A bare name from before per-model pins,
-        or a hand-edited entry, must not stop the model listing; its render says
-        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        """Only the entries that are pins. A hand-edited entry that is not one must
+        not stop the model listing; its render says what is wrong with it
+        (`parse_declaration`), and pinning it again fixes it."""
         if not isinstance(value, list):
             return []
         readable: list[ModelLibrary] = []
@@ -332,6 +332,9 @@ class Catalogue:
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
         media_store: MediaStore | None = None,
+        *,
+        serve_previews: bool = True,
+        wrapper_prefix: str,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -340,9 +343,16 @@ class Catalogue:
         self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
-        #: Where the default-render preview is read from; None turns it off.
+        #: The default-render previews. Kept clean of gone and reused models even
+        #: while `serve_previews` is off, so turning previews back on never serves
+        #: an earlier model's image.
         self.previews = previews
+        #: Off, the catalogue serves no preview at all -- including ones rendered
+        #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
+        self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: A render's colour wrapper file prefix, which a duplicate leaves out.
+        self.wrapper_prefix = wrapper_prefix
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -460,7 +470,7 @@ class Catalogue:
             output_id = self.outputs.plate_cover_output(slug)
             if output_id is not None:
                 return ThumbnailOrigin("output", output_id=output_id)
-        if self.previews is not None:
+        if self.previews is not None and self.serve_previews:
             preview_id = self.previews.preview_id(slug)
             if preview_id is not None:
                 return ThumbnailOrigin("preview", preview_id=preview_id)
@@ -495,7 +505,7 @@ class Catalogue:
             plate = self.outputs.plate_cover(slug)
             if plate is not None:
                 return plate, "image/png"
-        if self.previews is None:
+        if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)
         return (preview, "image/png") if preview is not None else None
@@ -607,10 +617,10 @@ class Catalogue:
         """The models whose live ``model.json`` pins ``name`` (at ``commit``).
 
         Read leniently and counted conservatively, because the answer decides
-        whether a checkout may be deleted: an entry that only names the library --
-        a bare name from before per-model pins, or a hand edit with no readable
-        commit -- counts at every commit, and a ``model.json`` that is not JSON
-        counts when its text mentions the name at all.
+        whether a checkout may be deleted: an entry that names the library with no
+        readable commit -- a hand edit -- counts at every commit, and a
+        ``model.json`` that is not JSON counts when its text mentions the name at
+        all.
         """
         users: list[str] = []
         for slug in self.slugs():
@@ -739,7 +749,9 @@ class Catalogue:
                         staged,
                         # Nor a render's colour wrapper, written beside the source
                         # for the length of a render and gitignored for that reason.
-                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
+                        ignore=shutil.ignore_patterns(
+                            ".*", *([f"{self.wrapper_prefix}*"] if self.wrapper_prefix else [])
+                        ),
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
@@ -820,7 +832,7 @@ class Catalogue:
         return self.record(slug)
 
     def pin_library(
-        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+        self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
     ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
         or at the end. One revision of the model; no other model moves.
@@ -883,8 +895,7 @@ class Catalogue:
         self._require(slug)
         if not self._stored_media(slug):
             self._write_sidecar(slug, THUMBNAIL_NAME, png)
-            if self.previews is not None:
-                self.previews.drop(slug)
+            self._drop_preview(slug)
             self._commit(f"Set {slug} thumbnail", slug)
             return self.record(slug)
         item_id = new_media_id()
@@ -899,8 +910,7 @@ class Catalogue:
             self._save_media(slug, edit, added=[cover.file])
 
         self._commit_change(f"Set {slug} thumbnail", change, slug)
-        if self.previews is not None:
-            self.previews.drop(slug)
+        self._drop_preview(slug)
         return self.record(slug)
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
@@ -1473,6 +1483,7 @@ class Catalogue:
         self.sweep_orphans()
         # Whether or not the sweep got to its outputs: the model is gone either way.
         self._forget_cover(slug)
+        self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
         if self.media_store is not None:
@@ -1552,12 +1563,7 @@ class Catalogue:
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         keyed_by_file = (self.paths.schema_cache, self.paths.presets)
-        roots = (
-            self.paths.outputs,
-            self.paths.model_revisions,
-            *keyed_by_file,
-            self.paths.previews,
-        )
+        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
                 if not root.is_dir():
@@ -1565,12 +1571,7 @@ class Catalogue:
                 for entry in root.iterdir():
                     if root in (self.paths.outputs, self.paths.model_revisions):
                         candidates.append((entry.name, entry))
-                    elif (root in keyed_by_file and entry.suffix == ".json") or (
-                        root == self.paths.previews
-                        and entry.suffix in (".png", ".json")
-                        # A dotfile is an atomic write's temp file, still in flight.
-                        and not entry.name.startswith(".")
-                    ):
+                    elif root in keyed_by_file and entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
             except OSError:
                 logger.exception("could not list for orphans", extra={"path": str(root)})
@@ -1582,17 +1583,97 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            # A preview file goes under the preview lock, as every other change to one.
-            gone = (
-                remove_preview_file(path)
-                if path.parent == self.paths.previews
-                else _remove_tree(path)
-            )
-            if gone:
+            if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
         return removed
+
+    def sweep_stranded_claims(self) -> list[str]:
+        """Move to tombstones the model directories a claim left with nothing in them.
+
+        `_claim` makes a slug's directory before `create` or `duplicate` writes
+        into it; a process killed in between leaves one with no ``model.scad``,
+        which reads as missing yet refuses a retry as taken. Only one with nothing
+        tracked at HEAD either goes, and only once older than ``duplicate_staging_max_age``:
+        another replica sharing ``/data`` may be mid-claim. Runs at boot, before
+        the tombstone sweep. One that cannot be read or moved is logged and skipped.
+        """
+        root = self.paths.models
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - self.duplicate_staging_max_age
+        moved: list[str] = []
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            logger.exception("could not list for stranded claims", extra={"path": str(root)})
+            return []
+        for directory in entries:
+            slug = directory.name
+            if slug.startswith(".") or slug == BUILTIN_DIR:
+                continue
+            try:
+                if not directory.is_dir() or (directory / SOURCE_NAME).exists():
+                    continue
+                if directory.stat().st_mtime > cutoff:
+                    continue
+                # Tracked at HEAD: a model whose source is missing from disk, not a
+                # claim -- restoring it is the history's job, not this sweep's.
+                if self.history is not None and self.history.available:
+                    head = self.history.head()
+                    if head is not None and self.history.files_at(head, slug):
+                        continue
+                tombstones = self.paths.tombstones
+                tombstones.mkdir(parents=True, exist_ok=True)
+                directory.rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
+            except FileNotFoundError:
+                continue
+            except (OSError, GitError):
+                logger.exception("could not sweep a stranded claim", extra={"slug": slug})
+                continue
+            moved.append(slug)
+        return moved
+
+    def sweep_orphan_previews(self) -> list[str]:
+        """Drop the default-render preview of every model that is gone; returns their
+        ids. Apart from `sweep_orphans`, which works by path: the previews are
+        rows in the database.
+
+        A model counts as live while its directory exists, as for `sweep_orphans`,
+        and one whose liveness cannot be checked is kept.
+        """
+        if self.previews is None:
+            return []
+        try:
+            slugs = self.previews.slugs()
+        except psycopg.Error:
+            # The database, not one model: nothing to sweep this time, as
+            # `sweep_orphans` skips a root it cannot list.
+            logger.exception("could not list the previews to sweep")
+            return []
+        removed: list[str] = []
+        for slug in slugs:
+            try:
+                if self.paths.model_dir(slug).exists():
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
+                continue
+            self.previews.drop(slug)
+            removed.append(slug)
+        return removed
+
+    def _drop_preview(self, slug: str) -> None:
+        """Best effort, like the rest of a delete's or a reused slug's cleanup: one
+        left behind ranks below the model's own thumbnail, and a gone model's is
+        swept at the next boot."""
+        if self.previews is None:
+            return
+        try:
+            self.previews.drop(slug)
+        except Exception:
+            logger.exception("could not drop a preview", extra={"slug": slug})
 
     def _claim(self, slug: str) -> Path:
         """Make ``slug``'s directory, or raise ModelExistsError if anything has it.
@@ -1627,9 +1708,9 @@ class Catalogue:
             self.paths.model_presets(slug),
         ):
             _remove_tree(path)
-        # Under the preview lock, with or without a store attached: a render of the
-        # previous model finishing now must not interleave with this.
-        drop_preview(self.paths, slug)
+        # Under the model's preview lock: a render of the previous model finishing
+        # now is either dropped here or discarded by its own "still wanted?" check.
+        self._drop_preview(slug)
         self._forget_cover(slug)
 
     def _forget_cover(self, slug: str) -> None:
@@ -1868,14 +1949,12 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     return resolved
 
 
-def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+def _declares(entries: list[Any], name: str, expected: ModelLibrary) -> bool:
     """Is ``expected`` still the entry ``entries`` has for ``name``?"""
     found = [entry for entry in entries if entry_name(entry) == name]
     if len(found) != 1:
         return False
     [entry] = found
-    if isinstance(expected, str):
-        return bool(entry == expected)
     try:
         return ModelLibrary.model_validate(entry) == expected
     except ValidationError:
