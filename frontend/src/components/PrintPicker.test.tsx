@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError, MAY_HAVE_QUEUED, printRunPoll } from '../api/client'
+import { api, ApiError, printRunPoll } from '../api/client'
 import type { Output, PrintRunResult } from '../api/types'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
@@ -321,13 +321,12 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     expect(ids[0]).not.toBe(ids[1])
   })
 
-  it('takes a run that may have queued to the queue, with the advice said once', async () => {
+  it('offers no Print after a failed run that had tried to queue (#470)', async () => {
     vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
       new ApiError({
-        type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
-        title: 'Gateway Timeout',
-        status: 504,
-        detail: `Bambuddy did not answer in time. ${MAY_HAVE_QUEUED}`,
+        title: 'Internal Server Error',
+        status: 500,
+        detail: 'Plate 2 failed to slice after plate 1 was queued.',
         may_have_queued: true,
       }),
     )
@@ -336,46 +335,43 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('Bambuddy did not answer in time.')
-    expect(alert).toHaveTextContent("Check Bambuddy's queue before printing again")
-    expect(alert).not.toHaveTextContent(MAY_HAVE_QUEUED)
-    // No Print to press again: the way back to it is closing and reopening the dialog.
+    expect(alert).toHaveTextContent('Plate 2 failed to slice after plate 1 was queued.')
+    expect(alert).toHaveTextContent(
+      "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice.",
+    )
     expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
     expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
   })
 
-  it('keeps Print disabled after a run lost while it was queueing', async () => {
-    const lost =
-      'ScadBuddy restarted while it was preparing this print, after it had started queueing it, ' +
-      'so it cannot tell whether the print was queued.'
+  it('keeps Print after a failed run that never tried to queue, even a Bambuddy timeout', async () => {
     vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
       new ApiError({
-        title: 'Internal Server Error',
-        status: 500,
-        detail: `${lost} ${MAY_HAVE_QUEUED}`,
-        may_have_queued: true,
+        type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+        title: 'Gateway Timeout',
+        status: 504,
+        detail: 'could not reach Bambuddy to slice the plate: ReadTimeout',
+        may_have_queued: false,
       }),
     )
     const { user } = renderPicker()
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    expect(await screen.findByRole('alert')).toHaveTextContent("check Bambuddy's queue")
-    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('could not reach Bambuddy to slice the plate: ReadTimeout')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 })
 
 describe('PrintPicker · A run that got no answer (#470)', () => {
-  // runPrint re-sends a request no ScadBuddy answer described (the same request_id,
-  // so the same run) a few times before giving up; do not wait a second between them.
+  // runPrint re-sends an unanswered press (same request_id) before it gives up.
   beforeEach(() => {
     printRunPoll.intervalMs = 1
   })
   afterEach(() => {
     printRunPoll.intervalMs = 1000
   })
-  /** How many times one press posts when nothing ever answers it. */
-  const resent = 1 + printRunPoll.reattempts
 
   function runAnswers(answer: () => Response) {
     const calls = watch('POST', '/run')
@@ -411,8 +407,8 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       expect.any(String),
       'noopener',
     )
-    // The same press, re-sent until the client gives up; keyed on its request_id.
-    expect(bodies).toHaveLength(resent)
+    // One press, re-sent while unanswered: every try is the same run on the server.
+    expect(bodies).toHaveLength(1 + printRunPoll.reattempts)
     expect(new Set(bodies.map((body) => body['request_id'])).size).toBe(1)
     expect(onRan).not.toHaveBeenCalled()
   })
@@ -487,14 +483,14 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       http.post('/api/v1/print/outputs/:id/run', async () => {
         calls += 1
         await new Promise<void>((resolve) => (release = resolve))
-        const now = new Date().toISOString()
+        // #470: the route answers with the run, here one already finished.
         return HttpResponse.json(
           {
-            id: 'run-slow',
+            id: 'run-1',
             output_id: output.id,
             status: 'succeeded',
-            created_at: now,
-            finished_at: now,
+            created_at: '2026-09-28T10:00:00Z',
+            finished_at: '2026-09-28T10:00:01Z',
             result: queuedResult,
             error: null,
             may_have_queued: false,

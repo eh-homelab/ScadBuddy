@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, ApiError, MAY_HAVE_QUEUED, mayHaveRun, newRequestId } from '../api/client'
+import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
   ChoicesView,
   FilamentOptions,
@@ -115,9 +115,10 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
   /**
-   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection):
-   * the backend may have queued it anyway, so the dialog says so instead of offering
-   * Print again. Closing the dialog is the way back to it.
+   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection),
+   * or one that failed after it had tried to queue (`may_have_queued`): Bambuddy may
+   * have queued it anyway, so the dialog says so instead of offering Print again.
+   * Closing the dialog is the way back to it.
    */
   const [unanswered, setUnanswered] = useState<string | null>(null)
   // Only for the queue link while a run is unanswered (a result carries its own), so it
@@ -443,18 +444,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     } catch (cause) {
       if (attempt !== runAttempt.current) return
       if (mayHaveRun(cause)) {
-        // The unanswered view gives the queue advice itself, so a failed run's own
-        // copy of it (runPrint appends it once the run had tried to queue) is dropped.
-        setUnanswered((cause as ApiError).detail.replace(` ${MAY_HAVE_QUEUED}`, ''))
+        setUnanswered((cause as ApiError).detail)
         return
       }
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // Anything else (a refusal, nothing upstream took it) is worth retrying as it
-      // stands, except a run that may have queued: Print again would be a new print (#470).
-      setRefused(
-        cause instanceof ApiError &&
-          (cause.status === 422 || cause.problem.may_have_queued === true),
-      )
+      // Anything else (a refusal, nothing upstream took it) is worth retrying as it stands.
+      setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
       if (attempt === runAttempt.current) setRunning(false)
     }

@@ -244,10 +244,12 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
  * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
  * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice.
+ * one of these blind can do it twice. A failed print run (#470) says so itself: its
+ * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
   return [0, 502, 504, 524].includes(error.status)
@@ -286,8 +288,6 @@ export function newRequestId(): string {
 /**
  * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
  * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
- * `send` writes those as `UNANSWERED` problems; the backend's own problems never are.
- * An offline browser could not send the request at all, so that is not re-sent here.
  */
 function unanswered(caught: unknown): boolean {
   return (
@@ -308,10 +308,6 @@ async function reattach<T>(attempt: () => Promise<T>): Promise<T> {
     }
   }
 }
-
-/** Appended to a failed run that had already tried to queue (#470). */
-export const MAY_HAVE_QUEUED =
-  "The print may still have been queued: check Bambuddy's queue before printing again."
 
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
@@ -755,11 +751,10 @@ export const api = {
         type: error?.type,
         title: error?.title ?? 'Print failed',
         status: error?.status ?? 500,
-        // The run had already tried to queue (a queue call that timed out, a later
-        // plate failing after an earlier one was queued, or a run lost while queueing):
-        // another Print is a new print, so say where to look first. The flag alone
-        // decides; the backend's detail never carries this advice itself.
-        detail: run.may_have_queued ? `${detail} ${MAY_HAVE_QUEUED}` : detail,
+        detail,
+        // Whether the run had already tried to queue (a queue call that timed out, a
+        // later plate failing after an earlier one was queued, or a run lost while
+        // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
         may_have_queued: run.may_have_queued,
       })
     }

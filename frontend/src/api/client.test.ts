@@ -5,7 +5,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
-  MAY_HAVE_QUEUED,
+  UNANSWERED,
   api,
   mayHaveRun,
   newRequestId,
@@ -252,16 +252,42 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).status).toBe(504)
-    expect((error as ApiError).detail).toBe(`Bambuddy did not answer in time. ${MAY_HAVE_QUEUED}`)
-    // The type a synchronous 504 would have carried, which "may have run" is told by.
+    // The dialog adds the queue advice; the detail is the backend's own.
+    expect((error as ApiError).detail).toBe('Bambuddy did not answer in time.')
     expect((error as ApiError).problem).toMatchObject({
       type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
       status: 504,
       may_have_queued: true,
     })
+    expect(mayHaveRun(error)).toBe(true)
   })
 
-  it('adds the queue advice to a run lost while queueing once, from the flag', async () => {
+  it('does not count a failed run that never tried to queue, whatever its type', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: false,
+          error: {
+            type: BAMBUDDY_UNAVAILABLE,
+            status: 504,
+            title: 'Gateway Timeout',
+            detail: 'could not reach Bambuddy to slice the plate: ReadTimeout',
+            extensions: {},
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).status).toBe(504)
+    expect(mayHaveRun(error)).toBe(false)
+  })
+
+  it('counts a run lost while queueing as maybe queued, from the flag', async () => {
     const lost =
       'ScadBuddy restarted while it was preparing this print, after it had started queueing it, ' +
       'so it cannot tell whether the print was queued.'
@@ -278,7 +304,8 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     )
 
     const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
-    expect((error as ApiError).detail).toBe(`${lost} ${MAY_HAVE_QUEUED}`)
+    expect((error as ApiError).detail).toBe(lost)
+    expect(mayHaveRun(error)).toBe(true)
   })
 
   it('re-sends the same request when its answer never arrived, and re-attaches to the run', async () => {
@@ -336,7 +363,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
 
     const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
     expect(error).toBeInstanceOf(ApiError)
-    expect((error as ApiError).status).toBe(0)
+    expect((error as ApiError).problem).toMatchObject({ type: UNANSWERED, status: 0 })
     expect(mayHaveRun(error)).toBe(true)
     expect(posts).toBe(3)
   })
