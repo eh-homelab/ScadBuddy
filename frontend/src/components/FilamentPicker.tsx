@@ -11,6 +11,7 @@ import {
   NO_FILTERS,
   facets,
   filterSpools,
+  fittingSides,
   loadedLabel,
   nozzleMismatch,
   slotNeed,
@@ -89,21 +90,46 @@ function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; si
 }
 
 /**
- * The side a spool feeds, lettered as the printer and Bambuddy letter it: a square green
- * badge, like Bambuddy's own nozzle-side badge (#469).
+ * The side a spool feeds, lettered as the printer and Bambuddy letter it (#469). Without
+ * the Filament Track Switch the AMS is wired to that side: a square green badge, like
+ * Bambuddy's nozzle-side badge. With the switch the spool only rests there and can be
+ * fed to either nozzle, so it reads "rests on L" in Bambuddy's blue inlet colors.
  */
-function SideBadge({ side, testId }: { side: 'L' | 'R'; testId: string }) {
+function SideBadge({
+  side,
+  resting,
+  testId,
+}: {
+  side: 'L' | 'R'
+  resting: boolean
+  testId: string
+}) {
+  const word = side === 'L' ? 'left' : 'right'
+  if (resting) {
+    return (
+      <span
+        className="shrink-0 rounded px-1 py-0.5 text-[10px] font-bold"
+        style={{ background: 'var(--sb-inlet-bg)', color: 'var(--sb-inlet-ink)' }}
+        title={`Rests on the ${word} inlet; the Filament Track Switch can feed it to either nozzle.`}
+        data-testid={testId}
+      >
+        rests on {side}
+      </span>
+    )
+  }
   return (
     <span
       className="inline-flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold"
       style={{ background: 'var(--sb-side-bg)', color: 'var(--sb-side-ink)' }}
-      title={side === 'L' ? 'Left extruder' : 'Right extruder'}
+      title={`Feeds the ${word} extruder`}
       data-testid={testId}
     >
       {side}
     </span>
   )
 }
+
+const SIDE_LETTER = { 0: 'R', 1: 'L' } as const
 
 function grams(value: number): string {
   return `${value < 10 ? value.toFixed(1) : value.toFixed(0)} g`
@@ -136,9 +162,20 @@ interface Props {
   copies: number
   /** The nozzle size the print is sliced for; a spool whose side has another is ruled out (#469). */
   nozzleSize?: string
+  /** The extruder picked per slot id, where one was (#469); absent is Auto. */
+  extruders?: Record<string, 0 | 1>
+  onExtruderChange?: (slotId: number, extruder: 0 | 1 | null) => void
 }
 
-export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: Props) {
+export function FilamentPicker({
+  options,
+  plan,
+  onChange,
+  copies,
+  nozzleSize,
+  extruders = {},
+  onExtruderChange,
+}: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
 
   const spools = options.spools ?? []
@@ -166,6 +203,9 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
   const nozzles = (options.nozzles ?? []).filter((nozzle) => nozzle.nozzle_diameter)
   // Indexed by extruder (#469), so never the filtered list above.
   const mounted = options.nozzles ?? []
+  const resting = options.track_switch ?? false
+  const fits = fittingSides(options, nozzleSize)
+  const bothKnown = Boolean(mounted[0]?.nozzle_diameter && mounted[1]?.nozzle_diameter)
 
   return (
     <section className="mt-4">
@@ -181,6 +221,12 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
         </button>
       </div>
 
+      {nozzleSize && bothKnown && fits.length === 0 && (
+        <p className="mt-1 text-[12px] text-warn" data-testid="no-fitting-nozzle">
+          Neither nozzle is {nozzleSize} mm: the right has {mounted[0]?.nozzle_diameter} mm and the
+          left {mounted[1]?.nozzle_diameter} mm.
+        </p>
+      )}
       {nozzles.length > 0 && (
         <p className="mt-1 text-[12px] text-muted" data-testid="nozzles">
           {options.printer_name ?? 'The chosen printer'} has {nozzleList(nozzles)} mounted.
@@ -288,7 +334,7 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
             : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const chosenSpool = spools.find((spool) => spool.spool_id === chosen)
           const chosenFitted =
-            chosenSpool && nozzleMismatch(chosenSpool, mounted, nozzleSize) !== null
+            chosenSpool && nozzleMismatch(chosenSpool, options, nozzleSize) !== null
               ? mounted[chosenSpool.extruder ?? -1]?.nozzle_diameter
               : null
           return (
@@ -309,11 +355,43 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
                     <Swatch colour={chosenSpool.colour} size="sm" />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
                     {chosenSpool.side && (
-                      <SideBadge side={chosenSpool.side} testId={`slot-side-${slot.slot_id}`} />
+                      <SideBadge
+                        side={chosenSpool.side}
+                        resting={resting}
+                        testId={`slot-side-${slot.slot_id}`}
+                      />
                     )}
                   </span>
                 )}
               </legend>
+              {/* The extruder this color is sliced for (#469): the only side with the
+                  chosen size, or a choice when the switch lets both sides print it. */}
+              {fits.length === 1 && (
+                <p className="mt-1 text-[12px] text-muted" data-testid={`slot-extruder-${slot.slot_id}`}>
+                  → {SIDE_LETTER[fits[0]!]} ({nozzleSize})
+                </p>
+              )}
+              {fits.length === 2 && resting && (
+                <label className="mt-1 flex items-center gap-2 text-[12px] text-muted">
+                  Extruder
+                  <select
+                    aria-label={`Slot ${slot.slot_id} extruder`}
+                    value={extruders[String(slot.slot_id)] ?? ''}
+                    onChange={(event) =>
+                      onExtruderChange?.(
+                        slot.slot_id,
+                        event.target.value === '' ? null : (Number(event.target.value) as 0 | 1),
+                      )
+                    }
+                    className="sb-field cursor-pointer py-0.5 text-[12px]"
+                    data-testid={`slot-extruder-${slot.slot_id}`}
+                  >
+                    <option value="">Auto</option>
+                    <option value="1">L ({nozzleSize})</option>
+                    <option value="0">R ({nozzleSize})</option>
+                  </select>
+                </label>
+              )}
               {chosenSpool && chosenFitted && (
                 <p className="mt-1 text-[12px] text-warn" data-testid={`slot-mismatch-${slot.slot_id}`}>
                   This spool feeds the {chosenSpool.side === 'L' ? 'left' : 'right'} extruder, where
@@ -336,7 +414,7 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
                   )
                   // Ruled out, not hidden: the run slices each spool for the side it
                   // feeds, so this one would be sliced for a nozzle it is not on (#469).
-                  const mismatch = nozzleMismatch(spool, mounted, nozzleSize)
+                  const mismatch = nozzleMismatch(spool, options, nozzleSize)
                   return (
                     <li key={spool.spool_id} className="border-b border-line last:border-b-0">
                       <label
@@ -376,7 +454,13 @@ export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: 
                             {mismatch}
                           </span>
                         ) : (
-                          spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />
+                          spool.side && (
+                            <SideBadge
+                              side={spool.side}
+                              resting={resting}
+                              testId={`side-${spool.spool_id}`}
+                            />
+                          )
                         )}
                         <span className="sb-num shrink-0 text-[11px] text-faint">
                           {spool.remaining_g === null || spool.remaining_g === undefined

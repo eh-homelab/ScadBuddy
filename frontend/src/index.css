@@ -27,6 +27,9 @@
   /* Bambuddy's own nozzle-side badge (#469). */
   --sb-side-bg: #1a4d2e;
   --sb-side-ink: #00ae42;
+  /* Bambuddy's inlet badge: with the track switch a side is only a rest position. */
+  --sb-inlet-bg: #1e3a5f;
+  --sb-inlet-ink: #3b82f6;
 
   /* Read by the 3D viewer, which cannot use Tailwind utilities. */
   --sb-plate-cell: #29323f;
@@ -54,6 +57,8 @@
     --sb-focus: #1d4ed8;
     --sb-side-bg: #e7f5e9;
     --sb-side-ink: #00ae42;
+    --sb-inlet-bg: #e3f0fb;
+    --sb-inlet-ink: #2563eb;
 
     --sb-plate-cell: #ccd4df;
     --sb-plate-section: #a9b5c4;

@@ -85,7 +85,20 @@ describe('PrintPicker', () => {
     expect(body).not.toHaveProperty('pipeline_id')
   })
 
+  /** The dialog on printer 1 as if it had no track switch, so each AMS is wired to a side. */
+  function unswitched() {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: { ...choicesView.filaments, track_switch: false },
+        }),
+      ),
+    )
+  }
+
   it('rules out spools by the nozzle size chosen, following a change of size (#469)', async () => {
+    unswitched()
     renderPicker()
     const slot = await screen.findByTestId('filament-slot-2')
     // The default 0.4: spool 9 feeds the right extruder, where the 0.2 is fitted.
@@ -96,6 +109,56 @@ describe('PrintPicker', () => {
 
     await waitFor(() => expect(within(slot).getByTestId('spool-9')).toBeEnabled())
     expect(within(slot).getByTestId('spool-22')).toBeDisabled()
+  })
+
+  it('never opens on a spool the size rules out, and swaps one a size change rules out (#469)', async () => {
+    unswitched()
+    const { user } = renderPicker()
+    // The suggestion is spool 21 (on the right's 0.2) for slot 1; at the default 0.4 it
+    // is swapped for the same blue on the shelf, which has no side to rule it out.
+    const one = await screen.findByTestId('filament-slot-1')
+    await waitFor(() => expect(within(one).getByTestId('spool-26')).toBeChecked())
+    expect(within(one).getByTestId('spool-21')).not.toBeChecked()
+
+    // Spool 22 is on the left's 0.4; at 0.2 it can't print, so the pink on the shelf
+    // takes its place rather than leaving a selection Print would be refused for.
+    const two = screen.getByTestId('filament-slot-2')
+    await user.click(within(two).getByTestId('spool-22'))
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() => expect(within(two).getByTestId('spool-27')).toBeChecked())
+  })
+
+  it('sends the extruder picked per color when both sides fit, and forgets it on a size change (#469)', async () => {
+    const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: {
+            ...choicesView.filaments,
+            nozzles: [
+              { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+              { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+            ],
+          },
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await user.click(await screen.findByRole('radio', { name: /0\.2 mm/i }))
+    const choice = () => screen.getByRole('combobox', { name: 'Slot 1 extruder' })
+    await user.selectOptions(choice(), '1')
+    // A pick made for one size says nothing about another.
+    await user.click(screen.getByRole('radio', { name: /0\.4 mm/i }))
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    expect(choice()).toHaveValue('')
+
+    await user.selectOptions(choice(), '1')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    expect(run.mock.calls[0]![1].choices.extruders).toEqual({ '1': 1 })
+
+    await screen.findByTestId('queued-items')
   })
 
   it('disables Print and names the slot when a spool has no preset for the size', async () => {
@@ -148,6 +211,7 @@ describe('PrintPicker', () => {
         process_name: null,
         bed_type: 'Textured PEI Plate',
         filament_overrides: {},
+        extruders: {},
       },
       plate_id: 1,
       all_plates: false,

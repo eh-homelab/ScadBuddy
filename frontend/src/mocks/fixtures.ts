@@ -944,7 +944,9 @@ export const filamentOptions: FilamentOptions = {
   spools: [
     {
       spool_id: 9,
-      // #469 — the right extruder is 0, the left 1; AMS 0 is on switch inlet B.
+      // #469 — the right extruder is 0, the left 1. Printer 1 has the Filament Track
+      // Switch, so this is where the spool rests (AMS 0 on inlet B), not a constraint;
+      // tests give an unswitched printer its own options.
       extruder: 0,
       side: 'R',
       material: 'PETG',
@@ -965,7 +967,7 @@ export const filamentOptions: FilamentOptions = {
     },
     {
       spool_id: 21,
-      extruder: 0, // AMS 1 is on inlet B too
+      extruder: 0, // AMS 1 rests on inlet B too
       side: 'R',
       material: 'PLA',
       subtype: 'Silk',
@@ -986,7 +988,7 @@ export const filamentOptions: FilamentOptions = {
     {
       // The AMS-HT: one spool, no slot number to name, and on the other inlet.
       spool_id: 22,
-      extruder: 1, // the HT is on inlet A
+      extruder: 1, // the HT rests on inlet A
       side: 'L',
       material: 'PLA',
       subtype: 'Basic',
@@ -1077,6 +1079,7 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
+  track_switch: true,
   // #78 — the H2C's two extruders, as `printers/{id}/status` reports them.
   nozzles: [
     { nozzle_type: 'HS00', nozzle_diameter: '0.2' },

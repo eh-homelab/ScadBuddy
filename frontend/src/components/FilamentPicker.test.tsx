@@ -19,12 +19,22 @@ function Harness({
   onChange?: (plan: SlotChoice[]) => void
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
+  const [extruders, setExtruders] = useState<Record<string, 0 | 1>>({})
   return (
     <FilamentPicker
       options={options}
       plan={plan}
       copies={copies}
       nozzleSize={nozzleSize}
+      extruders={extruders}
+      onExtruderChange={(slotId, extruder) =>
+        setExtruders((current) => {
+          const next = { ...current }
+          if (extruder === null) delete next[String(slotId)]
+          else next[String(slotId)] = extruder
+          return next
+        })
+      }
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -45,11 +55,23 @@ function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1, n
 
 const slot = (id: number) => screen.getByTestId(`filament-slot-${id}`)
 
+/** The fixture is printer 1, which has the Filament Track Switch fitted. */
+const switched: FilamentOptions = fixtures.filamentOptions
+/** The same printer as if each AMS were wired to one side. */
+const wired: FilamentOptions = { ...fixtures.filamentOptions, track_switch: false }
+const bothAt02: FilamentOptions = {
+  ...switched,
+  nozzles: [
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+  ],
+}
+
 describe('FilamentPicker', () => {
   // #469 — the fixture printer has the 0.2 on the right (extruder 0) and the 0.4 on the
-  // left (1); spools 9 and 21 feed the right, the HT's spool 22 the left.
+  // left (1); spools 9 and 21 are on the right, the HT's spool 22 on the left.
   it('badges each loaded spool with the side it feeds, and the chosen one in the heading', () => {
-    open()
+    open(wired)
 
     expect(within(slot(1)).getByTestId('side-9')).toHaveTextContent('R')
     expect(within(slot(1)).getByTestId('side-22')).toHaveTextContent('L')
@@ -58,7 +80,7 @@ describe('FilamentPicker', () => {
   })
 
   it('disables a spool whose side has another nozzle fitted, and says which', () => {
-    open(fixtures.filamentOptions, 1, '0.4')
+    open(wired, 1, '0.4')
 
     expect(within(slot(2)).getByTestId('spool-9')).toBeDisabled()
     expect(within(slot(2)).getByTestId('mismatch-9')).toHaveTextContent('R · 0.2 fitted')
@@ -70,12 +92,58 @@ describe('FilamentPicker', () => {
 
   it('says why a chosen spool on the wrong side will not print', () => {
     // The suggestion puts spool 21, on the right's 0.2, in slot 1.
-    open(fixtures.filamentOptions, 1, '0.4')
+    open(wired, 1, '0.4')
 
     expect(screen.getByTestId('slot-mismatch-1')).toHaveTextContent(
       "This spool feeds the right extruder, where the 0.2 mm nozzle is fitted, so it can't print at 0.4 mm.",
     )
     expect(screen.queryByTestId('slot-mismatch-2')).toBeNull()
+  })
+
+  it('with the track switch, a side is only where the spool rests and rules nothing out', () => {
+    open(switched, 1, '0.4')
+
+    expect(within(slot(2)).getByTestId('side-9')).toHaveTextContent('rests on R')
+    expect(within(slot(2)).getByTestId('side-9')).toHaveAttribute(
+      'title',
+      'Rests on the right inlet; the Filament Track Switch can feed it to either nozzle.',
+    )
+    expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
+    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
+  })
+
+  it('names the one extruder every color prints on when only one side fits', () => {
+    open(switched, 1, '0.4')
+    expect(screen.getByTestId('slot-extruder-1')).toHaveTextContent('→ L (0.4)')
+    expect(screen.getByTestId('slot-extruder-2')).toHaveTextContent('→ L (0.4)')
+    expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
+  })
+
+  it('offers a side per color, Auto by default, when both sides fit with the switch', async () => {
+    const { user } = open(bothAt02, 1, '0.2')
+    const choice = screen.getByRole('combobox', { name: 'Slot 1 extruder' })
+    expect(choice).toHaveValue('')
+    expect(within(choice).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Auto',
+      'L (0.2)',
+      'R (0.2)',
+    ])
+
+    await user.selectOptions(choice, '1')
+    expect(choice).toHaveValue('1')
+  })
+
+  it('offers no side choice without the switch, where the AMS decides it', () => {
+    open({ ...bothAt02, track_switch: false }, 1, '0.2')
+    expect(screen.queryByTestId('slot-extruder-1')).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
+  })
+
+  it('says so up front when neither nozzle is the chosen size', () => {
+    open(switched, 1, '0.6')
+    expect(screen.getByTestId('no-fitting-nozzle')).toHaveTextContent(
+      'Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm.',
+    )
   })
 
   it('rules nothing out before a nozzle size is chosen', () => {

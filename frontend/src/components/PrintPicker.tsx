@@ -16,7 +16,7 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
-import { seedPlan } from '../lib/filaments'
+import { fitPlan, seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { FilamentPicker, WarningList } from './FilamentPicker'
@@ -90,6 +90,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   /** #87 — the inventory behind the filament picker, and the plan built on it. */
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
+  /** #469 — the extruder picked per slot id, when both sides fit; absent is Auto. */
+  const [extruders, setExtruders] = useState<Record<string, 0 | 1>>({})
 
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
@@ -219,6 +221,18 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const printers = choices?.printers ?? []
   const printer = printers.find((entry) => entry.id === printerId)
   const size = nozzles[0]?.size ?? '0.4'
+
+  // #469 — a spool the chosen size rules out (its AMS wired to the other nozzle) is
+  // swapped for one that prints, both when the plan is seeded and when the size moves,
+  // so the dialog never sits on a selection the run would refuse.
+  useEffect(() => {
+    if (!filaments) return
+    setPlan((current) => fitPlan(filaments, current, size))
+  }, [filaments, size])
+  // A side picked for one size, printer or output says nothing about another.
+  useEffect(() => {
+    setExtruders({})
+  }, [size, printerId, outputId])
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
   // later plate uses still gets a row (spec §2 step 1).
@@ -290,7 +304,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   useEffect(() => {
     setRunError(null)
     setRefused(false)
-  }, [nozzles, tier, processName, bedType, plan, overrides, printerId, plate])
+  }, [nozzles, tier, processName, bedType, plan, overrides, extruders, printerId, plate])
 
   const rememberedCopies =
     resolveOptions(
@@ -401,6 +415,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
           process_name: processName,
           bed_type: bedType,
           filament_overrides: overrides,
+          extruders,
         },
         ...(copies === null ? {} : { copies }),
         plate_id: chosenPlate,
@@ -566,6 +581,15 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                   onChange={setPlan}
                   copies={effectiveCopies}
                   nozzleSize={size}
+                  extruders={extruders}
+                  onExtruderChange={(slotId, extruder) =>
+                    setExtruders((current) => {
+                      const next = { ...current }
+                      if (extruder === null) delete next[String(slotId)]
+                      else next[String(slotId)] = extruder
+                      return next
+                    })
+                  }
                 />
               )}
 
