@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import psycopg
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
@@ -53,7 +54,7 @@ from scadbuddy.library.media import (
 )
 from scadbuddy.library.media_store import MediaStore
 from scadbuddy.library.presets import TemplatePreset, TemplatePresets
-from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
@@ -332,6 +333,8 @@ class Catalogue:
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
         media_store: MediaStore | None = None,
+        *,
+        serve_previews: bool = True,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -340,8 +343,13 @@ class Catalogue:
         self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
-        #: Where the default-render preview is read from; None turns it off.
+        #: The default-render previews. Kept clean of gone and reused models even
+        #: while `serve_previews` is off, so turning previews back on never serves
+        #: an earlier model's image.
         self.previews = previews
+        #: Off, the catalogue serves no preview at all -- including ones rendered
+        #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
+        self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
@@ -460,7 +468,7 @@ class Catalogue:
             output_id = self.outputs.plate_cover_output(slug)
             if output_id is not None:
                 return ThumbnailOrigin("output", output_id=output_id)
-        if self.previews is not None:
+        if self.previews is not None and self.serve_previews:
             preview_id = self.previews.preview_id(slug)
             if preview_id is not None:
                 return ThumbnailOrigin("preview", preview_id=preview_id)
@@ -495,7 +503,7 @@ class Catalogue:
             plate = self.outputs.plate_cover(slug)
             if plate is not None:
                 return plate, "image/png"
-        if self.previews is None:
+        if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)
         return (preview, "image/png") if preview is not None else None
@@ -883,8 +891,7 @@ class Catalogue:
         self._require(slug)
         if not self._stored_media(slug):
             self._write_sidecar(slug, THUMBNAIL_NAME, png)
-            if self.previews is not None:
-                self.previews.drop(slug)
+            self._drop_preview(slug)
             self._commit(f"Set {slug} thumbnail", slug)
             return self.record(slug)
         item_id = new_media_id()
@@ -899,8 +906,7 @@ class Catalogue:
             self._save_media(slug, edit, added=[cover.file])
 
         self._commit_change(f"Set {slug} thumbnail", change, slug)
-        if self.previews is not None:
-            self.previews.drop(slug)
+        self._drop_preview(slug)
         return self.record(slug)
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
@@ -1473,6 +1479,7 @@ class Catalogue:
         self.sweep_orphans()
         # Whether or not the sweep got to its outputs: the model is gone either way.
         self._forget_cover(slug)
+        self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
         if self.media_store is not None:
@@ -1552,12 +1559,7 @@ class Catalogue:
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         keyed_by_file = (self.paths.schema_cache, self.paths.presets)
-        roots = (
-            self.paths.outputs,
-            self.paths.model_revisions,
-            *keyed_by_file,
-            self.paths.previews,
-        )
+        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
                 if not root.is_dir():
@@ -1565,12 +1567,7 @@ class Catalogue:
                 for entry in root.iterdir():
                     if root in (self.paths.outputs, self.paths.model_revisions):
                         candidates.append((entry.name, entry))
-                    elif (root in keyed_by_file and entry.suffix == ".json") or (
-                        root == self.paths.previews
-                        and entry.suffix in (".png", ".json")
-                        # A dotfile is an atomic write's temp file, still in flight.
-                        and not entry.name.startswith(".")
-                    ):
+                    elif root in keyed_by_file and entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
             except OSError:
                 logger.exception("could not list for orphans", extra={"path": str(root)})
@@ -1582,17 +1579,51 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            # A preview file goes under the preview lock, as every other change to one.
-            gone = (
-                remove_preview_file(path)
-                if path.parent == self.paths.previews
-                else _remove_tree(path)
-            )
-            if gone:
+            if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
         return removed
+
+    def sweep_orphan_previews(self) -> list[str]:
+        """Drop the default-render preview of every model that is gone; returns their
+        ids. Apart from `sweep_orphans`, which works by path: the previews are
+        rows in the database.
+
+        A model counts as live while its directory exists, as for `sweep_orphans`,
+        and one whose liveness cannot be checked is kept.
+        """
+        if self.previews is None:
+            return []
+        try:
+            slugs = self.previews.slugs()
+        except psycopg.Error:
+            # The database, not one model: nothing to sweep this time, as
+            # `sweep_orphans` skips a root it cannot list.
+            logger.exception("could not list the previews to sweep")
+            return []
+        removed: list[str] = []
+        for slug in slugs:
+            try:
+                if self.paths.model_dir(slug).exists():
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
+                continue
+            self.previews.drop(slug)
+            removed.append(slug)
+        return removed
+
+    def _drop_preview(self, slug: str) -> None:
+        """Best effort, like the rest of a delete's or a reused slug's cleanup: one
+        left behind ranks below the model's own thumbnail, and a gone model's is
+        swept at the next boot."""
+        if self.previews is None:
+            return
+        try:
+            self.previews.drop(slug)
+        except Exception:
+            logger.exception("could not drop a preview", extra={"slug": slug})
 
     def _claim(self, slug: str) -> Path:
         """Make ``slug``'s directory, or raise ModelExistsError if anything has it.
@@ -1627,9 +1658,9 @@ class Catalogue:
             self.paths.model_presets(slug),
         ):
             _remove_tree(path)
-        # Under the preview lock, with or without a store attached: a render of the
-        # previous model finishing now must not interleave with this.
-        drop_preview(self.paths, slug)
+        # Under the model's preview lock: a render of the previous model finishing
+        # now is either dropped here or discarded by its own "still wanted?" check.
+        self._drop_preview(slug)
         self._forget_cover(slug)
 
     def _forget_cover(self, slug: str) -> None:
