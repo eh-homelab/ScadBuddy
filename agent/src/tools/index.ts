@@ -5,6 +5,7 @@ import { historyTools } from './history.js'
 import { libraryTools } from './libraries.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
+import { printMediaTools } from './prints.js'
 import type { Tier } from '../auth/principal.js'
 import type { Tool } from './registry.js'
 import { settingsTools } from './settings.js'
@@ -22,6 +23,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...libraryTools,
   ...settingsTools,
   ...printTools,
+  ...printMediaTools,
   ...approvalTools,
 ]
 

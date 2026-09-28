@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from scadbuddy.api import realtime
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import (
+    BusResync,
     Event,
     EventBus,
     FontInstalled,
@@ -304,6 +305,24 @@ def test_a_subscription_that_fell_behind_is_told_to_resync() -> None:
 
     sent = asyncio.run(scenario())
     assert sent[0] == {"type": "resync"}
+
+
+def test_a_bus_resync_is_told_to_the_client_whatever_it_follows() -> None:
+    async def scenario() -> list[dict[str, Any]]:
+        bus = InProcessEventBus()
+        subscription: Subscription = bus.subscribe()
+        bus.publish(BusResync(last_event_id=None))
+        sent: list[dict[str, Any]] = []
+
+        async def send(frame: dict[str, Any]) -> None:
+            sent.append(frame)
+            subscription.close()
+
+        await realtime.pump(subscription, {"fonts"}, send)
+        return sent
+
+    assert asyncio.run(scenario()) == [{"type": "resync"}]
+    assert realtime.topics_of(BusResync()) == []
 
 
 def test_rate_limit_refills() -> None:
