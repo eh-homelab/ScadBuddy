@@ -6,6 +6,7 @@ import { api } from '../api/client'
 import { BUILTIN_SLUG, GALLERY_SLUG, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { intersect } from '../test/intersection'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
@@ -445,10 +446,13 @@ describe('CataloguePage cards (#277)', () => {
     )
   }
 
+  /** The coaster's card, scrolled near enough to have mounted its carousel. */
   async function coasterCard() {
-    return (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+    const card = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
       'li',
     ) as HTMLElement
+    intersect(card)
+    return card
   }
 
   it('browses a card inline: next changes the slide, stays here and opens nothing', async () => {

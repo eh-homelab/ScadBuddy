@@ -1,5 +1,5 @@
 import useEmblaCarousel from 'embla-carousel-react'
-import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
 
@@ -12,6 +12,11 @@ interface Props {
   className?: string
   /** What the carousel is of, for assistive technology: the template's name. */
   label: string
+  /**
+   * Mount the carousel only once it nears the viewport, showing its first slide until
+   * then (#558): a catalogue has one per card, and renders them all.
+   */
+  lazy?: boolean
 }
 
 /**
@@ -19,16 +24,72 @@ interface Props {
  * is its poster with a play badge, and plays in the lightbox. Its controls keep their
  * clicks to themselves, so inside a card (#277) they never follow the card's link.
  */
-export function MediaCarousel({ slides, onOpen, fallback, className, label }: Props) {
+export function MediaCarousel({ slides, onOpen, fallback, className, label, lazy }: Props) {
   if (slides.length === 0) return <>{fallback}</>
-  if (slides.length === 1) {
-    return (
-      <div className={className}>
-        <SlideMedia slide={slides[0]!} index={0} onOpen={onOpen} focusable eager />
-      </div>
-    )
-  }
+  if (slides.length === 1) return <Cover slide={slides[0]!} onOpen={onOpen} className={className} />
+  if (lazy) return <LazyCarousel slides={slides} onOpen={onOpen} className={className} label={label} />
   return <Carousel slides={slides} onOpen={onOpen} className={className} label={label} />
+}
+
+/** One slide on its own: a template with one picture, or a carousel's first until it mounts. */
+function Cover({
+  slide,
+  onOpen,
+  className,
+}: {
+  slide: Slide
+  onOpen?: (index: number) => void
+  className?: string
+}) {
+  return (
+    <div className={className}>
+      <SlideMedia slide={slide} index={0} onOpen={onOpen} focusable eager />
+    </div>
+  )
+}
+
+/** How far outside the viewport a card starts to mount its carousel. */
+const NEAR_VIEWPORT = '200px'
+
+/**
+ * The first slide until the card nears the viewport, then the carousel, which stays
+ * mounted. The two are the same height, so nothing moves. Without IntersectionObserver
+ * it mounts at once.
+ */
+function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+  const wrapper = useRef<HTMLDivElement>(null)
+  // Focus on the cover (a Tab that scrolled it in) moves to the carousel's first slide.
+  const refocus = useRef(false)
+
+  useEffect(() => {
+    const element = wrapper.current
+    if (near || !element) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return
+        refocus.current = element.contains(document.activeElement)
+        setNear(true)
+      },
+      { rootMargin: NEAR_VIEWPORT },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [near])
+
+  useEffect(() => {
+    if (near && refocus.current) wrapper.current?.querySelector<HTMLElement>('button')?.focus()
+  }, [near])
+
+  return (
+    <div ref={wrapper}>
+      {near ? (
+        <Carousel {...props} />
+      ) : (
+        <Cover slide={props.slides[0]!} onOpen={props.onOpen} className={props.className} />
+      )}
+    </div>
+  )
 }
 
 /** A click that must not reach a link or a click handler the carousel sits in. */

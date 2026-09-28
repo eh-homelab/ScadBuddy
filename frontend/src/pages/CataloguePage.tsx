@@ -212,6 +212,7 @@ function ModelCard({
           onOpen={(index) => onOpenMedia(slides, index)}
           label={model.name}
           className={raised}
+          lazy
           fallback={
             <ModelThumbnail
               src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}

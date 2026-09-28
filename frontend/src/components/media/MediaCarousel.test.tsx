@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { GALLERY_SLUG, media } from '../../mocks/fixtures'
+import { intersect } from '../../test/intersection'
 import { MediaCarousel } from './MediaCarousel'
 import { toSlides, type Slide } from './slides'
 
@@ -181,5 +182,48 @@ describe('MediaCarousel (#275)', () => {
     render(<MediaCarousel slides={images.slice(0, 1)} label="Read-only" />)
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
     expect(screen.getByRole('img', { name: images[0]!.alt })).toBeInTheDocument()
+  })
+})
+
+describe('MediaCarousel, lazy (#558)', () => {
+  it('shows the first slide alone, with no carousel, until it nears the viewport', () => {
+    const { container } = render(
+      <MediaCarousel slides={images} onOpen={vi.fn()} label="Crème Coaster" lazy />,
+    )
+
+    const cover = screen.getByRole('img', { name: images[0]!.alt })
+    expect(cover).toHaveAttribute('loading', 'eager')
+    expect(screen.getByRole('button', { name: `Open ${images[0]!.alt}` })).toBeInTheDocument()
+    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('carousel-position')).not.toBeInTheDocument()
+    expect(container.querySelectorAll('img')).toHaveLength(1)
+  })
+
+  it('mounts the carousel once it nears the viewport, and keeps it', async () => {
+    const user = userEvent.setup()
+    const { container } = render(
+      <MediaCarousel slides={images} onOpen={vi.fn()} label="Crème Coaster" lazy />,
+    )
+
+    intersect(container)
+
+    expect(screen.getByRole('region', { name: 'Crème Coaster' })).toBeInTheDocument()
+    expect(current()).toBe('1 of 3')
+    await user.click(screen.getByRole('button', { name: 'Next slide' }))
+    intersect(container)
+    expect(current()).toBe('2 of 3')
+  })
+
+  it('moves focus on the cover to the carousel when it mounts', () => {
+    const { container } = render(
+      <MediaCarousel slides={images} onOpen={vi.fn()} label="Crème Coaster" lazy />,
+    )
+    screen.getByRole('button', { name: `Open ${images[0]!.alt}` }).focus()
+
+    intersect(container)
+
+    const first = screen.getByRole('button', { name: `Open ${images[0]!.alt}` })
+    expect(screen.getByRole('region', { name: 'Crème Coaster' })).toContainElement(first)
+    expect(first).toHaveFocus()
   })
 })
