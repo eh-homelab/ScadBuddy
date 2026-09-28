@@ -11,7 +11,8 @@ import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
-import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import { browserTierOf, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { ensureSessionDir, isUuid, sessionBrowserDir, sessionWorkDir } from '../harness/stateDirs.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
@@ -152,6 +153,13 @@ export type SessionManagerDeps = {
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
+  /**
+   * The headless browser (#349, spec §5.3). A session's turns get it only when
+   * this is set AND the `headless_browser_enabled` setting is `true`; it is off
+   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
+   * is the one origin the browser may open.
+   */
+  headlessBrowser?: { backendUrl: string }
   run?: QueryRunner
   leaseMs?: number
   renewMs?: number
@@ -464,7 +472,10 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    const tierOf = this.deps.tierOf ?? (() => undefined)
+    const ownTiers = this.deps.tierOf ?? (() => undefined)
+    // The browser's tools are tiered here too, so the action feed shows them
+    // as read/write rather than outward (spec §5.3, "Tiers").
+    const tierOf: TierResolver = (name) => browserTierOf(name) ?? ownTiers(name)
     const mapper = new SdkEventMapper(id, tierOf)
     let lost = false
 
@@ -497,11 +508,20 @@ export class SessionManager {
       // after this point is redacted before it reaches the event log.
       const credential = await this.deps.credential()
       secrets = [credential.secret]
-      const [cwd, resume, model] = await Promise.all([
+      const [cwd, resume, model, browserSetting] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
+        this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const browser =
+        this.deps.headlessBrowser && browserSetting === true
+          ? {
+              sessionId: id,
+              backendUrl: this.deps.headlessBrowser.backendUrl,
+              dir: sessionBrowserDir(this.deps.paths, id),
+            }
+          : undefined
       const run: HarnessRun = {
         paths: this.deps.paths,
         credential,
@@ -512,7 +532,8 @@ export class SessionManager {
         maxTurns: session.maxTurns,
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
         signal: controller.signal,
-        tierOf,
+        tierOf: ownTiers,
+        ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),

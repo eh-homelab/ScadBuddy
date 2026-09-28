@@ -417,6 +417,14 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # The headless browser's tests (#349: test/headlessBrowser.server.test.ts
+      # and .e2e.test.ts) drive the pinned @playwright/mcp with a real Chromium
+      # and skip without one. The same build the Dockerfile's `agent` stage
+      # installs, through the pinned package, so it matches the pin.
+      - name: Install the headless browser's Chromium
+        # --with-deps runs apt through sudo itself when it is not root.
+        run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
+
       - name: Unit tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test

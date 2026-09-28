@@ -1,0 +1,184 @@
+import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import {
+  AGENT_ACTOR_HEADER,
+  BROWSER_TOOL_TIERS,
+  DISALLOWED_BROWSER_TOOLS,
+  materializeHeadlessBrowser,
+  SERVER_NAME,
+} from '../src/harness/headlessBrowser.js'
+import { type Hit, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
+
+// The pinned @playwright/mcp server itself, started exactly as the per-session
+// plugin's `.mcp.json` starts it, driven over stdio by an MCP client. No model
+// and no Claude Code: this measures what the SERVER does with the config
+// headlessBrowser.ts writes, i.e. the spec §3.2 rows for §5.3 that are about
+// the server (origin allow-list vs. page JavaScript and redirects, the marker
+// header, isolation, output files, the environment). The harness side is
+// headlessBrowser.e2e.test.ts.
+
+const chromium = testChromium()
+const LEAK = 'sk-must-not-leak-0000'
+const clients: Client[] = []
+
+type ToolResult = { content?: { type: string; text?: string }[]; isError?: boolean }
+
+/**
+ * Starts the server as a session's `.mcp.json` says, the way Claude Code does:
+ * with this process's environment (plus a credential that must not leak) and
+ * the session's cwd, which is separate from the browser directory as in
+ * production (stateDirs.ts `sessionBrowserDir`).
+ */
+async function connect(backendUrl: string, sessionId = randomUUID()) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'pw-'))
+  const cwd = path.join(root, 'cwd')
+  await mkdir(cwd)
+  const plugin = materializeHeadlessBrowser({
+    sessionId,
+    backendUrl,
+    dir: path.join(root, 'browser'),
+    ...chromium,
+  })
+  const mcp = JSON.parse(readFileSync(path.join(plugin.pluginDir, '.mcp.json'), 'utf8')) as {
+    mcpServers: Record<string, { command: string; args: string[] }>
+  }
+  const server = mcp.mcpServers[SERVER_NAME]!
+  const transport = new StdioClientTransport({
+    command: server.command,
+    args: server.args,
+    env: { ...(process.env as Record<string, string>), ANTHROPIC_AUTH_TOKEN: LEAK },
+    cwd,
+    stderr: 'pipe',
+  })
+  const client = new Client({ name: 'scadbuddy-test', version: '0' })
+  await client.connect(transport)
+  clients.push(client)
+  const call = async (name: string, args: Record<string, unknown> = {}): Promise<{ text: string; isError: boolean }> => {
+    const result = (await client.callTool({ name, arguments: args })) as ToolResult
+    return {
+      text: (result.content ?? []).map((c) => c.text ?? `[${c.type}]`).join('\n'),
+      isError: result.isError === true,
+    }
+  }
+  return { client, call, plugin, sessionId, cwd, root, pid: transport.pid }
+}
+
+const refOf = (snapshot: string, role: string, name: string): string => {
+  const match = new RegExp(`${role} "${name}"[^\\n]*\\[ref=(e\\d+)\\]`).exec(snapshot)
+  if (!match?.[1]) throw new Error(`no ${role} "${name}" in:\n${snapshot}`)
+  return match[1]
+}
+
+const marker = (h: Hit | undefined) => h?.headers[AGENT_ACTOR_HEADER.toLowerCase()]
+
+describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromium ? '' : ' (skipped: no Chromium)'}`, () => {
+  let ui: PageServer
+  let other: PageServer
+
+  beforeAll(async () => {
+    other = await startOtherOrigin()
+    ui = await startUi(other.origin)
+  })
+  afterEach(async () => {
+    await Promise.all(clients.splice(0).map((c) => c.close()))
+    ui.hits.length = 0
+    other.hits.length = 0
+  })
+  afterAll(async () => {
+    await ui.close()
+    await other.close()
+  })
+
+  it('offers the core tools, including the four the harness must disallow', async () => {
+    const { client } = await connect(ui.origin)
+    const names = (await client.listTools()).tools.map((t) => t.name).sort()
+    // The server offers them; disallowedTools in the harness is what removes them.
+    for (const name of ['browser_run_code_unsafe', 'browser_evaluate', 'browser_file_upload', 'browser_drop']) {
+      expect(names).toContain(name)
+    }
+    // Every other tool is in the tier map: nothing new slipped in with the pin.
+    const disallowed: readonly string[] = DISALLOWED_BROWSER_TOOLS
+    expect(names.filter((n) => !disallowed.includes(n))).toEqual(Object.keys(BROWSER_TOOL_TIERS).sort())
+  }, 60_000)
+
+  it.skipIf(process.platform !== 'linux')('runs without the environment it was started with', async () => {
+    const { call, pid, plugin } = await connect(ui.origin)
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    const environ = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean)
+    expect(environ.join('\n')).not.toContain(LEAK)
+    expect(environ.map((e) => e.split('=')[0]).sort()).toEqual(
+      ['HOME', 'TMPDIR', ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? ['PLAYWRIGHT_BROWSERS_PATH'] : [])].sort(),
+    )
+    expect(environ).toContain(`HOME=${path.join(path.dirname(plugin.pluginDir), 'home')}`)
+  }, 60_000)
+
+  it('sends the marker on every request, and a page fetch cannot replace it', async () => {
+    const { call, sessionId } = await connect(ui.origin)
+    expect((await call('browser_navigate', { url: `${ui.origin}/` })).isError).toBe(false)
+    const snap = (await call('browser_snapshot')).text
+    await call('browser_click', { element: 'Print', target: refOf(snap, 'button', 'Print') })
+    await call('browser_wait_for', { text: 'print 403' })
+    expect(ui.hits.length).toBeGreaterThan(1)
+    for (const hit of ui.hits) expect(marker(hit)).toBe(sessionId)
+    // The page's fetch set the header to "forged" itself; the context's value wins.
+    expect(marker(ui.hits.find((h) => h.url === '/api/v1/prints'))).toBe(sessionId)
+  }, 60_000)
+
+  it('blocks page JavaScript from reaching another origin', async () => {
+    const { call } = await connect(ui.origin)
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    const snap = (await call('browser_snapshot')).text
+    await call('browser_click', { element: 'Probe', target: refOf(snap, 'button', 'Probe') })
+    await call('browser_wait_for', { text: 'probe blocked' })
+    expect(other.hits).toEqual([])
+  }, 60_000)
+
+  it('refuses a direct navigation off the origin, but NOT a redirect off it', async () => {
+    const { call, sessionId } = await connect(ui.origin)
+    const direct = await call('browser_navigate', { url: `${other.origin}/` })
+    expect(direct.isError).toBe(true)
+    expect(direct.text).toContain('net::ERR_BLOCKED_BY_CLIENT')
+    expect(other.hits).toEqual([])
+    // The README's warning, measured: the list "does not affect redirects". The
+    // request reaches the other origin, marker and all (the tool mostly, but not
+    // always, reports an interrupted navigation, so that is not asserted). The
+    // harness cannot see redirects, so ScadBuddy's origin must not serve an
+    // open redirect (docs/ai/headless-browser.md).
+    await call('browser_navigate', { url: `${ui.origin}/redirect-away` })
+    expect(other.hits.map((h) => [h.url, marker(h)])).toEqual([['/', sessionId]])
+  }, 60_000)
+
+  it('keeps two sessions apart: storage does not carry over', async () => {
+    const a = await connect(ui.origin)
+    const b = await connect(ui.origin)
+    await a.call('browser_navigate', { url: `${ui.origin}/` })
+    expect((await a.call('browser_navigate', { url: `${ui.origin}/` })).text).toContain('seen=xx')
+    const fresh = (await b.call('browser_navigate', { url: `${ui.origin}/` })).text
+    expect(fresh).toContain('seen=x')
+    expect(fresh).not.toContain('seen=xx')
+  }, 60_000)
+
+  it('writes unnamed output to the output dir, named output to the cwd, and nothing outside', async () => {
+    const { call, plugin, cwd, root } = await connect(ui.origin)
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    expect((await call('browser_take_screenshot', {})).isError).toBe(false)
+    expect((await call('browser_take_screenshot', { filename: 'preview.png' })).isError).toBe(false)
+    const escape = await call('browser_take_screenshot', { filename: '../escape.png' })
+    const absolute = await call('browser_take_screenshot', { filename: path.join(root, 'abs.png') })
+    // The server's own restriction ("a convenience defense … not a secure
+    // boundary"); the harness refuses such names before this (headlessBrowser.ts).
+    expect(escape.isError).toBe(true)
+    expect(escape.text).toContain('outside allowed roots')
+    expect(absolute.isError).toBe(true)
+    expect(existsSync(path.join(root, 'escape.png'))).toBe(false)
+    expect(existsSync(path.join(root, 'abs.png'))).toBe(false)
+    expect((await readdir(plugin.outputDir)).some((f) => f.endsWith('.png'))).toBe(true)
+    expect(await readdir(cwd)).toEqual(['preview.png'])
+  }, 60_000)
+})

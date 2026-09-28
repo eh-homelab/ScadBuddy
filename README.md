@@ -340,9 +340,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment.
+  credential's environment. The one exception is the headless browser (#349,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
+  writes that plugin itself and starts its server under `env -i`. It is off
+  unless the `headless_browser_enabled` AI setting is on, and the image carries
+  its Chromium (about 600 MB of the image).
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
+  Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/` and `work/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).

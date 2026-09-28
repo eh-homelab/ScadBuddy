@@ -38,6 +38,17 @@ export function sessionWorkDir(paths: HarnessPaths, sessionId: string): string {
   return path.join(scratchDir(paths), 'sessions', sessionId.toLowerCase())
 }
 
+/**
+ * A session's headless-browser directory (#349): `browser/<id>`, holding its
+ * copy of the playwright plugin, the server's config and its output files.
+ * Deliberately OUTSIDE the session's `cwd`: the server resolves a named output
+ * file against its workspace root, which is that `cwd`, so nothing the model
+ * names can overwrite the config it was started with.
+ */
+export function sessionBrowserDir(paths: HarnessPaths, sessionId: string): string {
+  return path.join(paths.stateDir, 'browser', path.basename(sessionWorkDir(paths, sessionId)))
+}
+
 /** Creates the session's working directory on this replica, idempotently. */
 export async function ensureSessionDir(paths: HarnessPaths, sessionId: string): Promise<string> {
   const dir = sessionWorkDir(paths, sessionId)

@@ -7,6 +7,10 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 //   outward     → needs_approval (spec §8.2: "Outward tools always need a human
 //                 approval in the ScadBuddy UI")
 //
+// Before the tier, an optional InputGuard may DENY a call by its arguments
+// (the headless browser's origin allow-list and file names, #349); a denial
+// there holds at every tier.
+//
 // The approval UI and the resume-after-approval flow are #258. Until then
 // `needs_approval` is answered with a DENY whose message says the action needs
 // approval, so an outward tool can never run unattended.
@@ -33,13 +37,22 @@ export type RiskTier = (typeof RISK_TIERS)[number]
  */
 export type TierResolver = (toolName: string) => RiskTier | undefined
 
+/**
+ * Refuses a call by its INPUT, whatever its tier: the reason it must not run,
+ * or undefined. The headless browser's origin and file-name checks
+ * (headlessBrowser.ts `browserInputProblem`, #349) are one.
+ */
+export type InputGuard = (toolName: string, input: unknown) => string | undefined
+
 export type ToolDecision =
   | { decision: 'allow'; tier: RiskTier }
   | { decision: 'needs_approval'; tier: RiskTier; reason: string }
   | { decision: 'deny'; tier: RiskTier; reason: string }
 
-export function decide(toolName: string, tierOf: TierResolver): ToolDecision {
+export function decide(toolName: string, tierOf: TierResolver, input?: unknown, guard?: InputGuard): ToolDecision {
   const tier = tierOf(toolName) ?? 'outward'
+  const refused = guard?.(toolName, input)
+  if (refused !== undefined) return { decision: 'deny', tier, reason: refused }
   if (tier === 'read' || tier === 'write') return { decision: 'allow', tier }
   return {
     decision: 'needs_approval',
@@ -60,9 +73,9 @@ function toPermissionResult(decision: ToolDecision): PermissionResult {
     : { behavior: 'deny', message: decision.reason }
 }
 
-export function makeCanUseTool(tierOf: TierResolver, onDecision?: DecisionListener): CanUseTool {
+export function makeCanUseTool(tierOf: TierResolver, onDecision?: DecisionListener, guard?: InputGuard): CanUseTool {
   return (toolName, input) => {
-    const decision = decide(toolName, tierOf)
+    const decision = decide(toolName, tierOf, input, guard)
     onDecision?.(toolName, decision)
     const result = toPermissionResult(decision)
     // The SDK passes the input back to the tool from `updatedInput` when set;
@@ -71,12 +84,16 @@ export function makeCanUseTool(tierOf: TierResolver, onDecision?: DecisionListen
   }
 }
 
-export function makePreToolUseHook(tierOf: TierResolver, onDecision?: DecisionListener): HookCallbackMatcher {
+export function makePreToolUseHook(
+  tierOf: TierResolver,
+  onDecision?: DecisionListener,
+  guard?: InputGuard,
+): HookCallbackMatcher {
   return {
     hooks: [
       (input) => {
         if (input.hook_event_name !== 'PreToolUse') return Promise.resolve({})
-        const decision = decide(input.tool_name, tierOf)
+        const decision = decide(input.tool_name, tierOf, input.tool_input, guard)
         if (decision.decision === 'allow') return Promise.resolve({})
         onDecision?.(input.tool_name, decision)
         return Promise.resolve({
