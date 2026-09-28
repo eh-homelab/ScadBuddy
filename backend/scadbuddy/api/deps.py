@@ -270,16 +270,20 @@ def build_state(settings: Settings) -> AppState:
             assets=assets,
         )
 
-        def runner(slug: str) -> Awaitable[bytes]:
+        def runner(slug: str, timeout: float) -> Awaitable[bytes]:
+            # The timeout bounds the render, not the wait for a free worker.
             return legacy.run_background(
-                lambda: render_preview(
-                    slug,
-                    config=config,
-                    paths=paths,
-                    history=history,
-                    assets=assets,
-                    executor=legacy.thumbnail_executor,
-                    checkouts=checkouts,
+                lambda: asyncio.wait_for(
+                    render_preview(
+                        slug,
+                        config=config,
+                        paths=paths,
+                        history=history,
+                        assets=assets,
+                        executor=legacy.thumbnail_executor,
+                        checkouts=checkouts,
+                    ),
+                    timeout=timeout,
                 )
             )
 

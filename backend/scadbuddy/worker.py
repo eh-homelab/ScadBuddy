@@ -10,6 +10,7 @@ import signal
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -20,7 +21,6 @@ from starlette.routing import Route
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from scadbuddy.api.deps import AppState
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import Metrics
@@ -37,6 +37,9 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, make_current, render_worker
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
 
 logger = logging.getLogger(__name__)
 

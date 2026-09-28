@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from temporalio import activity
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.worker import Worker
 
 from scadbuddy.core.config import load_config
 from scadbuddy.core.metrics import Metrics
@@ -26,6 +27,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import Projection
+from scadbuddy.workflows.pipelines import RenderPreview
 from tests.support.temporal import temporal_client
 from tests.test_workflows import FakeActivities, _worker
 
@@ -214,3 +216,116 @@ async def test_an_identical_submit_coalesces_and_starts_nothing_new(
     assert reconciled == 0
     assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total") == 1
     assert (await asyncio.to_thread(projection.read, first.id)).claims == 2
+
+
+async def test_a_row_whose_start_fails_does_not_stop_the_next_one(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue, reconcile_after=0.0)
+        with monkeypatch.context() as patched:
+
+            async def unavailable(*_: object, **__: object) -> None:
+                raise RuntimeError("temporal is down")
+
+            patched.setattr(client, "start_workflow", unavailable)
+            first = await service.submit(SLUG, {"width": 6})
+            second = await service.submit(SLUG, {"width": 7})
+
+        start = client.start_workflow
+
+        async def refuses_the_first(*args: Any, **kwargs: Any) -> Any:
+            if kwargs["id"] == workflow_id_for(first.id):
+                raise RuntimeError("this payload is refused")
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(client, "start_workflow", refuses_the_first)
+        # A failed first pass does not stop the service from starting.
+        await service.start()
+        await service.aclose()
+        second_run = await client.get_workflow_handle(workflow_id_for(second.id)).describe()
+
+    assert second_run.status == WorkflowExecutionStatus.RUNNING
+    assert (
+        service.metrics.registry.get_sample_value(
+            "scadbuddy_render_store_errors_total", {"operation": "start_workflow"}
+        )
+        == 3
+    )
+
+
+class FakePreview:
+    """`render_preview_png` by name, holding every call until released."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.release = asyncio.Event()
+
+    @activity.defn(name="render_preview_png")
+    async def render_preview_png(self, slug: str) -> bytes:
+        self.calls += 1
+        await self.release.wait()
+        return PNG + slug.encode()
+
+
+PNG = b"\x89PNG\r\n\x1a\n"
+
+
+async def test_a_preview_renders_on_the_worker_and_one_slug_runs_once(
+    make_service: ServiceFactory, deps: WorkerDeps
+) -> None:
+    registered = {
+        getattr(fn, "__temporal_activity_definition").name for fn in RenderActivities(deps).all()
+    }
+    assert "render_preview_png" in registered
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        fake = FakePreview()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            both = asyncio.gather(
+                service.render_preview(SLUG, 30.0), service.render_preview(SLUG, 30.0)
+            )
+            async with asyncio.timeout(30):
+                while fake.calls == 0:
+                    await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+            fake.release.set()
+            pngs = await both
+        await service.aclose()
+
+    assert list(pngs) == [PNG + SLUG.encode()] * 2
+    assert fake.calls == 1
+
+
+async def test_a_preview_past_its_timeout_is_cancelled_on_the_worker(
+    make_service: ServiceFactory,
+) -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        fake = FakePreview()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            with pytest.raises(TimeoutError):
+                await service.render_preview(SLUG, 0.5)
+            handle = client.get_workflow_handle(f"preview-{SLUG}")
+            async with asyncio.timeout(30):
+                while (await handle.describe()).status == WorkflowExecutionStatus.RUNNING:
+                    await asyncio.sleep(0.05)
+            fake.release.set()
+            described = await handle.describe()
+        await service.aclose()
+
+    assert described.status == WorkflowExecutionStatus.CANCELED

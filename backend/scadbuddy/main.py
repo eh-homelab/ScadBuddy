@@ -299,6 +299,14 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
         raise
 
 
+def _worker_exited(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
+    """An in-process worker that ends before shutdown asked it to leaves renders
+    pending: say so when it happens, not at shutdown."""
+    if stop.is_set() or task.cancelled():
+        return
+    logger.error("the in-process render worker exited early", exc_info=task.exception())
+
+
 async def _stop_worker(state: AppState, worker: asyncio.Task[None], deps: WorkerDeps) -> None:
     """Let the in-process worker drain for up to one activity, then cancel it."""
     try:
@@ -366,12 +374,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         if state.temporal is not None and state.settings.temporal_worker_inprocess:
             deps = worker_deps_from_state(state)
-            worker = (
-                asyncio.create_task(
-                    run_inprocess_worker(state.settings, deps, state.temporal, stop)
-                ),
-                deps,
+            task = asyncio.create_task(
+                run_inprocess_worker(state.settings, deps, state.temporal, stop)
             )
+            task.add_done_callback(partial(_worker_exited, stop))
+            worker = (task, deps)
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
