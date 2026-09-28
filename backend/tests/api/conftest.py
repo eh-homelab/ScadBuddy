@@ -72,6 +72,23 @@ if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
     pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
     raise SystemExit(0)
 
+if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
+    # A customizer range and a select, as `// [1:100]` and `// [a, b]` export (#432).
+    pathlib.Path(out).write_text(
+        json.dumps(
+            {
+                "parameters": [
+                    {"name": "width", "type": "number", "initial": 10, "group": "Main",
+                     "min": 1, "max": 100, "step": 1},
+                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
+                     "options": [{"name": "Round", "value": "round"},
+                                 {"name": "Square", "value": "square"}]},
+                ],
+            }
+        )
+    )
+    raise SystemExit(0)
+
 if out is not None and out.endswith(".param"):
     pathlib.Path(out).write_text(
         json.dumps(

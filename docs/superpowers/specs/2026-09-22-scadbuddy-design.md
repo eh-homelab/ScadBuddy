@@ -758,6 +758,34 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 - `-D` values are constructed from the schema, never from raw user strings:
   numbers are formatted, strings are quoted and escaped, booleans are
   `true`/`false`. A parameter not in the schema is rejected (422).
+- **The customizer's range and options are enforced (#432).** A number outside its
+  `[min:max]` (inclusive), and a dropdown value that is not one of its options,
+  is refused with a 422 problem document whose `detail` names the parameter and
+  the range or options and whose `parameters` extension is `[name]`. The render
+  submit and a preset save make the same check (`require_valid_params`), and the
+  worker's `-D` construction repeats it. A template that turns a count into a loop
+  is then bounded by its own customizer range, not by the render timeout.
+  - *Refuse, never clamp.* A clamped value renders something the viewer did not
+    ask for and records it as though they had; a 422 naming the setting is
+    something the customize view can show. This applies to saved values too: a
+    preset, or an output reopened for editing, is applied to the template as it is
+    now, so a value outside a range that has since narrowed is refused, naming the
+    setting, until the viewer moves it back inside. Ranges are rarely narrowed, and
+    a silent change to a saved design is the worse failure. A value a template
+    renames rather than narrows is kept working with `retired` (below).
+  - *The step is not enforced.* It is the widget's increment; OpenSCAD renders any
+    value, and a bundled default sits off its own grid (plant-label's
+    `thickness = 2.5` on `[1.6:0.2:5]`).
+  - *Retired dropdown values.* A value a template renamed but still renders is
+    declared on a comment line of its own, `// retired <name> = "<value>"` (or a
+    number), and is accepted by a render and a preset save without being offered
+    in the dropdown (the schema's `retired`). The pre-#318 `image_threshold` value
+    of `overlay_type` / `mask_type` in bookmark, coaster-set and flexi-fabric is
+    declared that way, so presets and outputs saved before the rename still
+    render. Before this, a render took any value of the right type and only a
+    preset save checked a dropdown's options.
+  - A test derives the schema of every `models/*/model.scad` and runs its
+    defaults, and every shipped `presets.json`, through the same check.
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the
   model's directory so `include`/`import` resolve.
 - **Template notes (#285).** A template tells the user what it changed from the
