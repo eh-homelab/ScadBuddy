@@ -54,7 +54,11 @@ class StubRender:
         self.released = threading.Event()
         self.released.set()
 
-    async def __call__(self, slug: str) -> bytes:
+    async def __call__(self, slug: str, timeout: float) -> bytes:
+        # As the app's runners do, it applies the timeout the scheduler hands it.
+        return await asyncio.wait_for(self._render(slug), timeout)
+
+    async def _render(self, slug: str) -> bytes:
         self.started.append(slug)
         while not self.released.is_set():
             await asyncio.sleep(0.01)

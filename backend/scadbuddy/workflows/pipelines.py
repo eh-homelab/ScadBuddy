@@ -148,11 +148,14 @@ class RenderPreview:
 
     @workflow.run
     async def run(self, slug: str) -> bytes:
+        # Schema, render and plate image, each bounded by `render_timeout`, plus the
+        # margin: `RenderService.render_preview` sets it.
+        timeout = workflow.memo_value("preview_timeout", default=3 * 120.0 + 60.0, type_hint=float)
         png: bytes = await workflow.execute_activity(
             "render_preview_png",
             slug,
             result_type=bytes,
-            start_to_close_timeout=_openscad_timeout(),
+            start_to_close_timeout=timedelta(seconds=timeout),
             heartbeat_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
