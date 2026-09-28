@@ -3,10 +3,10 @@ Bambuddy's library. The run (`print_run.run_print`) reads everything that differ
 between the two through :class:`PrintSource`; the resolver, slicing and queueing are
 shared unchanged.
 
-- :class:`OutputSource` is today's behaviour, moved as is: the output's ``model.3mf``
+- :class:`OutputSource` is today's behavior, moved as is: the output's ``model.3mf``
   is uploaded on demand, replated for the printer (#105) and recolored for the spools
   (#476), and each queued plate is recorded on the output (#83).
-- :class:`LibrarySource` (below) prints the library file as its author left it.
+- A library file prints as its author left it (``LibrarySource``, #313).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from scadbuddy.render.bambu3mf import plate_filaments, plates_of
 
 @dataclass(frozen=True)
 class ReadFile:
-    """The library file the filament step reads slots from, and the colours to show
+    """The library file the filament step reads slots from, and the colors to show
     in place of the file's own (an output's copy recolored for a run, #457)."""
 
     id: int
@@ -45,13 +45,8 @@ class PrintFile:
 class PrintSource(Protocol):
     @property
     def colours(self) -> list[str]:
-        """One colour per filament of the file, in slot order: what a slot with no
+        """One color per filament of the file, in slot order: what a slot with no
         spool keeps, and the fallback when Bambuddy reads no slots."""
-        ...
-
-    @property
-    def filament_count(self) -> int:
-        """How many filaments the file has, which #469's nozzle check counts."""
         ...
 
     @property
@@ -113,10 +108,6 @@ class OutputSource:
     @property
     def colours(self) -> list[str]:
         return list(self.meta.colors)
-
-    @property
-    def filament_count(self) -> int:
-        return len(self.meta.colors)
 
     @property
     def options_slug(self) -> str | None:

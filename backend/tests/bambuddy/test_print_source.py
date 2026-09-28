@@ -23,5 +23,4 @@ def test_an_output_source_is_the_models_colors_and_slug(tmp_path: Path) -> None:
     )
 
     assert source.colours == ["#FF0000", "#0000FF"]
-    assert source.filament_count == 2
     assert source.options_slug == "name-keychain"
