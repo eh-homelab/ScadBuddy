@@ -219,6 +219,12 @@ class Metrics:
             ["op", "outcome"],
             registry=r,
         )
+        self.worker_cache = Counter(
+            "scadbuddy_worker_cache_total",
+            "Piece fetches answered from this process's local cache (hit) or downloaded (miss).",
+            ["result"],
+            registry=r,
+        )
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the queue's.
