@@ -1,11 +1,13 @@
-"""The pieces of template media (#274) that need no app: typing by magic bytes,
-reading ``model.json`` entries, the history's ignore rules."""
+"""The pieces of template media (#274) below the API: typing by magic bytes,
+reading a bundled ``model.json``'s entries, the history's ignore rules, the
+`template_media` store and the catalogue on top of it."""
 
 from __future__ import annotations
 
 import os
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from scadbuddy.library.catalogue import (
     Catalogue,
     MediaNotFoundError,
     MediaOrderError,
+    MediaUnavailableError,
     ModelMeta,
     TooManyMediaError,
     meta_from_raw,
@@ -31,6 +34,8 @@ from scadbuddy.library.media import (
     readable_media,
     sniff_kind,
 )
+from scadbuddy.library.media_store import PostgresMediaStore
+from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -126,15 +131,32 @@ def test_media_does_not_change_what_a_model_renders_from(tmp_path: Path) -> None
     assert source_version(tmp_path) == before
 
 
-# ── the catalogue's media, without history ────────────────────────────────────
+# ── the `template_media` store and the catalogue on it ─────────────────────────
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
 
-def _catalogue(tmp_path: Path) -> Catalogue:
+@pytest.fixture
+def data(tmp_path: Path) -> DataPaths:
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
-    catalogue = Catalogue(paths)
+    return paths
+
+
+@pytest.fixture
+def store(pg_conninfo: str, data: DataPaths) -> Iterator[PostgresMediaStore]:
+    """Opened as the app opens it: through the job store, which runs the migrations."""
+    jobs = PostgresJobStore(pg_conninfo, data, pool_size=2)
+    jobs.open()
+    try:
+        yield PostgresMediaStore(jobs.pool)
+    finally:
+        jobs.close()
+
+
+@pytest.fixture
+def catalogue(data: DataPaths, store: PostgresMediaStore) -> Catalogue:
+    catalogue = Catalogue(data, media_store=store)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     return catalogue
 
@@ -146,15 +168,48 @@ def _stage(catalogue: Catalogue, payload: bytes, kind: MediaKind, ext: str) -> S
     return StagedMedia(path=path, kind=kind, extension=ext)
 
 
-def test_a_new_model_holds_no_media_entry(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
+def _item(item_id: str, caption: str = "") -> MediaItem:
+    return MediaItem(id=item_id, file=f"{item_id}.png", kind="image", caption=caption)
 
+
+@pytest.mark.requires_postgres
+def test_the_store_keeps_each_templates_list_in_order(store: PostgresMediaStore) -> None:
+    store.replace("a", [_item("one", "First"), _item("two")])
+    store.replace("b", [_item("one")])
+
+    store.replace("a", [_item("two"), _item("one", "First")])
+
+    assert [(item.id, item.caption) for item in store.items("a")] == [
+        ("two", ""),
+        ("one", "First"),
+    ]
+    assert [item.id for item in store.items("b")] == ["one"]
+    store.delete("a")
+    assert store.items("a") == []
+    assert store.items("nothing") == []
+
+
+@pytest.mark.requires_postgres
+def test_a_failed_replace_leaves_the_list_as_it_was(store: PostgresMediaStore) -> None:
+    store.replace("a", [_item("one")])
+
+    with pytest.raises(Exception, match="template_media"):
+        store.replace("a", [_item("two"), _item("two")])
+
+    assert [item.id for item in store.items("a")] == ["one"]
+
+
+@pytest.mark.requires_postgres
+def test_a_new_model_holds_no_media(catalogue: Catalogue, store: PostgresMediaStore) -> None:
     assert "media" not in catalogue.read_raw_meta("demo")
     assert catalogue.list_media("demo") == []
+    assert store.items("demo") == []
 
 
-def test_an_upload_is_moved_in_and_listed_last(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
+@pytest.mark.requires_postgres
+def test_an_upload_is_moved_in_and_listed_last(
+    catalogue: Catalogue, store: PostgresMediaStore
+) -> None:
     staged = _stage(catalogue, PNG, "image", "png")
 
     catalogue.add_media("demo", staged, caption="Front")
@@ -167,10 +222,39 @@ def test_an_upload_is_moved_in_and_listed_last(tmp_path: Path) -> None:
     ]
     assert record.media[0].file == f"{record.media[0].id}.png"
     assert (catalogue.media_dir("demo") / record.media[0].file).read_bytes() == PNG
+    # The list is rows, not model.json.
+    assert [item.id for item in store.items("demo")] == [item.id for item in record.media]
+    assert "media" not in catalogue.read_raw_meta("demo")
 
 
-def test_the_first_write_converts_the_legacy_thumbnail(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
+@pytest.mark.requires_postgres
+def test_a_file_whose_row_cannot_be_written_is_removed(
+    catalogue: Catalogue, store: PostgresMediaStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(template_id: str, items: list[MediaItem]) -> None:
+        raise RuntimeError("the database is gone")
+
+    monkeypatch.setattr(store, "replace", refuse)
+    staged = _stage(catalogue, PNG, "image", "png")
+
+    with pytest.raises(RuntimeError):
+        catalogue.add_media("demo", staged)
+
+    assert not catalogue.media_dir("demo").is_dir() or not any(
+        catalogue.media_dir("demo").iterdir()
+    )
+
+
+@pytest.mark.requires_postgres
+def test_a_file_with_no_row_is_ignored(catalogue: Catalogue) -> None:
+    catalogue.media_dir("demo").mkdir()
+    (catalogue.media_dir("demo") / "abcdefabcdef.png").write_bytes(PNG)
+
+    assert catalogue.list_media("demo") == []
+
+
+@pytest.mark.requires_postgres
+def test_the_first_write_converts_the_legacy_thumbnail(catalogue: Catalogue) -> None:
     catalogue.thumbnail_path("demo").write_bytes(PNG)
     assert [item.id for item in catalogue.list_media("demo")] == [LEGACY_ID]
 
@@ -183,8 +267,25 @@ def test_the_first_write_converts_the_legacy_thumbnail(tmp_path: Path) -> None:
     assert (catalogue.media_dir("demo") / item.file).read_bytes() == PNG
 
 
-def test_a_reorder_must_be_a_permutation(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
+@pytest.mark.requires_postgres
+def test_a_failed_conversion_puts_the_legacy_thumbnail_back(
+    catalogue: Catalogue, store: PostgresMediaStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue.thumbnail_path("demo").write_bytes(PNG)
+
+    def refuse(template_id: str, items: list[MediaItem]) -> None:
+        raise RuntimeError("the database is gone")
+
+    monkeypatch.setattr(store, "replace", refuse)
+    with pytest.raises(RuntimeError):
+        catalogue.set_caption("demo", LEGACY_ID, "Cover")
+
+    assert catalogue.thumbnail_path("demo").read_bytes() == PNG
+    assert [item.id for item in catalogue.list_media("demo")] == [LEGACY_ID]
+
+
+@pytest.mark.requires_postgres
+def test_a_reorder_must_be_a_permutation(catalogue: Catalogue) -> None:
     catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
     ids = [item.id for item in catalogue.list_media("demo")]
 
@@ -194,14 +295,9 @@ def test_a_reorder_must_be_a_permutation(tmp_path: Path) -> None:
         catalogue.remove_media("demo", "abcdefabcdef")
 
 
-def test_the_item_limit_is_enforced(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
-    raw = catalogue.read_raw_meta("demo")
-    raw["media"] = [
-        {"id": f"i{index}", "file": f"i{index}.png", "kind": "image"}
-        for index in range(MAX_MEDIA_ITEMS)
-    ]
-    catalogue.write_raw_meta("demo", raw)
+@pytest.mark.requires_postgres
+def test_the_item_limit_is_enforced(catalogue: Catalogue, store: PostgresMediaStore) -> None:
+    store.replace("demo", [_item(f"i{index}") for index in range(MAX_MEDIA_ITEMS)])
     staged = _stage(catalogue, PNG, "image", "png")
 
     with pytest.raises(TooManyMediaError):
@@ -209,8 +305,49 @@ def test_the_item_limit_is_enforced(tmp_path: Path) -> None:
     assert staged.path.exists()
 
 
-def test_a_crashed_uploads_staging_is_swept_once_it_is_old(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path)
+@pytest.mark.requires_postgres
+def test_a_delete_removes_the_templates_rows(
+    catalogue: Catalogue, store: PostgresMediaStore
+) -> None:
+    catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png"))
+
+    catalogue.delete("demo")
+
+    assert store.items("demo") == []
+
+
+# ── without a database ────────────────────────────────────────────────────────
+
+
+def test_without_a_database_only_the_legacy_thumbnail_is_listed(data: DataPaths) -> None:
+    catalogue = Catalogue(data)
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
+
+    assert [item.id for item in catalogue.list_media("demo")] == [LEGACY_ID]
+    assert catalogue.record("demo").thumbnail_source == "model"
+
+
+def test_without_a_database_a_media_write_is_refused(data: DataPaths) -> None:
+    catalogue = Catalogue(data)
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"), thumbnail=PNG)
+    staged = _stage(catalogue, PNG, "image", "png")
+
+    writes: list[Callable[[], object]] = [
+        lambda: catalogue.add_media("demo", staged),
+        lambda: catalogue.set_caption("demo", LEGACY_ID, "x"),
+        lambda: catalogue.reorder("demo", [LEGACY_ID]),
+        lambda: catalogue.remove_media("demo", LEGACY_ID),
+    ]
+    for write in writes:
+        with pytest.raises(MediaUnavailableError):
+            write()
+    assert staged.path.exists()
+    assert catalogue.thumbnail_path("demo").read_bytes() == PNG
+
+
+def test_a_crashed_uploads_staging_is_swept_once_it_is_old(data: DataPaths) -> None:
+    catalogue = Catalogue(data)
+    catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     fresh = _stage(catalogue, PNG, "image", "png")
     stale = _stage(catalogue, PNG, "image", "png")
     old = time.time() - 2 * 3600

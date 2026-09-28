@@ -26,6 +26,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
+from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -136,9 +137,16 @@ def build_state(settings: Settings) -> AppState:
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
-    # The outputs feed the catalogue's fallback thumbnail (#179).
+    # The outputs feed the catalogue's fallback thumbnail (#179). The media list
+    # (#274) shares the render queue's pool, opened with it in the lifespan.
     catalogue = Catalogue(
-        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+        paths,
+        history,
+        outputs,
+        duplicate_staging_max_age=config.duplicate_staging_max_age,
+        media_store=(
+            PostgresMediaStore(store.pool) if isinstance(store, PostgresJobStore) else None
+        ),
     )
     history.on_commit = announce_commits(events, catalogue)
     return AppState(

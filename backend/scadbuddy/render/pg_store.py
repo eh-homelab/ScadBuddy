@@ -99,6 +99,22 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
     """,
+    # 3: a template's images and videos (#274), in order; the files are in
+    # `models/<slug>/media/`. Built-ins read theirs from the bundled model.json.
+    """
+    CREATE TABLE template_media (
+        template_id text        NOT NULL,
+        id          text        NOT NULL,
+        position    integer     NOT NULL,
+        file        text        NOT NULL,
+        kind        text        NOT NULL CHECK (kind IN ('image', 'video')),
+        caption     text        NOT NULL DEFAULT '' CHECK (char_length(caption) <= 1000),
+        poster      text,
+        created_at  timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (template_id, id),
+        UNIQUE (template_id, position) DEFERRABLE INITIALLY DEFERRED
+    );
+    """,
 )
 
 JOB_COLUMNS = (
@@ -177,6 +193,12 @@ class PostgresJobStore:
             kwargs={"autocommit": True, "row_factory": dict_row},
             name="scadbuddy-jobs",
         )
+
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The connections, shared with the other Postgres stores (`template_media`).
+        Opened, and the migrations applied, by :meth:`open`."""
+        return self._pool
 
     def open(self) -> None:
         self._pool.open(wait=True, timeout=self.connect_timeout)

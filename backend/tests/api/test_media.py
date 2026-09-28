@@ -1,6 +1,6 @@
 """Several images and videos per template (#274): stored in ``media/`` beside the
-source, ordered by ``model.json``, served with Range support, written through their
-own upload gate."""
+source, ordered by `template_media` rows (a built-in's by its bundled model.json),
+served with Range support, written through their own upload gate."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
 
-pytestmark = pytest.mark.requires_git
+pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
 # A NUL, as every real PNG has, so git stores it as binary.
 PNG = PNG_BYTES + b"\x00"
@@ -46,6 +46,18 @@ def bundled(seed_dir: Path) -> Path:
         encoding="utf-8",
     )
     return directory
+
+
+@pytest.fixture
+def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
+    """The API tests' settings, with the Postgres the media list lives in."""
+    return Settings(
+        openscad=fake_openscad,
+        data_dir=data_dir,
+        seed_models_dir=seed_dir,
+        frontend_dir=Path("/nonexistent"),
+        database_url=pg_conninfo,
+    )
 
 
 @pytest.fixture
@@ -391,23 +403,25 @@ def test_images_are_committed_and_videos_are_not(
     assert f"{model}/media/{image['file']}" in tracked
     assert f"{model}/media/{video['poster']}" in tracked
     assert f"{model}/media/{video['file']}" not in tracked
-    assert f"{model}/model.json" in tracked
+    # The list is rows in Postgres, not model.json.
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
-    assert [entry["id"] for entry in meta["media"]] == [image["id"], video["id"]]
+    assert "media" not in meta
 
 
-def test_a_restore_that_loses_a_video_reports_it_missing(
+def test_a_restore_brings_back_a_file_but_not_its_row(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    video = _upload(client, model, MP4).json()["media"][0]
+    """The list is not versioned: an image a restore puts back has no row, and a
+    file with no row is ignored."""
+    image = _upload(client, model, PNG).json()["media"][0]
     commit = client.get(f"/api/v1/models/{model}/versions").json()[0]["commit"]
-    client.delete(f"/api/v1/models/{model}/media/{video['id']}")
+    client.delete(f"/api/v1/models/{model}/media/{image['id']}")
 
     restored = client.post(f"/api/v1/models/{model}/versions/{commit}/restore")
 
     assert restored.status_code == 200, restored.text
-    [listed] = _media(client, model)
-    assert listed["missing"] is True
+    assert (paths.model_dir(model) / "media" / image["file"]).read_bytes() == PNG
+    assert _media(client, model) == []
 
 
 def test_a_built_ins_media_is_served_and_read_only(client: TestClient) -> None:
@@ -453,20 +467,31 @@ def test_a_duplicate_of_a_built_in_copies_its_media(client: TestClient) -> None:
     assert client.get(f"/api/v1/models/{slug}/media/{item['id']}").content == PNG
 
 
-def test_a_hand_edited_entry_cannot_reach_outside_media(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+def test_a_bundled_entry_cannot_reach_outside_media(client: TestClient, paths: DataPaths) -> None:
+    meta = json.loads(paths.model_meta(BUILTIN).read_text(encoding="utf-8"))
     meta["media"] = [
         {"id": "escape", "file": "../model.scad", "kind": "image"},
         {"id": "ok", "file": "ok.png", "kind": "image", "poster": "../../settings.json"},
     ]
-    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    paths.model_meta(BUILTIN).write_text(json.dumps(meta), encoding="utf-8")
 
-    listed = _media(client, model)
+    listed = _media(client, BUILTIN)
 
     assert [item["id"] for item in listed] == []
-    assert client.get(f"/api/v1/models/{model}/media/escape").status_code == 404
+    assert client.get(f"/api/v1/models/{BUILTIN}/media/escape").status_code == 404
+
+
+def test_a_mine_model_json_media_entry_is_not_the_list(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Only a built-in's bundled model.json is read: a template of mine's is rows."""
+    (paths.model_dir(model) / "media").mkdir()
+    (paths.model_dir(model) / "media" / "front.png").write_bytes(PNG)
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["media"] = [{"id": "front", "file": "front.png", "kind": "image"}]
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+
+    assert _media(client, model) == []
 
 
 # ── the upload gate ───────────────────────────────────────────────────────────
@@ -474,7 +499,7 @@ def test_a_hand_edited_entry_cannot_reach_outside_media(
 
 @pytest.fixture
 def small_limit_client(
-    data_dir: Path, seed_dir: Path, fake_openscad: str, model: str
+    data_dir: Path, seed_dir: Path, fake_openscad: str, model: str, pg_conninfo: str
 ) -> Iterator[TestClient]:
     settings = Settings(
         openscad=fake_openscad,
@@ -482,6 +507,7 @@ def small_limit_client(
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         media_upload_max_bytes=1024 * 1024,
+        database_url=pg_conninfo,
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
@@ -580,6 +606,7 @@ def test_the_limit_comes_from_the_environment(
     seed_dir: Path,
     fake_openscad: str,
     model: str,
+    pg_conninfo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES", "1024")
@@ -588,6 +615,7 @@ def test_the_limit_comes_from_the_environment(
         data_dir=data_dir,
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
+        database_url=pg_conninfo,
     )
     with TestClient(create_app(settings)) as client:
         # Reported read-only, for the UI's own check before an upload.

@@ -4714,6 +4714,13 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description No database: SCADBUDDY_DATABASE_URL is unset */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     reorder_media_api_v1_models__slug__media_order_put: {
@@ -4748,6 +4755,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description No database: SCADBUDDY_DATABASE_URL is unset */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -4821,6 +4835,13 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description No database: SCADBUDDY_DATABASE_URL is unset */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     patch_media_api_v1_models__slug__media__item_id__patch: {
@@ -4856,6 +4877,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description No database: SCADBUDDY_DATABASE_URL is unset */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

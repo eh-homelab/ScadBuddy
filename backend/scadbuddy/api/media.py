@@ -13,7 +13,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path as FilePath
-from typing import IO, Annotated
+from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, status
 from fastapi.responses import FileResponse
@@ -26,6 +26,7 @@ from scadbuddy.api.models import require_mine, require_model_exists
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
+    Catalogue,
     MediaNotFoundError,
     MediaOrderError,
     ModelNotFoundError,
@@ -267,6 +268,26 @@ def _no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
+#: Until #401 makes the database required, a deployment may run without one.
+NO_DATABASE = (
+    "template media needs a database: set SCADBUDDY_DATABASE_URL. Without one, only "
+    "the thumbnail is shown"
+)
+
+
+#: Every media write's answer when there is no database.
+NO_DATABASE_RESPONSE: dict[int | str, dict[str, Any]] = {
+    503: {"description": "No database: SCADBUDDY_DATABASE_URL is unset"}
+}
+
+
+def _require_media_store(catalogue: Catalogue) -> None:
+    """503 before anything is read or written, so an upload is refused on its
+    headers rather than after a gigabyte of body."""
+    if catalogue.media_store is None:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
+
+
 def _no_item(slug: str, item_id: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no media item {item_id!r}")
 
@@ -326,6 +347,7 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     "/models/{slug}/media",
     response_model=ModelRecord,
     responses={
+        **NO_DATABASE_RESPONSE,
         409: {"description": f"The template already holds {MAX_MEDIA_ITEMS} items"},
         413: {
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
@@ -356,6 +378,7 @@ async def upload_media(
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    _require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
     try:
         upload, caption, poster = _upload_parts(received)
@@ -376,6 +399,7 @@ async def upload_media(
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
+    responses=NO_DATABASE_RESPONSE,
     summary="Caption a media item",
 )
 def patch_media(
@@ -387,6 +411,7 @@ def patch_media(
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    _require_media_store(catalogue)
     try:
         record = catalogue.set_caption(slug, item_id, body.caption)
     except ModelNotFoundError:
@@ -400,6 +425,7 @@ def patch_media(
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
+    responses=NO_DATABASE_RESPONSE,
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -411,6 +437,7 @@ def reorder_media(
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    _require_media_store(catalogue)
     try:
         record = catalogue.reorder(slug, body.ids)
     except ModelNotFoundError:
@@ -424,6 +451,7 @@ def reorder_media(
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
+    responses=NO_DATABASE_RESPONSE,
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "
@@ -435,6 +463,7 @@ def delete_media(
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    _require_media_store(catalogue)
     try:
         record = catalogue.remove_media(slug, item_id)
     except ModelNotFoundError:

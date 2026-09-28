@@ -7658,6 +7658,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "No database: SCADBUDDY_DATABASE_URL is unset"
           }
         },
         "summary": "Add an image or video",
@@ -7713,6 +7716,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "No database: SCADBUDDY_DATABASE_URL is unset"
           }
         },
         "summary": "Reorder the media",
@@ -7768,6 +7774,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "No database: SCADBUDDY_DATABASE_URL is unset"
           }
         },
         "summary": "Remove a media item",
@@ -7883,6 +7892,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "No database: SCADBUDDY_DATABASE_URL is unset"
           }
         },
         "summary": "Caption a media item",

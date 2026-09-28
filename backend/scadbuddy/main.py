@@ -38,6 +38,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.render.pg_store import PostgresJobStore
 
 API_PREFIX = "/api/v1"
 
@@ -135,6 +136,11 @@ async def _asset_sweeper(state: AppState) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     state.paths.ensure()
+    # First, when there is a database: the catalogue reads template media rows
+    # (#274) from here on (the lockfile migration below lists every model), and
+    # this applies the migrations. `RenderQueue.start` opening it again is a no-op.
+    if isinstance(state.queue.store, PostgresJobStore):
+        await asyncio.to_thread(state.queue.store.open)
     # Before the built-in sync: an existing models directory becomes revision 1,
     # so what a newer image changes in a built-in is a commit on top of it rather
     # than an unversioned overwrite.

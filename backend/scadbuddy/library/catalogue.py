@@ -10,7 +10,7 @@ import stat
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -50,6 +50,7 @@ from scadbuddy.library.media import (
     new_media_id,
     readable_media,
 )
+from scadbuddy.library.media_store import MediaStore
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -146,6 +147,11 @@ class MediaOrderError(ValueError):
     """A reorder that is not a permutation of the template's media ids."""
 
 
+class MediaUnavailableError(RuntimeError):
+    """A media write with no database to hold the list (#274): until #401 makes
+    ``SCADBUDDY_DATABASE_URL`` required, a deployment may run without one."""
+
+
 class TooManyMediaError(ValueError):
     """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
 
@@ -190,8 +196,9 @@ class ModelMeta(BaseModel):
     #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
     #: a fetched commit, set by `pin_library`, never typed in.
     libraries: list[ModelLibrary] = Field(default_factory=list)
-    #: The template's images and videos (#274), in order; the first is the cover. Not
-    #: in `ModelPatch`: the media routes write it, beside the files it names.
+    #: A built-in's images and videos (#274), in order, as its bundled model.json
+    #: ships them. A template of mine keeps its list in `template_media` instead, and
+    #: this is never written for one.
     media: list[MediaItem] = Field(default_factory=list)
 
     @field_validator("media", mode="before")
@@ -295,9 +302,13 @@ class Catalogue:
         history: ModelHistory | None = None,
         outputs: OutputStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
+        media_store: MediaStore | None = None,
     ) -> None:
         self.paths = paths
         self.history = history
+        #: Where a template of mine's media list is; None with no database, when
+        #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
+        self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
         self.duplicate_staging_max_age = duplicate_staging_max_age
@@ -491,7 +502,7 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        media = self._views(slug, meta.media, legacy=raw.get("media") is None)
+        media = self._views(slug, self._stored_media(slug, meta))
         thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug, media)
         return ModelRecord(
             **meta.model_dump(exclude={"media"}),
@@ -579,9 +590,9 @@ class Catalogue:
         directory = self._claim(slug)
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
-            # No `media: []`: that would say "no media", and the thumbnail given
-            # here would not be listed as the cover (#274).
-            self.write_raw_meta(slug, meta.model_dump(exclude=set() if meta.media else {"media"}))
+            # A template of mine's media list is rows (#274), never model.json.
+            self.write_raw_meta(slug, meta.model_dump(exclude={"media"}))
+            self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
             if readme is not None:
@@ -606,6 +617,8 @@ class Catalogue:
         self._require(upstream_id)
         if self.exists(slug):
             raise ModelExistsError(slug)
+        # The upstream's list, copied as rows once the files are in place (#274).
+        media = self._stored_media(upstream_id)
         # Not `self.version`, which logs a git failure and answers None: here that
         # would record no base and copy the working tree instead of the revision.
         # A failure reading it fails the duplicate, as a failed export does.
@@ -649,6 +662,8 @@ class Catalogue:
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
             meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
             meta.pop("schema", None)
+            # A built-in's bundled list becomes rows of the copy's own.
+            meta.pop("media", None)
             if is_builtin(upstream_id):
                 # A built-in never has an `origin_url` (#179): the record drops one
                 # its image's model.json carries, and the copy must not bring it
@@ -677,6 +692,9 @@ class Catalogue:
                 raise
         finally:
             _remove_tree(staging)
+        # After the files, as every media write: a row never names a file not there.
+        if self.media_store is not None:
+            self.media_store.replace(slug, media)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # Sweep any staging an earlier duplicate crashed out of, once it is old
         # enough not to be another replica's copy in flight: a single replica that crashed and
@@ -771,7 +789,7 @@ class Catalogue:
         first item that is a video. It gets a new id, since an id never changes
         its contents."""
         self._require(slug)
-        if self.read_raw_meta(slug).get("media") is None:
+        if not self._stored_media(slug):
             self._write_sidecar(slug, THUMBNAIL_NAME, png)
             self._commit(f"Set {slug} thumbnail", slug)
             return self.record(slug)
@@ -784,7 +802,7 @@ class Catalogue:
             self._media_directory(slug)
             write_atomic(self.media_dir(slug) / cover.file, png)
             edit.items[: 1 if replaced is not None else 0] = [cover]
-            self._save_media(slug, edit)
+            self._save_media(slug, edit, added=[cover.file])
 
         self._commit_change(f"Set {slug} thumbnail", change, slug)
         return self.record(slug)
@@ -794,7 +812,7 @@ class Catalogue:
         report one: the next item's, or the fallback's when the model has been
         generated. With media, that is the first item when it is an image."""
         self._require(slug)
-        if self.read_raw_meta(slug).get("media") is None:
+        if not self._stored_media(slug):
             self._remove_sidecar(slug, THUMBNAIL_NAME)
             self._commit(f"Remove {slug} thumbnail", slug)
             return self.record(slug)
@@ -831,10 +849,20 @@ class Catalogue:
             return self.thumbnail_path(slug)
         return self.media_dir(slug) / file
 
-    def _views(self, slug: str, items: list[MediaItem], *, legacy: bool) -> list[MediaView]:
-        """``items`` with what the disk says of each. ``legacy`` is a model.json with
-        no ``media`` at all: its ``thumbnail.png``, if any, is the one item."""
-        if legacy:
+    def _stored_media(self, slug: str, meta: ModelMeta | None = None) -> list[MediaItem]:
+        """The list as stored: a built-in's bundled model.json ``media``, shipped
+        read-only; a template of mine's `template_media` rows, or none without a
+        database. ``meta`` is the model's, when the caller has already read it."""
+        if is_builtin(slug):
+            return (meta or self._meta(slug, self.read_raw_meta(slug))).media
+        if self.media_store is None:
+            return []
+        return self.media_store.items(slug)
+
+    def _views(self, slug: str, items: list[MediaItem]) -> list[MediaView]:
+        """``items`` with what the disk says of each. With none stored, the model's
+        ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
+        if not items:
             size = _file_size(self.thumbnail_path(slug))
             if size is None:
                 return []
@@ -867,8 +895,7 @@ class Catalogue:
     def list_media(self, slug: str) -> list[MediaView]:
         """The template's images and videos, in order; the first is the cover."""
         self._require(slug)
-        raw = self.read_raw_meta(slug)
-        return self._views(slug, self._meta(slug, raw).media, legacy=raw.get("media") is None)
+        return self._views(slug, self._stored_media(slug))
 
     def media_item(self, slug: str, item_id: str) -> tuple[MediaView, Path]:
         """One item and its file, or :class:`MediaNotFoundError` -- for an unknown
@@ -885,18 +912,29 @@ class Catalogue:
                 return self.media_dir(slug) / item.poster
         raise MediaNotFoundError(item_id)
 
+    def _clear_media_rows(self, slug: str) -> None:
+        """Rows a deleted model at ``slug`` left behind (its delete removes them
+        best-effort), so a new model there does not list its predecessor's media."""
+        if self.media_store is not None:
+            self.media_store.delete(slug)
+
+    def _require_media_store(self) -> MediaStore:
+        if self.media_store is None:
+            raise MediaUnavailableError("template media needs SCADBUDDY_DATABASE_URL")
+        return self.media_store
+
     def _edit_media(self, slug: str) -> _MediaEdit:
         """The stored items, to change and pass to :meth:`_save_media`. A legacy
         ``thumbnail.png`` comes back as an ordinary item with an id of its own,
         which the save moves into ``media/`` -- the first write converts it."""
-        raw = self.read_raw_meta(slug)
-        if raw.get("media") is not None:
-            return _MediaEdit(raw, self._meta(slug, raw).media, None)
+        stored = self._require_media_store().items(slug)
+        if stored:
+            return _MediaEdit(list(stored), stored, None)
         if not self.thumbnail_path(slug).is_file():
-            return _MediaEdit(raw, [], None)
+            return _MediaEdit([], [], None)
         item_id = new_media_id()
         legacy = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
-        return _MediaEdit(raw, [legacy], legacy)
+        return _MediaEdit([legacy], [], legacy)
 
     def _resolve_id(self, edit: _MediaEdit, item_id: str) -> str:
         """``thumbnail`` names the converted legacy item until the first write."""
@@ -904,23 +942,29 @@ class Catalogue:
             return edit.legacy.id
         return item_id
 
-    def _save_media(self, slug: str, edit: _MediaEdit) -> None:
-        """Write ``edit.items`` to model.json, then remove the files of every item
-        it no longer holds. Under the history's write lock, as every change is."""
-        before = readable_media(edit.raw.get("media"))
+    def _save_media(self, slug: str, edit: _MediaEdit, added: Sequence[str] = ()) -> None:
+        """Write ``edit.items`` as the template's rows, then remove the files of every
+        item it no longer holds. The files come first: ``added`` (already in
+        ``media/``) and a converted legacy thumbnail are in place before the rows
+        name them, and are taken back out if the rows cannot be written. Under the
+        history's write lock, as every change is."""
+        store = self._require_media_store()
+        before = list(edit.before)
+        converted = edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items)
         if edit.legacy is not None:
-            if any(item.id == edit.legacy.id for item in edit.items):
+            if converted:
                 directory = self._media_directory(slug)
                 os.replace(self.thumbnail_path(slug), directory / edit.legacy.file)
             else:
                 before.append(edit.legacy)
-        edit.raw["media"] = [item.model_dump(exclude_defaults=True) for item in edit.items]
         try:
-            self.write_raw_meta(slug, edit.raw)
+            store.replace(slug, edit.items)
         except BaseException:
-            if edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items):
+            if converted and edit.legacy is not None:
                 with contextlib.suppress(OSError):
                     os.replace(self.media_dir(slug) / edit.legacy.file, self.thumbnail_path(slug))
+            for added_name in added:
+                (self.media_dir(slug) / added_name).unlink(missing_ok=True)
             raise
         kept = {name for item in edit.items for name in (item.file, item.poster) if name}
         for item in before:
@@ -956,11 +1000,13 @@ class Catalogue:
             if len(edit.items) >= MAX_MEDIA_ITEMS:
                 raise TooManyMediaError(slug)
             directory = self._media_directory(slug)
+            added = [item.file]
             os.replace(upload.path, directory / item.file)
             if poster is not None and item.poster is not None:
                 os.replace(poster.path, directory / item.poster)
+                added.append(item.poster)
             edit.items.append(item)
-            self._save_media(slug, edit)
+            self._save_media(slug, edit, added=added)
 
         kind = "video" if upload.kind == "video" else "image"
         self._commit_change(f"Add {kind} {item_id} to {slug}", change, slug)
@@ -1317,6 +1363,13 @@ class Catalogue:
         self.sweep_orphans()
         # Whether or not the sweep got to its outputs: the model is gone either way.
         self._forget_cover(slug)
+        # Its media rows (#274). Best-effort as the rest: a create or duplicate at
+        # this slug clears any left behind (`_clear_media_rows`).
+        if self.media_store is not None:
+            try:
+                self.media_store.delete(slug)
+            except Exception:
+                logger.exception("could not remove media rows", extra={"slug": slug})
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -1621,11 +1674,11 @@ class Catalogue:
 
 @dataclass
 class _MediaEdit:
-    """A template's media being changed: its raw model.json, the items, and the
+    """A template's media being changed: the items, the rows as they were, and the
     legacy thumbnail they converted, if any (see :meth:`Catalogue._edit_media`)."""
 
-    raw: dict[str, Any]
     items: list[MediaItem]
+    before: list[MediaItem]
     legacy: MediaItem | None
 
 
