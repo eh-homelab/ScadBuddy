@@ -176,7 +176,7 @@ describe('PresetPicker', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-    expect(duplicate).toHaveBeenCalledWith('name-keychain', 'template-0', { name: 'Tiny for Bo' })
+    expect(duplicate).toHaveBeenCalledWith('name-keychain', 'template-tiny', { name: 'Tiny for Bo' })
     const select = screen.getByRole('combobox', { name: 'Preset' })
     expect(select).toHaveDisplayValue('Tiny for Bo')
     expect(within(select).getByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')

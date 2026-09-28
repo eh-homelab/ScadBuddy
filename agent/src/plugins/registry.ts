@@ -6,7 +6,7 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 
 // The plugin registry (issue #297): "provide an endpoint and we'll add the
 // plugin/skills to the harness". Stored in Postgres, `ai_plugins`
-// (db/migrations.ts entry 3; spec §9, "All AI state lives in the #241
+// (src/db/migrations/<timestamp>_plugins.sql; spec §9, "All AI state lives in the #241
 // database"). No file is written.
 //
 // WHAT A PLUGIN IS HERE. A remote MCP server: a Streamable HTTP URL plus an

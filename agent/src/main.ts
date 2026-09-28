@@ -7,7 +7,7 @@ import { FailClosedTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
-import { MigrationChecksumError } from './db/migrations.js'
+import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
@@ -56,8 +56,8 @@ const database = config.databaseUrl
   ? connectDatabase(config.databaseUrl, {
       onMigrationError: (err) => {
         console.error('database migrations failed:', (err as Error).message)
-        // An edited migration is not a transient failure: stop, visibly.
-        if (err instanceof MigrationChecksumError) process.exit(1)
+        // An edited migration or an unreadable ledger is not a transient failure: stop, visibly.
+        if (err instanceof MigrationChecksumError || err instanceof MigrationLedgerError) process.exit(1)
       },
       afterMigrate: async (sql) => {
         if (!previousKek?.ok || !kek.ok) return
