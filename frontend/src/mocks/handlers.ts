@@ -2350,7 +2350,7 @@ export const handlers = [
     const folderId = asked === null ? null : Number(asked)
     const all = search.get('all') === 'true'
     const here = libraryFiles.filter((file) => (file.folder_id ?? null) === folderId)
-    const files = all ? here : here.filter((file) => file.file_type === '3mf')
+    const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
     return HttpResponse.json({
       folder_id: folderId,
       all,
@@ -2365,7 +2365,9 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates`, ({ params }) => {
     const file = libraryFiles.find((row) => row.id === Number(params['id']))
-    if (!file) return problem(404, 'Not Found', 'Bambuddy has no such resource')
+    if (!file) {
+      return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read the plates of library file ${params['id']}`)
+    }
     if (file.file_type === 'stl') return HttpResponse.json([] satisfies OutputPlate[])
     const count = file.id === MULTI_PLATE_FILE ? 2 : 1
     return HttpResponse.json(

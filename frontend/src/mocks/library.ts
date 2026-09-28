@@ -16,7 +16,7 @@ function entry(id: number, filename: string, fileType: string, folderId: number 
     folder_id: folderId,
     has_thumbnail: fileType !== 'stl',
     print_count: 0,
-    printable: fileType === '3mf' || fileType === 'stl',
+    printable: ['3mf', 'stl'].includes(fileType.toLowerCase()),
   }
 }
 
