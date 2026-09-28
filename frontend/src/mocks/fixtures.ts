@@ -1101,6 +1101,7 @@ function printOf(
     slug: output.slug,
     output_name: output.name ?? null,
     printer_id: 1,
+    printer_name: '3DP-31B-598',
     started_at: '2026-09-27T04:09:36.529201',
     completed_at: '2026-09-27T05:56:53.660315',
     actual_time_seconds: 6437,
@@ -1137,7 +1138,7 @@ function printOf(
       filament_color: '#00629B,#FF9425',
       cost: 0.43,
       printer_id: summary.printer_id,
-      printer_name: '3DP-31B-598',
+      printer_name: summary.printer_name,
       runs: [],
     },
     printer_media: null,
@@ -1152,6 +1153,7 @@ const FINISH_PHOTO = 'finish_20260927_015703_93372185.jpg'
 export const prints: PrintDetail[] = [
   printOf(38, workshop, {
     status: 'deleted_in_bambuddy',
+    printer_name: null,
     started_at: null,
     completed_at: null,
     actual_time_seconds: null,
@@ -1166,6 +1168,7 @@ export const prints: PrintDetail[] = [
   printOf(37, nova, {
     status: 'printing',
     printer_id: 2,
+    printer_name: '3DP-H2C-042',
     started_at: '2026-09-28T09:12:00',
     completed_at: null,
     actual_time_seconds: null,
@@ -1187,8 +1190,8 @@ export const prints: PrintDetail[] = [
     cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
     has_timelapse: true,
     media: {
-      finish_photo: null,
-      photos: [{ name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` }],
+      finish_photo: { name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+      photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
         info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },

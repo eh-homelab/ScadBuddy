@@ -957,6 +957,23 @@ describe('the prints mock', () => {
     expect(await ids()).toEqual({ ids: [38, 37, 36, 35], next: null })
   })
 
+  it("names each print's printer, and none for a deleted archive", async () => {
+    const body = (await (await fetch('/api/v1/prints')).json()) as {
+      items: { archive_id: number; printer_name: string | null }[]
+    }
+    expect(Object.fromEntries(body.items.map((item) => [item.archive_id, item.printer_name]))).toEqual({
+      38: null,
+      37: '3DP-H2C-042',
+      36: '3DP-31B-598',
+      35: '3DP-31B-598',
+    })
+    const detail = (await (await fetch('/api/v1/prints/37')).json()) as {
+      printer_name: string
+      outcome: { printer_name: string }
+    }
+    expect(detail.outcome.printer_name).toBe(detail.printer_name)
+  })
+
   it('filters and pages as the backend does', async () => {
     expect((await ids('?status=failed')).ids).toEqual([36])
     expect((await ids('?printer_id=2')).ids).toEqual([37])
@@ -968,12 +985,15 @@ describe('the prints mock', () => {
   })
 
   it('serves a detail with and without a timelapse, and 404s an unlinked archive', async () => {
-    const done = (await (await fetch('/api/v1/prints/35')).json()) as { media: { timelapse: unknown } }
+    const done = (await (await fetch('/api/v1/prints/35')).json()) as {
+      media: { timelapse: unknown; finish_photo: { name: string } | null }
+    }
     const failed = (await (await fetch('/api/v1/prints/36')).json()) as {
       media: { timelapse: unknown }
       outcome: { failure_reason: string }
     }
     expect(done.media.timelapse).not.toBeNull()
+    expect(done.media.finish_photo?.name).toMatch(/^finish_/)
     expect(failed.media.timelapse).toBeNull()
     expect(failed.outcome.failure_reason).toBe('Spaghetti detected')
     expect((await fetch('/api/v1/prints/99')).status).toBe(404)

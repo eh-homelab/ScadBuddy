@@ -106,6 +106,9 @@ class PrintSummary(_Response):
     #: ``deleted_in_bambuddy`` for a linked archive Bambuddy no longer has.
     status: str
     printer_id: int | None
+    #: The printer's name as Bambuddy recorded it on the print's runs; None for a
+    #: deleted archive or one with no run yet.
+    printer_name: str | None
     started_at: datetime | None
     completed_at: datetime | None
     actual_time_seconds: int | None
@@ -183,9 +186,10 @@ class PrintAttachment(_Response):
 
 
 class PrintMedia(_Response):
-    #: Always None for now: which photo is the finish photo is unverified (plan
-    #: §2.4), so every photo is in ``photos``.
+    #: The photo Bambuddy captured when the print finished, named
+    #: ``finish_<ts>_<hex>.jpg`` (plan L11); None when it took none.
     finish_photo: PrintPhoto | None = None
+    #: Every other photo of the print, in Bambuddy's order.
     photos: list[PrintPhoto] = []
     timelapse: PrintTimelapse | None = None
     plate_thumbnails: list[PlateThumbnail] = []
@@ -262,6 +266,7 @@ def _summary(
             if archive is not None and archive.printer_id is not None
             else link.printer_id
         ),
+        printer_name=None,  # From the runs, read only for the prints that are shown.
         started_at=None if archive is None else archive.started_at,
         completed_at=None if archive is None else archive.completed_at,
         actual_time_seconds=None if archive is None else archive.actual_time_seconds,
@@ -387,6 +392,25 @@ def _matches(
     return True
 
 
+def _printer_name(runs: list[ArchiveRun]) -> str | None:
+    return next((run.printer_name for run in runs if run.printer_name), None)
+
+
+async def _named(
+    cache: ArchiveCache, client: BambuddyClient, items: list[PrintSummary], present: set[int]
+) -> list[PrintSummary]:
+    """``items`` with their printers' names: one runs read per print on the page."""
+    shown = [item.archive_id for item in items if item.archive_id in present]
+    runs = await _bounded(
+        [cache.runs(client, archive_id) for archive_id in shown], READ_CONCURRENCY
+    )
+    names = {
+        archive_id: _printer_name(run_list.items)
+        for archive_id, run_list in zip(shown, runs, strict=True)
+    }
+    return [item.model_copy(update={"printer_name": names.get(item.archive_id)}) for item in items]
+
+
 async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
     gate = asyncio.Semaphore(limit)
 
@@ -437,6 +461,8 @@ async def list_prints(
     known: dict[str, _Output | None] = {}
     before = int(cursor) if cursor is not None else None
     items: list[PrintSummary] = []
+    #: The archives Bambuddy still has, of those in ``items``.
+    present: set[int] = set()
 
     async with client_for(store.load()) as client:
         while True:
@@ -457,11 +483,16 @@ async def list_prints(
                 if not _matches(filters, summary, link, archive, output):
                     continue
                 items.append(summary)
+                if archive is not None:
+                    present.add(archive.id)
                 if len(items) == limit:
                     more = index < len(batch) - 1 or len(batch) == limit
-                    return PrintPage(items=items, next_cursor=str(before) if more else None)
+                    return PrintPage(
+                        items=await _named(cache, client, items, present),
+                        next_cursor=str(before) if more else None,
+                    )
             if len(batch) < limit:
-                return PrintPage(items=items)
+                return PrintPage(items=await _named(cache, client, items, present))
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
@@ -535,11 +566,14 @@ async def _media(
             ],
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
+    photos = [
+        PrintPhoto(name=name, url=_prints_url(archive.id, f"photos/{name}"))
+        for name in _photos(archive)
+    ]
+    finish = next((photo for photo in photos if photo.name == archive.finish_photo), None)
     return PrintMedia(
-        photos=[
-            PrintPhoto(name=name, url=_prints_url(archive.id, f"photos/{name}"))
-            for name in _photos(archive)
-        ],
+        finish_photo=finish,
+        photos=[photo for photo in photos if photo is not finish],
         timelapse=timelapse,
         plate_thumbnails=(
             [PlateThumbnail(index=plate, url=_prints_url(archive.id, f"plates/{plate}/thumbnail"))]
@@ -564,7 +598,7 @@ def _outcome(
         filament_color=archive.filament_color,
         cost=archive.cost,
         printer_id=summary.printer_id,
-        printer_name=next((run.printer_name for run in runs if run.printer_name), None),
+        printer_name=summary.printer_name,
         runs=runs,
     )
 
@@ -614,6 +648,7 @@ async def get_print(
                 _media(cache, client, link, archive), cache.runs(client, archive_id)
             )
             runs = run_list.items
+            summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
         files = await asyncio.to_thread(_files, outputs, meta, archive)
