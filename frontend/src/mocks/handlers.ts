@@ -635,19 +635,38 @@ export const handlers = [
         description?: string
         tags?: string[]
         force?: boolean
+        libraries?: string[]
       }
       const pastedSlug = slugify(body.name)
       if (!pastedSlug) return problem(422, 'Unprocessable Content', 'that name yields no slug')
       if (state.models.some((m) => m.slug === pastedSlug)) {
         return problem(409, 'Conflict', `a model named '${pastedSlug}' already exists`)
       }
+      // #169 — curated names only, each pinned at the catalogue's ref.
+      const named = [...new Set(body.libraries ?? [])]
+      const unknown = named.filter((name) => !state.libraries.some((entry) => entry.name === name))
+      if (unknown.length > 0) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `not in the library catalogue: ${unknown.join(', ')}`,
+        )
+      }
       const check = checkOf(body.source)
       if (!check.ok && !body.force) return refusal(check)
+      const libraries = state.libraries
+        .filter((entry) => named.includes(entry.name))
+        .map((entry) => {
+          state.seq += 1
+          const commit = state.seq.toString(16).padStart(40, 'c')
+          return { name: entry.name, url: entry.url, ref: entry.ref, commit }
+        })
       const pasted: ModelSummary = {
         slug: pastedSlug,
         name: body.name,
         description: body.description ?? '',
         tags: body.tags ?? [],
+        libraries,
         updated_at: new Date().toISOString(),
         has_thumbnail: false,
         has_readme: false,
