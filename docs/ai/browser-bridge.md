@@ -6,6 +6,14 @@ state and `onChange` paths that user input takes. The design is in spec §5.2 an
 [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers/specs/2026-09-27-ai-integration-design.md).
 The code is in [`frontend/src/agent/`](../../frontend/src/agent/).
 
+Sessions that have **no** user tab use a different tool: a headless Chromium in the
+agent container, driven through the Playwright plugin (#349,
+[headless-browser.md](headless-browser.md)). The two do not overlap: the headless
+browser loads ScadBuddy's UI on its own and never sees the user's tab, and the bridge
+stays the only way to act in that tab. The headless browser does not honour
+`data-agent-user-only` (it clicks like a user would); what it cannot do is complete an
+outward request, which the backend refuses for it (`AgentActorGate`).
+
 > **Status.** On `main` the bridge has two callers: WebMCP, which is opt-in (below),
 > and `window.__scadbuddyBridge`, which exists in dev and mocked-e2e builds only. The
 > transport from the agent service to a paired tab (#266 and the pairing of spec §8.5)

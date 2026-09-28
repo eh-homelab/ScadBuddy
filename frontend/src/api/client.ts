@@ -11,6 +11,7 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  HeadlessBrowserSetting,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -781,6 +782,19 @@ export const api = {
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
+
+  /**
+   * The AI agent's headless browser (#349), served by the agent service under
+   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getHeadlessBrowserSetting: () =>
+    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
+
+  putHeadlessBrowserSetting: (enabled: boolean) =>
+    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */
   listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),

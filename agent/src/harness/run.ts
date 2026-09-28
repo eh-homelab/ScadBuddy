@@ -11,8 +11,17 @@ import {
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
+  assertHeadlessPlugin,
+  browserInputProblem,
+  browserTierOf,
+  disallowedBrowserTools,
+  type HeadlessBrowserOptions,
+  materializeHeadlessBrowser,
+} from './headlessBrowser.js'
+import {
   type ApprovalGate,
   type DecisionListener,
+  type InputGuard,
   makeCanUseTool,
   makePreToolUseHook,
   type TierResolver,
@@ -55,6 +64,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //   - registered remote MCP plugins (#297, `remotePlugins`, via the loopback
 //     forwarder in src/plugins/forwarder.ts), as Streamable
 //     HTTP servers with their own tier maps (remotePluginOptions below);
+//   - the headless browser (#349, headlessBrowser.ts) when the session has it
+//     enabled: a per-session copy of the vendored `playwright` plugin, its
+//     tier map, its disallowed tools and its origin/file-name guard;
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -93,6 +105,11 @@ export type HarnessRun = {
    * disabled tools go in `disallowedTools`.
    */
   remotePlugins?: HarnessPlugin[]
+  /**
+   * The headless browser for this query (#349, spec §5.3). Only when the
+   * `headless_browser_enabled` setting is on; the session manager decides.
+   */
+  headlessBrowser?: HeadlessBrowserOptions
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   onDecision?: DecisionListener
@@ -201,8 +218,18 @@ export function buildHarnessOptions(run: HarnessRun): Options {
 
 function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
   const base = buildQueryOptions(run.paths)
-  const tierOf = harnessTierOf(run)
+  const ownTiers = harnessTierOf(run)
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
+  let tierOf: TierResolver = ownTiers
+  let guard: InputGuard | undefined
+  let browserPlugin: string | undefined
+  if (run.headlessBrowser) {
+    const browser = materializeHeadlessBrowser(run.headlessBrowser)
+    assertHeadlessPlugin(browser.pluginDir)
+    browserPlugin = browser.pluginDir
+    tierOf = (name) => browserTierOf(name) ?? ownTiers(name)
+    guard = (name, input) => browserInputProblem(name, input, browser.allowedOrigin)
+  }
   const options: Options = {
     ...base,
     env: {
@@ -214,8 +241,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate, guard),
+    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate, guard)] },
     permissionMode: 'default',
   }
   if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
@@ -225,11 +252,25 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   if (run.sessionStore !== undefined) options.sessionStore = run.sessionStore
   if (run.cwd !== undefined) options.cwd = run.cwd
   if (run.includePartialMessages) options.includePartialMessages = true
-  if (run.pluginPaths?.length) {
-    options.plugins = run.pluginPaths.map((p) => {
-      assertPluginAllowed(p)
-      return { type: 'local' as const, path: path.resolve(p) }
-    })
+  const plugins = (run.pluginPaths ?? []).map((p) => {
+    assertPluginAllowed(p)
+    return { type: 'local' as const, path: path.resolve(p) }
+  })
+  // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
+  // assertPluginAllowed refuses, but one this module wrote and starts under `env -i`.
+  if (browserPlugin !== undefined) plugins.push({ type: 'local', path: browserPlugin })
+  if (plugins.length) options.plugins = plugins
+  if (browserPlugin !== undefined) {
+    // "The `Bash` tool definition is removed from the request. Claude does not
+    // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
+    // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
+    options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
+    // Measured on Claude Code 2.1.283: with `strictMcpConfig` a plugin's MCP
+    // servers are not started at all (the init message lists the plugin but no
+    // server). The option exists to ignore MCP configs from settings files,
+    // and `settingSources: []` already loads none: the e2e test plants a
+    // project `.mcp.json` in the session's cwd and asserts it is not started.
+    options.strictMcpConfig = false
   }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
