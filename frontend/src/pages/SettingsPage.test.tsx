@@ -174,4 +174,80 @@ describe('SettingsPage', () => {
     expect(usage).toHaveTextContent('2 (no limit)')
     expect(usage).toHaveTextContent('640 B (no limit)')
   })
+  describe('Uploads (#274)', () => {
+    const MiB = 1024 * 1024
+
+    it('shows the media upload limit in MB', async () => {
+      renderPage(<SettingsPage />)
+      await seeded()
+      expect(screen.getByLabelText('Largest media upload (MB)')).toHaveValue(1024)
+    })
+
+    it('leaves the limit out of a save that did not change it', async () => {
+      const put = vi.spyOn(api, 'putSettings')
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+
+      await user.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(put).toHaveBeenCalled())
+      // Sent unchanged it would stop following SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES.
+      expect(put.mock.calls[0]?.[0]).not.toHaveProperty('media_upload_max_bytes')
+      put.mockRestore()
+    })
+
+    it('saves a new limit in bytes', async () => {
+      const put = vi.spyOn(api, 'putSettings')
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+
+      const field = screen.getByLabelText('Largest media upload (MB)')
+      await user.clear(field)
+      await user.type(field, '512')
+      await user.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(put).toHaveBeenCalled())
+      expect(put.mock.calls[0]?.[0]).toMatchObject({ media_upload_max_bytes: 512 * MiB })
+      expect((await api.getSettings()).media_upload_max_bytes).toBe(512 * MiB)
+      put.mockRestore()
+    })
+
+    it('puts the deployment default back when the field is cleared', async () => {
+      const put = vi.spyOn(api, 'putSettings')
+      server.use(
+        http.get('/api/v1/settings', () =>
+          HttpResponse.json({
+            bambuddy_url: 'https://bambuddy.internal.nullreference.io',
+            has_api_key: true,
+            display_unit: 'mm',
+            media_upload_max_bytes: 256 * MiB,
+          }),
+        ),
+      )
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+
+      const field = screen.getByLabelText('Largest media upload (MB)')
+      expect(field).toHaveValue(256)
+      await user.clear(field)
+      await user.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(put).toHaveBeenCalled())
+      expect(put.mock.calls[0]?.[0]).toMatchObject({ media_upload_max_bytes: null })
+      put.mockRestore()
+    })
+
+    it('refuses a limit that is not a positive whole number of MB', async () => {
+      const put = vi.spyOn(api, 'putSettings')
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+
+      const field = screen.getByLabelText('Largest media upload (MB)')
+      await user.clear(field)
+      await user.type(field, '0')
+      await user.click(screen.getByRole('button', { name: 'Save changes' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'The largest media upload is a whole number of MB, at least 1.',
+      )
+      expect(put).not.toHaveBeenCalled()
+      put.mockRestore()
+    })
+  })
 })

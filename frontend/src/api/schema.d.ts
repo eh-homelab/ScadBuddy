@@ -394,6 +394,91 @@ export interface paths {
         patch: operations["repin_library_api_v1_models__slug__libraries__name__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an image or video
+         * @description Adds a PNG, JPEG or WebP image, or an MP4 or WebM video as the template's last media item, as one revision. The type comes from the bytes, not the name. A video may carry a `poster` image and any item a `caption`. The body may be as large as `media_upload_max_bytes` (Settings > Uploads); an image is at most 10 MB, since it is committed to the template's history, while a video is not. The first write turns a legacy `thumbnail.png` into an ordinary item.
+         */
+        post: operations["upload_media_api_v1_models__slug__media_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/media/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Reorder the media
+         * @description Puts the items in the order given, which must name every item exactly once (422 otherwise). The first is the cover.
+         */
+        put: operations["reorder_media_api_v1_models__slug__media_order_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/media/{item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One media file
+         * @description Serves one image or video of the template. Honours `Range`, so a video can seek. An item's id never changes its contents, so it is cached as `immutable` -- except `thumbnail`, the legacy item, which is `no-cache`. 404 for an unknown id and for an entry whose file is missing.
+         */
+        get: operations["get_media_api_v1_models__slug__media__item_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Remove a media item
+         * @description Removes one item and its files, as one revision. An entry whose file is missing is removed all the same.
+         */
+        delete: operations["delete_media_api_v1_models__slug__media__item_id__delete"];
+        options?: never;
+        head?: never;
+        /** Caption a media item */
+        patch: operations["patch_media_api_v1_models__slug__media__item_id__patch"];
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/media/{item_id}/poster": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A video's poster
+         * @description The poster image of one video. 404 when it has none.
+         */
+        get: operations["get_media_poster_api_v1_models__slug__media__item_id__poster_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/outputs": {
         parameters: {
             query?: never;
@@ -593,7 +678,7 @@ export interface paths {
         };
         /**
          * Model thumbnail
-         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
+         * @description The model's cover -- its first media image, or the poster of its first video -- or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
          */
         get: operations["get_thumbnail_api_v1_models__slug__thumbnail_get"];
         /**
@@ -2152,6 +2237,73 @@ export interface components {
             /** Tray Id */
             tray_id: number;
         };
+        /** MediaCaption */
+        MediaCaption: {
+            /** Caption */
+            caption: string;
+        };
+        /**
+         * MediaOrder
+         * @description Every item's id, once each, in the new order.
+         */
+        MediaOrder: {
+            /** Ids */
+            ids: string[];
+        };
+        /**
+         * MediaUpload
+         * @description The multipart body of ``POST /models/{slug}/media``.
+         */
+        MediaUpload: {
+            /**
+             * Caption
+             * @default null
+             */
+            caption: string | null;
+            /**
+             * File
+             * Format: binary
+             * @description The image or video: a PNG, JPEG or WebP image, or an MP4 or WebM video
+             */
+            file: string;
+            /**
+             * Poster
+             * @description A video's poster image (PNG, JPEG or WebP)
+             * @default null
+             */
+            poster: string | null;
+        };
+        /**
+         * MediaView
+         * @description An item as the API reports it, with what the disk says about its file.
+         */
+        MediaView: {
+            /**
+             * Caption
+             * @default
+             */
+            caption: string;
+            /** Content Type */
+            content_type: string;
+            /** File */
+            file: string;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "image" | "video";
+            /**
+             * Missing
+             * @default false
+             */
+            missing: boolean;
+            /** Poster */
+            poster?: string | null;
+            /** Size */
+            size: number | null;
+        };
         /** MergePreview */
         MergePreview: {
             /**
@@ -2298,6 +2450,8 @@ export interface components {
             has_thumbnail: boolean;
             /** Libraries */
             libraries?: components["schemas"]["ModelLibrary"][];
+            /** Media */
+            media?: components["schemas"]["MediaView"][];
             /** Name */
             name: string;
             /**
@@ -3432,6 +3586,8 @@ export interface components {
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
             library_folder_id?: number | null;
+            /** Media Upload Max Bytes */
+            media_upload_max_bytes?: number | null;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Printer Id */
@@ -3467,6 +3623,8 @@ export interface components {
             has_api_key: boolean;
             /** Library Folder Id */
             library_folder_id?: number | null;
+            /** Media Upload Max Bytes */
+            media_upload_max_bytes: number;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Printer Id */
@@ -4504,6 +4662,237 @@ export interface operations {
             };
         };
     };
+    upload_media_api_v1_models__slug__media_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["MediaUpload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description The template already holds 64 items */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Larger than Settings > Uploads, or an image over 10 MB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a PNG, JPEG or WebP image, or an MP4 or WebM video */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reorder_media_api_v1_models__slug__media_order_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MediaOrder"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_media_api_v1_models__slug__media__item_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                    "video/*": unknown;
+                };
+            };
+            /** @description The byte range asked for with `Range` */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_media_api_v1_models__slug__media__item_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    patch_media_api_v1_models__slug__media__item_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MediaCaption"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_media_poster_api_v1_models__slug__media__item_id__poster_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_outputs_api_v1_models__slug__outputs_get: {
         parameters: {
             query?: never;
@@ -5033,7 +5422,9 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
+                    "image/jpeg": unknown;
                     "image/png": unknown;
+                    "image/webp": unknown;
                 };
             };
             /** @description The copy named by `If-None-Match` is still current */

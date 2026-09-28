@@ -33,6 +33,15 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
 }
 
+const MiB = 1024 * 1024
+
+/** #274 — the media upload limit as the field shows it: whole MB (of 1024 KiB). */
+function megabytes(bytes: number | undefined): string {
+  return bytes === undefined ? '' : String(bytes / MiB)
+}
+
+export const UPLOAD_LIMIT_REFUSAL = 'The largest media upload is a whole number of MB, at least 1.'
+
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 function ofLimit(used: string, limit: number, format: (n: number) => string): string {
   return limit > 0 ? `${used} of ${format(limit)}` : `${used} (no limit)`
@@ -49,6 +58,7 @@ export function SettingsPage() {
   const [printerId, setPrinterId] = useState('')
   const [defaultPlate, setDefaultPlate] = useState('')
   const [unit, setUnit] = useState<DisplayUnit>('mm')
+  const [uploadMb, setUploadMb] = useState('')
 
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
@@ -81,6 +91,7 @@ export function SettingsPage() {
     setPrinterId(idValue(settings.printer_id))
     setDefaultPlate(settings.default_plate ?? '')
     setUnit(settings.display_unit)
+    setUploadMb(megabytes(settings.media_upload_max_bytes))
   }, [settings])
 
   function draft(): SettingsUpdate {
@@ -95,6 +106,22 @@ export function SettingsPage() {
     }
     // Omitted entirely, so an unchanged field leaves the stored key alone.
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
+    // Only when changed: a value sent back unchanged would stop following
+    // SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES. A cleared field (null) follows it again.
+    if (uploadMb !== megabytes(settings?.media_upload_max_bytes)) {
+      body.media_upload_max_bytes = uploadMb.trim() === '' ? null : Number(uploadMb) * MiB
+    }
+    return body
+  }
+
+  /** The draft, or null (with the refusal shown) when the upload limit is not whole MB. */
+  function checkedDraft(): SettingsUpdate | null {
+    const body = draft()
+    const limit = body.media_upload_max_bytes
+    if (typeof limit === 'number' && !(Number.isInteger(limit / MiB) && limit >= MiB)) {
+      setError(UPLOAD_LIMIT_REFUSAL)
+      return null
+    }
     return body
   }
 
@@ -129,7 +156,8 @@ export function SettingsPage() {
         pipelineId !== idValue(settings.pipeline_id) ||
         printerId !== idValue(settings.printer_id) ||
         defaultPlate !== (settings.default_plate ?? '') ||
-        unit !== settings.display_unit))
+        unit !== settings.display_unit ||
+        uploadMb !== megabytes(settings.media_upload_max_bytes)))
 
   function formValues() {
     return Object.fromEntries(Object.entries(form).map(([field, [value]]) => [field, value]))
@@ -199,10 +227,12 @@ export function SettingsPage() {
   )
 
   async function save() {
-    setSaving(true)
     setError(null)
+    const body = checkedDraft()
+    if (!body) return
+    setSaving(true)
     try {
-      const next = await api.putSettings(draft())
+      const next = await api.putSettings(body)
       settingsState.setData(next)
       setDisplayUnit(next.display_unit)
       setApiKey('')
@@ -216,12 +246,14 @@ export function SettingsPage() {
   }
 
   async function runTest() {
-    setTesting(true)
     setError(null)
     setTest(null)
+    const body = checkedDraft()
+    if (!body) return
+    setTesting(true)
     try {
       // The server tests what it has stored, so save first or the test lags the form.
-      await api.putSettings(draft())
+      await api.putSettings(body)
       setApiKey('')
       setTest(await api.testSettings())
     } catch (cause) {
@@ -437,6 +469,31 @@ export function SettingsPage() {
                 is chosen in the print picker.
               </p>
             </div>
+          </div>
+        </section>
+
+        <section className="mt-4 rounded-[6px] border border-line bg-surface">
+          <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Uploads</h2>
+          <div className="p-4">
+            <label htmlFor="media-upload-max" className="block text-[13px]">
+              Largest media upload (MB)
+            </label>
+            <input
+              id="media-upload-max"
+              type="number"
+              min={1}
+              step={1}
+              inputMode="numeric"
+              value={uploadMb}
+              onChange={(event) => setUploadMb(event.target.value)}
+              className="sb-field mt-1.5"
+            />
+            <p className="mt-1.5 text-[12px] text-muted">
+              The largest image or video one upload to a template may be; it is streamed to
+              the data volume, never held in memory. An image is also capped at 10 MB, since
+              it is kept in the template&rsquo;s history. Leave it empty to use the
+              deployment&rsquo;s default (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES, else 1024 MB).
+            </p>
           </div>
         </section>
 
