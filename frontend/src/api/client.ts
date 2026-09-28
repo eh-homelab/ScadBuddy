@@ -234,16 +234,28 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
 /**
  * Whether a failed request may still have done its work: the server's own answer never
  * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
- * the backend's own call to Bambuddy timed out or dropped (`bambuddy-unavailable`
- * 502/504), which may have been the enqueue. Any other problem the backend wrote, a 503
- * (nothing upstream took it) and an offline browser all mean it did not. For a request
- * with a physical effect (a print), retrying one of these blind can do it twice.
+ * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
+ * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
+ * browser all mean it did not. For a request with a physical effect (a print), retrying
+ * one of these blind can do it twice.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
-  if (error.problem.type === BAMBUDDY_UNAVAILABLE) return [502, 504].includes(error.status)
+  if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
   return [0, 502, 504, 524].includes(error.status)
+}
+
+/**
+ * A `bambuddy-unavailable` problem is either a timeout or a dropped connection
+ * (`errors.py` `map_transport`: 504 or 502, no `bambuddy_status`), or a status Bambuddy
+ * answered (`map_response`'s fallback: 502 with `bambuddy_status`). An answer is a "no",
+ * unless it is a proxy's in front of Bambuddy that gave up waiting.
+ */
+function bambuddyUnanswered(problem: Problem): boolean {
+  const answered = problem.bambuddy_status
+  if (typeof answered === 'number') return [502, 504, 524].includes(answered)
+  return problem.status === 502 || problem.status === 504
 }
 
 const seg = encodeURIComponent

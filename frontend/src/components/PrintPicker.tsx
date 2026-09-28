@@ -120,8 +120,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
    * Print again. Closing the dialog is the way back to it.
    */
   const [unanswered, setUnanswered] = useState<string | null>(null)
-  // Only for the queue link while a run is unanswered: a result carries its own.
-  const settings = useAsync(async () => (open ? await api.getSettings() : null), [open])
+  // Only for the queue link while a run is unanswered (a result carries its own), so it
+  // is read then, not on every open; a failed read offers to try again.
+  const settings = useAsync(
+    async () => (open && unanswered !== null ? await api.getSettings() : null),
+    [open, unanswered !== null],
+  )
   // As typed in Settings: a trailing slash would make `…//queue` below.
   const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
@@ -470,10 +474,14 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         ) : unanswered !== null ? (
           <>
             <Button onClick={close}>Close</Button>
-            {bambuddyUrl && (
+            {bambuddyUrl ? (
               <Button variant="primary" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
                 {"Open Bambuddy's queue"}
               </Button>
+            ) : (
+              settings.error && (
+                <Button onClick={settings.reload}>{"Find Bambuddy's queue"}</Button>
+              )
             )}
           </>
         ) : (

@@ -227,13 +227,25 @@ describe('failures the server did not describe (#470)', () => {
     [504, 'could not reach Bambuddy to queue the print: ReadTimeout', true],
     [502, 'could not reach Bambuddy to queue the print: RemoteProtocolError', true],
     [409, 'Bambuddy refused the API key', false],
+    // map_response's fallback: Bambuddy answered, so its "no" is not a maybe...
+    [502, 'Bambuddy answered 500 when asked to queue the print', false, 500],
+    [502, 'Bambuddy answered 400 when asked to queue the print', false, 400],
+    // ...unless the answer is a proxy's in front of Bambuddy that gave up waiting.
+    [502, 'Bambuddy answered 504 when asked to queue the print', true, 504],
+    [502, 'Bambuddy answered 524 when asked to queue the print', true, 524],
   ])(
     'counts the backend’s bambuddy-unavailable %i as maybe having run: %s',
-    async (status, detail, expected) => {
+    async (status, detail, expected, bambuddy_status?: number) => {
       server.use(
         http.get('/api/v1/models', () =>
           HttpResponse.json(
-            { type: BAMBUDDY_UNAVAILABLE, title: 'Bad Gateway', status, detail },
+            {
+              type: BAMBUDDY_UNAVAILABLE,
+              title: 'Bad Gateway',
+              status,
+              detail,
+              ...(bambuddy_status === undefined ? {} : { bambuddy_status }),
+            },
             { status, headers: { 'Content-Type': 'application/problem+json' } },
           ),
         ),

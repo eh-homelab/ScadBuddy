@@ -463,6 +463,63 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
     )
   })
 
+  it('reads Settings for the queue link only once a run is unanswered', async () => {
+    const { urls } = watch('GET', '/api/v1/settings')
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    expect(urls).toHaveLength(0)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByRole('button', { name: "Open Bambuddy's queue" })
+    expect(urls).toHaveLength(1)
+  })
+
+  it('offers to read the queue link again when Settings could not be read', async () => {
+    let settingsFail = true
+    server.use(
+      http.get('/api/v1/settings', () =>
+        settingsFail
+          ? HttpResponse.error()
+          : HttpResponse.json(fixtures.settings),
+      ),
+    )
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('may still have been queued')
+    const retry = await screen.findByRole('button', { name: "Find Bambuddy's queue" })
+    expect(screen.queryByRole('button', { name: "Open Bambuddy's queue" })).toBeNull()
+
+    settingsFail = false
+    await user.click(retry)
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "Find Bambuddy's queue" })).toBeNull()
+  })
+
+  it('keeps Print when Bambuddy answered an error, which queued nothing', async () => {
+    runAnswers(() =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+          title: 'Bad Gateway',
+          status: 502,
+          detail: 'Bambuddy answered 500 when asked to queue the print',
+          bambuddy_status: 500,
+        },
+        { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Bambuddy answered 500 when asked to queue the print')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+
   it('keeps Print for a 503, which nothing upstream took', async () => {
     runAnswers(() => new HttpResponse('no healthy upstream', { status: 503 }))
     const { user } = renderPicker()
