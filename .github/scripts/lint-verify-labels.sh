@@ -18,7 +18,14 @@
 # subcommand is on the NEXT line (a `docker \` continuation, or a Python argv
 # list wrapped one element per line) fails too: a per-line match could not
 # see that it is a run, let alone whether it is labelled. Comment lines are
-# skipped. Its cases are in lint-verify-labels.test.sh; both run in ci.yml's
+# skipped.
+#
+# It is a text check, not a parser: it only recognises a LITERAL `docker run`
+# (or `"docker", "run"`) on one line. A run whose argv is assembled at run time
+# (`cmd = ["docker"]; cmd += ["run", ...]`, `docker "$SUB" ...`) slips past it,
+# and if that container mounts nothing the reaper's bind-mount fallback misses
+# it too. Keep every `docker run` in a verify.sh literal, and review new
+# templates for that shape. Its cases are in lint-verify-labels.test.sh; both run in ci.yml's
 # `lint` job.
 set -euo pipefail
 
