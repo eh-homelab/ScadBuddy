@@ -453,3 +453,22 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     with pytest.raises(StoreNotReadyError):
         worker_module.build_worker_deps(settings)
     assert len(opened) == 1 and opened[0].pool.closed
+
+
+async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Final review I1: as the API's boot does, so a BOSL2 render needs no network."""
+    commit = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"
+    seed = tmp_path / "image-libraries"
+    (seed / "BOSL2" / commit / "BOSL2").mkdir(parents=True)
+    (seed / "BOSL2" / commit / "BOSL2" / "std.scad").write_text("// std\n")
+    data = tmp_path / "worker-data"
+    cfg = settings.model_copy(update={"data_dir": data, "seed_libraries_dir": seed})
+    deps, store = worker_module.build_worker_deps(cfg)
+    try:
+        checkout = deps.paths.libraries / "BOSL2" / commit / "BOSL2" / "std.scad"
+        assert checkout.read_text() == "// std\n"
+    finally:
+        await store.aclose()
+        deps.projection.close()
