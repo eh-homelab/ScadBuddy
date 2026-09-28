@@ -17,6 +17,9 @@
 #     clearance) between the plates, from the corner out to the open edge
 #   - missing files render the default shape (OpenSCAD logs ERROR, exits 0);
 #     refused names (folders, leading dot) are never opened
+#   - the mask_type / overlay_type value "image_threshold" (the PNG choice's
+#     name before #318 renamed it "png_threshold") still renders the same
+#     parts as the new value, so saved presets and past outputs keep working
 #
 # The checking runs on the host with python3 and the standard library.
 set -euo pipefail
@@ -57,9 +60,9 @@ CASES=(
     "classic-plain|base_color,border_color|shape=\"classic\";label=\"\";overlay_file=\"\";mask_file=\"\""
     "tassel-text-across|base_color,text_color,bead_color|shape=\"tassel\";border=false;text_direction=\"horizontal\";label=\"Hi!\";mask_file=\"\";overlay_file=\"\";bead_count=1"
     "pointed-stripes|base_color,stripe_color_2,stripe_color_3,stripe_color_4,stripe_color_5,border_color,overlay_color|shape=\"pointed\";base_style=\"stripes\";stripe_count=5;label=\"\""
-    "ribbon-png-inlay|base_color,border_color,mask_color|shape=\"ribbon\";mask_file=\"sample-leaf.png\";mask_type=\"image_threshold\";mask_mode=\"inlay\";label=\"\";overlay_file=\"\""
+    "ribbon-png-inlay|base_color,border_color,mask_color|shape=\"ribbon\";mask_file=\"sample-leaf.png\";mask_type=\"png_threshold\";mask_mode=\"inlay\";label=\"\";overlay_file=\"\""
     "corner-cutout-fill|base_color,border_color|shape=\"corner\";mask_fit=\"fill\";overlay_file=\"\";label=\"\""
-    "corner-png-inlay|base_color,border_color,text_color,mask_color,overlay_color|shape=\"corner\";mask_file=\"sample-leaf.png\";mask_type=\"image_threshold\";mask_mode=\"inlay\";mask_rotation=45;overlay_x=-12;overlay_y=-12;overlay_scale=30;label=\"Page 1\""
+    "corner-png-inlay|base_color,border_color,text_color,mask_color,overlay_color|shape=\"corner\";mask_file=\"sample-leaf.png\";mask_type=\"png_threshold\";mask_mode=\"inlay\";mask_rotation=45;overlay_x=-12;overlay_y=-12;overlay_scale=30;label=\"Page 1\""
     "rounded_tab-svg-emboss|base_color,border_color,mask_color|shape=\"rounded_tab\";mask_mode=\"emboss\";label=\"\";overlay_file=\"\""
     "scalloped-svg-deboss-two-tone|base_color,border_color,top_color,text_color|shape=\"scalloped\";mask_mode=\"deboss\";two_tone=true;overlay_file=\"\""
     "star_top-png-emboss-repeat|base_color,topper_color,border_color,text_color,mask_color|shape=\"star_top\";mask_file=\"sample-leaf.png\";mask_mode=\"emboss\";mask_repeat=2;text_style=\"raised\";overlay_file=\"\""
@@ -78,14 +81,17 @@ CASES=(
     "island-fixed|base_color,border_color|shape=\"classic\";mask_file=\"sample-rings.svg\";tie_bars=\"centre\";label=\"\";overlay_file=\"\""
     "missing-mask|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|mask_file=\"no-such-file.svg\""
     "missing-outline|base_color,border_color|shape=\"custom_mask\";mask_file=\"no-such-file.svg\";label=\"\";overlay_file=\"\""
-    "missing-overlay|base_color,border_color,text_color,bead_color,bead_color_2|overlay_file=\"no-such-file.png\";overlay_type=\"image_threshold\""
+    "missing-overlay|base_color,border_color,text_color,bead_color,bead_color_2|overlay_file=\"no-such-file.png\";overlay_type=\"png_threshold\""
     "refused-parent|base_color,border_color,text_color,bead_color,bead_color_2|mask_file=\"../model.scad\";overlay_file=\"/etc/hostname\""
     "note-corner-outline|base_color,border_color|shape=\"corner\";mask_mode=\"outline\";mask_file=\"sample-cat.svg\";overlay_file=\"\";label=\"\""
     "note-custom-mask-inlay|base_color,border_color|shape=\"custom_mask\";mask_mode=\"inlay\";mask_file=\"sample-cat.svg\";overlay_file=\"\";label=\"\""
     "dotdot-name-read|base_color,border_color|shape=\"custom_mask\";mask_file=\"cat..v2.svg\";label=\"\";overlay_file=\"\""
     "refused-subdir|base_color,border_color|shape=\"custom_mask\";mask_file=\"sub/x.svg\";overlay_file=\".hidden.svg\";label=\"\""
+    "png-forced-types|base_color,border_color,mask_color,overlay_color|shape=\"classic\";mask_file=\"sample-leaf.png\";mask_type=\"png_threshold\";mask_mode=\"inlay\";overlay_file=\"sample-leaf.png\";overlay_type=\"png_threshold\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
+    # The values before #318 renamed them; must render exactly as png-forced-types.
+    "png-legacy-types|base_color,border_color,mask_color,overlay_color|shape=\"classic\";mask_file=\"sample-leaf.png\";mask_type=\"image_threshold\";mask_mode=\"inlay\";overlay_file=\"sample-leaf.png\";overlay_type=\"image_threshold\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
     "upload-names|base_color,border_color,overlay_color|shape=\"classic\";mask_file=\"_scadbuddy_solid_asset_0123456789abcdef.svg\";overlay_file=\"_scadbuddy_solid_asset_fedcba9876543210.png\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
-    "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"image_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
+    "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"png_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
 )
 
 # Every dropdown value of shape and mask_mode must appear in some case.
@@ -441,6 +447,31 @@ for line in open(os.path.join(OUT, "cases.txt")):
     if name == "largest":
         check(name, ms < 120000, "renders inside ScadBuddy's 120 s job timeout (%.1f s)" % (ms / 1000))
     summary.append("%s: %d parts, %.1f s" % (name, len(named), ms / 1000))
+
+# #318: the PNG choice's value was "image_threshold" until it was renamed
+# "png_threshold"; saved presets and past outputs still hold the old value.
+# The legacy case must render the same colour parts, of the same volume, as
+# its twin with the new value. (Without the fallback the old value is not
+# "auto", so the PNG goes to import() instead and the picture is lost.)
+def part_volumes(name):
+    mats, V, T = load_3mf(os.path.join(OUT, name + ".3mf"))
+    vols = Counter()
+    for t in T:
+        vols[mats[t[3]][1]] += tri_volume(V[t[0]], V[t[1]], V[t[2]])
+    return {c: v for c, v in vols.items() if abs(v) > 1e-9}
+
+
+for old, new in [("png-legacy-types", "png-forced-types")]:
+    if not all(os.path.exists(os.path.join(OUT, n + ".3mf")) for n in (old, new)):
+        continue  # ONLY= skipped one of them
+    print("\n%s vs %s" % (old, new))
+    a, b = part_volumes(old), part_volumes(new)
+    for key in ("mask_color", "overlay_color"):
+        check(old, DEFAULTS[key].upper() in b, "%s renders the %s part %s" % (new, key, DEFAULTS[key].upper()))
+    check(old, set(a) == set(b) and all(abs(a[c] - b[c]) <= 1e-6 * max(1.0, abs(b[c])) for c in b),
+          "the legacy value renders the same parts as the new one (%s vs %s)"
+          % (", ".join("%s %.1f" % kv for kv in sorted(a.items())),
+             ", ".join("%s %.1f" % kv for kv in sorted(b.items()))))
 
 print()
 for s in summary:
