@@ -14,12 +14,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from fastapi import status
+
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
+from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import plate_filaments, plates_of
@@ -195,4 +199,91 @@ class OutputSource:
                 project_id=project_id,
                 plates=sent,
             )
+        return sent
+
+
+#: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2).
+PRINTABLE_TYPES: frozenset[str] = frozenset({"3mf"})
+#: A sliced file: printed from Bambuddy directly, never through the dialog.
+SLICED_TYPE = "gcode.3mf"
+#: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
+#: without slice metadata). ``normalise_colour`` reads it as unknown.
+UNKNOWN_COLOUR = ""
+
+
+def printable(file_type: str | None) -> bool:
+    return (file_type or "") in PRINTABLE_TYPES
+
+
+def _refusal(file: LibraryFile) -> str:
+    if file.file_type == SLICED_TYPE:
+        return f"{file.filename} is sliced already. Print it from Bambuddy."
+    kind = file.file_type or "file of unknown type"
+    return f"ScadBuddy prints only 3MF files from the library, and {file.filename} is a {kind}."
+
+
+@dataclass(frozen=True)
+class LibrarySource:
+    """A file already in Bambuddy's library (#313), printed as its author left it:
+    never uploaded, replated or recolored, and recorded nowhere in ScadBuddy."""
+
+    file_id: int
+    colours: list[str]
+    plates: list[int]
+    options_slug: str | None = None
+
+    @classmethod
+    async def load(cls, client: BambuddyClient, file_id: int) -> LibrarySource:
+        """Read the file, its plates and its filaments. A file deleted in Bambuddy is
+        its 404; one the dialog cannot print is a 422 before anything else is read."""
+        file = await client.library_file(file_id)
+        if not printable(file.file_type):
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
+        plates = sorted(plate.index for plate in (await client.library_plates(file_id)).plates)
+        needs = (await client.filament_requirements(file_id)).filaments
+        colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
+        for need in needs:
+            colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
+        # No plate metadata is one plate, and no filaments is one of unknown color: a
+        # file laid out that way still has something on the bed to print.
+        return cls(file_id=file_id, colours=colours or [UNKNOWN_COLOUR], plates=plates or [1])
+
+    async def plate_ids(self, client: BambuddyClient) -> list[int]:
+        return list(self.plates)
+
+    async def used_slots(self, client: BambuddyClient, plate_ids: list[int]) -> set[int]:
+        """The slots Bambuddy marks used on each printed plate. A plate it reads no
+        slots for counts as using every filament of the file, as an output's does."""
+        every = set(range(1, len(self.colours) + 1))
+        used: set[int] = set()
+        for plate_id in plate_ids:
+            answer = await client.filament_requirements(self.file_id, plate_id=plate_id)
+            own = {need.slot_id for need in answer.filaments if need.used_in_plate}
+            used |= own or every
+        return used & every
+
+    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        return ReadFile(self.file_id)
+
+    async def file_to_print(
+        self,
+        client: BambuddyClient,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        plan: FilamentPlan,
+        project_id: int | None,
+    ) -> PrintFile:
+        return PrintFile(self.file_id)
+
+    async def record(
+        self,
+        library_file_id: int,
+        plate_id: int,
+        outcome: QueueOutcome,
+        project_id: int | None,
+        sent: list[PlateSend],
+    ) -> list[PlateSend]:
+        # Recorded nowhere in ScadBuddy: Bambuddy's queue and archives are the record
+        # (print history is #305).
         return sent

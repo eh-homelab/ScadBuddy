@@ -42,7 +42,7 @@ from scadbuddy.bambuddy.hardware import (
 )
 from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
+from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -480,4 +480,29 @@ def _queued(
         project_id=project_id,
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
+    )
+
+
+async def run_for_library(
+    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
+) -> PrintRunResult:
+    """Resolve, slice and queue a file already in Bambuddy's library (#313)."""
+    return await run_print(client, await LibrarySource.load(client, file_id), settings, request)
+
+
+async def filament_options_for_library(
+    client: BambuddyClient,
+    file_id: int,
+    *,
+    printer_id: int | None = None,
+    plate_id: int = 1,
+    all_plates: bool = False,
+) -> FilamentOptions:
+    """:func:`filament_options` for a file already in Bambuddy's library (#313)."""
+    return await filament_options(
+        client,
+        await LibrarySource.load(client, file_id),
+        printer_id=printer_id,
+        plate_id=plate_id,
+        all_plates=all_plates,
     )
