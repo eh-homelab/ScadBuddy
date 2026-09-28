@@ -1,7 +1,8 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ok, okBytes } from './call.js'
-import { decodeBase64, fileForm, MAX_INLINE_BYTES, params, slug } from './common.js'
+import { binary } from './binary.js'
+import { ok } from './call.js'
+import { decodeBase64, fileForm, params, slug } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { validateParams } from './validate.js'
 
@@ -152,19 +153,18 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'get_render_preview',
     description:
-      "A finished render's preview mesh as a binary glTF (model/gltf-binary), embedded as a base64 resource.",
+      "A finished render's preview mesh as a binary glTF (model/gltf-binary), embedded as a base64 resource; " +
+      'when it is too large to inline, a link to fetch it instead.',
     input: z.object({ job_id: jobId }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/preview.glb'],
-    handler: async ({ job_id }, { backend }) =>
-      blob(
-        `scadbuddy://jobs/${job_id}/preview.glb`,
-        await ok(
-          backend.GET('/api/v1/jobs/{job_id}/preview.glb', { params: { path: { job_id } }, parseAs: 'arrayBuffer' }),
-          `get preview of ${job_id}`,
-        ),
-        'model/gltf-binary',
-        MAX_INLINE_BYTES,
+    handler: async ({ job_id }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/jobs/{job_id}/preview.glb', { params: { path: { job_id } }, parseAs: 'stream' }),
+        `get preview of ${job_id}`,
+        ctx,
+        { path: `/api/v1/jobs/${job_id}/preview.glb`, name: `preview-${job_id}.glb`, fallbackType: 'model/gltf-binary' },
+        (bytes, mimeType) => blob(`scadbuddy://jobs/${job_id}/preview.glb`, bytes, mimeType),
       ),
   }),
 
@@ -283,18 +283,20 @@ export const customizerTools: Tool[] = [
     }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/assets/{asset_id}', 'GET /api/v1/models/{slug}/assets/{asset_id}/content'],
-    handler: async ({ slug, asset_id, include_content }, { backend }) => {
+    handler: async ({ slug, asset_id, include_content }, ctx) => {
       const path = { slug, asset_id }
       const meta = json(
-        await ok(backend.GET('/api/v1/models/{slug}/assets/{asset_id}', { params: { path } }), `get asset ${asset_id}`),
+        await ok(ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}', { params: { path } }), `get asset ${asset_id}`),
       )
       if (!include_content) return meta
-      const { bytes, mimeType } = await okBytes(
-        backend.GET('/api/v1/models/{slug}/assets/{asset_id}/content', { params: { path }, parseAs: 'arrayBuffer' }),
+      const content = await binary(
+        ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}/content', { params: { path }, parseAs: 'stream' }),
         `get asset content ${asset_id}`,
-        'image/png',
+        ctx,
+        { path: `/api/v1/models/${slug}/assets/${asset_id}/content`, name: `asset-${asset_id}`, fallbackType: 'image/png' },
+        imageOrText,
       )
-      return { content: [...meta.content, ...imageOrText(bytes, mimeType).content] }
+      return { content: [...meta.content, ...content.content] }
     },
   }),
 
@@ -304,17 +306,21 @@ export const customizerTools: Tool[] = [
     input: z.object({ slug, name: z.string().min(1), version: z.string().optional() }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/samples/{name}'],
-    handler: async ({ slug, name, version }, { backend }) => {
-      const { bytes, mimeType } = await okBytes(
-        backend.GET('/api/v1/models/{slug}/samples/{name}', {
+    handler: async ({ slug, name, version }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/models/{slug}/samples/{name}', {
           params: { path: { slug, name }, query: { version } },
-          parseAs: 'arrayBuffer',
+          parseAs: 'stream',
         }),
         `get sample ${name}`,
-        'image/png',
-      )
-      return imageOrText(bytes, mimeType)
-    },
+        ctx,
+        {
+          path: `/api/v1/models/${slug}/samples/${encodeURIComponent(name)}${version ? `?version=${encodeURIComponent(version)}` : ''}`,
+          name,
+          fallbackType: 'image/png',
+        },
+        imageOrText,
+      ),
   }),
 ]
 

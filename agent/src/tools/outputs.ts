@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
-import { MAX_INLINE_BYTES, outputId, slug } from './common.js'
+import { binary } from './binary.js'
+import { outputId, slug } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
@@ -69,19 +70,19 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'download_3mf',
-    description: "An output's multi-colour 3MF, embedded as a base64 resource (model/3mf).",
+    description:
+      "An output's multi-colour 3MF, embedded as a base64 resource (model/3mf); when it is too large to " +
+      'inline, a link to fetch it instead.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/model.3mf'],
-    handler: async ({ output_id }, { backend }) =>
-      blob(
-        `scadbuddy://outputs/${output_id}/model.3mf`,
-        await ok(
-          backend.GET('/api/v1/outputs/{output_id}/model.3mf', { params: { path: { output_id } }, parseAs: 'arrayBuffer' }),
-          `download 3MF of ${output_id}`,
-        ),
-        'model/3mf',
-        MAX_INLINE_BYTES,
+    handler: async ({ output_id }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/model.3mf', { params: { path: { output_id } }, parseAs: 'stream' }),
+        `download 3MF of ${output_id}`,
+        ctx,
+        { path: `/api/v1/outputs/${output_id}/model.3mf`, name: `${output_id}.3mf`, fallbackType: 'model/3mf' },
+        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/model.3mf`, bytes, mimeType),
       ),
   }),
 
@@ -104,22 +105,29 @@ export const outputTools: Tool[] = [
     input: z.object({ output_id: outputId, plate: z.number().int().min(1).optional() }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/thumbnail', 'GET /api/v1/outputs/{output_id}/plates/{index}/thumbnail'],
-    handler: async ({ output_id, plate }, { backend }) =>
-      image(
-        plate === undefined
-          ? await ok(
-              backend.GET('/api/v1/outputs/{output_id}/thumbnail', { params: { path: { output_id } }, parseAs: 'arrayBuffer' }),
-              `get thumbnail of ${output_id}`,
-            )
-          : await ok(
-              backend.GET('/api/v1/outputs/{output_id}/plates/{index}/thumbnail', {
-                params: { path: { output_id, index: plate } },
-                parseAs: 'arrayBuffer',
-              }),
-              `get plate ${plate} image of ${output_id}`,
-            ),
-        'image/png',
-      ),
+    handler: async ({ output_id, plate }, ctx) =>
+      plate === undefined
+        ? binary(
+            ctx.backend.GET('/api/v1/outputs/{output_id}/thumbnail', { params: { path: { output_id } }, parseAs: 'stream' }),
+            `get thumbnail of ${output_id}`,
+            ctx,
+            { path: `/api/v1/outputs/${output_id}/thumbnail`, name: `${output_id}-thumbnail.png`, fallbackType: 'image/png' },
+            image,
+          )
+        : binary(
+            ctx.backend.GET('/api/v1/outputs/{output_id}/plates/{index}/thumbnail', {
+              params: { path: { output_id, index: plate } },
+              parseAs: 'stream',
+            }),
+            `get plate ${plate} image of ${output_id}`,
+            ctx,
+            {
+              path: `/api/v1/outputs/${output_id}/plates/${plate}/thumbnail`,
+              name: `${output_id}-plate-${plate}.png`,
+              fallbackType: 'image/png',
+            },
+            image,
+          ),
   }),
 
   defineTool({

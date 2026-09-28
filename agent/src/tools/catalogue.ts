@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
@@ -229,13 +230,13 @@ export const catalogueTools: Tool[] = [
     input: z.object({ slug }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/thumbnail'],
-    handler: async ({ slug }, { backend }) =>
-      image(
-        await ok(
-          backend.GET('/api/v1/models/{slug}/thumbnail', { params: { path: { slug } }, parseAs: 'arrayBuffer' }),
-          `get thumbnail of ${slug}`,
-        ),
-        'image/png',
+    handler: async ({ slug }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/models/{slug}/thumbnail', { params: { path: { slug } }, parseAs: 'stream' }),
+        `get thumbnail of ${slug}`,
+        ctx,
+        { path: `/api/v1/models/${slug}/thumbnail`, name: `${slug}-thumbnail.png`, fallbackType: 'image/png' },
+        image,
       ),
   }),
 

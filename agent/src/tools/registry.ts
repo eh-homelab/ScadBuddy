@@ -36,6 +36,10 @@ export type ToolServices = {
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
   renderWaitMs: number
+  /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
+  maxInlineBytes?: number
+  /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
+  publicBaseUrl?: string | undefined
 }
 
 export type ToolContext = ToolServices & {
@@ -170,13 +174,11 @@ export function image(bytes: ArrayBuffer, mimeType: string): CallToolResult {
   return { content: [{ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType }] }
 }
 
-/** Binary content (a GLB, a 3MF) as an embedded resource, refused above `maxBytes`. */
-export function blob(uri: string, bytes: ArrayBuffer, mimeType: string, maxBytes: number): CallToolResult {
-  if (bytes.byteLength > maxBytes) {
-    throw new ToolError(
-      `${uri} is ${bytes.byteLength} bytes, over the ${maxBytes}-byte limit for inline content`,
-    )
-  }
+/**
+ * Binary content (a GLB, a 3MF) as an embedded resource. Size is binary.ts's
+ * concern: it links instead of calling this when the bytes are over the cap.
+ */
+export function blob(uri: string, bytes: ArrayBuffer, mimeType: string): CallToolResult {
   return {
     content: [
       {

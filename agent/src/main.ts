@@ -101,6 +101,7 @@ const app = createApp({
       pending: new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 10 * 60_000,
+      publicBaseUrl: config.publicUrl,
     },
     // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
     // migration in db/migrations.ts) and the auth mode read from `ai_settings`.

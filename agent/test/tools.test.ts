@@ -330,6 +330,87 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
   })
 })
 
+describe('binary results: inline under the cap, a link over it', () => {
+  const OUT = 'a'.repeat(32)
+
+  it('returns a small 3MF inline as an embedded resource', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/model.3mf`, () =>
+        new HttpResponse(new Uint8Array([1, 2, 3, 4]), { headers: { 'content-type': 'model/3mf' } }),
+      ),
+    )
+    const result = await runTool(tool('download_3mf'), { output_id: OUT }, ctx({ maxInlineBytes: 16 }))
+    expect(result.isError).toBeFalsy()
+    expect(result.content).toEqual([
+      {
+        type: 'resource',
+        resource: { uri: `scadbuddy://outputs/${OUT}/model.3mf`, mimeType: 'model/3mf', blob: 'AQIDBA==' },
+      },
+    ])
+  })
+
+  it('links, not fails, when the declared size is over the cap', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/model.3mf`, () =>
+        new HttpResponse(new Uint8Array(64), { headers: { 'content-type': 'model/3mf', 'content-length': '64' } }),
+      ),
+    )
+    const result = await runTool(
+      tool('download_3mf'),
+      { output_id: OUT },
+      ctx({ maxInlineBytes: 16, publicBaseUrl: 'https://scadbuddy.example/' }),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: `https://scadbuddy.example/api/v1/outputs/${OUT}/model.3mf`,
+      mimeType: 'model/3mf',
+      size: 64,
+    })
+    expect(JSON.parse((result.content[1] as { text: string }).text)).toMatchObject({
+      inline: false,
+      size_bytes: 64,
+      fetch: { method: 'GET', path: `/api/v1/outputs/${OUT}/model.3mf` },
+    })
+  })
+
+  it('links when a streamed body with no length outgrows the cap, and uses the bare path without a public URL', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/jobs/j1/preview.glb`, () => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array(8))
+            controller.close()
+          },
+        })
+        return new HttpResponse(body, { headers: { 'content-type': 'model/gltf-binary' } })
+      }),
+    )
+    const result = await runTool(tool('get_render_preview'), { job_id: 'j1' }, ctx({ maxInlineBytes: 16 }))
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0]).toMatchObject({ type: 'resource_link', uri: '/api/v1/jobs/j1/preview.glb' })
+    expect((result.content[1] as { text: string }).text).toContain('SCADBUDDY_PUBLIC_URL')
+  })
+
+  it('get_asset with content: small image inline, large one linked', async () => {
+    const asset = 'b'.repeat(64)
+    let size = 4
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () =>
+        new HttpResponse(new Uint8Array(size), { headers: { 'content-type': 'image/png' } }),
+      ),
+    )
+    const args = { slug: 'box', asset_id: asset, include_content: true }
+    const small = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
+    expect(small.content.map((c) => c.type)).toEqual(['text', 'image'])
+    size = 64
+    const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
+    expect(large.isError).toBeFalsy()
+    expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
+  })
+})
+
 describe('base64 inputs', () => {
   it('refuses malformed base64 instead of uploading truncated bytes', async () => {
     const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())

@@ -27,9 +27,6 @@ export const params = z
   .catchall(paramValue)
   .describe('Customizer values by parameter name; omitted parameters keep their defaults')
 
-/** Inline binary limit: a tool result is carried in one JSON-RPC message. */
-export const MAX_INLINE_BYTES = 8 * 1024 * 1024
-
 export function decodeBase64(value: string, what: string): Uint8Array<ArrayBuffer> {
   // Node's decoder silently drops characters outside the alphabet, so check the
   // shape first rather than upload silently truncated bytes.

@@ -35,15 +35,3 @@ export async function ok<T>(pending: Promise<FetchResult<T>>, what: string): Pro
   // 204 responses have no body; openapi-fetch gives `{}` or undefined.
   return data as T
 }
-
-/** Binary content with the media type the backend declared (PNG or SVG for assets and samples). */
-export async function okBytes(
-  pending: Promise<FetchResult<ArrayBuffer>>,
-  what: string,
-  fallbackType: string,
-): Promise<{ bytes: ArrayBuffer; mimeType: string }> {
-  const result = await pending
-  const bytes = await ok(Promise.resolve(result), what)
-  const mimeType = result.response.headers.get('content-type')?.split(';')[0]?.trim() || fallbackType
-  return { bytes, mimeType }
-}
