@@ -6,7 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -25,10 +25,16 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import render_key
-from scadbuddy.render.projection import JobProjection, workflow_id_for
+from scadbuddy.render.jobs import RAW_RENDER_NAME
+from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
-from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
+from scadbuddy.workflows.activities import (
+    PIECE_NAME,
+    RenderActivities,
+    WorkerDeps,
+    _heartbeating,
+)
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, render_worker
 from scadbuddy.workflows.models import Failure, PieceRequest, Projection, piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
@@ -117,13 +123,15 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
     env = ActivityEnvironment()
     req = _request()
 
+    assert await env.run(acts.cached_piece, req) is None
     prepared = await env.run(acts.prepare, req)
     main = await env.run(acts.render_main, req, prepared)
     await env.run(acts.render_solids, req, prepared, main)
     piece = await env.run(acts.finish_piece, req, prepared, main)
 
-    assert deps.blobs.exists(req.piece_key)
     blob = deps.blobs.dir_for(req.piece_key)
+    assert (blob / PIECE_NAME).is_file()
+    assert await env.run(acts.cached_piece, req) == piece
     assert (paths.root / piece.result.model_3mf).is_file()
     assert (paths.root / piece.result.model_3mf).parent == blob
     assert piece.result.source_version == prepared.version
@@ -306,6 +314,61 @@ async def test_project_failed_copies_the_failure(
     assert refs.referenced() == set()
 
 
+def _kinds(conninfo: str, job_id: str) -> list[str]:
+    with psycopg.connect(conninfo) as conn:
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT kind FROM events WHERE payload->>'job_id' = %s ORDER BY seq", (job_id,)
+            )
+        ]
+
+
+def _cancelled(job: Job) -> Projection:
+    return Projection(
+        job_id=job.id,
+        slug="demo",
+        state="cancelled",
+        failure=Failure(error="cancelled"),
+        log_tail=["partial"],
+        steps=[StepInfo(name="render", state="running", done=0, total=1)],
+    )
+
+
+@pytest.mark.requires_postgres
+async def test_project_cancelled_onto_a_running_job(
+    pg_conninfo: str, projecting: tuple[RenderActivities, JobProjection, BlobRefs]
+) -> None:
+    acts, projection, _ = projecting
+    job = _submitted(projection)
+    await acts.project(Projection(job_id=job.id, slug="demo", state="running"))
+
+    await acts.project(_cancelled(job))
+
+    stored = projection.read(job.id)
+    assert stored.state == "cancelled"
+    assert stored.error == "cancelled"
+    assert stored.steps == _cancelled(job).steps
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.superseded"]
+
+
+@pytest.mark.requires_postgres
+async def test_project_cancelled_onto_a_job_the_api_cancelled_keeps_its_error(
+    pg_conninfo: str, projecting: tuple[RenderActivities, JobProjection, BlobRefs]
+) -> None:
+    acts, projection, _ = projecting
+    job = _submitted(projection)
+    assert projection.release_claim(job.id, slug="demo") is not None
+
+    await acts.project(_cancelled(job))
+
+    stored = projection.read(job.id)
+    assert stored.state == "cancelled"
+    assert stored.error == CANCELLED_ERROR
+    assert stored.steps == _cancelled(job).steps
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.superseded"]
+
+
 @pytest.mark.requires_postgres
 async def test_project_for_an_unknown_job_returns(
     projecting: tuple[RenderActivities, JobProjection, BlobRefs],
@@ -332,6 +395,8 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     deps = _deps(tmp_path, paths, projection=projection, refs=refs)
     job = _submitted(projection)
     key = piece_key("demo", None, "model.scad", {"width": 1})
+    raw = deps.blobs.dir_for(key) / RAW_RENDER_NAME
+    again = _job(width=1)
 
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -350,11 +415,21 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
                     build_id="test",
                     ignore_missing_task_queues=True,
                     allow_no_pollers=True,
-                )
+                ),
+                timeout=timedelta(seconds=30),
             )
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                ),
+                timeout=120,
+            )
+            rendered = raw.stat().st_mtime_ns
+            # The same piece again, after the first one closed: answered from the blob.
+            projection.submit(again, render_key("demo", {"width": 1}, None))
+            await asyncio.wait_for(
+                client.execute_workflow(
+                    TemplatePipeline.run, again, id=workflow_id_for(again.id), task_queue=queue
                 ),
                 timeout=120,
             )
@@ -363,8 +438,9 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert stored.state == "done", stored.error
     assert stored.result is not None
     assert (paths.root / stored.result.model_3mf).is_file()
-    assert deps.blobs.exists(key)
     assert key in refs.referenced()
-    with psycopg.connect(pg_conninfo) as conn:
-        kinds = [row[0] for row in conn.execute("SELECT kind FROM events ORDER BY seq")]
-    assert kinds == ["job.pending", "job.running", "job.done"]
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.done"]
+    repeat = projection.read(again.id)
+    assert repeat.state == "done", repeat.error
+    assert repeat.result == stored.result
+    assert raw.stat().st_mtime_ns == rendered

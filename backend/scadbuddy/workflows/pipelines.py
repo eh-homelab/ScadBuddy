@@ -90,6 +90,16 @@ class RenderPiece:
         return result
 
     async def _render(self, req: PieceRequest) -> PieceResult:
+        # A piece a closed run already finished: never rendered again in place.
+        cached: PieceResult | None = await workflow.execute_activity(
+            "cached_piece",
+            req,
+            result_type=PieceResult,
+            start_to_close_timeout=SHORT,
+            retry_policy=RETRY,
+        )
+        if cached is not None:
+            return cached
         prepared: PrepareResult = await workflow.execute_activity(
             "prepare",
             req,

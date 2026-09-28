@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
@@ -42,6 +44,9 @@ from scadbuddy.workflows.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The finished piece, written last: a blob that has it is never rendered again.
+PIECE_NAME = "piece.json"
 
 
 @dataclass
@@ -89,6 +94,8 @@ async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
         if not work.done():
             work.cancel()
             await asyncio.wait({work})
+            if not work.cancelled():
+                work.exception()  # retrieved, so asyncio does not log it as lost
 
 
 def _prepared(result: PrepareResult) -> Prepared:
@@ -113,6 +120,18 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
     )
 
 
+def _write_piece(work: Path, piece: PieceResult) -> None:
+    staging = work / f".{PIECE_NAME}.{uuid.uuid4().hex}"
+    staging.write_text(piece.model_dump_json(), encoding="utf-8")
+    os.replace(staging, work / PIECE_NAME)
+
+
+def _read_piece(path: Path) -> PieceResult | None:
+    if not path.is_file():
+        return None
+    return PieceResult.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def _process_output(main: RenderMainResult) -> ProcessOutput:
     return ProcessOutput(
         returncode=main.returncode,
@@ -131,13 +150,28 @@ class RenderActivities:
         self.deps = deps
 
     def all(self) -> Sequence[Callable[..., Any]]:
-        return [self.prepare, self.render_main, self.render_solids, self.finish_piece, self.project]
+        return [
+            self.cached_piece,
+            self.prepare,
+            self.render_main,
+            self.render_solids,
+            self.finish_piece,
+            self.project,
+        ]
 
     def _config(self, prepared: PrepareResult) -> Config:
         # What `prepare_source` returned: the one field it sets is the library path.
         return replace(
             self.deps.config, library_path=tuple(Path(path) for path in prepared.library_path)
         )
+
+    @activity.defn(name="cached_piece")
+    async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
+        """The piece as a finished render left it, so it is never rendered in place again."""
+        blobs = self.deps.blobs
+        if not blobs.exists(req.piece_key):
+            return None
+        return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
@@ -208,13 +242,14 @@ class RenderActivities:
     ) -> PieceResult:
         d = self.deps
         source = _prepared(prepared)
+        work = d.blobs.dir_for(req.piece_key)
         try:
             # The schema is derived here, from the checkouts: hold them.
             async with library_lease(d.checkouts, f"piece:{req.piece_key}", source.library_path):
                 result = await finish_piece_stage(
                     source,
                     req.params,
-                    d.blobs.dir_for(req.piece_key),
+                    work,
                     _process_output(main),
                     config=self._config(prepared),
                     paths=d.paths,
@@ -223,7 +258,10 @@ class RenderActivities:
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
-        return PieceResult(result=result, log_tail=main.log_tail)
+        piece = PieceResult(result=result, log_tail=main.log_tail)
+        # Last, and atomically: from here on the piece is answered by `cached_piece`.
+        await asyncio.to_thread(_write_piece, work, piece)
+        return piece
 
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:
@@ -240,6 +278,8 @@ class RenderActivities:
             job = await asyncio.to_thread(p.read, projection.job_id)
         except JobNotFoundError:
             return
+        # The API cancelled it first: its error says why, the workflow's does not.
+        keep_error = projection.state == "cancelled" and job.state == "cancelled"
         job.state = projection.state
         job.pipeline_version = projection.pipeline_version
         if projection.steps is not None:
@@ -252,7 +292,8 @@ class RenderActivities:
             job.diagnostics_dropped = projection.result.diagnostics_dropped
         if projection.failure is not None:
             failure = projection.failure
-            job.error = failure.error
+            if not keep_error:
+                job.error = failure.error
             job.log_tail = failure.log_tail
             job.diagnostics = failure.diagnostics
             job.diagnostics_dropped = failure.diagnostics_dropped
