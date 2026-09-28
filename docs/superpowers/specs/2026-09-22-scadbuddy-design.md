@@ -98,6 +98,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
 > including non-whole initials such as `wall = 1.2`. That is the customizer's
 > default, not a declared step, so `build_schema` keeps `step` only for
 > sliders; the three `.param` fixtures were regenerated on the new build.
+>
+> **Re-verified 2026-09-28 against OpenSCAD 2026.09.28**
+> (`openscad/openscad:dev.2026-09-28@sha256:99250895…`, now pinned by tag and
+> digest in the Dockerfile). Everything below still holds with no change: all 35
+> `models/*/verify.sh` pass, and the backend suite in the `test` image passes
+> (1942 passed; the 65 skips are the Postgres-only tests).
 
 - `openscad -o model.param model.scad` writes the **customizer schema as JSON**:
   `{"parameters":[{name, type, initial, caption, group, min, max, step,

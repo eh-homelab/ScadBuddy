@@ -28,7 +28,8 @@ import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
-  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [])
+  // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
+  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const navigate = useNavigate()
