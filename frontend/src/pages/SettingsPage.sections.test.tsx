@@ -1,6 +1,6 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Link, Route, Routes } from 'react-router'
+import { BrowserRouter, MemoryRouter, Link, Route, Routes, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { restartMockBackend, setMockRemembered } from '../mocks/handlers'
@@ -49,7 +49,7 @@ describe('SettingsPage sources (#322)', () => {
     await user.click(screen.getByRole('button', { name: 'Reset public_url to the deployment value' }))
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL'))
     expect(put).toHaveBeenCalledWith({ reset: ['public_url'] })
-    expect(field).toHaveValue('https://scadbuddy.internal.nullreference.io')
+    await waitFor(() => expect(field).toHaveValue('https://scadbuddy.internal.nullreference.io'))
     put.mockRestore()
   })
 
@@ -194,6 +194,72 @@ describe('SettingsPage sections (#322)', () => {
     await user.click(screen.getByRole('link', { name: 'Catalogue' }))
     await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
     expect(await screen.findByText('The catalogue')).toBeInTheDocument()
+  })
+
+  it('holds a programmatic navigation while anything is unsaved', async () => {
+    function GoHome() {
+      const navigate = useNavigate()
+      return (
+        <button type="button" onClick={() => void navigate('/')}>
+          Go home
+        </button>
+      )
+    }
+    const user = userEvent.setup()
+    render(
+      <MemoryRouter initialEntries={['/settings']}>
+        <Routes>
+          <Route
+            path="/settings"
+            element={
+              <>
+                <GoHome />
+                <SettingsPage />
+              </>
+            }
+          />
+          <Route path="/" element={<p>The catalogue</p>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await seeded()
+    await user.clear(screen.getByLabelText('Render timeout'))
+    await user.type(screen.getByLabelText('Render timeout'), '45')
+
+    await user.click(screen.getByRole('button', { name: 'Go home' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    expect(screen.queryByText('The catalogue')).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByText('The catalogue')).toBeInTheDocument()
+  })
+
+  it('holds the browser Back button while anything is unsaved', async () => {
+    window.history.replaceState(null, '', '/')
+    window.history.pushState(null, '', '/settings')
+    const user = userEvent.setup()
+    render(
+      <BrowserRouter>
+        <Routes>
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/" element={<p>The catalogue</p>} />
+        </Routes>
+      </BrowserRouter>,
+    )
+    await seeded()
+    await user.clear(screen.getByLabelText('Render timeout'))
+    await user.type(screen.getByLabelText('Render timeout'), '45')
+
+    act(() => window.history.back())
+    const dialog = await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    expect(window.location.pathname).toBe('/settings')
+    await user.click(within(dialog).getByRole('button', { name: 'Stay' }))
+    expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
+
+    // Held again after staying, and this time let through.
+    act(() => window.history.back())
+    await user.click(await screen.findByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByText('The catalogue')).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/')
   })
 })
 

@@ -1,16 +1,55 @@
-import { useEffect, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router'
+import { useContext, useEffect, useRef, useState } from 'react'
+import { createPath, UNSAFE_NavigationContext, useLocation, useNavigate, type Navigator, type To } from 'react-router'
+
+/** Marks the history entry pushed on top of the page while it is dirty. */
+const SENTINEL = 'scadbuddyLeaveGuard'
+/** `pending` for a held Back: leaving means going back past the page. */
+const BACK = Symbol('back')
+
+function onSentinel(): boolean {
+  const state: unknown = window.history.state
+  return typeof state === 'object' && state !== null && SENTINEL in state
+}
+
+/** A copy of the current entry (the router's own state kept), marked as the sentinel. */
+function pushSentinel() {
+  const state: unknown = window.history.state
+  window.history.pushState({ ...(typeof state === 'object' ? state : {}), [SENTINEL]: true }, '')
+}
+
+/**
+ * Routes the router's `push` and `replace` through `hold` until the returned function
+ * restores them. The history object is the router's own, shared by every `navigate()`
+ * and `<Link>`; wrapping it in place is the only hook a declarative router offers.
+ */
+function intercept(navigator: Navigator, hold: (original: Navigator['push']) => Navigator['push']): () => void {
+  const { push, replace } = navigator
+  navigator.push = hold(push)
+  navigator.replace = hold(replace)
+  return () => {
+    navigator.push = push
+    navigator.replace = replace
+  }
+}
 
 /**
  * #322 — an in-app "leave with unsaved changes?" guard. Bambuddy embeds ScadBuddy in a
  * sandboxed iframe without `allow-modals`, so neither `beforeunload` nor `confirm()` can
- * ask; instead a click on an in-app link to another page is held while `dirty`, and the
- * page shows its own dialog. Links within the page (the section nav) pass.
+ * ask; instead, while `dirty`, a navigation to another page is held and the page shows
+ * its own dialog. Navigations within the page (the section nav) pass. Held are:
+ *
+ * - clicks on in-app links, plain anchors included;
+ * - every router navigation, `navigate()` calls included: the app uses a declarative
+ *   `BrowserRouter`, which has no `useBlocker`, so the router's navigator is wrapped;
+ * - Back: a sentinel entry is pushed on top of the page, so Back pops it without leaving
+ *   the page, and the push drops any Forward entries.
  */
 export function useLeaveGuard(dirty: boolean) {
   const navigate = useNavigate()
   const location = useLocation()
-  const [pending, setPending] = useState<string | null>(null)
+  const { navigator } = useContext(UNSAFE_NavigationContext)
+  const [pending, setPending] = useState<string | typeof BACK | null>(null)
+  const bypass = useRef(false)
 
   useEffect(() => {
     if (!dirty) return
@@ -33,13 +72,53 @@ export function useLeaveGuard(dirty: boolean) {
     return () => document.removeEventListener('click', onClick, true)
   }, [dirty, location.pathname])
 
+  useEffect(() => {
+    if (!dirty) return
+    return intercept(navigator, (original) => (to: To, state?: unknown, opts?: Parameters<Navigator['push']>[2]) => {
+      const path = typeof to === 'string' ? to : createPath(to)
+      if (bypass.current || new URL(path, window.location.href).pathname === location.pathname) {
+        original.call(navigator, to, state, opts)
+        return
+      }
+      setPending(path)
+    })
+  }, [dirty, navigator, location.pathname])
+
+  useEffect(() => {
+    if (!dirty) return
+    if (!onSentinel()) pushSentinel()
+    const onPop = () => {
+      if (!onSentinel()) setPending(BACK)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => {
+      window.removeEventListener('popstate', onPop)
+      // Saved or discarded: take the sentinel off, so one Back leaves again.
+      if (onSentinel()) window.history.back()
+    }
+  }, [dirty])
+
   return {
     pending,
-    stay: () => setPending(null),
+    stay: () => {
+      if (pending === BACK) pushSentinel()
+      setPending(null)
+    },
     leave: () => {
       const to = pending
       setPending(null)
-      if (to !== null) void navigate(to)
+      if (to === BACK) {
+        window.history.back()
+        return
+      }
+      if (to === null) return
+      bypass.current = true
+      try {
+        // Replacing the sentinel, so Back from `to` comes to this page, not to it.
+        void navigate(to, { replace: onSentinel() })
+      } finally {
+        bypass.current = false
+      }
     },
   }
 }
