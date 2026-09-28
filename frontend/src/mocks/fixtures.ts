@@ -177,6 +177,9 @@ export const sampleFiles: Record<string, Record<string, { type: string; body: st
  */
 export const BUILTIN_SLUG = 'builtin:keychain-template'
 
+/** Which default render the built-in's preview is: the source key's first 16 characters. */
+export const BUILTIN_PREVIEW_ID = '5eed0f00d5eed0f0'
+
 export const builtinSchema: CustomizerSchema = { ...keychainSchema, title: 'Keychain Template' }
 
 export const models: ModelSummary[] = [
@@ -209,9 +212,12 @@ export const models: ModelSummary[] = [
     description: 'The built-in keychain, to customize as it is or duplicate.',
     tags: ['keychain', 'template'],
     updated_at: '2026-09-01T00:00:00Z',
-    has_thumbnail: false,
-    thumbnail_source: null,
+    // No bundled thumbnail and no output: its default-render preview stands in, as
+    // the backend renders one for any model, built-in or mine, with neither.
+    has_thumbnail: true,
+    thumbnail_source: 'preview',
     thumbnail_output_id: null,
+    thumbnail_preview_id: BUILTIN_PREVIEW_ID,
     upstream: null,
     has_readme: false,
     origin: 'builtin',
