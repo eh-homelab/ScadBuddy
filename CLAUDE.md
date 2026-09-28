@@ -113,7 +113,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
   `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes and `/mcp` now; `/api/v1/ws` later) uses the one allowlist in
+  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on

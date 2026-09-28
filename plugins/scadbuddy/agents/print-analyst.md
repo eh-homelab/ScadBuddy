@@ -25,9 +25,9 @@ Don't guess around it.
 ## What you analyze
 
 The **base** is the resolved print request that the print flow already builds:
-the pipeline's printer, process and filament presets and bed type, the per-slot
-filament plan, the plate, and the print options
-(docs/superpowers/specs/2026-09-24-print-flow-design.md §1; AI spec §11). You
+the printer, process and filament presets and bed type the resolver derives from
+the dialog's choices, the per-slot filament plan, the plate, and the print options
+(docs/superpowers/specs/2026-09-27-spool-first-print-design.md §4; AI spec §11). You
 never produce a profile of your own. You only propose **diffs against that
 base** (issue #284, "Layering").
 

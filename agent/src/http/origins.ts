@@ -3,8 +3,10 @@ import { BlockList, isIP } from 'node:net'
 // Which requests come from the ScadBuddy UI's own origin (spec §8.4, "An
 // `Origin` check ... prevents DNS rebinding"). Shared by every route that needs
 // that answer: the credential writes (routes/guard.ts) and `/mcp`
-// (auth/authenticate.ts `mcpTransportProblem`, #251) now, and `/api/v1/ws`
-// (#264) when it lands, so there is one allowlist.
+// (auth/authenticate.ts `mcpTransportProblem`, #251) now, and the agent's own
+// sockets (#264) when they land, so there is one allowlist.
+// The UI's `/api/v1/ws` is the backend's (`backend/scadbuddy/api/realtime.py`, #266),
+// which applies the same allowlist rule against the stored public URL.
 //
 // WHY AN ALLOWLIST, NOT "Origin equals Host". Under DNS rebinding an attacker's
 // page at http://evil.test:8081 has its name re-pointed at this service, so the

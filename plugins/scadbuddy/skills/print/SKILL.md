@@ -1,6 +1,6 @@
 ---
 name: print
-description: Print a ScadBuddy output through Bambuddy - choose a pipeline, check eligibility, plan filaments per slot, pick the plate, options and project, run it with the user's approval, and follow its progress. Use when asked to print, send, queue or slice a generated model, or to explain why a print was refused or failed.
+description: Print a ScadBuddy output through Bambuddy - read the dialog's choices, pick a spool per slot, the nozzle size, quality and plate, options and project, run it with the user's approval, and follow its progress. Use when asked to print, send, queue or slice a generated model, or to explain why a print was refused or failed.
 ---
 
 # Printing a ScadBuddy output through Bambuddy
@@ -14,18 +14,22 @@ the same rule: report Bambuddy's answers, and don't second-guess them.
 Sources, relative to the root of
 [eh-homelab/ScadBuddy](https://github.com/eh-homelab/ScadBuddy):
 
+- `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` ("spool-first
+  spec"): §2 for the flow, §3 for what each step reads, §4 for how presets are
+  derived, §4.5 for errors versus warnings, §6 for what Bambuddy decides. It
+  supersedes the print-flow spec's §2 rule that a pipeline is never bypassed.
 - `docs/superpowers/specs/2026-09-24-print-flow-design.md` ("print-flow spec"):
-  §1 for the request, §2 for the route, §3 to §5 for filaments, §6 for progress,
-  §7 for projects.
+  §3 to §5 for filaments, §6 for progress, §7 for projects.
 - `docs/superpowers/specs/2026-09-27-ai-integration-design.md` ("AI spec"): §8 for
   tiers and approvals, §11 for analyzers.
 - `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` ("main spec"): §7 for
   Bambuddy integration and extruder order.
 - `backend/openapi.json` for every route named below (all under `/api/v1`).
 
-The ScadBuddy MCP tools arrive with issue #251. A print tool wraps
-"eligibility → send → run behind a single approval" (AI spec §5.1). The routes
-below are what it calls. Use the tool when you have it.
+The ScadBuddy MCP tools arrive with issue #251. A print tool wraps the run
+behind a single approval (AI spec §5.1): read the choices, then run with them.
+The routes below are what it calls. Use the tool when you have it. There is no
+pipeline or eligibility step in the print dialog any more (spool-first spec §0).
 
 ## Approvals come first
 
@@ -39,8 +43,9 @@ human approval in the ScadBuddy UI, in every auth mode**, including `disabled`
   steps. `prepare` returns a pending action id and a summary. `confirm` completes
   only after the user approves in the UI (AI spec §8.2).
 
-So before you prepare a print, tell the user what will happen: which pipeline or
-printer, how many copies, the filament plan, and which route (§3 below). Never
+So before you prepare a print, tell the user what will happen: which printer, how
+many copies, the spool for each slot, the nozzle size, quality and plate, and any
+warnings (§3 below). Never
 say a print started until progress (§6 below) says so. Don't retry a denied
 action with different wording.
 
@@ -54,18 +59,25 @@ that route's description).
 
 ## 2. Assemble the request
 
-The print dialog builds one `PrintRequest` from independent steps
-(print-flow spec §1). The request body is `PrintRunRequest` in
-`backend/openapi.json`: `pipeline_id`, `printer_id`, `filament_plan`,
-`bed_type`, `plate_id` / `all_plates`, `options`, `project_id`, `copies` and
-`force`.
+The print dialog reads everything it offers in one call,
+`GET /api/v1/print/outputs/{output_id}/choices?printer_id=` (`ChoicesView` in
+`backend/openapi.json`; spool-first spec §3): the printers, the installed nozzles
+and the four nozzle sizes, the quality tiers and processes for the size, the
+plates with the one the printer's last print used, the model's remembered
+choices, and the filament step (slots, spools and a suggestion).
+
+The run body is `PrintRunRequest` in `backend/openapi.json`: `printer_id`,
+`filament_plan`, `choices`, `plate_id` / `all_plates`, `options`, `project_id`
+and `copies`. `choices` is `PrintChoices`: `nozzles` (one size for the job),
+`tier` (`fine` / `standard` / `draft`) or a `process_name`, `bed_type`, and any
+per-slot `filament_overrides` (spool-first spec §2).
 
 | Step | Read with | Notes |
 |---|---|---|
-| Pipeline | `GET /api/v1/print/models/{slug}/pipelines` | Includes this model's default. Without `pipeline_id` a run uses the model's default, then the global one (`backend/openapi.json`, `POST /print/outputs/{output_id}/run`). |
-| Eligibility | `POST /api/v1/print/outputs/{output_id}/eligibility` | Bambuddy judges a *library file*, so this **uploads the 3MF to Bambuddy** if it isn't there yet (`backend/openapi.json`). Whether a printer can run the job is Bambuddy's answer, not ours (print-flow spec §4). |
-| Filaments | `GET /api/v1/print/outputs/{output_id}/filaments?printer_id=&plate_id=` | The plate's slots and the whole spool inventory, already joined (print-flow spec §3). |
-| Plate | `bed_type`, `plate_id` / `all_plates` | The bed type last used on a printer is remembered with `PUT /api/v1/print/printers/{printer_id}/bed-type` (`backend/openapi.json`). |
+| Everything above | `GET /api/v1/print/outputs/{output_id}/choices?printer_id=` | One read for the whole dialog (spool-first spec §3). |
+| Filaments | `GET /api/v1/print/outputs/{output_id}/filaments?printer_id=&plate_id=` | The plate's slots and the whole spool inventory, already joined (print-flow spec §3). `all_plates=true` answers for every plate at once. |
+| Plate | `choices.bed_type`, `plate_id` / `all_plates` | Preselected from the printer's last print, then the plate remembered with `PUT /api/v1/print/printers/{printer_id}/bed-type` (spool-first spec §4.4). |
+| Remembered choices | `PUT /api/v1/print/models/{slug}/choices` | The printer and spools last chosen for this model (`backend/openapi.json`). |
 | Options | `GET /api/v1/settings/print-options` | The sparse `PrintOptions` overlay (#88; `backend/openapi.json`, `PrintOptions`). |
 | Project | `GET /api/v1/print/projects` | Bambuddy's projects, with their library folders (print-flow spec §7). |
 
@@ -93,43 +105,35 @@ order is extruder order, which is the order of the model's colour parameters
 - ScadBuddy sends **no `ams_mapping`**. Bambuddy's scheduler computes it against
   the printer it actually dispatches to (print-flow spec §4). Don't invent one.
 
-## 3. Which route runs: pipeline, or slice then queue
+## 3. The run: slice, then queue
 
-There is one submit, `POST /api/v1/print/outputs/{output_id}/run`, and the
-backend picks the route from what the request asks for (print-flow spec §2):
+There is one submit, `POST /api/v1/print/outputs/{output_id}/run`. ScadBuddy
+derives the printer, process and per-slot filament presets from `choices` and the
+chosen spools (spool-first spec §4), slices through Bambuddy, waits for the slice
+job, then `POST /queue/` on the one printer the dialog is scoped to. No pipeline
+runs on this path.
 
-- **`route="pipeline"`**: `POST /slicer-pipelines/{id}/run` on Bambuddy. A
-  pipeline run carries only `source_library_file_id` / `source_archive_id` /
-  `copies` / `force`: no printer, no mapping, no options.
-- **`route="slice_queue"`**: slice with the pipeline's own presets and bed type,
-  with filament presets swapped per slot, wait for the slice job, then
-  `POST /queue/` with `printer_id`, `filament_overrides`,
-  `required_filament_types`, `plate_id`, `options` and `project_id`.
+- **Errors** are a 422 before anything is sliced, and name the slot or setting:
+  mixed nozzle sizes, or a slot with no filament preset for the nozzle
+  (spool-first spec §4.5).
+- **Warnings** come back in the result and never block: spool not loaded, nozzle
+  not installed, High Flow slicing as Standard, a Generic filament preset
+  fallback, or a plate that differs from the last print (spool-first spec §4.5).
+  Tell the user about the ones you can predict before they approve.
 
-**What escalates to slice-then-queue:** only a filament plan or queue-level print
-options. A `printer_id` alone doesn't, and neither does a `project_id` alone
-(print-flow spec §2, "What actually escalates, as shipped").
-
-Tell the user before they approve, because it changes where the copies land. A
-class-targeted pipeline fans out across printers, but a queued item goes to one
-(print-flow spec §2): "Bambuddy will slice this for *printer*, then queue it."
-
-**`force`.** A blocking eligibility issue comes back as Bambuddy's 409, whose
-body is passed through as `bambuddy_body`. `force: true` runs anyway, and
-Bambuddy records `eligibility_overridden` (`backend/openapi.json`, the run
-route's description). Only set `force` when the user has read that refusal and
-asked to override it.
+Which AMS tray and extruder each spool feeds, and which rack nozzle is used,
+stay Bambuddy's and the printer's decisions (spool-first spec §6).
 
 The simpler **send** path, `POST /api/v1/outputs/{output_id}/send` with
 `{mode: "library" | "queue", copies, options}`, uploads to the library folder
-and, in `queue` mode, slices and queues it (`backend/openapi.json`; main spec
-§7). It is outward too.
+and, in `queue` mode, runs the pipeline chosen in Settings (`backend/openapi.json`;
+main spec §7; spool-first spec §0). It is outward too.
 
 ## 4. After the run: the result
 
-`PrintRunResult` reports `route`, `run`, `slice_job_id`, `queue_item_ids`,
-`library_file_id`, `bambuddy_url` and `warnings` (`backend/openapi.json`;
-print-flow spec §2). Give the user the `bambuddy_url`.
+`PrintRunResult` reports `route` (always `slice_queue`), `slice_job_id`,
+`queue_item_ids`, `library_file_id`, `copies`, `bambuddy_url` and `warnings`
+(`backend/openapi.json`). Give the user the `bambuddy_url` and every warning.
 
 ## 5. Projects
 
@@ -137,7 +141,7 @@ A project is Bambuddy's (print-flow spec §7). `POST /api/v1/print/projects`
 creates one, or links an existing one, together with its library folder. Attaching
 queue entries and archives is a separate call,
 `POST /api/v1/print/outputs/{output_id}/project`. Call it once the ids exist:
-queue entries appear after a pipeline run's background task, and archives only
+queue entries appear once a plate is queued, and archives only
 after the print finishes. Calling it again later is how archives land on the
 project (print-flow spec §7). The project routes need Bambuddy's **Manage
 Projects** scope, which the key may not have (print-flow spec §7).
@@ -148,11 +152,13 @@ Projects** scope, which the key may not have (print-flow spec §7).
 (print-flow spec §6; `backend/openapi.json`, `PrintProgress`):
 
 - `null` means the output was never printed. That is an answer, not an error.
-- `settled` says when to stop. On a failed pipeline run, **`status` and the copy
-  counters don't move**, so don't read them as "still printing". The run's
-  `completed_at` is what settles it (print-flow spec §6).
+- `settled` says when to stop. An all-plates print reads "Slicing…" until one of
+  its plates has a queue entry, and a plate can fail before it is ever queued.
+  For a send-bar pipeline run, **`status` and the copy counters don't move** on a
+  failure, so don't read them as "still printing". The run's `completed_at` is
+  what settles it (print-flow spec §6).
 - Show Bambuddy's `error_message` **word for word**, next to the `fix` the route
-  suggests (re-check eligibility, change the mapping, retry). Don't paraphrase it
+  suggests (change the mapping, retry). Don't paraphrase it
   (print-flow spec §6).
 
 ## 7. Errors that name a scope
@@ -168,13 +174,13 @@ leaves the server (`CLAUDE.md`, section "Bambuddy iframe facts").
 
 Analyzers inspect a print before it runs and propose **diffs against the base
 request** that this flow already builds. They never propose a profile of their
-own (AI spec §11; issue #284). Accepting a diff forces the slice-then-queue
-route:
+own (AI spec §11; issue #284). The run already slices then queues, so an
+accepted diff lands on that same request:
 
 1. Filament-level settings go in `filament_overrides` on the queue item.
 2. Process-level settings become a derived local preset.
 3. The 3MF's `project_settings.config` is used only if it is shown to beat the
-   pipeline's preset. Main spec §3 measured the preset winning.
+   resolved process preset. Main spec §3 measured the preset winning.
 
 Each of these is on AI spec §3.2's "to verify" list, so don't rely on any of them
 until a PR verifies it. Analyzer sessions can read and propose, but they can't
