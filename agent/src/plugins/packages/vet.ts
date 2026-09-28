@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { parseDocument } from 'yaml'
+import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
 import { declaredConfigs, isInside, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
@@ -16,12 +16,15 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //     injection), in the harness's environment, which holds the Claude
 //     credential. Measured on CLI 2.1.283, the harness already denies it
 //     ("Permission to use Bash has been denied", even with `allowed-tools:
-//     Bash(...)`; test/pluginPackages.e2e.test.ts). Refused here as well, in
-//     every Markdown file, so no review shows a package that relies on a shell.
+//     Bash(...)`; test/pluginPackages.e2e.test.ts), and every query sets
+//     `disableSkillShellExecution` (harness/options.ts). Refused here as well,
+//     in every Markdown file, so no review shows a package that relies on a
+//     shell.
 //   - Frontmatter `hooks` (skills register hooks "when the skill is invoked",
 //     same page, frontmatter fields), `mcpServers` and `permissionMode`
 //     (subagent frontmatter): refused, so every hook and MCP server is in
-//     the files vetted below and shown in the review.
+//     the files vetted below and shown in the review. Frontmatter must be
+//     plain YAML (`frontmatter()`), so no key can hide from this check.
 //   - Tools. `allowed-tools` (skills, commands: "Tools Claude can use without
 //     asking permission") and `tools` (subagents) may name MCP tools only
 //     (`mcp__<server>__<tool>`), whose tier the permission seam decides
@@ -42,7 +45,8 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 //     `http` hooks: no `$`, no `allowedEnvVars` (the variables a header may
 //     interpolate, https://code.claude.com/docs/en/hooks "HTTP hook fields"),
 //     and the URL goes through the egress check. `prompt` and `agent` hooks
-//     run no code.
+//     run no code. Only the events in PACKAGE_HOOK_EVENTS are allowed: a
+//     PermissionRequest or PreToolUse hook could approve or rewrite a call.
 //   - Manifest fields ScadBuddy does not apply and a headless run cannot
 //     honour: `dependencies` (other plugins, resolved by Claude Code's own
 //     installer), `userConfig` and `channels` (prompted interactively and kept
@@ -78,6 +82,36 @@ export type Vetting = {
 }
 
 const NON_COMMAND_MCP_TYPE = 'http'
+
+// The hook events a package may use: an allowlist, so an event added to
+// Claude Code later is refused until it is read. Left out on purpose, from
+// the CLI 2.1.283 event list and the hooks reference
+// (https://code.claude.com/docs/en/hooks):
+//   - PermissionRequest: the CLI races these against the host's
+//     `can_use_tool` answer, and a hook's `behavior: "allow"` (or
+//     `updatedInput`) wins, so an http hook would approve an outward tool
+//     before the human does (spec §8.2).
+//   - PreToolUse: `permissionDecision` and `updatedInput`, which would rewrite
+//     a write-tier call that the harness then allows.
+//   - PermissionDenied (`retry`), Elicitation/ElicitationResult (answers on the
+//     user's behalf), WorktreeCreate/WorktreeRemove, ConfigChange, Setup,
+//     the model-switch, file, directory, task and teammate events,
+//     InstructionsLoaded, UserPromptExpansion, MessageDisplay and
+//     PostToolBatch: decisions or side effects ScadBuddy has not reviewed.
+const PACKAGE_HOOK_EVENTS = new Set([
+  'SessionStart',
+  'SessionEnd',
+  'UserPromptSubmit',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'Notification',
+  'Stop',
+  'StopFailure',
+  'SubagentStart',
+  'SubagentStop',
+  'PreCompact',
+  'PostCompact',
+])
 const MAX_REPORTED_PROBLEMS = 50
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,27 +129,83 @@ function listFiles(root: string, rel = ''): string[] {
   return out.sort()
 }
 
+// Claude Code's own frontmatter patterns (bundled CLI 2.1.283, `Dk` and `ZH`
+// in its frontmatter parser): the block it parses ends at the FIRST `---`,
+// even one in the middle of a line; the line-anchored form is what it checks
+// that against. A byte-order mark is stripped first.
+const FM_CLI = /^---\s*\n([\s\S]*?)---\s*\n?/
+const FM_OPEN = /^---\s*\n/
+const FM_LINES = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+// A line at column 0 of accepted frontmatter: blank, a comment, a sequence
+// item of the key above it, or a plain `key:` (the CLI's own key alphabet).
+// Anything else (a quoted, explicit `?` or merge `<<` key, a flow mapping, an
+// anchor, a directive, a document marker) is refused.
+const TOP_LEVEL_LINE = /^(?:$|#|-(?:[ \t]|$)|[A-Za-z0-9_][A-Za-z0-9_.-]*:(?:[ \t]|$))/
+
+class FrontmatterError extends Error {}
+
+function refuseForm(reason: string): never {
+  throw new FrontmatterError(
+    `frontmatter uses a YAML form a plugin package may not use (${reason}); write plain "key: value" lines`,
+  )
+}
+
 /**
  * The YAML frontmatter's top-level keys, each value as a list of strings (a
  * scalar is one item; anything else is kept as JSON so a tool check refuses
- * it). Parsed with a real YAML parser, so a quoted (`"hooks":`), explicit
- * (`? hooks`), flow (`{hooks: …}`) or merged (`<<: {hooks: …}`) key is seen
- * the way Claude Code would see it. Throws when the frontmatter is not a
- * clean YAML mapping: the caller refuses it (fail closed).
+ * it). Undefined when Claude Code would see no frontmatter.
+ *
+ * Fails closed: the block is cut exactly where Claude Code cuts it, and it
+ * must be one block mapping of plain keys at column 0, with no anchors,
+ * aliases, tags, merge keys, directives or second document. Those forms are
+ * where two YAML parsers (ours and the CLI's) could read different keys, and
+ * a key only the CLI sees (`"hooks":`, `? hooks`, `{hooks: …}`, `<<: *x`)
+ * would get past the checks below. Anything else throws, and the caller
+ * refuses the package.
  */
 export function frontmatter(text: string): Map<string, string[]> | undefined {
-  const match = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text)
-  if (!match) return undefined
-  const doc = parseDocument(match[1]!, { merge: true, uniqueKeys: true, prettyErrors: false })
+  const body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+  const match = FM_CLI.exec(body)
+  if (!match) {
+    if (FM_OPEN.test(body)) refuseForm('an opening "---" with no closing "---"')
+    return undefined
+  }
+  const block = match[1] ?? ''
+  const lined = FM_LINES.exec(body)?.[1]
+  if ((block.trim() !== '' || (lined ?? '').trim() !== '') && lined?.trim() !== block.trim()) {
+    refuseForm('a "---" that is not on a line of its own')
+  }
+  for (const line of block.split(/\r?\n/)) {
+    if (line.startsWith(' ')) continue
+    if (!TOP_LEVEL_LINE.test(line)) refuseForm(`the line ${JSON.stringify(line.slice(0, 40))}`)
+  }
+
+  const doc = parseDocument(block, { merge: false, uniqueKeys: true, prettyErrors: false })
   const issue = doc.errors[0] ?? doc.warnings[0]
-  if (issue) throw new Error(`frontmatter is not valid YAML: ${issue.message.split('\n')[0]}`)
-  const data: unknown = doc.toJS({ maxAliasCount: 100 })
-  if (data === null || data === undefined) return new Map()
-  if (!isRecord(data)) throw new Error('frontmatter is not a YAML mapping')
+  if (issue) throw new FrontmatterError(`frontmatter is not valid YAML: ${issue.message.split('\n')[0]}`)
+  if (doc.directives?.docStart) refuseForm('a document marker')
+  visit(doc, {
+    Alias() {
+      refuseForm('an alias')
+    },
+    Node(_key, node) {
+      if (node.anchor) refuseForm('an anchor')
+      if (node.tag) refuseForm('a tag')
+    },
+  })
+  if (doc.contents === null) return new Map()
+  if (!isMap(doc.contents)) throw new FrontmatterError('frontmatter is not a YAML mapping')
+  if (doc.contents.flow) refuseForm('a flow mapping')
+
   const keys = new Map<string, string[]>()
   const item = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v))
-  for (const [key, value] of Object.entries(data)) {
-    keys.set(key, value === null || value === undefined ? [] : Array.isArray(value) ? value.map(item) : [item(value)])
+  for (const pair of doc.contents.items) {
+    const key = pair.key
+    if (!isScalar(key) || key.type !== 'PLAIN' || typeof key.value !== 'string') refuseForm('a key that is not plain')
+    const at = key.range?.[0] ?? -1
+    if (at !== 0 && block[at - 1] !== '\n') refuseForm(`the key "${key.value}" is not at column 0`)
+    const value: unknown = isNode(pair.value) ? pair.value.toJS(doc) : pair.value
+    keys.set(key.value, value === null || value === undefined ? [] : Array.isArray(value) ? value.map(item) : [item(value)])
   }
   return keys
 }
@@ -134,7 +224,8 @@ export function isAllowlistedTool(name: string): boolean {
 }
 
 const INJECTION_INLINE = /(^|\s)!`/m
-const INJECTION_BLOCK = /^\s*(```|~~~)!/m
+// Anywhere in the text, as the CLI matches it (2.1.283: /```!\s*\n?([\s\S]*?)\n?```/g).
+const INJECTION_BLOCK = /(```|~~~)!/
 
 function checkMarkdown(rel: string, text: string, problems: string[]): void {
   if (INJECTION_INLINE.test(text) || INJECTION_BLOCK.test(text)) {
@@ -144,7 +235,8 @@ function checkMarkdown(rel: string, text: string, problems: string[]): void {
   try {
     fm = frontmatter(text)
   } catch (err) {
-    problems.push(`${rel}: ${(err as Error).message}`)
+    if (!(err instanceof FrontmatterError)) throw err
+    problems.push(`${rel}: ${err.message}`)
     return
   }
   if (!fm) return
@@ -267,6 +359,11 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     for (const { event, handler } of hookHandlers(config)) {
       const type = isRecord(handler) && typeof handler.type === 'string' ? handler.type : 'command'
       const hook: ReviewHook = { event, type }
+      if (!PACKAGE_HOOK_EVENTS.has(event)) {
+        problems.push(
+          `${where}: a ${event} hook is not allowed in a plugin package; it may decide or rewrite a tool call, or it is not known`,
+        )
+      }
       if (type === 'mcp_tool') {
         problems.push(`${where}: ${event} has an mcp_tool hook, which calls a tool outside the approval seam`)
       } else if (type === 'http' && isRecord(handler)) {

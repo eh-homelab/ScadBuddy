@@ -62,5 +62,6 @@ export function buildQueryOptions(paths: HarnessPaths): Options {
     mcpServers: {},
     cwd: scratchDir(paths),
     env,
+    settings: { disableSkillShellExecution: true },
   }
 }
