@@ -17,6 +17,7 @@ import {
 import type { ChatTransportFactory } from '../agent/chat/transport'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
+import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { useLoadDisplayUnit } from '../lib/units'
 
 // Split out: the panel, its protocol schemas (zod) and its renderer download only
@@ -115,7 +116,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
           ))}
         </nav>
 
-        {ai.available && (
+        <div className="ml-auto flex items-center gap-2">
+          <LiveUpdatesIndicator />
+          {ai.available && (
           <button
             ref={toggleButton}
             type="button"
@@ -124,13 +127,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
             aria-controls={mounted ? PANEL_ID : undefined}
             aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
             title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})`}
-            className={`ml-auto rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+            className={`rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
               open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
             }`}
           >
             Assistant
           </button>
-        )}
+          )}
+        </div>
       </header>
 
       <div className="relative flex min-h-0 flex-1">
