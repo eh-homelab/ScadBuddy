@@ -1,6 +1,7 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
+  AssetUsage,
   AttachResult,
   BoundingBox,
   CatalogueFont,
@@ -1332,6 +1333,17 @@ export const handlers = [
       : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
   }),
 
+  // #296 — the server's defaults for the caps.
+  http.get(`${base}/assets/usage`, () => {
+    const metas = [...state.assets.values()].map((asset) => asset.meta)
+    return HttpResponse.json({
+      count: metas.length,
+      bytes: metas.reduce((total, meta) => total + meta.size, 0),
+      max_count: 10_000,
+      max_total_bytes: 1_000_000_000,
+    } satisfies AssetUsage)
+  }),
+
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
     return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
@@ -1378,6 +1390,8 @@ export const handlers = [
     job.colors = colorsOf(job.slug, job.params ?? {})
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+    job.notes =
+      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
     return HttpResponse.json(jobView(job))
   }),
 

@@ -785,9 +785,10 @@ def duplicate_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
         ) from None
-    except ModelNotFoundError:
-        # A concurrent delete of the upstream got there first.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except ModelNotFoundError as error:
+        # A concurrent delete got there first: of the upstream, or of the new copy
+        # between its commit and its record (#215). The error names which.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {error.args[0]!r}") from None
     except GitError as error:
         # Reading the upstream at `base` failed; as every other route that reads
         # the history maps it. Nothing of the duplicate is left behind.

@@ -61,3 +61,35 @@ def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(scene.export(file_type="glb", include_normals=False))
     return bounding_box(parts)
+
+
+def _colour_of(mesh: trimesh.Trimesh) -> str:
+    material = getattr(mesh.visual, "material", None)
+    factor = getattr(material, "baseColorFactor", None)
+    if factor is None:
+        return "#FFFFFF"
+    rgb = np.asarray(factor).ravel()[:3]
+    if rgb.dtype.kind == "f" and float(rgb.max(initial=0.0)) <= 1.0:
+        rgb = np.rint(rgb * 255)
+    return "#" + "".join(f"{int(channel):02X}" for channel in rgb)
+
+
+def read_glb(path: Path) -> list[ColourPart]:
+    """The parts a preview written by :func:`write_glb` holds, back in OpenSCAD's
+    Z-up millimetres: what a job or a saved output can be re-drawn from without
+    another OpenSCAD run. Watertightness is not what the preview is for; the
+    parts' meshes are only good for drawing."""
+    scene = trimesh.load(path, file_type="glb", force="scene")
+    if not isinstance(scene, trimesh.Scene):  # `force="scene"` promises one
+        raise ValueError(f"{path.name} is not a glTF scene")
+    y_up_to_z_up = np.linalg.inv(Z_UP_TO_Y_UP)
+    parts: list[ColourPart] = []
+    for index, node in enumerate(scene.graph.nodes_geometry, start=1):
+        transform, geometry_name = scene.graph[node]
+        geometry = scene.geometry[geometry_name]
+        if not isinstance(geometry, trimesh.Trimesh) or len(geometry.faces) == 0:
+            continue
+        mesh = geometry.copy()
+        mesh.apply_transform(y_up_to_z_up @ transform)
+        parts.append(ColourPart(index, str(geometry_name), _colour_of(geometry), mesh))
+    return parts

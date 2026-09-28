@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.schema import ParamValue
 
@@ -34,6 +35,15 @@ class JobResult(BaseModel):
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: The main render's ERROR/WARNING lines, parsed (#252). The per-colour solid
+    #: passes re-run the same source and would only repeat them.
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+    #: Diagnostics past the cap that ``diagnostics`` leaves out; 0 when it is all.
+    diagnostics_dropped: int = 0
+    #: The template's own `NOTE:`/`WARNING:` echoes (#285): what it changed from the
+    #: parameters it was given, say a size capped to fit the plate. Defaulted, like
+    #: `source_version`, so a result stored before the field existed still loads.
+    notes: list[str] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -53,6 +63,11 @@ class Job(BaseModel):
     finished_at: datetime | None = None
     log_tail: list[str] = Field(default_factory=list)
     error: str | None = None
+    #: What OpenSCAD reported, parsed (#252): the result's on success, the failed
+    #: run's on failure -- a parser error is exactly when a client needs them.
+    #: Stored where the job record lives: the job file, or `render_jobs` columns.
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+    diagnostics_dropped: int = 0
     result: JobResult | None = None
     #: Which try this is, as the store that handed the job to a worker numbered it.
     #: Not on the wire: it is how `finish` tells the attempt that still holds a job

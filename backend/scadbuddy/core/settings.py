@@ -6,6 +6,10 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
+    DEFAULT_ASSET_MAX_COUNT,
+    DEFAULT_ASSET_MAX_TOTAL_BYTES,
+    DEFAULT_ASSET_SWEEP_GRACE,
+    DEFAULT_ASSET_SWEEP_INTERVAL,
     DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
     DEFAULT_DATABASE_POOL_SIZE,
@@ -59,6 +63,10 @@ class Settings(BaseSettings):
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
+    asset_max_total_bytes: int = DEFAULT_ASSET_MAX_TOTAL_BYTES
+    asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
+    asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
+    asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -123,6 +131,10 @@ class Settings(BaseSettings):
             openscad_lsp=self.openscad_lsp,
             lsp_sessions=self.lsp_sessions,
             library_max_bytes=self.library_max_bytes,
+            asset_max_total_bytes=self.asset_max_total_bytes,
+            asset_max_count=self.asset_max_count,
+            asset_sweep_grace=self.asset_sweep_grace,
+            asset_sweep_interval=self.asset_sweep_interval,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:

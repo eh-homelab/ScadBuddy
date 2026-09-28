@@ -133,3 +133,36 @@ def test_a_negative_solid_concurrency_is_refused_by_name(monkeypatch: pytest.Mon
         load_config({"SCADBUDDY_SOLID_CONCURRENCY": "-1"})
     monkeypatch.setenv("SCADBUDDY_SOLID_CONCURRENCY", "5")
     assert Settings().to_config().solid_concurrency == 5
+
+
+def test_the_asset_caps_and_sweep_interval_take_zero() -> None:
+    config = load_config(
+        {
+            "SCADBUDDY_ASSET_MAX_TOTAL_BYTES": "0",
+            "SCADBUDDY_ASSET_MAX_COUNT": "0",
+            "SCADBUDDY_ASSET_SWEEP_INTERVAL": "0",
+        }
+    )
+    assert config.asset_max_total_bytes == 0
+    assert config.asset_max_count == 0
+    assert config.asset_sweep_interval == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SCADBUDDY_ASSET_MAX_TOTAL_BYTES",
+        "SCADBUDDY_ASSET_MAX_COUNT",
+        "SCADBUDDY_ASSET_SWEEP_INTERVAL",
+    ],
+)
+def test_a_negative_asset_setting_is_refused_by_name(name: str) -> None:
+    with pytest.raises(ValueError, match=f"{name} must be at least 0"):
+        load_config({name: "-1"})
+
+
+def test_an_asset_sweep_grace_under_an_hour_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"):
+        load_config({"SCADBUDDY_ASSET_SWEEP_GRACE": "60"})
+    with pytest.raises(ValueError, match="SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"):
+        Settings(data_dir=tmp_path, asset_sweep_grace=0).to_config()

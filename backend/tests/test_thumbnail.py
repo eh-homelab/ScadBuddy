@@ -9,17 +9,24 @@ size and transparency are the properties that carry the meaning.
 
 from __future__ import annotations
 
+from typing import get_args
+
 import numpy as np
 import pytest
 import trimesh
 
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
+    MAX_VIEW_SIZE,
+    MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
+    VIEW_DIRECTIONS,
+    ViewName,
     _downsample,
     encode_png,
     render_plate_thumbnails,
+    render_view,
 )
 from tests.conftest import read_png
 
@@ -215,3 +222,65 @@ def test_downsampling_keeps_each_larger_block_to_itself() -> None:
     assert reduced[0, 1].tolist() == [0, 0, 255, 255]
     assert reduced[1, 0].tolist() == [0, 0, 0, 0]
     assert reduced[1, 1].tolist() == [0, 255, 0, 128]
+
+
+# ── named views (#252) ───────────────────────────────────────────────────────
+
+
+def _opaque_extent(image: np.ndarray) -> tuple[int, int]:
+    """(width, height) of the opaque pixels' bounding box."""
+    rows, cols = np.nonzero(image[..., 3] == 255)
+    return int(cols.max() - cols.min() + 1), int(rows.max() - rows.min() + 1)
+
+
+def _long_in_x() -> list[ColourPart]:
+    return [ColourPart(1, "Color 1", BLUE, trimesh.creation.box(extents=(40, 10, 10)))]
+
+
+def test_every_view_name_has_a_direction() -> None:
+    assert set(get_args(ViewName)) == set(VIEW_DIRECTIONS)
+
+
+@pytest.mark.parametrize(
+    ("view", "wide"),
+    [
+        ("front", True),
+        ("back", True),
+        ("top", True),
+        ("bottom", True),
+        ("left", False),
+        ("right", False),
+    ],
+)
+def test_each_view_looks_along_its_own_axis(view: ViewName, wide: bool) -> None:
+    """A bar along X is wide from the front, back, top and bottom, and square end-on."""
+    width, height = _opaque_extent(read_png(render_view(_long_in_x(), view, 256)))
+
+    if wide:
+        assert width > 3 * height
+    else:
+        assert abs(width - height) <= 2
+
+
+def test_a_view_is_the_size_asked_for_and_shows_every_colour() -> None:
+    image = read_png(render_view(_two_colour_parts(), "iso", 200))
+
+    assert image.shape == (200, 200, 4)
+    opaque = _opaque_colours(image).astype(int)
+    red, blue = opaque[:, 0], opaque[:, 2]
+    assert np.any(blue > red + 60)  # the blue slab
+    assert np.any(red > blue + 60)  # the pink one
+
+
+@pytest.mark.parametrize(
+    ("view", "size"),
+    [("sideways", 256), ("front", MIN_VIEW_SIZE - 1), ("front", MAX_VIEW_SIZE + 1)],
+)
+def test_a_view_refuses_what_it_cannot_draw(view: str, size: int) -> None:
+    with pytest.raises(ValueError):
+        render_view(_long_in_x(), view, size)  # type: ignore[arg-type]
+
+
+def test_a_view_of_nothing_is_refused() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        render_view([], "iso")

@@ -225,7 +225,8 @@ jobs/<job-id>.json                render job state (pending/running/done/failed,
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
-assets/<sha256>.json              its original name, kind and size; never pruned
+assets/<sha256>.json              its original name, kind and size; swept once unreferenced
+.assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -519,8 +520,62 @@ string.
   under the same URL; any other name is a 404. Provenance for a sample is its
   name, so a re-render reproduces the output while the revision still ships it.
 - **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
-  content hash; assets are never pruned, so a re-render and "Customize this
-  version" reproduce the output.
+  content hash; an asset any output names is never swept (below), so a re-render
+  and "Customize this version" reproduce the output.
+- **Limits and the sweep (#296).** Distinct uploads were otherwise kept forever,
+  so every slightly different picture added a blob to the volume for good.
+  - *Caps.* `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1 000 000 000) and
+    `SCADBUDDY_ASSET_MAX_COUNT` (10 000); 0 is no limit for either. An upload whose
+    content is not already stored and that would take the store past either is a
+    413 problem document (RFC 9457, the same shape as the 8 MiB refusal) whose
+    `detail` names the setting and whose `usage` extension is the store's
+    `{count, bytes, max_count, max_total_bytes}`. Content already stored is
+    never refused, so re-uploading what an output uses keeps working at the cap.
+    The check and the write happen under one lock, so two uploads cannot both take
+    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
+  - *Usage.* `GET /assets/usage` answers the same four numbers; Settings shows
+    them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
+    `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
+    `scadbuddy_assets_max_bytes` (read per scrape), `scadbuddy_assets_rejected_total`
+    and `scadbuddy_assets_swept_total`.
+  - *What keeps an asset.* Any 64-hex string equal to its id in: an output's JSON
+    records (`params.json`, `meta.json`) or, when `params.json` is gone, the raw
+    root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to
+    is stamped (raw rather than through `provenance.read`, which answers "no
+    stamp" for a stamp it cannot parse); a
+    saved preset (`presets/`); a template's `presets.json` or `model.json`, mine or
+    built-in; or a job in the render queue's store, whatever its state (with
+    Postgres, every replica's). The match is on raw text, not on parsed `file`
+    values, so a damaged record still keeps what it names, and a coincidental
+    match only keeps a file longer. An older revision's shipped `presets.json` in
+    the models history is not read: shipped presets name samples, not uploads.
+  - *Last use.* An asset's last use is the later mtime of its two files. An upload
+    (a re-upload included) rewrites them; every `file` value that a render submit,
+    a render's staging or a preset save validates is marked used (`AssetStore.use`,
+    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+    value that is not an upload or a sample, as a render always did.
+  - *The sweep* removes an asset nothing keeps whose last use is older than
+    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s). It runs at
+    boot, after the render queue has opened its store, and then every
+    `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 1 day; 0 turns the sweep off, boot
+    included). Like the tombstone, orphan and library-staging sweeps it is best
+    effort: a failure is logged and never stops the boot. (#271 proposes the same
+    shape for library checkouts; there is no such sweep yet to share code with.)
+  - *Why it is safe against concurrent uploads and renders.* The references are
+    read first, and if any source cannot be read (a store outage, an unreadable
+    record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
+    the set, so what protects it is the last use: every path that creates one
+    marks the asset used under the store's lock, and the sweep re-checks the last
+    use under the same lock immediately before it removes each asset. Either the
+    use wins, and the sweep sees a fresh asset and skips it, or the sweep wins and
+    the use is a not-found: a 422 for that render or preset, never a job that
+    loses its file halfway. A running render was marked used when it staged its
+    files, and its job stays in the store until the TTL prunes it. An upload whose
+    first render has not been submitted yet is protected by the grace alone, which
+    is why the grace has a floor. Removal takes the metadata first, so `get` stops
+    finding the asset before its bytes go. The lock is an `flock` on
+    `data/.assets.lock`, beside the store rather than in it, so it also holds
+    between replicas sharing the volume.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job
@@ -617,6 +672,16 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   `true`/`false`. A parameter not in the schema is rejected (422).
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the
   model's directory so `include`/`import` resolve.
+- **Template notes (#285).** A template tells the user what it changed from the
+  parameters it was given (a size capped or text shrunk to fit the plate) by
+  echoing one string that starts `NOTE: ` — or `WARNING: `, which `wifi-qr-plaque`
+  and `flexi-fabric` use; both are accepted rather than renaming them. The main
+  render's whole log is scanned (not just the tail: the echo comes early), and
+  each distinct message, prefix removed, lands in the job's `notes` (at most 20).
+  The customize view shows them under the preview of a successful render. Any
+  other echo — `echo("NOTE:", x)`, debug output — and OpenSCAD's own `WARNING:`
+  lines stay in the log only. OpenSCAD prints the string raw, embedded quotes
+  unescaped (measured on 2026.09.23).
 
 ### 6.2 Bambu-style 3MF writer
 
@@ -819,7 +884,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
-| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5) |
+| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5); 413 past the store's caps, with its `usage` |
+| GET | `/assets/usage` | the upload store: `{count, bytes, max_count, max_total_bytes}`, a cap of 0 being none (§5.5) |
 | GET | `/models/{slug}/assets/{id}` / `…/{id}/content` | an upload's metadata / its stored bytes (served with a sandboxing CSP) |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema. `?merge_base=<commit>` saves a conflicted upstream merge's resolution: conflict markers are refused (422, `force` or not), and `upstream.base` advances to that revision in the same commit, `Merge <upstream id> into <slug>` by default |
 | GET | `/models/{slug}/upstream` | a duplicate's upstream: `{state, upstream, revision, preview}`. `state` is `current`, `update` (the upstream's current revision is neither `base` nor `dismissed`), `dismissed` or `gone`. On `update`, `preview` is `{ours, base, theirs, merged, clean, taken[], kept[]}`: `merged` is `git merge-file -p --diff3 ours base theirs`, `taken` the other files that follow the upstream (unchanged here since `base`) and `kept` those changed on both sides. 404 for a template that is not a duplicate |
@@ -834,7 +900,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/models/{slug}/versions/{commit}/diff` | `?base=` (default: the parent) → unified patch |
 | POST | `/models/{slug}/versions/{commit}/restore` | restores it as a NEW commit, never a rewrite |
 | POST | `/models/{slug}/render` | body `{params, version?}` → `{job_id}` (202) |
-| GET | `/jobs/{id}` | state, progress, log tail, result URLs |
+| GET | `/jobs/{id}` | state, progress, log tail, result URLs, the template's `notes` (§6.1) |
 | GET | `/jobs/{id}/preview.glb` | viewer mesh |
 | POST | `/models/{slug}/outputs` | persist a finished job as an output (Generate) |
 | GET | `/models/{slug}/outputs` / `/outputs/{id}` | history |
@@ -847,7 +913,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
-| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, upload store, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 
