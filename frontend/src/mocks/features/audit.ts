@@ -13,7 +13,7 @@ import {
   type AuditPage,
   MAX_RETENTION_DAYS,
   MIN_RETENTION_DAYS,
-} from '../agent/audit'
+} from '../../agent/audit'
 
 const SESSION = '0b7f3c1e-2a44-4d5e-9c1a-5f0e6d7c8b9a'
 const APPROVAL = '4c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f'
@@ -113,7 +113,7 @@ export const AUDIT_FIXTURES: readonly AuditEntry[] = [
 
 let retention = 90
 
-export function resetAuditMock(): void {
+export function reset(): void {
   retention = 90
 }
 
@@ -121,7 +121,7 @@ function problem(status: number, detail: string) {
   return HttpResponse.json({ detail }, { status })
 }
 
-export const auditHandlers = [
+export const handlers = [
   http.get('/api/v1/ai/audit', ({ request }) => {
     const url = new URL(request.url)
     const kind = url.searchParams.get('kind')
