@@ -207,6 +207,9 @@ export function useRenderJob(
       stopped = true
       unfollow?.()
       if (timer) clearTimeout(timer)
+      // The job is no longer followed, so its last step is no longer news: the
+      // preview must not name it through the debounce before the next submit.
+      setStage(undefined)
     }
   }, [slug, params, version])
 

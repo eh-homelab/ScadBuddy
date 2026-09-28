@@ -67,7 +67,7 @@ function fakeRealtime() {
   }
 }
 
-type Props = { slug: string; params: Record<string, number>; version?: string }
+type Props = { slug: string; params: Record<string, number> | undefined; version?: string }
 
 function mount(initialProps: Props) {
   return renderHook(({ slug, params, version }: Props) => useRenderJob(slug, params, version), {
@@ -252,6 +252,16 @@ describe('useRenderJob', () => {
 
       read.mockImplementation(async (id) => job(id, 'done'))
       await realtime.signal(`job:${JOB_A}`)
+      expect(result.current.stage).toBeUndefined()
+    })
+
+    it('drops the step when the params change and the job is no longer followed', async () => {
+      const { result, rerender } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      await realtime.signal(`job:${JOB_A}`, 'job.progress', { stage: 'solids' })
+      expect(result.current.stage).toBe('solids')
+      // Mid-typing: CustomizePage passes no params until the debounce settles.
+      rerender({ slug: 'demo', params: undefined })
       expect(result.current.stage).toBeUndefined()
     })
 

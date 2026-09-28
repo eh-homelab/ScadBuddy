@@ -116,9 +116,12 @@ function runJob(jobId: string): void {
     const job = state.jobs.get(jobId)
     if (job) emitRealtime(kind, [`job:${jobId}`], { job_id: jobId, slug: job.slug })
   }
+  // Ids restart at every resetMockState, so a timer left by an earlier test checks
+  // it is still acting on the job it was started for.
+  const started = state.jobs.get(jobId)
   setTimeout(() => {
     const job = state.jobs.get(jobId)
-    if (!job || job.status !== 'pending') return
+    if (!job || job !== started || job.status !== 'pending') return
     job.status = 'running'
     job.log_tail = ['Compiling design (CSG Tree generation)...']
     announce('job.running')
