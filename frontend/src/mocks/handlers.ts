@@ -1,6 +1,5 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
-  AnalysisRun,
   Asset,
   AssetUsage,
   AttachResult,
@@ -57,7 +56,6 @@ import {
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
-import { analysisReport } from './analyzers'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -299,6 +297,11 @@ export function setMockUploadLimit(bytes: number): void {
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -593,7 +596,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
@@ -2251,19 +2254,6 @@ export const handlers = [
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     } satisfies PrintRunResult)
-  }),
-
-  // --- #284 print analyzers (#461) ---------------------------------------------------
-
-  /**
-   * `POST /analyzers/run` on an output: the keychain's two findings (`mocks/analyzers.ts`).
-   * A configuration target (`slug` + `params`) is not something the dialog sends.
-   */
-  http.post(`${base}/analyzers/run`, async ({ request }) => {
-    const body = (await request.json()) as AnalysisRun
-    const output = state.outputs.find((o) => o.id === body.target.output_id)
-    if (!output) return problem(404, 'Output not found')
-    return HttpResponse.json(analysisReport(output, body.request ?? { plate_id: 1, all_plates: false }))
   }),
 
   // --- #79 projects -----------------------------------------------------------------
