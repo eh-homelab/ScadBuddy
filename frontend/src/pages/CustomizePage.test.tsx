@@ -116,6 +116,33 @@ describe('CustomizePage', () => {
     expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
   })
 
+  it('says the queue is full and renders anyway once the delay passes', async () => {
+    server.use(
+      http.post(
+        '/api/v1/models/:slug/render',
+        () =>
+          HttpResponse.json(
+            {
+              type: 'about:blank',
+              title: 'Service Unavailable',
+              status: 503,
+              detail: 'the render queue is full (16 jobs waiting for a worker); try again in 1 s',
+              retry_after: 1,
+            },
+            { status: 503, headers: { 'Retry-After': '1' } },
+          ),
+        { once: true },
+      ),
+    )
+    render()
+    expect(await screen.findByTestId('render-busy', {}, { timeout: 4000 })).toHaveTextContent(
+      'retried in 1 s',
+    )
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await firstRender()
+    expect(screen.queryByTestId('render-busy')).not.toBeInTheDocument()
+  })
+
   it('re-renders after a parameter change and updates the dimensions', async () => {
     const { user } = render()
     await firstRender()

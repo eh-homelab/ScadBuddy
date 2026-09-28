@@ -1,7 +1,10 @@
 import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
+import { committed, touchAfterRender, waitFor } from '../agent/highlight'
+import { AgentToolError } from '../agent/types'
+import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api } from '../api/client'
-import type { Output, ParamValue, Plate } from '../api/types'
+import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
@@ -17,7 +20,13 @@ import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
-import { defaultValues, type ParamValues } from '../lib/params'
+import {
+  allParams,
+  checkParamValue,
+  defaultValues,
+  diffFromDefaults,
+  type ParamValues,
+} from '../lib/params'
 import { fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
@@ -118,7 +127,12 @@ export function CustomizePage() {
     job,
     rendering,
     error: renderError,
+    busy: renderBusy,
+    settledFor,
   } = useRenderJob(slug, settled ? debounced : undefined, version)
+  // The job on screen is the render of the values on screen — not the previous one,
+  // which is all `settled && !rendering` can promise for a frame after a change.
+  const upToDate = settled && settledFor === debounced && !rendering
 
   // A parameter change invalidates the saved output — Generate has to run again.
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
@@ -149,6 +163,168 @@ export function CustomizePage() {
   }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+
+  // #254 — the parameter the agent last touched: the panel shows its tab, and the row
+  // gets the highlight once it is on screen.
+  const [reveal, setReveal] = useState<{ name: string } | undefined>(undefined)
+  const showTouched = useCallback((name: string) => {
+    setReveal({ name })
+    touchAfterRender(() => document.querySelector(`[data-param="${name}"]`))
+  }, [])
+
+  const live = useLatest({
+    schema,
+    values,
+    upToDate,
+    job,
+    renderError,
+    printerModel,
+    plateState,
+    fit,
+    misfit,
+  })
+
+  function requireSchema() {
+    if (!schema) {
+      throw new AgentToolError('timeout', schemaState.error ? `The model did not load: ${schemaState.error.message}` : 'The model is still loading.')
+    }
+    return schema
+  }
+
+  function requireParam(name: string): Param {
+    const param = allParams(requireSchema()).find((entry) => entry.name === name)
+    if (!param) {
+      throw new AgentToolError('invalid_args', `"${slug}" has no parameter "${name}"; get_params lists them.`)
+    }
+    return param
+  }
+
+  function checked(name: string, value: ParamValue): ParamValue {
+    const outcome = checkParamValue(requireParam(name), value)
+    if (!outcome.ok) throw new AgentToolError('invalid_args', outcome.message)
+    return outcome.value
+  }
+
+  function renderReport() {
+    const { job: settledJob, renderError: failure, misfit: fitProblems, fit: plateFit } = live.current
+    return {
+      status: failure ? 'error' : settledJob?.status,
+      error: failure?.message ?? settledJob?.error ?? null,
+      bbox_mm: settledJob?.bbox_mm ?? null,
+      colors: settledJob?.colors ?? [],
+      warnings: settledJob?.warnings ?? [],
+      // The log only earns its tokens when something went wrong.
+      log_tail: settledJob?.status === 'failed' ? (settledJob.log_tail ?? []).slice(-20) : undefined,
+      plate: plateFit?.plate.name ?? null,
+      fits: fitProblems.length === 0,
+      fit_problems: fitProblems,
+    }
+  }
+
+  useAgentHandlers(
+    'customize',
+    {
+      get_params: () => {
+        const current = requireSchema()
+        return {
+          slug,
+          version: version ?? null,
+          params: allParams(current).map((param) => ({
+            name: param.name,
+            caption: param.caption ?? null,
+            type: param.type,
+            group: param.group || null,
+            value: values[param.name] ?? param.initial ?? null,
+            initial: param.initial ?? null,
+            min: param.min ?? undefined,
+            max: param.max ?? undefined,
+            step: param.step ?? undefined,
+            max_length: param.max_length ?? undefined,
+            options: param.options?.map((option) => ({ name: option.name, value: option.value })),
+            samples: param.samples?.length ? param.samples : undefined,
+          })),
+          changed: diffFromDefaults(current, values).map((diff) => diff.name),
+        }
+      },
+      set_param: async ({ name, value }) => {
+        const next = checked(name, value)
+        onChange(name, next)
+        showTouched(name)
+        await committed(() => live.current.values[name] === next)
+        return { name, value: next, rendering: 'after the usual debounce; render waits for it' }
+      },
+      set_params: async ({ values: wanted }) => {
+        const entries = Object.entries(wanted)
+        if (entries.length === 0) throw new AgentToolError('invalid_args', 'values is empty.')
+        const problems: string[] = []
+        const next: ParamValues = {}
+        for (const [name, value] of entries) {
+          try {
+            next[name] = checked(name, value)
+          } catch (cause) {
+            problems.push(cause instanceof Error ? cause.message : String(cause))
+          }
+        }
+        // All or nothing: one bad value leaves every field as it was.
+        if (problems.length > 0) throw new AgentToolError('invalid_args', problems.join(' '))
+        setEdits((current) => ({
+          of: current.of,
+          values: { ...(current.values ?? current.of ?? NOTHING), ...next },
+        }))
+        showTouched(Object.keys(next)[0] ?? '')
+        await committed(() => Object.entries(next).every(([name, value]) => live.current.values[name] === value))
+        return { values: next }
+      },
+      reset_param: async ({ name }) => {
+        if (name === undefined) {
+          const current = requireSchema()
+          onReset()
+          await committed(() => diffFromDefaults(current, live.current.values).length === 0)
+          return { reset: 'all' }
+        }
+        const param = requireParam(name)
+        if (param.initial === null || param.initial === undefined) {
+          throw new AgentToolError('invalid_args', `"${name}" has no default to go back to.`)
+        }
+        const initial = param.initial
+        onChange(name, initial)
+        showTouched(name)
+        await committed(() => live.current.values[name] === initial)
+        return { name, value: initial }
+      },
+      render: async ({ timeout_ms }) => {
+        requireSchema()
+        await waitFor(() => (live.current.upToDate ? true : undefined), {
+          timeout: timeout_ms,
+          what: 'the preview render of the current values',
+        })
+        return renderReport()
+      },
+      select_plate: async ({ printer_model }) => {
+        setPrinterModel(printer_model)
+        const plateNow = await waitFor(
+          () => {
+            const { printerModel: model, plateState: state } = live.current
+            return model === printer_model && !state.loading ? state : undefined
+          },
+          { timeout: 10_000, what: 'the plate to load' },
+        )
+        if (plateNow.error) throw new AgentToolError('failed', plateNow.error.message)
+        return { plate: plateNow.data ?? null }
+      },
+    },
+    () => ({
+      slug,
+      version: version ?? null,
+      loaded: Boolean(schema),
+      changed: schema ? diffFromDefaults(schema, values).map((diff) => ({ name: diff.name, value: diff.value })) : [],
+      render: upToDate ? (renderError ? 'error' : job?.status) : 'pending',
+      bbox_mm: job?.status === 'done' ? job.bbox_mm : null,
+      plate: plate?.name ?? null,
+      fit_problems: misfit,
+      saved_output: output ? { id: output.id, name: output.name ?? null } : null,
+    }),
+  )
 
   if (reopenId && reopenState.error) {
     // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
@@ -321,10 +497,12 @@ export function CustomizePage() {
           <ParameterPanel
             schema={schema}
             slug={slug}
+            version={version}
             values={values}
             fonts={fontsState.data ?? []}
             onChange={onChange}
             onReset={onReset}
+            reveal={reveal}
             toolbar={
               <PresetPicker
                 // A preset picked on one model means nothing on the next.
@@ -362,6 +540,15 @@ export function CustomizePage() {
               Does not fit: {misfit.join('; ')}.
             </p>
           )}
+          {renderBusy !== undefined && (
+            <p
+              role="status"
+              data-testid="render-busy"
+              className="border-t border-line px-3 py-2 text-[12px] text-muted"
+            >
+              The render queue is full; this preview will be retried in {renderBusy} s.
+            </p>
+          )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
               {renderError.message}
@@ -371,6 +558,7 @@ export function CustomizePage() {
             slug={slug}
             job={job}
             rendering={rendering || !settled}
+            upToDate={upToDate}
             output={output}
             capture={capture}
             fit={fit}

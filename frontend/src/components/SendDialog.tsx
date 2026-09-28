@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { Output, PrintOptions, SendMode, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
@@ -124,7 +125,12 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
             <Button onClick={close} disabled={sending}>
               Cancel
             </Button>
-            <Button variant="primary" onClick={() => void send()} disabled={sending || !output}>
+            <Button
+              variant="primary"
+              onClick={() => void send()}
+              disabled={sending || !output}
+              {...USER_ONLY}
+            >
               {sending && <Spinner />}
               {sending ? 'Sending' : 'Send'}
             </Button>

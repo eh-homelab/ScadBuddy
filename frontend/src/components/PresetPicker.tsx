@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
 import { sameValues, type ParamValues } from '../lib/params'
@@ -42,7 +43,8 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
   const [skipped, setSkipped] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [naming, setNaming] = useState(false)
+  /** Which dialog asks for a name: a save of the values on screen, or a copy of a preset. */
+  const [naming, setNaming] = useState<'save' | 'duplicate' | null>(null)
   const [name, setName] = useState('')
   const [nameError, setNameError] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -68,11 +70,18 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
   function openSaveAs() {
     setName(selected && modified ? `${selected.name} (variant)` : '')
     setNameError(null)
-    setNaming(true)
+    setNaming('save')
   }
 
-  function closeSaveAs() {
-    if (!busy) setNaming(false)
+  function openDuplicate() {
+    if (!selected) return
+    setName(`${selected.name} copy`)
+    setNameError(null)
+    setNaming('duplicate')
+  }
+
+  function closeNaming() {
+    if (!busy) setNaming(null)
   }
 
   async function saveAs(event?: FormEvent) {
@@ -89,7 +98,31 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
       presetsState.setData([...presets, created])
       setSelection({ preset: created, applied: values })
       setSkipped([])
-      setNaming(false)
+      setNaming(null)
+    } catch (caught) {
+      setNameError(message(caught))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Copies the selected preset -- the way to change one the template ships, which is
+   * read-only. The copy holds the original's values, not what is on screen, and the
+   * screen is left alone: an edit made since picking the original shows as a change
+   * to the copy, which Update then saves into it.
+   */
+  async function duplicate(event?: FormEvent) {
+    event?.preventDefault()
+    const chosen = name.trim()
+    if (!selected || !chosen || busy) return
+    setBusy(true)
+    setNameError(null)
+    try {
+      const copy = await api.duplicatePreset(slug, selected.id, { name: chosen })
+      presetsState.setData([...presets, copy])
+      setSelection({ preset: copy, applied: applyPreset(schema, copy).values })
+      setNaming(null)
     } catch (caught) {
       setNameError(message(caught))
     } finally {
@@ -170,7 +203,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
         </select>
       </div>
 
-      <div className="flex items-center justify-end gap-1">
+      <div className="flex flex-wrap items-center justify-end gap-1">
         {modified && (
           <span data-testid="preset-modified" className="mr-auto text-[12px] text-faint">
             Changed from {selected?.name}
@@ -179,6 +212,16 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
         {editable && modified && (
           <Button size="sm" onClick={() => void update()} disabled={busy}>
             Update
+          </Button>
+        )}
+        {selected && (
+          <Button
+            size="sm"
+            onClick={openDuplicate}
+            disabled={busy}
+            aria-label={`Duplicate preset ${selected.name}`}
+          >
+            Duplicate
           </Button>
         )}
         <Button size="sm" onClick={openSaveAs} disabled={busy}>
@@ -210,27 +253,33 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
       )}
 
       <Dialog
-        open={naming}
-        title="Save as preset"
-        description="Saves the values that differ from the template's defaults, under a name to pick them by next time."
-        onClose={closeSaveAs}
+        open={naming !== null}
+        title={naming === 'duplicate' ? `Duplicate ${selected?.name ?? 'preset'}` : 'Save as preset'}
+        description={
+          naming === 'duplicate'
+            ? `The copy is a saved preset of yours to change, with ${selected?.name ?? 'the original'}'s values. The original stays as it is.`
+            : "Saves the values that differ from the template's defaults, under a name to pick them by next time."
+        }
+        onClose={closeNaming}
         footer={
           <>
-            <Button variant="ghost" onClick={closeSaveAs} disabled={busy}>
+            <Button variant="ghost" onClick={closeNaming} disabled={busy}>
               Cancel
             </Button>
             <Button
               variant="primary"
-              onClick={() => void saveAs()}
+              onClick={() => void (naming === 'duplicate' ? duplicate() : saveAs())}
               disabled={busy || !name.trim()}
             >
               {busy && <Spinner />}
-              Save
+              {naming === 'duplicate' ? 'Duplicate' : 'Save'}
             </Button>
           </>
         }
       >
-        <form onSubmit={(event) => void saveAs(event)}>
+        <form
+          onSubmit={(event) => void (naming === 'duplicate' ? duplicate(event) : saveAs(event))}
+        >
           <label className="flex flex-col gap-1 text-[13px] text-muted">
             Preset name
             <input
@@ -259,7 +308,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
             <Button variant="ghost" onClick={() => setConfirmingDelete(false)} disabled={busy}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => void remove()} disabled={busy}>
+            <Button variant="danger" onClick={() => void remove()} disabled={busy} {...USER_ONLY}>
               {busy && <Spinner />}
               Delete preset
             </Button>

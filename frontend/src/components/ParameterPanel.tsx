@@ -10,27 +10,45 @@ interface Props {
   schema: CustomizerSchema
   /** The model being customized; `file` parameters upload against it (#204). */
   slug: string
+  /** The revision being customized, if not the current one (#90). */
+  version?: string
   values: ParamValues
   fonts: FontFamily[]
   onChange: (name: string, value: ParamValue) => void
   onReset: () => void
   /** Above the group tabs: the preset picker. */
   toolbar?: ReactNode
+  /**
+   * #254 — a parameter an agent just changed. A new object switches to its tab, so the
+   * change happens where the user can see it.
+   */
+  reveal?: { name: string }
 }
 
 export function ParameterPanel({
   schema,
   slug,
+  version,
   values,
   fonts,
   onChange,
   onReset,
   toolbar,
+  reveal,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
   const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
   const [active, setActive] = useState(() => tabs[0]?.name ?? GLOBAL_GROUP)
+  const [revealed, setRevealed] = useState(reveal)
+  // Adjusting state when a prop changes, during render rather than in an effect, so the
+  // right tab is in the same commit as the change instead of one frame late:
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  if (reveal !== revealed) {
+    setRevealed(reveal)
+    const home = reveal && tabs.find((group) => group.params.some((param) => param.name === reveal.name))
+    if (home) setActive(home.name)
+  }
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
   const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
@@ -83,11 +101,12 @@ export function ParameterPanel({
           <div className="border-b border-line bg-surface-2/40">
             <ul className="divide-y divide-line/60">
               {globalGroup.params.map((param) => (
-                <li key={param.name}>
+                <li key={param.name} data-param={param.name}>
                   <ParamWidget
                     param={param}
                     value={values[param.name] ?? (param.initial as ParamValue)}
                     slug={slug}
+                    version={version}
                     fonts={fonts}
                     sampleText={sampleText}
                     extruder={extruderOf(param.name)}
@@ -102,11 +121,12 @@ export function ParameterPanel({
         {current && (
           <ul role="tabpanel" aria-label={current.name} className="divide-y divide-line/60">
             {current.params.map((param) => (
-              <li key={param.name}>
+              <li key={param.name} data-param={param.name}>
                 <ParamWidget
                   param={param}
                   value={values[param.name] ?? (param.initial as ParamValue)}
                   slug={slug}
+                  version={version}
                   fonts={fonts}
                   sampleText={sampleText}
                   extruder={extruderOf(param.name)}

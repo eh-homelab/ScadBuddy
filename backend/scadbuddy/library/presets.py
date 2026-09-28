@@ -96,6 +96,17 @@ class ParamPresetUpdate(BaseModel):
         return None if name is None else _clean_name(name)
 
 
+class ParamPresetDuplicate(BaseModel):
+    """The copy's name; its values are the original's."""
+
+    name: str = Field(min_length=1, max_length=MAX_PRESET_NAME)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, name: str) -> str:
+        return _clean_name(name)
+
+
 class _StoredPreset(_PresetBody):
     id: str
     created_at: datetime
@@ -203,6 +214,13 @@ class PresetStore:
     def presets(self, model_id: str) -> list[ParamPreset]:
         """The template's presets, then the saved ones, each in their own order."""
         return self.template_presets(model_id) + self.saved_presets(model_id)
+
+    def find(self, model_id: str, preset_id: str) -> ParamPreset:
+        """One preset of the template, shipped or saved."""
+        for preset in self.presets(model_id):
+            if preset.id == preset_id:
+                return preset
+        raise PresetNotFoundError(preset_id)
 
     def _require_free(self, model_id: str, stored: _StoredPresets, name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""

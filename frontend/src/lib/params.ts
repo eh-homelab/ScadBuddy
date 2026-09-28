@@ -95,3 +95,75 @@ export function sameValues(a: ParamValues, b: ParamValues): boolean {
   }
   return true
 }
+
+export type CheckedValue = { ok: true; value: ParamValue } | { ok: false; message: string }
+
+const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+/** An uploaded asset's id: the sha256 of its content (#204). */
+const ASSET_ID = /^[0-9a-f]{64}$/
+
+/**
+ * #254 — whether `value` is one the parameter's own widget could produce, and the value
+ * as that widget would hand it to `onChange` (a select's option in its own type, a
+ * colour normalised). An agent's value goes through this before the same `onChange`
+ * a keystroke does, so it cannot put a value on screen no field would have.
+ */
+export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
+  const label = `"${param.name}"`
+  switch (param.type) {
+    case 'number':
+    case 'integer':
+    case 'slider': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return { ok: false, message: `${label} takes a number.` }
+      }
+      if (param.type === 'integer' && !Number.isInteger(value)) {
+        return { ok: false, message: `${label} takes a whole number.` }
+      }
+      if (param.min != null && value < param.min) {
+        return { ok: false, message: `${label} is at least ${param.min}.` }
+      }
+      if (param.max != null && value > param.max) {
+        return { ok: false, message: `${label} is at most ${param.max}.` }
+      }
+      return { ok: true, value }
+    }
+    case 'boolean':
+      return typeof value === 'boolean'
+        ? { ok: true, value }
+        : { ok: false, message: `${label} takes true or false.` }
+    case 'select': {
+      const options = param.options ?? []
+      const picked = options.find((option) => String(option.value) === String(value))
+      return picked
+        ? { ok: true, value: picked.value }
+        : {
+            ok: false,
+            message: `${label} is one of ${options.map((option) => JSON.stringify(option.value)).join(', ')}.`,
+          }
+    }
+    case 'color':
+      return typeof value === 'string' && HEX.test(value.trim())
+        ? { ok: true, value: normalizeHex(value) }
+        : { ok: false, message: `${label} takes a hex colour such as "#FF8800".` }
+    case 'file': {
+      if (typeof value !== 'string') return { ok: false, message: `${label} takes a file name.` }
+      const samples = param.samples ?? []
+      if (value === '' || samples.includes(value) || ASSET_ID.test(value)) return { ok: true, value }
+      return {
+        ok: false,
+        message:
+          `${label} takes one of the template's samples (${samples.map((s) => JSON.stringify(s)).join(', ') || 'none'}), ` +
+          'an uploaded asset id, or "" to clear it. Uploading a file is for the user.',
+      }
+    }
+    case 'font':
+    case 'string': {
+      if (typeof value !== 'string') return { ok: false, message: `${label} takes text.` }
+      if (param.max_length != null && value.length > param.max_length) {
+        return { ok: false, message: `${label} is at most ${param.max_length} characters.` }
+      }
+      return { ok: true, value }
+    }
+  }
+}

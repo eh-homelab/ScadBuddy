@@ -98,6 +98,7 @@ jobs:
     outputs:
       backend: ${{ steps.detect.outputs.backend }}
       frontend: ${{ steps.detect.outputs.frontend }}
+      agent: ${{ steps.detect.outputs.agent }}
       e2e: ${{ steps.detect.outputs.e2e }}
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
@@ -122,6 +123,8 @@ jobs:
           if [ -f backend/pyproject.toml ]; then backend=true; fi
           frontend=false
           if [ -f frontend/package.json ]; then frontend=true; fi
+          agent=false
+          if [ -f agent/package.json ]; then agent=true; fi
           e2e=false
           if [ -d frontend/e2e ]; then e2e=true; fi
           models=false
@@ -153,6 +156,7 @@ jobs:
           {
             echo "backend=$backend"
             echo "frontend=$frontend"
+            echo "agent=$agent"
             echo "e2e=$e2e"
             echo "models=$models"
             echo "image=$image"
@@ -229,6 +233,19 @@ jobs:
 
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
+
+      # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
+      # in CI reads: a skill that loses its frontmatter still loads with its
+      # description gone, and a malformed marketplace.json only fails when a
+      # user runs `/plugin marketplace add`. The lint also enforces the AI
+      # spec's citation rule (D10) on every skill. jq is on ubuntu-latest; the
+      # Claude Code CLI's `claude plugin validate` is not, so it stays a local
+      # check (plugins/scadbuddy/README.md).
+      - name: Lint the Claude plugin and marketplace
+        run: .github/scripts/lint-plugin.sh
+
+      - name: Test the plugin lint
+        run: .github/scripts/lint-plugin.test.sh
 
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
   frontend:
@@ -316,6 +333,128 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ── Agent service (#261): the AI sidecar in agent/ ──────────────────────────
+  #
+  # The same shape as `frontend` (same Node major, corepack-pinned pnpm,
+  # frozen lockfile), plus the sidecar image: `--target agent` is a separate
+  # image with nothing in common with the OpenSCAD stages, so it is built and
+  # smoke-tested here rather than in `image`. The build itself asserts the
+  # Claude Code version the Agent SDK bundles (the Dockerfile's
+  # CLAUDE_CODE_VERSION), so an SDK bump that moves it reds this job on the PR.
+  #
+  # No test here calls Anthropic: test/run.test.ts points the SDK at a local
+  # fake Anthropic-format endpoint as its gateway (ANTHROPIC_BASE_URL, #255).
+  # The Postgres service is for test/pg.test.ts (the agent's `ai_*` tables and
+  # migrations), reached on the runner's loopback; each test works in a schema
+  # of its own, as the backend's `requires_postgres` tests do.
+  agent:
+    name: Agent lint, typecheck, test, build, image
+    needs: layout
+    if: ${{ needs.layout.outputs.agent == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Pinned with the Dockerfile's agent stages and the `frontend` job.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - uses: docker/setup-buildx-action@v4
+
+      # `type=gha` only because this is a GitHub-hosted runner (see the header
+      # of this file). Its own `scope` so this job and `image`, which run in
+      # parallel, do not overwrite each other's cache index; build-image.yml
+      # writes the same scope from main, which is what warms it for PRs.
+      - name: Build the agent image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: agent
+          load: true
+          tags: scadbuddy-agent:ci
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,scope=agent,mode=max
+
+      # The image's own HEALTHCHECK is the assertion, as in `image`. No
+      # database and no backend exist here, so /healthz must say AI is
+      # disabled rather than fail: that is the degraded mode spec §9 requires.
+      - name: Start the agent container and check /healthz
+        run: |
+          set -euo pipefail
+          docker run -d --name scadbuddy-agent-ci --read-only \
+            --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent:uid=10001,gid=10001 \
+            -p 18081:8081 scadbuddy-agent:ci
+          status=""
+          for _ in $(seq 1 30); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' scadbuddy-agent-ci 2>/dev/null || true)"
+            case "$status" in
+              healthy) break ;;
+              unhealthy) break ;;
+            esac
+            sleep 2
+          done
+          if [ "$status" != "healthy" ]; then
+            echo "::error::agent container never became healthy (last status: ${status:-<none>})"
+            docker logs scadbuddy-agent-ci
+            exit 1
+          fi
+          body="$(curl --fail --silent --show-error http://127.0.0.1:18081/healthz)"
+          echo "$body"
+          if ! jq -e '.status == "ok" and .ai == "disabled (no database)"' <<<"$body" >/dev/null; then
+            echo "::error::unexpected /healthz body from the agent container"
+            exit 1
+          fi
+          # The tmpfs hides the image's own claude/ and work/, so these exist
+          # only if the service recreated them at start (harness/stateDirs.ts).
+          if ! docker exec scadbuddy-agent-ci test -d /var/lib/scadbuddy-agent/claude -a -w /var/lib/scadbuddy-agent/claude -a -d /var/lib/scadbuddy-agent/work -a -w /var/lib/scadbuddy-agent/work; then
+            echo "::error::the agent did not recreate its state directories on the mounted volume"
+            exit 1
+          fi
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f scadbuddy-agent-ci || true
+
   # ── Image build + everything that needs a real openscad ─────────────────────
   #
   # ONE job, on purpose. The backend's integration tests are marked
@@ -329,6 +468,22 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # For the `requires_postgres` tests: the render queue's Postgres store. The
+    # test container reaches it on the runner's loopback (`--network host`), and
+    # each test works in a schema of its own.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
         with:
@@ -380,8 +535,12 @@ jobs:
 
       # No `-m` filter: inside the image `requires_openscad` tests are supposed
       # to run, and the point of building the image at all is that they can.
+      # `requires_postgres` ones run against the service container above.
       - name: pytest
-        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
+        run: >-
+          docker run --rm --network host
+          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
@@ -673,7 +832,7 @@ jobs:
 
   # ── Committed generated files must match their generator ────────────────────
   #
-  # Ported from WonderForgeLabs/forge's `freshness` job. Three files in this
+  # Ported from WonderForgeLabs/forge's `freshness` job. Four files in this
   # repo are written by a tool and committed, so they can silently drift from
   # the inputs they were generated from:
   #
@@ -706,6 +865,12 @@ jobs:
   #     until the next PR that happened to run the generator, where the errors
   #     surfaced in someone else's diff (#101, and #96/#98 found it
   #     independently).
+  #
+  #   agent/src/api/schema.d.ts
+  #     The same generator (the agent's own pinned openapi-typescript) over the
+  #     same exported spec, for the agent service's typed backend client
+  #     (agent/src/api/backend.ts, #261). Last in the chain: export openapi ->
+  #     frontend gen:api -> agent gen:api (AI design spec §4.3).
   #
   # Deliberately NOT covered:
   #   models/<slug>/model.json — hand-authored catalogue metadata (name,
@@ -807,9 +972,12 @@ jobs:
           if [ -f backend/pyproject.toml ]; then backend=true; fi
           frontend=false
           if [ -f frontend/package.json ]; then frontend=true; fi
+          agent=false
+          if [ -f agent/package.json ]; then agent=true; fi
           {
             echo "backend=$backend"
             echo "frontend=$frontend"
+            echo "agent=$agent"
           } | tee -a "$GITHUB_OUTPUT"
 
       # uv resolves the environment from backend/uv.lock, so the exported
@@ -837,12 +1005,12 @@ jobs:
       # Same Node major and the same corepack-driven pnpm as the `frontend`
       # job, so the msw the worker is copied from is the msw the tests run.
       - uses: actions/setup-node@v7
-        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        if: ${{ steps.detect.outputs.frontend == 'true' || steps.detect.outputs.agent == 'true' }}
         with:
           node-version: "24"
 
       - name: Enable corepack
-        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        if: ${{ steps.detect.outputs.frontend == 'true' || steps.detect.outputs.agent == 'true' }}
         run: corepack enable
 
       - name: Install frontend dependencies
@@ -876,11 +1044,23 @@ jobs:
         working-directory: frontend
         run: pnpm exec msw init public --save
 
+      - name: Install agent dependencies
+        if: ${{ steps.detect.outputs.agent == 'true' }}
+        working-directory: agent
+        run: pnpm install --frozen-lockfile
+
+      # After the export for the same reason as the frontend's gen:api, and
+      # gated on both trees for the same reason too.
+      - name: Regenerate agent/src/api/schema.d.ts
+        if: ${{ steps.detect.outputs.backend == 'true' && steps.detect.outputs.agent == 'true' }}
+        working-directory: agent
+        run: pnpm gen:api
+
       - name: Check for drift
         id: check
         run: |
           set -uo pipefail
-          # Scoped to the three generated paths on purpose: `pnpm install` and
+          # Scoped to the four generated paths on purpose: `pnpm install` and
           # `uv run` touch other things (node_modules is ignored, but a future
           # tool need not be), and this job must never commit a file it did not
           # deliberately regenerate. A pathspec that matches nothing — the
@@ -889,7 +1069,8 @@ jobs:
           if git diff --quiet -- \
             backend/openapi.json \
             frontend/public/mockServiceWorker.js \
-            frontend/src/api/schema.d.ts; then
+            frontend/src/api/schema.d.ts \
+            agent/src/api/schema.d.ts; then
             echo "stale=false" | tee -a "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -898,7 +1079,8 @@ jobs:
           git --no-pager diff --stat -- \
             backend/openapi.json \
             frontend/public/mockServiceWorker.js \
-            frontend/src/api/schema.d.ts
+            frontend/src/api/schema.d.ts \
+            agent/src/api/schema.d.ts
 
       # The commit message deliberately carries NO `[skip ci]`. That tag stops
       # every workflow running on the new head; required checks are evaluated
@@ -920,7 +1102,8 @@ jobs:
           git add \
             backend/openapi.json \
             frontend/public/mockServiceWorker.js \
-            frontend/src/api/schema.d.ts
+            frontend/src/api/schema.d.ts \
+            agent/src/api/schema.d.ts
           git commit -m "chore: regenerate committed generated files
 
           Auto-generated by the CI freshness check."
@@ -954,7 +1137,7 @@ jobs:
           if [ "$PUSHED" = "true" ]; then
             echo "::error::Generated files were stale and have been auto-fixed. The new commit's CI run will verify them."
           else
-            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi', then 'cd frontend && pnpm gen:api && pnpm exec msw init public --save' (in that order — gen:api reads the exported spec), then commit the result."
+            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi', then 'cd frontend && pnpm gen:api && pnpm exec msw init public --save', then 'cd agent && pnpm gen:api' (in that order — both gen:api steps read the exported spec), then commit the result."
           fi
           exit 1
 
@@ -963,7 +1146,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, image, models, freshness]
+    needs: [layout, lint, frontend, agent, image, models, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -989,6 +1172,7 @@ jobs:
           LAYOUT_RESULT: ${{ needs.layout.result }}
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          AGENT_RESULT: ${{ needs.agent.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
           MODELS_RESULT: ${{ needs.models.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
@@ -1021,6 +1205,8 @@ jobs:
           if [ -f backend/pyproject.toml ]; then has_backend=true; fi
           has_frontend=false
           if [ -f frontend/package.json ]; then has_frontend=true; fi
+          has_agent=false
+          if [ -f agent/package.json ]; then has_agent=true; fi
           has_models=false
           if [ -d models ]; then has_models=true; fi
           has_image=false
@@ -1033,12 +1219,13 @@ jobs:
           has_app=false
           if [ -f backend/scadbuddy/main.py ]; then has_app=true; fi
 
-          echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} models=${has_models} image=${has_image}"
+          echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} agent=${has_agent} models=${has_models} image=${has_image}"
           echo "Container smoke gated on the API entrypoint: app=${has_app}"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
 
@@ -1072,7 +1259,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, image, models, summary]
+    needs: [lint, frontend, agent, image, models, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

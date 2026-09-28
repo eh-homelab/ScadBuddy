@@ -22,12 +22,15 @@ by which stage produced it, so it stays right when Bambuddy rewords a message.
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections import OrderedDict
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
+from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
 
@@ -36,7 +39,7 @@ QUEUE_PATH = "/queue"
 #: Normalised across both routes. ``unknown`` is a real state: Bambuddy's status
 #: vocabularies differ per object and a new value must render as "still going" rather
 #: than silently as "done", which would stop the polling on a print that is still live.
-Stage = Literal["pending", "running", "queued", "done", "failed", "cancelled", "unknown"]
+Stage = Literal["running", "queued", "done", "failed", "cancelled", "unknown"]
 
 #: Bambuddy's own words for a finished state, per object. Anything outside these is
 #: treated as still in flight.
@@ -278,7 +281,7 @@ async def _queued_progress(
 
 
 #: How far along an unsettled plate is; a slicing plate already reads as ``running``.
-_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "pending": 1, "queued": 2, "running": 3}
+_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "queued": 1, "running": 2}
 
 
 def from_plates(
@@ -394,3 +397,52 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
         return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url)
 
     return None
+
+
+#: Outputs whose last observed progress :class:`ProgressObserver` remembers.
+OBSERVED_OUTPUTS = 256
+
+
+class ProgressObserver:
+    """Turns the progress reads the backend makes into ``print.*`` events.
+
+    Until the per-print watcher (#268) exists, the only time the backend sees a
+    print move is when someone asks: the progress route, a send or a run. Each
+    read is compared with the last one seen for that output, so a poll that finds
+    nothing new publishes nothing, and ``print.settled`` is published once, on the
+    read that first finds the print settled.
+    """
+
+    def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
+        self.events = events
+        self.capacity = capacity
+        #: Per output: the last progress seen, as JSON, and whether it was settled.
+        self._seen: OrderedDict[str, tuple[str, bool]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def started(self, meta: OutputMeta) -> None:
+        """A print of ``meta`` was just started: whatever was seen before is stale."""
+        with self._lock:
+            self._seen.pop(meta.id, None)
+        emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
+
+    def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> None:
+        if progress is None:
+            return
+        fingerprint = progress.model_dump_json()
+        # Compare, decide and record under one hold of the lock, so two reads of the
+        # same output racing each other (two tabs polling) cannot both decide they are
+        # the first to see it settled. Only the publishing happens outside it.
+        kinds: list[Literal["print.progress", "print.settled"]] = []
+        with self._lock:
+            previous = self._seen.pop(meta.id, None)
+            self._seen[meta.id] = (fingerprint, progress.settled)
+            while len(self._seen) > self.capacity:
+                self._seen.popitem(last=False)
+            if previous is None or previous[0] != fingerprint:
+                kinds.append("print.progress")
+                was_settled = previous is not None and previous[1]
+                if progress.settled and not was_settled:
+                    kinds.append("print.settled")
+        for kind in kinds:
+            emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))

@@ -20,7 +20,9 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. The only place a real `openscad` exists is the image:
+PATH. Tests marked `requires_postgres` (the render queue's Postgres store) skip
+unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
+CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):
@@ -35,6 +37,22 @@ pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the
 
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 
+Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):
+
+```bash
+cd agent
+corepack enable
+pnpm install --frozen-lockfile
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
+docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
+```
+
+Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
+against a local fake Anthropic endpoint; `test/pg.test.ts` needs
+`SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
+-e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
+`SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
+
 Generated files (the `freshness` job regenerates them on PRs and pushes a fix; run
 them yourself when you change an API model or route, in this order):
 
@@ -42,9 +60,10 @@ them yourself when you change an API model or route, in this order):
 cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi   # backend/openapi.json
 cd frontend && pnpm gen:api                                             # src/api/schema.d.ts
 cd frontend && pnpm exec msw init public --save                         # public/mockServiceWorker.js
+cd agent && pnpm gen:api                                                # agent/src/api/schema.d.ts
 ```
 
-`gen:api` reads the exported spec, so export first. `--save` is required on `msw init`
+Both `gen:api` steps read the exported spec, so export first. `--save` is required on `msw init`
 (without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
@@ -81,7 +100,39 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run.
+- `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
+  as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
+  reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` and
+  `SCADBUDDY_SECRET_KEY_FILE` (no AI env vars; AI settings live in the database);
+  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
+  `/api/v1/ai/credentials`); `src/harness/options.ts` builds every query's SDK options
+  (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
+  top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
+  abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
+  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `src/api/backend.ts` is the `openapi-fetch` client over the generated
+  `src/api/schema.d.ts`.
+  - Database: the agent owns the `ai_*` tables. Schema changes are appended to
+    `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
+    start under advisory lock "SCADAGNT", ledger `ai_migrations`, separate from the
+    backend's `scadbuddy_migrations`). Secrets are envelope-encrypted with
+    `src/secrets.ts` under the KEK in `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes,
+    base64; spec §9); comparable tokens are stored hashed instead.
+  - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
+    (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
+    (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
+    `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend; the `agent` CI job sets it. The design is
+  `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
+  `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
+  The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
+  line 185) describes the backend container; the
+  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
+  `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
+  the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
+  `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
+  the authoritative manifest check.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
@@ -127,8 +178,15 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - **Never use the buildx `type=gha` cache on a self-hosted pool** — it fails the build
   there. It is used on the hosted runners in `ci.yml` and `build-image.yml`.
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
-  together, LTS (even) majors only. `frontend/pnpm-workspace.yaml` must be copied into
-  the Docker build (it holds `allowBuilds`).
+  together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
+  `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
+  `frontend/pnpm-workspace.yaml` must be copied into the Docker build (it holds
+  `allowBuilds`); `agent/` has none because no dependency has an install script.
+- `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
+  Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
+  currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
+- The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
+  with `scope=agent`, so they do not overwrite the backend image's cache index.
 
 ## PR conventions
 

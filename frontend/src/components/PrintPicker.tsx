@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type {
   ChoicesView,
@@ -449,6 +450,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               onClick={() => void run()}
               disabled={running || loading || !choices || refused}
               data-testid="run-print"
+              {...USER_ONLY}
             >
               {running && <Spinner />}
               Print

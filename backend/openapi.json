@@ -600,7 +600,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
@@ -815,6 +814,38 @@
           "source"
         ],
         "title": "EditTarget",
+        "type": "object"
+      },
+      "FeatureEstimate": {
+        "properties": {
+          "bbox": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "islands": {
+            "title": "Islands",
+            "type": "integer"
+          },
+          "min_extent_mm": {
+            "title": "Min Extent Mm",
+            "type": "number"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_extent_mm",
+          "part",
+          "colour",
+          "bbox",
+          "islands"
+        ],
+        "title": "FeatureEstimate",
         "type": "object"
       },
       "FilamentOptions": {
@@ -1124,6 +1155,108 @@
           }
         },
         "title": "FontVariant",
+        "type": "object"
+      },
+      "GeometryAnalysis": {
+        "description": "What :func:`analyze_geometry` measured. See the module docstring for methods.",
+        "properties": {
+          "bbox": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "bed_contact_area_mm2": {
+            "title": "Bed Contact Area Mm2",
+            "type": "number"
+          },
+          "bed_z": {
+            "title": "Bed Z",
+            "type": "number"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MeshEdge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "edges_truncated": {
+            "default": false,
+            "title": "Edges Truncated",
+            "type": "boolean"
+          },
+          "footprint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "height_mm": {
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "height_to_base_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height To Base Ratio"
+          },
+          "overhangs": {
+            "items": {
+              "$ref": "#/components/schemas/OverhangBucket"
+            },
+            "title": "Overhangs",
+            "type": "array"
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/PartGeometry"
+            },
+            "title": "Parts",
+            "type": "array"
+          },
+          "smallest_feature": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FeatureEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thinnest_wall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WallEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "default": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "parts",
+          "bbox",
+          "bed_z",
+          "height_mm",
+          "bed_contact_area_mm2",
+          "overhangs"
+        ],
+        "title": "GeometryAnalysis",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1564,6 +1697,75 @@
           "clean"
         ],
         "title": "MergePreview",
+        "type": "object"
+      },
+      "MeshEdge": {
+        "description": "One defective edge, located so the preview can draw it.",
+        "properties": {
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "end": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "End",
+            "type": "array"
+          },
+          "faces": {
+            "title": "Faces",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "open",
+              "non_manifold"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "start": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Start",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "part",
+          "colour",
+          "start",
+          "end",
+          "faces"
+        ],
+        "title": "MeshEdge",
         "type": "object"
       },
       "ModelLibrary": {
@@ -2181,6 +2383,40 @@
         "title": "OutputPlate",
         "type": "object"
       },
+      "OverhangBucket": {
+        "description": "Faces tipped at least ``min_angle_deg`` below horizontal (cumulative).",
+        "properties": {
+          "area_mm2": {
+            "title": "Area Mm2",
+            "type": "number"
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "faces": {
+            "title": "Faces",
+            "type": "integer"
+          },
+          "min_angle_deg": {
+            "title": "Min Angle Deg",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_angle_deg",
+          "area_mm2",
+          "faces"
+        ],
+        "title": "OverhangBucket",
+        "type": "object"
+      },
       "Overshoot": {
         "properties": {
           "axis": {
@@ -2303,6 +2539,22 @@
           "name"
         ],
         "title": "ParamPresetCreate",
+        "type": "object"
+      },
+      "ParamPresetDuplicate": {
+        "description": "The copy's name; its values are the original's.",
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ParamPresetDuplicate",
         "type": "object"
       },
       "ParamPresetUpdate": {
@@ -2441,6 +2693,13 @@
             "title": "Options",
             "type": "array"
           },
+          "samples": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Samples",
+            "type": "array"
+          },
           "step": {
             "anyOf": [
               {
@@ -2473,6 +2732,92 @@
           "type"
         ],
         "title": "Parameter",
+        "type": "object"
+      },
+      "PartGeometry": {
+        "properties": {
+          "bbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "edges_checked": {
+            "title": "Edges Checked",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "non_manifold_edges": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Non Manifold Edges"
+          },
+          "open_edges": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Edges"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "solid",
+              "split"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "triangles": {
+            "title": "Triangles",
+            "type": "integer"
+          },
+          "volume_mm3": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Mm3"
+          }
+        },
+        "required": [
+          "part",
+          "name",
+          "colour",
+          "source",
+          "triangles",
+          "bbox",
+          "edges_checked"
+        ],
+        "title": "PartGeometry",
         "type": "object"
       },
       "PartInfo": {
@@ -3292,7 +3637,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
@@ -3831,6 +4175,18 @@
             },
             "title": "Params",
             "type": "object"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes"
           },
           "version": {
             "anyOf": [
@@ -4804,6 +5160,52 @@
           "path"
         ],
         "title": "VersionFile",
+        "type": "object"
+      },
+      "WallEstimate": {
+        "properties": {
+          "at": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "At",
+            "type": "array"
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "thickness_mm": {
+            "title": "Thickness Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "thickness_mm",
+          "part",
+          "colour",
+          "at",
+          "samples"
+        ],
+        "title": "WallEstimate",
         "type": "object"
       }
     }
@@ -6041,6 +6443,71 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+      "post": {
+        "description": "Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).",
+        "operationId": "duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preset_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9-]{1,64}$",
+              "title": "Preset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParamPresetDuplicate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParamPreset"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Duplicate a preset",
+        "tags": [
+          "presets"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/readme": {
       "delete": {
         "description": "Removes the README, as one revision in the model's history.",
@@ -6227,11 +6694,83 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds"
           }
         },
         "summary": "Queue a render",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/samples/{name}": {
+      "get": {
+        "description": "Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.",
+        "operationId": "get_sample_content_api_v1_models__slug__samples__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$",
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {},
+              "image/svg+xml": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A sample file the template ships",
+        "tags": [
+          "assets"
         ]
       }
     },
@@ -7144,6 +7683,50 @@
           }
         },
         "summary": "Resolve an edit deep link",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
+    "/api/v1/outputs/{output_id}/geometry": {
+      "get": {
+        "description": "Printability measurements of the output's closed per-colour solids (#284):\nopen and non-manifold edges with their locations, bounding box, bed contact,\nheight-to-base ratio, overhang area by angle, and estimates of the thinnest\nwall and smallest feature. Coordinates are the model's own (mm, Z up), as in\nthe preview. Computed on first ask and cached beside the output.",
+        "operationId": "get_output_geometry_api_v1_outputs__output_id__geometry_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeometryAnalysis"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mesh geometry analysis",
         "tags": [
           "outputs"
         ]

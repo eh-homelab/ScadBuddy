@@ -22,6 +22,7 @@ import type {
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
+  ParamPresetDuplicate,
   ParamPresetUpdate,
   PastedSource,
   ParamValue,
@@ -210,6 +211,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** Copies any preset, shipped or saved, to a new saved one with the same values. */
+  duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   deletePreset: (slug: string, id: string) =>
     request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, { method: 'DELETE' }),
 
@@ -319,6 +327,13 @@ export const api = {
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
+  /**
+   * A sample file the template ships beside its source (a `file` parameter's
+   * `samples`), at `version` when customizing an older revision.
+   */
+  sampleContentUrl: (slug: string, name: string, version?: string) =>
+    `${API_BASE}/models/${seg(slug)}/samples/${seg(name)}${version ? `?version=${seg(version)}` : ''}`,
+
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
     slug ? `${API_BASE}/models/${seg(slug)}/lsp` : `${API_BASE}/lsp`,
@@ -344,11 +359,25 @@ export const api = {
       method: 'POST',
     }),
 
-  /** `version` renders an old revision without restoring it ("Customize this version"). */
-  render: (slug: string, params: Record<string, ParamValue>, version?: string) =>
+  /**
+   * `version` renders an old revision without restoring it ("Customize this version").
+   * `supersedes` names the job this render replaces: the server drops it if no worker
+   * has started it yet. Refused (503 + `Retry-After`) only when the server sets
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   */
+  render: (
+    slug: string,
+    params: Record<string, ParamValue>,
+    version?: string,
+    supersedes?: string,
+  ) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
-      body: JSON.stringify({ params, version: version ?? null }),
+      body: JSON.stringify({
+        params,
+        version: version ?? null,
+        ...(supersedes ? { supersedes } : {}),
+      }),
     }),
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
