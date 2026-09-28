@@ -10,10 +10,12 @@ import { FilamentPicker } from './FilamentPicker'
 function Harness({
   options,
   copies = 1,
+  nozzleSize,
   onChange,
 }: {
   options: FilamentOptions
   copies?: number
+  nozzleSize?: string
   onChange?: (plan: SlotChoice[]) => void
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
@@ -22,6 +24,7 @@ function Harness({
       options={options}
       plan={plan}
       copies={copies}
+      nozzleSize={nozzleSize}
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -30,14 +33,57 @@ function Harness({
   )
 }
 
-function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1) {
+function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1, nozzleSize?: string) {
   const onChange = vi.fn()
-  return { onChange, ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />) }
+  return {
+    onChange,
+    ...renderPage(
+      <Harness options={options} copies={copies} nozzleSize={nozzleSize} onChange={onChange} />,
+    ),
+  }
 }
 
 const slot = (id: number) => screen.getByTestId(`filament-slot-${id}`)
 
 describe('FilamentPicker', () => {
+  // #469 — the fixture printer has the 0.2 on the right (extruder 0) and the 0.4 on the
+  // left (1); spools 9 and 21 feed the right, the HT's spool 22 the left.
+  it('badges each loaded spool with the side it feeds, and the chosen one in the heading', () => {
+    open()
+
+    expect(within(slot(1)).getByTestId('side-9')).toHaveTextContent('R')
+    expect(within(slot(1)).getByTestId('side-22')).toHaveTextContent('L')
+    expect(within(slot(1)).queryByTestId('side-27')).toBeNull()
+    expect(within(slot(1)).getByTestId('slot-side-1')).toHaveTextContent('R')
+  })
+
+  it('disables a spool whose side has another nozzle fitted, and says which', () => {
+    open(fixtures.filamentOptions, 1, '0.4')
+
+    expect(within(slot(2)).getByTestId('spool-9')).toBeDisabled()
+    expect(within(slot(2)).getByTestId('mismatch-9')).toHaveTextContent('R · 0.2 fitted')
+    expect(within(slot(2)).getByTestId('spool-22')).toBeEnabled()
+    expect(within(slot(2)).queryByTestId('mismatch-22')).toBeNull()
+    // A shelf spool has no side, so nothing rules it out.
+    expect(within(slot(2)).getByTestId('spool-27')).toBeEnabled()
+  })
+
+  it('says why a chosen spool on the wrong side will not print', () => {
+    // The suggestion puts spool 21, on the right's 0.2, in slot 1.
+    open(fixtures.filamentOptions, 1, '0.4')
+
+    expect(screen.getByTestId('slot-mismatch-1')).toHaveTextContent(
+      "This spool feeds the right extruder, where the 0.2 mm nozzle is fitted, so it can't print at 0.4 mm.",
+    )
+    expect(screen.queryByTestId('slot-mismatch-2')).toBeNull()
+  })
+
+  it('rules nothing out before a nozzle size is chosen', () => {
+    open()
+    expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
+    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
+  })
+
   it('heads each slot with its colour, number, material and the grams it needs', () => {
     open(fixtures.filamentOptions, 3)
 

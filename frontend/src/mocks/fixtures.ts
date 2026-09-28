@@ -944,6 +944,9 @@ export const filamentOptions: FilamentOptions = {
   spools: [
     {
       spool_id: 9,
+      // #469 — the right extruder is 0, the left 1; AMS 0 is on switch inlet B.
+      extruder: 0,
+      side: 'R',
       material: 'PETG',
       subtype: 'Basic',
       brand: 'Bambu Lab',
@@ -962,6 +965,8 @@ export const filamentOptions: FilamentOptions = {
     },
     {
       spool_id: 21,
+      extruder: 0, // AMS 1 is on inlet B too
+      side: 'R',
       material: 'PLA',
       subtype: 'Silk',
       brand: 'Bambu Lab',
@@ -981,6 +986,8 @@ export const filamentOptions: FilamentOptions = {
     {
       // The AMS-HT: one spool, no slot number to name, and on the other inlet.
       spool_id: 22,
+      extruder: 1, // the HT is on inlet A
+      side: 'L',
       material: 'PLA',
       subtype: 'Basic',
       brand: 'Bambu Lab',

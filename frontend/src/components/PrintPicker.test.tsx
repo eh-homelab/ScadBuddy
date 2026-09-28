@@ -85,6 +85,19 @@ describe('PrintPicker', () => {
     expect(body).not.toHaveProperty('pipeline_id')
   })
 
+  it('rules out spools by the nozzle size chosen, following a change of size (#469)', async () => {
+    renderPicker()
+    const slot = await screen.findByTestId('filament-slot-2')
+    // The default 0.4: spool 9 feeds the right extruder, where the 0.2 is fitted.
+    expect(within(slot).getByTestId('spool-9')).toBeDisabled()
+    expect(within(slot).getByTestId('spool-22')).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+
+    await waitFor(() => expect(within(slot).getByTestId('spool-9')).toBeEnabled())
+    expect(within(slot).getByTestId('spool-22')).toBeDisabled()
+  })
+
   it('disables Print and names the slot when a spool has no preset for the size', async () => {
     vi.spyOn(api, 'runPrint').mockRejectedValue(
       new ApiError(422, 'Generic TPU has no slicer preset for a 0.2 mm nozzle. Pick one under Advanced.'),

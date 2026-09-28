@@ -12,6 +12,7 @@ import {
   facets,
   filterSpools,
   loadedLabel,
+  nozzleMismatch,
   slotNeed,
   checkPlan,
   spoolLabel,
@@ -63,6 +64,7 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'not-installed': 'text-warn',
   'plate-differs': 'text-muted',
   'hf-unsupported': 'text-muted',
+  'side-unknown': 'text-muted',
 }
 
 /** `0.2 mm (HS00) and 0.4 mm (HS01)` — one per extruder, as the printer reports them. */
@@ -83,6 +85,23 @@ function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; si
         size === 'sm' ? 'size-4' : 'size-5'
       }`}
     />
+  )
+}
+
+/**
+ * The side a spool feeds, lettered as the printer and Bambuddy letter it: a square green
+ * badge, like Bambuddy's own nozzle-side badge (#469).
+ */
+function SideBadge({ side, testId }: { side: 'L' | 'R'; testId: string }) {
+  return (
+    <span
+      className="inline-flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold"
+      style={{ background: 'var(--sb-side-bg)', color: 'var(--sb-side-ink)' }}
+      title={side === 'L' ? 'Left extruder' : 'Right extruder'}
+      data-testid={testId}
+    >
+      {side}
+    </span>
   )
 }
 
@@ -115,9 +134,11 @@ interface Props {
   plan: SlotChoice[]
   onChange: (plan: SlotChoice[]) => void
   copies: number
+  /** The nozzle size the print is sliced for; a spool whose side has another is ruled out (#469). */
+  nozzleSize?: string
 }
 
-export function FilamentPicker({ options, plan, onChange, copies }: Props) {
+export function FilamentPicker({ options, plan, onChange, copies, nozzleSize }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
 
   const spools = options.spools ?? []
@@ -143,6 +164,8 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
   const warnings = checkPlan(options, plan, copies)
   // #78 — the printer's mounted nozzles; the one to print with is the nozzle step's.
   const nozzles = (options.nozzles ?? []).filter((nozzle) => nozzle.nozzle_diameter)
+  // Indexed by extruder (#469), so never the filtered list above.
+  const mounted = options.nozzles ?? []
 
   return (
     <section className="mt-4">
@@ -264,6 +287,10 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
             ? matched
             : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
           const chosenSpool = spools.find((spool) => spool.spool_id === chosen)
+          const chosenFitted =
+            chosenSpool && nozzleMismatch(chosenSpool, mounted, nozzleSize) !== null
+              ? mounted[chosenSpool.extruder ?? -1]?.nozzle_diameter
+              : null
           return (
             <fieldset key={slot.slot_id} data-testid={`filament-slot-${slot.slot_id}`}>
               <legend className="flex items-center gap-2 text-[13px] text-ink">
@@ -281,9 +308,18 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                     <span aria-hidden="true">→</span>
                     <Swatch colour={chosenSpool.colour} size="sm" />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
+                    {chosenSpool.side && (
+                      <SideBadge side={chosenSpool.side} testId={`slot-side-${slot.slot_id}`} />
+                    )}
                   </span>
                 )}
               </legend>
+              {chosenSpool && chosenFitted && (
+                <p className="mt-1 text-[12px] text-warn" data-testid={`slot-mismatch-${slot.slot_id}`}>
+                  This spool feeds the {chosenSpool.side === 'L' ? 'left' : 'right'} extruder, where
+                  the {chosenFitted} mm nozzle is fitted, so it can't print at {nozzleSize} mm.
+                </p>
+              )}
 
               <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-[6px] border border-line">
                 {rows.length === 0 && (
@@ -298,18 +334,22 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                   const elsewhere = plan.find(
                     (choice) => choice.spool_id === spool.spool_id && choice.slot_id !== slot.slot_id,
                   )
+                  // Ruled out, not hidden: the run slices each spool for the side it
+                  // feeds, so this one would be sliced for a nozzle it is not on (#469).
+                  const mismatch = nozzleMismatch(spool, mounted, nozzleSize)
                   return (
                     <li key={spool.spool_id} className="border-b border-line last:border-b-0">
                       <label
-                        className={`flex cursor-pointer items-center gap-2.5 px-2.5 py-2 transition-colors ${
-                          chosen === spool.spool_id ? 'bg-accent/8' : 'hover:bg-surface-2'
-                        }`}
+                        className={`flex items-center gap-2.5 px-2.5 py-2 transition-colors ${
+                          mismatch ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+                        } ${chosen === spool.spool_id ? 'bg-accent/8' : mismatch ? '' : 'hover:bg-surface-2'}`}
                       >
                         <input
                           type="radio"
                           name={`filament-slot-${slot.slot_id}`}
                           value={spool.spool_id}
                           checked={chosen === spool.spool_id}
+                          disabled={mismatch !== null}
                           onChange={() => choose(slot.slot_id, spool.spool_id)}
                           className="accent-[var(--sb-accent)]"
                           data-testid={`spool-${spool.spool_id}`}
@@ -327,6 +367,16 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                           <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
                             {where}
                           </span>
+                        )}
+                        {mismatch ? (
+                          <span
+                            className="shrink-0 text-[11px] text-warn"
+                            data-testid={`mismatch-${spool.spool_id}`}
+                          >
+                            {mismatch}
+                          </span>
+                        ) : (
+                          spool.side && <SideBadge side={spool.side} testId={`side-${spool.spool_id}`} />
                         )}
                         <span className="sb-num shrink-0 text-[11px] text-faint">
                           {spool.remaining_g === null || spool.remaining_g === undefined

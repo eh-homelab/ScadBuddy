@@ -565,6 +565,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                   plan={plan}
                   onChange={setPlan}
                   copies={effectiveCopies}
+                  nozzleSize={size}
                 />
               )}
 

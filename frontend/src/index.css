@@ -24,6 +24,9 @@
   --sb-ok: #4ade80;
   --sb-warn: #f87171;
   --sb-focus: #9ec5ff;
+  /* Bambuddy's own nozzle-side badge (#469). */
+  --sb-side-bg: #1a4d2e;
+  --sb-side-ink: #00ae42;
 
   /* Read by the 3D viewer, which cannot use Tailwind utilities. */
   --sb-plate-cell: #29323f;
@@ -49,6 +52,8 @@
     --sb-ok: #15803d;
     --sb-warn: #b91c1c;
     --sb-focus: #1d4ed8;
+    --sb-side-bg: #e7f5e9;
+    --sb-side-ink: #00ae42;
 
     --sb-plate-cell: #ccd4df;
     --sb-plate-section: #a9b5c4;
