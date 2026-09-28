@@ -253,7 +253,7 @@ outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
-cache/preview-work/<uuid>/        a default-render preview's scratch space while it renders (§6.2.2)
+cache/preview-work/.work-<uuid>/  a default-render preview's scratch space while it renders (§6.2.2)
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
 assets/<sha256>.json              its original name, kind and size; swept once unreferenced
 .assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")

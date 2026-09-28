@@ -16,6 +16,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import psycopg
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
@@ -1180,8 +1181,15 @@ class Catalogue:
         """
         if self.previews is None:
             return []
+        try:
+            slugs = self.previews.slugs()
+        except psycopg.Error:
+            # The database, not one model: nothing to sweep this time, as
+            # `sweep_orphans` skips a root it cannot list.
+            logger.exception("could not list the previews to sweep")
+            return []
         removed: list[str] = []
-        for slug in self.previews.slugs():
+        for slug in slugs:
             try:
                 if self.paths.model_dir(slug).exists():
                     continue

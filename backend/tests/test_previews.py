@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NoReturn
 from unittest import mock
 
 import psycopg
@@ -117,6 +118,22 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     assert store.image(SLUG) == b"png"
     # The file sweep has nothing of the previews' to look at.
     assert Catalogue(paths, previews=store).sweep_orphans() == []
+
+
+def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """As `sweep_orphans` skips a root it cannot list: a database error costs this
+    sweep, never the boot."""
+
+    def unreachable() -> NoReturn:
+        raise psycopg.OperationalError("the database went away")
+
+    with caplog.at_level("ERROR"):
+        removed = Catalogue(paths, previews=PreviewStore(unreachable)).sweep_orphan_previews()
+
+    assert removed == []
+    assert "could not list the previews to sweep" in caplog.text
 
 
 def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
