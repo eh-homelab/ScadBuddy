@@ -390,6 +390,63 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
+  it("never lets a run from a closed dialog land on the next one's print", async () => {
+    const gates: Array<() => void> = []
+    let calls = 0
+    server.use(
+      http.post('/api/v1/print/outputs/:id/run', async () => {
+        calls += 1
+        const first = calls === 1
+        await new Promise<void>((resolve) => gates.push(resolve))
+        return first
+          ? new HttpResponse('timeout', { status: 524 })
+          : HttpResponse.json(queuedResult)
+      }),
+    )
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(gates).toHaveLength(1))
+    // Closed while the first print is still waiting on a slow proxy, then printed again.
+    await user.keyboard('{Escape}')
+    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(gates).toHaveLength(2))
+
+    // The first print's timeout lands while the second is still in flight: it is the
+    // closed dialog's, so it neither swaps in the "may have been queued" screen nor
+    // re-enables Print under the running second print.
+    gates[0]!()
+    await act(async () => {
+      await delay(20)
+    })
+    expect(screen.queryByText(/may still have been queued/)).toBeNull()
+    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+
+    gates[1]!()
+    await waitFor(() => expect(onRan).toHaveBeenCalledTimes(1))
+    expect(screen.queryByText(/may still have been queued/)).toBeNull()
+  })
+
+  it('opens the queue without a double slash when Settings has a trailing one', async () => {
+    const opened = vi.spyOn(window, 'open').mockReturnValue(null)
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...fixtures.settings, bambuddy_url: 'https://bambuddy.example/' }),
+      ),
+    )
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await user.click(await screen.findByRole('button', { name: "Open Bambuddy's queue" }))
+    expect(opened).toHaveBeenCalledWith(
+      'https://bambuddy.example/queue',
+      expect.any(String),
+      'noopener',
+    )
+  })
+
   it('keeps Print for a 503, which nothing upstream took', async () => {
     runAnswers(() => new HttpResponse('no healthy upstream', { status: 503 }))
     const { user } = renderPicker()

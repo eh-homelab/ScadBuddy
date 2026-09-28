@@ -122,7 +122,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const [unanswered, setUnanswered] = useState<string | null>(null)
   // Only for the queue link while a run is unanswered: a result carries its own.
   const settings = useAsync(async () => (open ? await api.getSettings() : null), [open])
-  const bambuddyUrl = settings.data?.bambuddy_url || null
+  // As typed in Settings: a trailing slash would make `…//queue` below.
+  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
   const outputId = output?.id
   /**
@@ -318,7 +319,14 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
+  /** Which `run()` may still update the dialog: bumped by each run and by `close`. */
+  const runAttempt = useRef(0)
+
   function close() {
+    // A run still in flight belongs to the dialog being closed: its answer must not
+    // land on the next one (#539 review).
+    runAttempt.current += 1
+    setRunning(false)
     setProjectId(null)
     setOptions({})
     setRunError(null)
@@ -399,6 +407,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
 
   async function run() {
     if (!outputId || !choices || bedType === null) return
+    const attempt = ++runAttempt.current
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -420,11 +429,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         options,
       }
       const ran = await api.runPrint(outputId, body)
+      if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
+      if (attempt !== runAttempt.current) return
       if (mayHaveRun(cause)) {
         setUnanswered((cause as ApiError).detail)
         return
@@ -433,7 +444,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
       setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
-      setRunning(false)
+      if (attempt === runAttempt.current) setRunning(false)
     }
   }
 

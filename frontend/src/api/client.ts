@@ -446,8 +446,17 @@ export const api = {
         }
         reject(new ApiError(xhrProblem(xhr)))
       }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
       xhr.onerror = () =>
-        reject(new ApiError({ title: 'The upload failed', status: 0, detail: 'The upload failed' }))
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
       xhr.onabort = () =>
         reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
       xhr.send(body)

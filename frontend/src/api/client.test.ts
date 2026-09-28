@@ -137,6 +137,8 @@ describe('uploadMedia (#274)', () => {
     const { pending, xhr } = upload()
     xhr.onerror?.()
     await expect(pending).rejects.toThrow('The upload failed')
+    // Like a dropped fetch: no answer arrived, so the upload may have landed.
+    expect(mayHaveRun(await pending.catch((caught: unknown) => caught))).toBe(true)
   })
 })
 
