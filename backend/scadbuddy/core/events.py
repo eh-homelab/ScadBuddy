@@ -181,6 +181,18 @@ class SettingsChanged(BaseEvent):
     section: SettingsSection
 
 
+class AnalyzerDecisionEvent(BaseEvent):
+    """A print-analyzer decision (accept, ignore, suppress) was recorded or removed
+    (#284). The ids say which rule at which scope; re-read the decisions for the rest."""
+
+    kind: Literal["analyzer.decision"] = "analyzer.decision"
+    decision_id: str
+    diagnostic_id: str
+    scope: str
+    scope_key: str
+    action: Literal["recorded", "removed"]
+
+
 #: The resync marker's kind. Every subscription receives it, whatever its filter.
 RESYNC_KIND = "bus.resync"
 
@@ -211,6 +223,7 @@ Event = Annotated[
     | LibraryRemoved
     | FontInstalled
     | SettingsChanged
+    | AnalyzerDecisionEvent
     | BusResync,
     Field(discriminator="kind"),
 ]
