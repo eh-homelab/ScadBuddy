@@ -75,6 +75,26 @@ describe('registry projections', () => {
     expect(bodies).toEqual([{ source: 'cube(1);', message: null, force: false }])
   })
 
+  it('still refuse an omitted required argument in-process', async () => {
+    let called = false
+    const backend = createBackendClient(BACKEND, async () => {
+      called = true
+      return Response.json({})
+    })
+    const principal = { id: 'browser', kind: 'browser' as const, tiers: tiersUpTo('outward') }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await createHarnessServer(ALL_TOOLS, services({ backend }), principal).instance.connect(serverSide)
+    const client = new Client({ name: 'projection-test', version: '0' })
+    await client.connect(clientSide)
+    // `source` has no default; leaving it out must fail before any backend call.
+    const result = await client
+      .callTool({ name: 'update_source', arguments: { slug: 'box' } })
+      .catch((error: unknown) => ({ isError: true, error }))
+    await client.close()
+    expect(result.isError, JSON.stringify(result)).toBe(true)
+    expect(called).toBe(false)
+  })
+
   it('mark read tools readOnly and outward tools destructive', () => {
     for (const tool of ALL_TOOLS) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.risk === 'read')
