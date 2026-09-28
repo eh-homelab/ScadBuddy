@@ -21,22 +21,28 @@ One table, ``render_jobs``, is both the job record and the wait list:
   submit, a reap and a finish are logged and NOTIFYed in the same transaction as the
   change (`PgNotifyEventBus.publish_in`), so they are heard on commit or not at all.
 
-Schema changes go in `MIGRATIONS`, append-only, applied at `open` under an advisory
-lock so two starting pods cannot race each other. They include the tables of the
+Schema changes are files in ``backend/scadbuddy/migrations/`` (`MIGRATIONS_DIR`), one
+per migration, named by UTC timestamp and slug (``20260928T0612Z_settings.sql``). Add a
+new file; never edit, rename or remove a merged one. They are applied at `open`, in
+timestamp order and each once by file id, under an advisory lock so two starting pods
+cannot race each other. They include the tables of the
 stores that share this pool through `PostgresJobStore.connection` -- the
-default-render previews' ``model_previews``.
+default-render previews' ``model_previews``
+(``20260928T0721Z_model_previews.sql``).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, NamedTuple, Protocol
 
-from psycopg import Connection
+from psycopg import Connection, sql
 from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg.types.json import Jsonb
@@ -66,77 +72,54 @@ MIGRATION_LOCK = 0x5343_4144_4244_4459
 #: schema: deployments sharing one database only wake each other's idle workers.
 QUEUE_CHANNEL = "scadbuddy_render_queue"
 
-#: Append-only: each entry is applied once, in order, and recorded by its position.
-MIGRATIONS: tuple[str, ...] = (
-    """
-    CREATE TABLE render_jobs (
-        id            text PRIMARY KEY,
-        slug          text NOT NULL,
-        params        jsonb NOT NULL DEFAULT '{}'::jsonb,
-        model_version text,
-        state         text NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
-        created_at    timestamptz NOT NULL,
-        started_at    timestamptz,
-        finished_at   timestamptz,
-        log_tail      jsonb NOT NULL DEFAULT '[]'::jsonb,
-        error         text,
-        result        jsonb,
-        render_key    text NOT NULL,
-        claims        integer NOT NULL DEFAULT 1,
-        attempts      integer NOT NULL DEFAULT 0,
-        heartbeat_at  timestamptz
-    );
-    CREATE INDEX render_jobs_pending ON render_jobs (created_at, id) WHERE state = 'pending';
-    CREATE UNIQUE INDEX render_jobs_pending_key ON render_jobs (render_key)
-        WHERE state = 'pending';
-    CREATE INDEX render_jobs_running ON render_jobs (heartbeat_at) WHERE state = 'running';
-    CREATE INDEX render_jobs_unfinished_slug ON render_jobs (slug)
-        WHERE state IN ('pending', 'running');
-    CREATE INDEX render_jobs_settled ON render_jobs (finished_at)
-        WHERE state IN ('done', 'failed');
-    """,
-    # 2: what OpenSCAD reported, parsed (#252). On the row rather than only inside
-    # `result`, because a failed render has no result and is when they matter most.
-    """
-    ALTER TABLE render_jobs
-        ADD COLUMN diagnostics jsonb NOT NULL DEFAULT '[]'::jsonb,
-        ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
-    CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
-        WHERE state IN ('done', 'failed');
-    """,
-    # 3: ScadBuddy's own job warnings (#408), on the row for the same reason: a
-    # failed render has no result to carry them.
-    """
-    ALTER TABLE render_jobs ADD COLUMN warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
-    """,
-    # 4: the event log (spec §7; `scadbuddy.core.pg_events`). Append-only; `seq` is
-    # what a client resumes from (Last-Event-ID), `logged_at` what age pruning reads.
-    """
-    CREATE TABLE events (
-        seq        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        event_id   text NOT NULL UNIQUE,
-        kind       text NOT NULL,
-        at         timestamptz NOT NULL,
-        logged_at  timestamptz NOT NULL DEFAULT now(),
-        payload    jsonb NOT NULL
-    );
-    CREATE INDEX events_logged_at ON events (logged_at);
-    """,
-    # 5: default-render previews (#454; `library.previews.PreviewStore`). One
-    # row per model id, the record and its image together: a rendered row always has
-    # its PNG and a failed one never does, so the two cannot disagree.
-    """
-    CREATE TABLE model_previews (
-        model_id    text PRIMARY KEY,
-        source_key  text NOT NULL,
-        ok          boolean NOT NULL,
-        error       text,
-        png         bytea,
-        rendered_at timestamptz NOT NULL,
-        CONSTRAINT model_previews_image_iff_ok CHECK (ok = (png IS NOT NULL))
-    );
-    """,
+#: The migration files (#491): one per migration, named ``<yyyymmdd>T<hhmm>Z_<slug>.sql``
+#: (UTC). The stem is the file's id in ``scadbuddy_migrations``.
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+#: ``<yyyymmdd>T<hhmm>Z_<slug>``; fixed width, so sorting ids sorts by time.
+MIGRATION_ID = re.compile(r"\d{8}T\d{4}Z_[a-z0-9_]+")
+
+
+class Migration(NamedTuple):
+    id: str
+    sql: str
+
+
+def load_migrations(directory: Path = MIGRATIONS_DIR) -> tuple[Migration, ...]:
+    """The migration files of `directory`, in timestamp order. Anything there that is
+    not a well-named ``.sql`` file raises, so a misnamed migration fails at start
+    instead of being skipped."""
+    migrations: list[Migration] = []
+    for path in sorted(directory.iterdir()):
+        if path.suffix != ".sql" or not MIGRATION_ID.fullmatch(path.stem):
+            raise ValueError(
+                f"{path} is not a migration: files there are named"
+                " <yyyymmdd>T<hhmm>Z_<slug>.sql (UTC, slug in [a-z0-9_])"
+            )
+        migrations.append(Migration(path.stem, path.read_text(encoding="utf-8")))
+    return tuple(migrations)
+
+
+#: Read at import, so an image without the files fails at start.
+MIGRATIONS: tuple[Migration, ...] = load_migrations()
+
+#: Before #491 the ledger recorded migrations by POSITION in a list: entry ``n`` of
+#: that list is ``LEGACY_VERSIONS[n - 1]``. `migrate` rewrites positional rows to
+#: these ids once, and keeps writing ``version`` for them so an image from before
+#: #491 still starts on the ledger. Frozen: nothing is ever added here.
+LEGACY_VERSIONS: tuple[str, ...] = (
+    "20260927T2243Z_render_jobs",
+    "20260928T0105Z_render_diagnostics",
+    "20260928T0600Z_render_warnings",
+    "20260928T0630Z_events",
 )
+
+
+class MigrationLedgerError(RuntimeError):
+    """The ledger holds a positional row (from before #491) that main's list never
+    had: this database ran a migration from a branch that did not merge as such.
+    Guessing which file it was would either re-run or skip real schema."""
+
 
 JOB_COLUMNS = (
     "id",
@@ -175,27 +158,97 @@ class TransactionalEvents(Protocol):
     def publish_in(self, conn: Connection[Any], event: Event) -> None: ...
 
 
-def migrate(conn: Connection[Any]) -> list[int]:
-    """Apply the migrations this database has not seen; returns their versions."""
-    applied: list[int] = []
+def migrate(conn: Connection[Any], migrations: tuple[Migration, ...] = MIGRATIONS) -> list[str]:
+    """Apply the migration files this database has not seen, in timestamp order;
+    returns their ids.
+
+    Any file not in the ledger is applied, so one with an OLDER timestamp that
+    merges after newer ones ran (a branch cut earlier) still runs. A ledger row
+    naming a file this build does not have (a newer image ran it) is left alone.
+    """
+    applied: list[str] = []
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        _ensure_ledger(conn)
+        ids = conn.cursor(row_factory=tuple_row).execute("SELECT id FROM scadbuddy_migrations")
+        done = {row[0] for row in ids}
+        for migration in sorted(migrations, key=lambda m: m.id):
+            if migration.id in done:
+                continue
+            conn.execute(migration.sql.encode("utf-8"))
+            version = (
+                LEGACY_VERSIONS.index(migration.id) + 1 if migration.id in LEGACY_VERSIONS else None
+            )
+            conn.execute(
+                "INSERT INTO scadbuddy_migrations (id, version) VALUES (%s, %s)",
+                (migration.id, version),
+            )
+            applied.append(migration.id)
+    return applied
+
+
+def _ensure_ledger(conn: Connection[Any]) -> None:
+    """Create the ledger, or convert one from before #491 (keyed by position) to file
+    ids, inside `migrate`'s transaction and advisory lock: exactly once, however many
+    pods start together."""
+    columns = {
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'scadbuddy_migrations'"
+        )
+    }
+    if not columns:
+        # `version` is kept for the LEGACY_VERSIONS files only.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS scadbuddy_migrations ("
-            " version integer PRIMARY KEY,"
+            "CREATE TABLE scadbuddy_migrations ("
+            " id text PRIMARY KEY,"
+            " version integer UNIQUE,"
             " applied_at timestamptz NOT NULL DEFAULT now())"
         )
-        versions = conn.cursor(row_factory=tuple_row).execute(
-            "SELECT version FROM scadbuddy_migrations"
+        return
+    if "id" in columns:
+        return
+    versions = [
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT version FROM scadbuddy_migrations ORDER BY version"
         )
-        done = {row[0] for row in versions}
-        for version, statement in enumerate(MIGRATIONS, start=1):
-            if version in done:
-                continue
-            conn.execute(statement.encode("utf-8"))
-            conn.execute("INSERT INTO scadbuddy_migrations (version) VALUES (%s)", (version,))
-            applied.append(version)
-    return applied
+    ]
+    unknown = [v for v in versions if not 1 <= v <= len(LEGACY_VERSIONS)]
+    if unknown:
+        raise MigrationLedgerError(
+            f"scadbuddy_migrations records positional version(s)"
+            f" {', '.join(map(str, unknown))}, but main only ever had {len(LEGACY_VERSIONS)}:"
+            " this database ran a migration from a branch that has not merged as such."
+            " Recreate the database, or delete those rows and the schema they created,"
+            " then start again."
+        )
+    pkey = (
+        conn.cursor(row_factory=tuple_row)
+        .execute(
+            "SELECT conname FROM pg_constraint"
+            " WHERE conrelid = 'scadbuddy_migrations'::regclass AND contype = 'p'"
+        )
+        .fetchone()
+    )
+    conn.execute("ALTER TABLE scadbuddy_migrations ADD COLUMN id text")
+    conn.execute(
+        "UPDATE scadbuddy_migrations SET id = (%s::text[])[version]", (list(LEGACY_VERSIONS),)
+    )
+    if pkey is not None:
+        conn.execute(
+            sql.SQL("ALTER TABLE scadbuddy_migrations DROP CONSTRAINT {}").format(
+                sql.Identifier(pkey[0])
+            )
+        )
+    conn.execute(
+        "ALTER TABLE scadbuddy_migrations"
+        " ALTER COLUMN id SET NOT NULL,"
+        " ADD PRIMARY KEY (id),"
+        " ADD UNIQUE (version),"
+        " ALTER COLUMN version DROP NOT NULL"
+    )
 
 
 class PostgresJobStore:

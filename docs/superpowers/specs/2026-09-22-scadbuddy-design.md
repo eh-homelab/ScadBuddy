@@ -684,8 +684,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
   heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
   heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
-  jobs survive a restart. Migrations are append-only and applied at startup under
-  an advisory lock. A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
+  jobs survive a restart. Migrations are one file each in
+  `backend/scadbuddy/migrations/`, never edited once merged, and applied at startup
+  in timestamp order under an advisory lock (#491). A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
   the transaction that queues it; each process keeps one `LISTEN` connection
   (reconnected with capped, jittered back-off) that wakes its idle workers, so a job
   queued on one replica starts at once on an idle other. While it is connected,
@@ -750,7 +751,7 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   the warn colour, so they do not read as the template's. A failed render shows
   them above its log. A failed job has no result, so its warnings (#408) live on
   the job record beside `diagnostics` (the job file, or the `render_jobs.warnings`
-  column, migration 3): the files the run could not open (`OpenSCAD could not
+  column, `20260928T0600Z_render_warnings.sql`): the files the run could not open (`OpenSCAD could not
   open pic.svg`, without "rendered without it") and any unreadable colour
   parameter. A template that draws only a missing picture exits 1 with "Current
   top level object is empty.", so this is often the only explanation there is.
@@ -849,8 +850,9 @@ source declares them -- is rendered in the background, and that render's
 - **Storage (#454).** In Postgres (`SCADBUDDY_DATABASE_URL`): a `model_previews` row per
   model id (`builtin:` ids included): the source key it was rendered from, whether
   it rendered, the error if not, and the PNG as `bytea`, on the render queue's
-  pool and created by its migrations (3). A rendered row always has its image and
-  a failed one never does (a CHECK constraint), so the record and the image cannot
+  pool and created by its migrations (`20260928T0721Z_model_previews.sql`). A rendered
+  row always has its image and a failed one never does (a CHECK constraint), so the
+  record and the image cannot
   disagree. Without a database there are no previews at all; the database becomes
   required with #401. A preview is never in the model's
   directory, so never committed, and never among the outputs, so never in a print

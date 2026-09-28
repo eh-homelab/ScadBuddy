@@ -120,9 +120,9 @@ PreviewConnection = Callable[[], AbstractContextManager[Connection[DictRow]]]
 
 
 class PreviewStore:
-    """The ``model_previews`` table (`pg_store.MIGRATIONS`), on the render queue's
-    pool: ``connect`` is `PostgresJobStore.connection`, so the table exists once the
-    queue has started.
+    """The ``model_previews`` table (``migrations/20260928T0721Z_model_previews.sql``),
+    on the render queue's pool: ``connect`` is `PostgresJobStore.connection`, so the
+    table exists once the queue has started.
 
     A change to one model's preview holds a transaction-scoped advisory lock on its
     id, taken before the row is read or written, so it also orders a write against

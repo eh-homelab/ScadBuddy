@@ -538,8 +538,8 @@ def test_migrations_apply_once(pg_conninfo: str, paths: DataPaths) -> None:
     second.open()
     second.close()
     with psycopg.connect(pg_conninfo) as conn:
-        versions = [row[0] for row in conn.execute("SELECT version FROM scadbuddy_migrations")]
-    assert versions == list(range(1, len(MIGRATIONS) + 1))
+        ids = [row[0] for row in conn.execute("SELECT id FROM scadbuddy_migrations ORDER BY id")]
+    assert ids == [m.id for m in MIGRATIONS]
 
 
 @pytest.mark.requires_postgres
