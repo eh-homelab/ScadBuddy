@@ -389,9 +389,13 @@ class Folder(BambuddyModel):
 
     def walk(self) -> list[Folder]:
         """This folder and every folder beneath it, depth first."""
-        found = [self]
+        return [folder for _, folder in self.walk_with_depth()]
+
+    def walk_with_depth(self, depth: int = 0) -> list[tuple[int, Folder]]:
+        """:meth:`walk`, each folder with how deep it sits (``depth`` for this one)."""
+        found = [(depth, self)]
         for child in self.children:
-            found.extend(child.walk())
+            found.extend(child.walk_with_depth(depth + 1))
         return found
 
 
