@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import type { ApprovalService } from './approvals/service.js'
+import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import type { TokenStore } from './auth/tokens.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
@@ -14,6 +16,7 @@ import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
 import { registerPluginRoutes } from './routes/plugins.js'
+import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
@@ -21,8 +24,8 @@ import type { KekStatus } from './secrets.js'
 // direct streaming. /healthz, the Claude credential routes (#255,
 // routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
 // plugin registry routes (#297, routes/plugins.ts), the plugin package routes
-// (#297, routes/pluginPackages.ts), and /mcp when `mcp` is given (#251,
-// mcp/http.ts).
+// (#297, routes/pluginPackages.ts), the MCP token routes (#251,
+// routes/mcpTokens.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -45,6 +48,12 @@ export type AppDeps = {
   /** Fetches and caches plugin packages; undefined disables installing. */
   packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
   testConnection: (credential: Credential) => Promise<ConnectionTest>
+  /**
+   * The MCP bearer-token store Settings manages (routes/mcpTokens.ts). Pass the
+   * same instance as `mcp.tokens`. Undefined (or left out) when there is no
+   * database: the routes then answer 503.
+   */
+  tokens?: TokenStore | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
@@ -200,6 +209,14 @@ export function createApp(deps: AppDeps): AgentApp {
               truncated: false,
             })),
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+  })
+
+  registerMcpTokenRoutes(app, {
+    tokens: deps.database ? deps.tokens : undefined,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   registerPluginPackageRoutes(app, {
