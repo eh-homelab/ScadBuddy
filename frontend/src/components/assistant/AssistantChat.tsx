@@ -49,13 +49,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const itemCount = active?.items.length ?? 0
 
   // Voice (#257): dictation fills the draft for the user to review; replies can be read aloud.
-  const getDraft = useCallback(() => composer.current?.value ?? '', [])
+  // Kept in step with every write, so dictation reconciles against typing that hasn't
+  // rendered yet rather than a stale value.
+  const draftNow = useRef('')
+  const writeDraft = useCallback((text: string) => {
+    draftNow.current = text
+    setDraft(text)
+  }, [])
+  const getDraft = useCallback(() => draftNow.current, [])
   const focusComposer = useCallback(() => composer.current?.focus(), [])
   const speakReplies = useSpeakReplies()
   const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
   const dictation = useDictation({
     getDraft,
-    setDraft,
+    setDraft: writeDraft,
     onDone: focusComposer,
     onStart: speech.stop,
     embedded,
@@ -80,7 +87,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     chat.send(text, pageContext(pathname, { tools, dialogs, page }))
-    setDraft('')
+    writeDraft('')
   }
 
   const onSubmit = (event: FormEvent) => {
@@ -244,7 +251,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           ref={composer}
           rows={2}
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => writeDraft(event.target.value)}
           onKeyDown={onComposerKey}
           disabled={!owned}
           placeholder={

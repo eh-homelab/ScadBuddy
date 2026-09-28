@@ -163,6 +163,43 @@ describe('speech to text', () => {
     expect(userMessages()[0]).toMatchObject({ text: 'Please make the name Reagan and the base blue' })
   })
 
+  it('keeps what the user types while dictation is still listening', async () => {
+    installSpeech()
+    const { user } = await openPanel()
+    await user.click(screen.getByRole('button', { name: 'Voice input' }))
+    const rec = FakeRecognition.instances[0]!
+    rec.hear(['make the name', true])
+    expect(composer()).toHaveValue('make the name')
+
+    await user.type(composer(), ' Reagan')
+    rec.hear(['make the name', true], [' and the base blue', false])
+    expect(composer()).toHaveValue('make the name Reagan and the base blue')
+    rec.hear(['make the name', true], [' and the base blue', true])
+    expect(composer()).toHaveValue('make the name Reagan and the base blue')
+
+    // An edit inside the dictated text survives too.
+    await user.clear(composer())
+    await user.type(composer(), 'Make it')
+    rec.hear(['make the name', true], [' and the base blue', true], [' please', false])
+    expect(composer()).toHaveValue('Make it please')
+    expect(userMessages()).toEqual([])
+  })
+
+  it('ignores a late error from a recognition it already dropped', async () => {
+    installSpeech()
+    const { user } = await openPanel()
+    await user.click(screen.getByRole('button', { name: 'Voice input' }))
+    const rec = FakeRecognition.instances[0]!
+    rec.hear(['make the name Reagan', true])
+    await user.click(screen.getByRole('button', { name: 'Send' }))
+    expect(rec.abort).toHaveBeenCalled()
+    rec.hear(['stray words', false])
+    rec.fail('network')
+    expect(screen.queryByText(/Speech recognition needs a network connection/)).not.toBeInTheDocument()
+    expect(composer()).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Voice input' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
   it('is push-to-talk when held: letting go stops listening', async () => {
     installSpeech()
     const { user } = await openPanel()

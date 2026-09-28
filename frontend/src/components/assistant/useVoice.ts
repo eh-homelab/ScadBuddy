@@ -8,13 +8,13 @@ import {
   type Recognition,
 } from '../../agent/chat/voice'
 
-function joinText(base: string, spoken: string): string {
-  if (!base) return spoken
-  if (!spoken) return base
-  return /\s$/.test(base) ? base + spoken : `${base} ${spoken}`
+/** The separator dictated text needs after `before`: a space unless either is empty or `before` ends in one. */
+function gap(before: string, spoken: string): string {
+  return before && spoken && !/\s$/.test(before) ? ' ' : ''
 }
 
 interface DictationOptions {
+  /** The draft as it is now, including edits that haven't rendered yet. */
   getDraft: () => string
   setDraft: (text: string) => void
   /** Called when listening ends, so the user can review the text. Never sends it. */
@@ -48,13 +48,38 @@ export function useDictation({ getDraft, setDraft, onDone, onStart, embedded }: 
     rec.lang = document.documentElement.lang || navigator.language
     rec.continuous = true
     rec.interimResults = true
-    const base = getDraft()
+    // Only the span this recognition inserted is ever rewritten. `inserted` is that span
+    // (separator included) as last written; while the draft still ends with it, the next
+    // result replaces just that span. If the user edited the draft meanwhile, their draft
+    // becomes the new base and only the results that weren't final yet are added after
+    // it, so dictation never clobbers typing.
+    let inserted = ''
+    let consumed = 0
+    let finalSoFar = 0
     rec.onresult = (event) => {
+      if (recognition.current !== rec) return
+      const draft = getDraft()
+      let prefix: string
+      if (draft.endsWith(inserted)) {
+        prefix = draft.slice(0, draft.length - inserted.length)
+      } else {
+        prefix = draft
+        consumed = finalSoFar
+      }
       let text = ''
-      for (let i = 0; i < event.results.length; i++) text += event.results[i]?.[0].transcript ?? ''
-      latest.current.setDraft(joinText(base, text.trim()))
+      finalSoFar = consumed
+      for (let i = consumed; i < event.results.length; i++) {
+        const result = event.results[i]
+        text += result?.[0].transcript ?? ''
+        if (result?.isFinal && i === finalSoFar) finalSoFar = i + 1
+      }
+      const spoken = text.trim()
+      inserted = gap(prefix, spoken) + spoken
+      latest.current.setDraft(prefix + inserted)
     }
     rec.onerror = (event) => {
+      // An abandoned recognition (sent, or replaced) can still report late; ignore it.
+      if (recognition.current !== rec) return
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
         if (embedded) setBlocked(true)
       }
