@@ -441,7 +441,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         return
       }
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
+      // Anything else (a refusal, nothing upstream took it) is worth retrying as it stands.
       setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
       if (attempt === runAttempt.current) setRunning(false)

@@ -138,6 +138,12 @@ async function requestText(path: string): Promise<string> {
 export const UNANSWERED = 'urn:scadbuddy:unanswered'
 /** The `type` of the problem for a request the offline browser could not send. */
 export const OFFLINE = 'urn:scadbuddy:offline'
+/**
+ * The backend's problem for a Bambuddy call that timed out, dropped or answered an
+ * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
+ * enqueue, and Bambuddy may have done it.
+ */
+export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -198,12 +204,15 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
 async function send(url: string, init?: RequestInit): Promise<Response> {
+  // Read before sending: a connection that goes offline while a long request waits
+  // may already have delivered it, so that is "no answer", not "could not send".
+  const offline = navigator.onLine === false
   try {
     return await fetch(url, init)
   } catch (cause) {
     if (init?.signal?.aborted) throw cause
     throw new ApiError(
-      navigator.onLine === false
+      offline
         ? {
             type: OFFLINE,
             title: 'Offline',
@@ -223,13 +232,16 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
 
 /**
  * Whether a failed request may still have done its work: the server's own answer never
- * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped. A
- * problem the backend wrote, a 503 (nothing upstream took it) and an offline browser
- * all mean it did not. For a request with a physical effect (a print), retrying one of
- * these blind can do it twice.
+ * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
+ * the backend's own call to Bambuddy timed out or dropped (`bambuddy-unavailable`
+ * 502/504), which may have been the enqueue. Any other problem the backend wrote, a 503
+ * (nothing upstream took it) and an offline browser all mean it did not. For a request
+ * with a physical effect (a print), retrying one of these blind can do it twice.
  */
 export function mayHaveRun(error: unknown): boolean {
-  if (!(error instanceof ApiError) || error.problem.type !== UNANSWERED) return false
+  if (!(error instanceof ApiError)) return false
+  if (error.problem.type === BAMBUDDY_UNAVAILABLE) return [502, 504].includes(error.status)
+  if (error.problem.type !== UNANSWERED) return false
   return [0, 502, 504, 524].includes(error.status)
 }
 

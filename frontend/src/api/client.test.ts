@@ -2,7 +2,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { server } from '../mocks/server'
-import { ApiError, api, mayHaveRun } from './client'
+import { ApiError, BAMBUDDY_UNAVAILABLE, api, mayHaveRun } from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -219,8 +219,30 @@ describe('failures the server did not describe (#470)', () => {
     const error = await failure()
     expect(error.detail).toBe('Bambuddy did not answer in time.')
     expect(error.problem.title).toBe('Bad Gateway')
+    // Not the backend's "Bambuddy did not answer" type, so nothing says it may have run.
     expect(mayHaveRun(error)).toBe(false)
   })
+
+  it.each([
+    [504, 'could not reach Bambuddy to queue the print: ReadTimeout', true],
+    [502, 'could not reach Bambuddy to queue the print: RemoteProtocolError', true],
+    [409, 'Bambuddy refused the API key', false],
+  ])(
+    'counts the backend’s bambuddy-unavailable %i as maybe having run: %s',
+    async (status, detail, expected) => {
+      server.use(
+        http.get('/api/v1/models', () =>
+          HttpResponse.json(
+            { type: BAMBUDDY_UNAVAILABLE, title: 'Bad Gateway', status, detail },
+            { status, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const error = await failure()
+      expect(error.detail).toBe(detail)
+      expect(mayHaveRun(error)).toBe(expected)
+    },
+  )
 
   it('keeps a detail-only body', async () => {
     server.use(
@@ -246,6 +268,20 @@ describe('failures the server did not describe (#470)', () => {
     expect(error.status).toBe(0)
     expect(error.detail).toBe('This browser is offline, so ScadBuddy could not reach its server.')
     expect(mayHaveRun(error)).toBe(false)
+  })
+
+  it('does not call it offline when the browser went offline only while waiting', async () => {
+    let online = true
+    vi.spyOn(navigator, 'onLine', 'get').mockImplementation(() => online)
+    server.use(
+      http.get('/api/v1/models', () => {
+        online = false
+        return HttpResponse.error()
+      }),
+    )
+    const error = await failure()
+    expect(error.problem.type).not.toBe('urn:scadbuddy:offline')
+    expect(mayHaveRun(error)).toBe(true)
   })
 
   it('passes an abort through as it is', async () => {

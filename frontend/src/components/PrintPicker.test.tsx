@@ -299,13 +299,13 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
   it('leaves Print enabled to retry after a refusal that is not a 422', async () => {
     const run = vi
       .spyOn(api, 'runPrint')
-      .mockRejectedValueOnce(new ApiError(502, 'Bambuddy did not answer in time.'))
+      .mockRejectedValueOnce(new ApiError(409, 'Bambuddy refused the API key.'))
       .mockResolvedValueOnce(queuedResult)
     const { user } = renderPicker()
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer in time.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key.')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
@@ -366,6 +366,32 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
     expect(alert).toHaveTextContent('The print may still have been queued.')
     expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
     expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+  })
+
+  it('says the same when the backend timed out on Bambuddy, which may have queued it', async () => {
+    const { bodies } = runAnswers(() =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+          title: 'Gateway Timeout',
+          status: 504,
+          detail: 'could not reach Bambuddy to queue the print: ReadTimeout',
+        },
+        { status: 504, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('could not reach Bambuddy to queue the print: ReadTimeout')
+    expect(alert).toHaveTextContent('The print may still have been queued.')
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+    expect(bodies).toHaveLength(1)
+    expect(onRan).not.toHaveBeenCalled()
   })
 
   it('offers Print again once the dialog is reopened', async () => {
