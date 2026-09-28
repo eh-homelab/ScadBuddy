@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -14,6 +14,14 @@ async function seeded() {
     expect(screen.getByLabelText('Bambuddy URL')).toHaveValue(
       'https://bambuddy.internal.nullreference.io',
     ),
+  )
+}
+
+/** The render key's warning (#426) is a status too, so find the one that says `text`. */
+function findStatus(text: string) {
+  return screen.findByText(
+    (_, element) =>
+      element?.getAttribute('role') === 'status' && (element.textContent ?? '').includes(text),
   )
 }
 
@@ -51,7 +59,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('3DP-31B-598')
+    expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
   })
 
   it('names the missing scope rather than the bare status code', async () => {
@@ -68,7 +76,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
-    expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
+    expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
   })
 
   it('offers the folders and pipelines Bambuddy reports', async () => {
@@ -153,7 +161,7 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add to Bambuddy sidebar' }))
     // Bambuddy renders the link in a sandboxed iframe at /external/{id}.
-    expect(await screen.findByRole('status')).toHaveTextContent('/external/3')
+    expect(await findStatus('/external/3')).toBeInTheDocument()
   })
 
   it('shows how much the store holds against its caps (#296, #426)', async () => {
@@ -209,8 +217,10 @@ describe('SettingsPage', () => {
     )
     renderPage(<SettingsPage />)
     await seeded()
-    expect(screen.getByTestId('render-key-fallback')).toHaveTextContent(
-      'Render workers hold the full Bambuddy key; template code can print.',
+    const warning = screen.getByTestId('render-key-fallback')
+    expect(warning).toHaveAttribute('role', 'status')
+    expect(warning).toHaveTextContent(
+      /^Render workers hold the full Bambuddy key; template code can print\. Create a key with only Manage Library in Bambuddy and paste it above as the render key\.$/,
     )
     expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Paste the key')
   })
@@ -266,8 +276,47 @@ describe('SettingsPage', () => {
     renderPage(<SettingsPage />)
     const usage = await screen.findByTestId('store-usage')
     expect(usage).toHaveTextContent('Bambuddy library')
-    expect(usage).toHaveTextContent('12')
+    expect(within(usage).getByText('Files').nextElementSibling).toHaveTextContent(
+      /^12 \(no limit\)$/,
+    )
     expect(screen.queryByTestId('asset-usage')).toBeNull()
+    expect(
+      screen.getByText(
+        'Where is the store this process uses; it moves to the Blob store choice above at its next restart, so the two can differ until then.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps a stored Bambuddy store backend on an unrelated save', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const bambuddy = { ...stored, store_backend: 'bambuddy', has_render_api_key: true }
+    server.use(
+      http.get('/api/v1/settings', () => HttpResponse.json(bambuddy)),
+      http.put('/api/v1/settings', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json(bambuddy)
+      }),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeEnabled()
+
+    const own = screen.getByLabelText(/ScadBuddy.s own URL/)
+    await user.clear(own)
+    await user.type(own, 'https://scadbuddy.test')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ store_backend: 'bambuddy' })
+  })
+
+  it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
+    server.use(
+      http.get('/api/v1/settings', () => HttpResponse.json({ ...stored, library_folder_id: null })),
+    )
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
   })
 })
 
@@ -306,7 +355,7 @@ describe('SettingsPage, live (#269)', () => {
     await user.clear(field)
     await user.type(field, 'https://tested.test')
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
-    await screen.findByRole('status')
+    await findStatus('3DP-31B-598')
 
     // The test saved the form; this is that save's own event.
     emitRealtime('settings.changed', ['settings'], { section: 'connection' })
