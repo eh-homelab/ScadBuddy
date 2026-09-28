@@ -25,7 +25,11 @@ class BlobStore(Protocol):
 def sweep_blobs(
     store: BlobStore, refs: BlobRefs, *, grace: float, now: float | None = None
 ) -> list[str]:
-    """Remove every blob nothing references that has not been touched for ``grace``."""
+    """Remove every blob nothing references that has not been touched for ``grace``.
+
+    A claimant calls `dir_for` (which touches the blob's mtime) before `refs.add`, so
+    a blob claimed between this sweep's `referenced()` snapshot and its `keys()` loop
+    is still within the grace window and survives."""
     cutoff = (now if now is not None else time.time()) - grace
     kept = refs.referenced()
     removed: list[str] = []
