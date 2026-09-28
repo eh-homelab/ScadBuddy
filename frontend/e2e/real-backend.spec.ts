@@ -228,6 +228,38 @@ test.describe('real backend', () => {
   })
 
   /**
+   * #269, end to end: details edited in one tab appear in another without a reload,
+   * through the backend's event bus and each tab's realtime socket.
+   */
+  test('shows details edited in one tab in another', async ({ context, request }) => {
+    const slug = `e2e-live-${Date.now().toString(36)}`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+    try {
+      const a = await context.newPage()
+      const b = await context.newPage()
+      await a.goto(`/m/${slug}`)
+      await b.goto(`/m/${slug}`)
+      await expect(b.getByRole('button', { name: 'Edit details' })).toBeVisible()
+
+      await a.getByRole('button', { name: 'Edit details' }).click()
+      const dialog = a.getByRole('dialog', { name: 'Edit details' })
+      await dialog.getByLabel('Name').fill('Renamed in tab A')
+      await dialog.getByRole('button', { name: 'Save' }).click()
+
+      await expect(b.getByRole('heading', { name: 'Renamed in tab A' })).toBeVisible({
+        timeout: 15_000,
+      })
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
+
+  /**
    * #266, end to end: `WS /api/v1/ws` in the image. One tab follows `models`
    * through the page's own socket, the way `lib/realtime.ts` does; a change made
    * from elsewhere reaches it as an event.

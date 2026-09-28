@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ApiError, api } from '../api/client'
+import { useSubscription, type RealtimeSignal } from '../lib/realtime'
 import type { CatalogueLibrary, LibraryPinRequest, ModelLibrary, ModelSummary } from '../api/types'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -72,6 +73,26 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
       if (generation.current === started) setError(message(caught))
     }
   }
+
+  // #269 — while open, pins and the catalogue follow changes made elsewhere (a clone
+  // finishing, another tab or an agent pinning). Not mid-action: that answer is newer.
+  const refreshOpen = async () => {
+    if (!openRef.current || running > 0) return
+    const started = ++generation.current
+    try {
+      const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
+      if (generation.current !== started) return
+      setPins(model.libraries ?? [])
+      setCatalogue(libraries)
+    } catch {
+      // The dialog keeps what it shows; the next change or reopen reads again.
+    }
+  }
+  const onChange = (signal: RealtimeSignal) => {
+    if (signal !== 'resync') void refreshOpen()
+  }
+  useSubscription(open ? 'libraries' : undefined, onChange)
+  useSubscription(open ? `model:${slug}` : undefined, onChange)
 
   function close() {
     if (running > 0) return

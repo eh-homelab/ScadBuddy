@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
+import { useSubscription } from '../lib/realtime'
 import type { ModelPatch, ModelSummary } from '../api/types'
 import {
   MAX_THUMBNAIL_SIZE,
@@ -70,8 +71,18 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // #269 — the details changed elsewhere while this form is open: say so, and let the
+  // user load them; never overwrite what is being typed.
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  useSubscription(open && baseline ? `model:${slug}` : undefined, (signal) => {
+    if (signal !== 'resync' && signal.kind === 'model.updated' && !saving) {
+      setChangedElsewhere(true)
+    }
+  })
+
   async function show() {
     setOpen(true)
+    setChangedElsewhere(false)
     setBaseline(null)
     setLoadError(null)
     setError(null)
@@ -221,6 +232,17 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
           <p className="flex items-center gap-2 text-[13px] text-muted">
             <Spinner /> Loading details
           </p>
+        )}
+        {changedElsewhere && (
+          <div
+            role="status"
+            className="mb-3 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>These details were changed elsewhere since you opened them.</span>
+            <Button size="sm" onClick={() => void show()}>
+              Load the latest
+            </Button>
+          </div>
         )}
         {loadError && (
           <p role="alert" className="text-[13px] text-warn">

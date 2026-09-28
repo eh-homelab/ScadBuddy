@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BROKEN_SOURCE, BUILTIN_SLUG, keychainSource } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { EditSourcePage } from './EditSourcePage'
@@ -237,5 +238,35 @@ describe('EditSourcePage', () => {
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
     expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false)
     replace.mockRestore()
+  })
+})
+
+describe('EditSourcePage, live (#269)', () => {
+  const THEIRS = 'cube([3, 3, 3]);\n'
+
+  it('follows a change made elsewhere while the buffer is untouched', async () => {
+    renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await api.replaceSource('name-keychain', THEIRS)
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    await waitFor(() => expect(editor).toHaveValue(THEIRS))
+    expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
+  })
+
+  it('never overwrites an edited buffer, and offers theirs instead', async () => {
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('sphere(2);\n')
+
+    await api.replaceSource('name-keychain', THEIRS)
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    const banner = await screen.findByTestId('changed-elsewhere')
+    expect(editor).toHaveValue('sphere(2);\n')
+
+    await user.click(within(banner).getByRole('button', { name: 'Load their version' }))
+    expect(editor).toHaveValue(THEIRS)
+    expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
   })
 })

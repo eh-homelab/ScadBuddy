@@ -29,6 +29,7 @@ import {
 } from '../lib/params'
 import { fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
@@ -45,10 +46,12 @@ export function CustomizePage() {
 
   const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
-  const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #269 — live: an output saved from another tab, or by an agent, appears here.
+  const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
   // #184 — a built-in is read-only on the server; the write actions only show once
   // the record says the model is the user's, so a built-in never flashes them.
-  const modelState = useAsync(() => api.getModel(slug), [slug])
+  // #269 — live: details, pins and the upstream badge follow changes made elsewhere.
+  const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   const origin = modelState.data?.origin
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
   // own provenance when the output record is gone. EditPage has usually resolved it
@@ -113,6 +116,22 @@ export function CustomizePage() {
   // A different model, or a different output, discards edits made against the old one.
   if (edits.of !== seed) setEdits({ of: seed, values: null })
   const values = edits.values ?? seed ?? NOTHING
+
+  // #269 — the source changed elsewhere (another tab, an agent). With no edits the
+  // parameters follow it at once; with edits they are the user's, so the page asks.
+  // An old revision (`version`) never changes, so it has nothing to follow.
+  const [sourceChanged, setSourceChanged] = useState(false)
+  const dirty = edits.values !== null
+  useSubscription(version === undefined ? `model:${slug}` : undefined, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'source.changed') return
+    if (dirty) setSourceChanged(true)
+    else schemaState.refresh()
+  })
+  const reloadSchema = () => {
+    setSourceChanged(false)
+    setEdits({ of: seed, values: null })
+    schemaState.refresh()
+  }
 
   // One debounce over the pair, so the tag can never lag the values it labels.
   const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
@@ -481,6 +500,20 @@ export function CustomizePage() {
 
       {/* The write actions wait on the record, so a failed fetch has to say so. */}
       <div>
+        {sourceChanged && (
+          <div
+            role="status"
+            className="flex items-center gap-3 border-b border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>This model&apos;s source changed elsewhere. Reload its parameters? Your changes here are kept until you do.</span>
+            <Button size="sm" onClick={reloadSchema}>
+              Reload parameters
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setSourceChanged(false)}>
+              Keep mine
+            </Button>
+          </div>
+        )}
         {modelState.error && (
           <div
             role="alert"

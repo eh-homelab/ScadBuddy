@@ -7,6 +7,7 @@ import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { countConflicts } from '../lib/upstream'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 
 /**
@@ -40,6 +41,25 @@ export function EditSourcePage() {
   useEffect(() => {
     if (initial !== undefined) setSource(initial)
   }, [initial])
+
+  // #269 — the source changed elsewhere (another tab, an agent). An untouched buffer
+  // follows it; an edited one is never overwritten: the page offers theirs, and a save
+  // of mine goes through the usual stale-write conflict (#234).
+  const [theirs, setTheirs] = useState<string | null>(null)
+  useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'source.changed') return
+    void api.getSource(slug).then((latest) => {
+      if (latest === source) return
+      if (source === loaded.data) loaded.setData(latest)
+      else setTheirs(latest)
+    })
+  })
+  const takeTheirs = () => {
+    if (theirs === null) return
+    loaded.setData(theirs)
+    setSource(theirs)
+    setTheirs(null)
+  }
 
   async function save(force: boolean) {
     if (merge) await api.resolveUpstreamMerge(slug, source ?? '', merge.base, force)
@@ -96,7 +116,26 @@ export function EditSourcePage() {
         </>
       }
       fields={
-        merging && (
+        <>
+        {theirs !== null && (
+          <div
+            data-testid="changed-elsewhere"
+            role="status"
+            className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]"
+          >
+            <span>
+              This source was changed elsewhere since you opened it. Load that version (your
+              edits here are discarded), or keep editing and save over it.
+            </span>
+            <Button size="sm" onClick={takeTheirs}>
+              Load their version
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setTheirs(null)}>
+              Keep editing
+            </Button>
+          </div>
+        )}
+        {merging && (
           <p
             data-testid="merge-banner"
             role="status"
@@ -113,7 +152,8 @@ export function EditSourcePage() {
                 : // Taken or dismissed since: this is the source as it stands.
                   'There is no update to resolve any more; this is the source as it is.'}
           </p>
-        )
+        )}
+        </>
       }
       uri={`file:///models/${slug}/model.scad`}
       slug={slug}

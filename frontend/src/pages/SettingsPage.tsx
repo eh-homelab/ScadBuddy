@@ -8,6 +8,7 @@ import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 
@@ -82,6 +83,20 @@ export function SettingsPage() {
     setDefaultPlate(settings.default_plate ?? '')
     setUnit(settings.display_unit)
   }, [settings])
+
+  // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
+  // follows them; an edited one (`dirty`, below) is never overwritten, and says so.
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  useSubscription('settings', (signal) => {
+    if (signal === 'resync' || saving) return
+    if (dirty) setChangedElsewhere(true)
+    else settingsState.refresh()
+  })
+  const loadLatest = () => {
+    setChangedElsewhere(false)
+    setApiKey('')
+    settingsState.refresh()
+  }
 
   function draft(): SettingsUpdate {
     const body: SettingsUpdate = {
@@ -259,6 +274,21 @@ export function SettingsPage() {
           How ScadBuddy reaches Bambuddy. The API key is stored on the server and never sent
           back to the browser.
         </p>
+
+        {changedElsewhere && (
+          <div
+            role="status"
+            className="mt-4 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>Settings were changed elsewhere. Your unsaved changes here are kept until you load them.</span>
+            <Button size="sm" onClick={loadLatest}>
+              Load the latest
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setChangedElsewhere(false)}>
+              Keep mine
+            </Button>
+          </div>
+        )}
 
         <section className="mt-5 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Connection</h2>

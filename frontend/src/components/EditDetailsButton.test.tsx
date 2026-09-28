@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { keychainReadme } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { EditDetailsButton } from './EditDetailsButton'
@@ -357,5 +358,22 @@ describe('EditDetailsButton', () => {
     const { dialog, user } = await open()
     await user.clear(within(dialog).getByLabelText('Name'))
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+})
+
+describe('EditDetailsButton, live (#269)', () => {
+  it('keeps what is being typed and offers the details changed elsewhere', async () => {
+    const { user, dialog } = await open()
+    const name = within(dialog).getByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Typed here')
+
+    await api.updateModel('name-keychain', { name: 'Changed Elsewhere' })
+    emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
+    expect(await within(dialog).findByText(/changed elsewhere since you opened them/)).toBeInTheDocument()
+    expect(name).toHaveValue('Typed here')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Load the latest' }))
+    await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveValue('Changed Elsewhere'))
   })
 })

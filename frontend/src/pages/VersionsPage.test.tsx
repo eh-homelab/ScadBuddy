@@ -2,6 +2,8 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { BUILTIN_SLUG, versionIds } from '../mocks/fixtures'
+import { api } from '../api/client'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { VersionsPage } from './VersionsPage'
@@ -191,5 +193,16 @@ describe('VersionsPage', () => {
     await rows()
     expect(screen.getAllByRole('button', { name: 'Restore this version' })).toHaveLength(3)
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+  })
+})
+
+describe('VersionsPage, live (#269)', () => {
+  it('shows a revision committed elsewhere without a reload', async () => {
+    render()
+    const before = (await rows()).length
+    await api.replaceSource('name-keychain', 'cube(2);\n', false, 'Committed by another tab')
+    emitRealtime('version.committed', ['model:name-keychain'], { slug: 'name-keychain' })
+    await waitFor(async () => expect((await rows()).length).toBe(before + 1))
+    expect(screen.getByText('Committed by another tab')).toBeInTheDocument()
   })
 })
