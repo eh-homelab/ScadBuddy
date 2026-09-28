@@ -114,11 +114,12 @@ class PrintLinkStore:
         return [PrintLink.model_validate(dict(row)) for row in rows]
 
     def _output_for(self, archive_id: int) -> str | None:
-        # The key is (output_id, archive_id), so nothing here stops two outputs sharing
-        # an archive; the oldest link wins. That rests on no two outputs slicing to the
-        # same bytes (the hash match), which holds because `OutputStore.create` stamps
-        # the output id into each output's 3MF (`render/provenance.py`). Drop that stamp
-        # and one output's prints could show under another's id.
+        # Nothing here makes an archive unique to one output: two outputs whose sliced
+        # files hash the same can both match it by hash, and the earliest link then owns
+        # it for the proxy. `OutputStore.create` stamps the output id into each source
+        # 3MF (`render/provenance.py`), so the same parameters rendered twice differ at
+        # the source; whether the sliced file keeps that stamp is the #306 spike's to
+        # confirm. If it does not, one output's prints can show under another's id.
         with self._require().connection() as conn:
             row = conn.execute(
                 "SELECT output_id FROM output_bambuddy_prints WHERE archive_id = %s"

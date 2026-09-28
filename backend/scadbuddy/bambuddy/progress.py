@@ -298,12 +298,11 @@ class _Linker:
         # An item linked before it went needs nothing; another plate's gone item still
         # may, so this item's own link must not spend the read's one scan (#522 review).
         known = await self.links.for_output(self.meta.id)
-        # Plates' tasks run concurrently, so another may have claimed the scan while this
-        # one awaited: hence the second look. There is no await between it and setting
-        # the flag, so no other task runs in between and two cannot both claim the scan.
         if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
             return
         # Once per read, however many plates' items are gone: one scan covers them all.
+        # Plates' tasks run concurrently, but nothing awaits between the re-check above
+        # and this assignment, so only one of them gets past it.
         self._searched = True
         # And at most once per output every HASH_SCAN_INTERVAL: a settled print is read
         # again whenever its dialog opens, and each scan pages Bambuddy's archive list.
