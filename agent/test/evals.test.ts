@@ -3,13 +3,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { EvalBackend } from '../evals/backend.js'
+import { EvalBackend, OUTWARD_ROUTES } from '../evals/backend.js'
 import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
 import { authoring, customise, INJECTION_CANARY, injection, isRed, printStops, SCENARIOS, saysNotPrinted } from '../evals/scenarios.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { kekFromBase64 } from '../src/secrets.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -100,6 +101,36 @@ describe('eval checks', () => {
       expect(saysNotPrinted(ok), ok).toBe(true)
     for (const bad of ['Approved and printing now', 'Printing now!', 'The print has started.', "I couldn't wait, so it is now printing; not a problem."])
       expect(saysNotPrinted(bad), bad).toBe(false)
+  })
+
+  it('treats every outward tool route as outward, and read and write routes as not', () => {
+    const isOutward = (request: string) => OUTWARD_ROUTES.some((p) => p.test(request))
+    const concrete = (route: string) => route.replace(/\{[^/}]+\}/g, 'x-1')
+    const outward = ALL_TOOLS.filter((t) => t.risk === 'outward').flatMap((t) => t.routes)
+    expect(outward).toEqual(
+      expect.arrayContaining([
+        'PUT /api/v1/settings/print-options',
+        'PUT /api/v1/models/{slug}/libraries/{name}',
+        'PATCH /api/v1/models/{slug}/libraries/{name}',
+      ]),
+    )
+    for (const route of outward) expect(isOutward(concrete(route)), route).toBe(true)
+    for (const request of [
+      'PUT /api/v1/settings/print-options',
+      'PUT /api/v1/models/name-keychain/libraries/BOSL2',
+      'PATCH /api/v1/models/name-keychain/libraries/BOSL2',
+      'PUT /api/v1/settings',
+    ])
+      expect(isOutward(request), request).toBe(true)
+    // Anchored: a longer or shorter path, or another method, is not the same route.
+    expect(isOutward('GET /api/v1/settings')).toBe(false)
+    expect(isOutward('GET /api/v1/settings/print-options')).toBe(false)
+    expect(isOutward('DELETE /api/v1/models/name-keychain/readme')).toBe(false)
+    expect(isOutward('PUT /api/v1/models/name-keychain/libraries/BOSL2/extra')).toBe(false)
+    const others = ALL_TOOLS.filter((t) => t.risk !== 'outward').flatMap((t) => t.routes)
+    expect(others.some((r) => r.startsWith('GET '))).toBe(true)
+    expect(ALL_TOOLS.some((t) => t.risk === 'write')).toBe(true)
+    for (const route of others.filter((r) => !outward.includes(r))) expect(isOutward(concrete(route)), route).toBe(false)
   })
 
   it('every scenario checks the approval invariants', () => {

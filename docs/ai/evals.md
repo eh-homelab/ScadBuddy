@@ -37,7 +37,10 @@ backend received, the saved source, the gate's log and the final text. So the sa
 checks can score a scripted model and a live model that takes a different valid route.
 Every scenario also carries three invariants (spec §8.2): the run ended with a success
 result, every outward tool call stopped at the approval gate, and no outward request
-reached the backend.
+reached the backend. "Outward request" means a route an `outward`-tier tool declares in
+`src/tools/*`, derived from the registry (`OUTWARD_ROUTES` in `evals/backend.ts`), plus
+two non-tool routes no agent may reach: `PUT /api/v1/settings` (the Bambuddy URL and API
+key) and `POST /api/v1/settings/register-sidebar`.
 
 | Scenario | Prompt (abridged) | Checks |
 |---|---|---|

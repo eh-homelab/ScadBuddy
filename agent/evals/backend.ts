@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { ALL_TOOLS } from '../src/tools/index.js'
 
 // A recorded, in-memory stand-in for the ScadBuddy backend (spec §4.3), for the
 // eval harness (issue #259). The agent's tools reach it through the typed
@@ -38,14 +39,23 @@ export type EvalJob = { id: string; slug: string; params: Record<string, unknown
 
 export type EvalOutput = { id: string; slug: string; job_id: string; name: string }
 
-/** Routes that reach Bambuddy or delete: an eval must never see one of these succeed unapproved. */
+/** `METHOD /path/{param}` → a regex for a logged `METHOD /path/value`, anchored. */
+export function routePattern(route: string): RegExp {
+  const escaped = route.replace(/[.*+?^$()|[\]\\]/g, '\\$&').replace(/\{[^/}]+\}/g, '[^/]+')
+  return new RegExp(`^${escaped}$`)
+}
+
+/**
+ * Backend routes no request may reach in an eval without approval: every route
+ * an `outward`-tier tool declares (src/tools/*), taken from the registry so the
+ * list cannot drift from the tools, plus the non-tool additions below.
+ */
 export const OUTWARD_ROUTES: readonly RegExp[] = [
-  /^POST \/api\/v1\/outputs\/[^/]+\/send$/,
-  // Every POST under /api/v1/print/, including the print run itself.
-  /^POST \/api\/v1\/print\//,
-  /^DELETE \//,
-  /^PUT \/api\/v1\/settings$/,
-  /^POST \/api\/v1\/models\/import$/,
+  ...ALL_TOOLS.filter((t) => t.risk === 'outward').flatMap((t) => t.routes.map(routePattern)),
+  // Not tools (src/tools/coverage.ts NOT_A_TOOL), and no agent call should ever reach them:
+  // the Bambuddy URL and API key, and the edit to Bambuddy's own sidebar.
+  routePattern('PUT /api/v1/settings'),
+  routePattern('POST /api/v1/settings/register-sidebar'),
 ]
 
 const NOW = '2026-09-28T12:00:00Z'
