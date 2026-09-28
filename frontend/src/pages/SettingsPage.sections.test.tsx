@@ -142,19 +142,20 @@ describe('SettingsPage sections (#322)', () => {
   })
 
   it('edits the upload limit in MB or GB and stores bytes', async () => {
+    // The default is 1 GiB, shown as exactly that.
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     const limit = screen.getByLabelText('Largest media upload')
     expect(limit).toHaveValue(1)
-    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GB')
+    expect(screen.getByLabelText('Unit for setting-media_upload_max_bytes')).toHaveValue('GiB')
 
     await user.clear(limit)
     await user.type(limit, '500')
     await user.selectOptions(screen.getByLabelText('Unit for setting-media_upload_max_bytes'), 'MB')
     await user.click(screen.getByRole('button', { name: 'Save Uploads' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500 * 1024 * 1024 })
+    expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500_000_000 })
     put.mockRestore()
   })
 

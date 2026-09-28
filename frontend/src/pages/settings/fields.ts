@@ -267,12 +267,23 @@ export function serverValue(settings: Settings, name: FieldName): string {
   return String(value)
 }
 
-/** Binary units, as the server's own messages count them (1 MB = 1024 KiB). */
-export const BYTE_UNITS = { MB: 1024 * 1024, GB: 1024 * 1024 * 1024 } as const
+/**
+ * Decimal and binary units both: the defaults are written either way (the media limit is
+ * 1 GiB, the upload store's cap 1 GB), and each is shown in the unit that holds it exactly.
+ */
+export const BYTE_UNITS = {
+  MB: 1_000_000,
+  GB: 1_000_000_000,
+  MiB: 1024 * 1024,
+  GiB: 1024 * 1024 * 1024,
+} as const
 export type ByteUnit = keyof typeof BYTE_UNITS
 
 export function bestUnit(bytes: number): ByteUnit {
-  return bytes >= BYTE_UNITS.GB && bytes % (BYTE_UNITS.GB / 1024) === 0 ? 'GB' : 'MB'
+  for (const unit of ['GiB', 'GB', 'MiB', 'MB'] as const) {
+    if (bytes >= BYTE_UNITS[unit] && bytes % BYTE_UNITS[unit] === 0) return unit
+  }
+  return 'MB'
 }
 
 export function inUnit(bytes: number, unit: ByteUnit): string {

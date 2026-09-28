@@ -117,7 +117,7 @@ export function FieldRow({
   )
 }
 
-/** Bytes, edited in MB or GB (binary, as the server's own messages count them). */
+/** Bytes, edited in MB or GB (or their binary MiB and GiB), and stored as bytes. */
 export function BytesInput({
   id,
   value,
@@ -167,8 +167,11 @@ export function BytesInput({
         onChange={(event) => emit(text, event.target.value as ByteUnit)}
         className="sb-field w-24 cursor-pointer"
       >
-        <option value="MB">MB</option>
-        <option value="GB">GB</option>
+        {(Object.keys(BYTE_UNITS) as ByteUnit[]).map((name) => (
+          <option key={name} value={name}>
+            {name}
+          </option>
+        ))}
       </select>
     </div>
   )
