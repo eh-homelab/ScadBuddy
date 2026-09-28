@@ -15,6 +15,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 |---|---|---|
 | [operating.md](operating.md) | Operators | Deploying the agent sidecar, its environment variables, the key-encryption key and its rotation, the credential routes, `/healthz`, the origin allowlist and trusted proxies |
 | [security.md](security.md) | Reviewers, operators | The threat model as built: risk tiers, the permission seam, envelope encryption, DNS-rebinding defence, egress checks, stderr redaction, plugin vetting, event-log scrubbing, known limitations and open §3.2 items |
+| [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's LISTEN on the event bus (#264) |
 | [browser-bridge.md](browser-bridge.md) | Contributors | The tab-side agent tools, `data-agent-user-only`, and the WebMCP opt-in |
 | [headless-browser.md](headless-browser.md) | Contributors, reviewers | The headless Chromium for sessions with no tab (#349): the pinned Playwright plugin, its tiers and guards, the backend's agent-actor gate, and what was measured |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |

@@ -350,12 +350,16 @@ merged code.
 |---|---|
 | Whether `canUseTool` can wait on an asynchronous human decision, or a `PreToolUse` hook must deny and the session resume after approval | #255, #258 |
 | Bambuddy 1.2.5.5 routes for print archive outcomes and stats | #251 |
-| Whether the #241 Postgres needs anything for `LISTEN/NOTIFY` across replicas | #264 |
 | Bambu Studio's "Open in Bambu Studio" hand-off | #284 |
 | Keys accepted by `filament_overrides` on `PrintQueueItemCreate` | #284 |
 | Whether `/local-presets/` can create a derived process preset | #284 |
 | Whether a BambuStudio-claimed 3MF's `project_settings.config` overrides the pipeline preset | #284 |
 | Which process preset each level of detail maps to | #284 |
+
+The `LISTEN/NOTIFY` across replicas item is answered by #264 (spec §3.2): connect to
+the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
+([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
+see [mcp-resources.md](mcp-resources.md#the-event-source).
 
 #349 measured the headless-browser rows and moved them to spec §3.1 (see
 [headless-browser.md](headless-browser.md), "Measured"), including how the backend
