@@ -3,7 +3,9 @@
 Self-hosted OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. The design,
 and the measured facts it rests on, are in
 `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` (§3 is the verified-facts list);
-the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`.
+the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`; template-owned
+UIs and pipelines on Temporal, the blob store and Arrange are
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md`.
 Deployment is described in `README.md` ("Deploying").
 
 ## Commands (what CI runs)
@@ -53,18 +55,20 @@ against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 -e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
 `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
 
-Generated files (the `freshness` job regenerates them on PRs and pushes a fix; run
-them yourself when you change an API model or route, in this order):
+Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
+`agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
+`pnpm gen:api` (`scripts/gen-api.mjs`) exports the spec with uv, then writes the
+client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
+uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
+the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
+from its `api-spec` stage. The `freshness` job no longer commits anything. It checks
+that two exports are byte-identical, checks the committed msw worker, and posts the API
+diff against main as one PR comment, edited in place. The msw worker
+(`public/mockServiceWorker.js`) stays committed; regenerate it after an msw bump:
 
 ```bash
-cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi   # backend/openapi.json
-cd frontend && pnpm gen:api                                             # src/api/schema.d.ts
-cd frontend && pnpm exec msw init public --save                         # public/mockServiceWorker.js
-cd agent && pnpm gen:api                                                # agent/src/api/schema.d.ts
+cd frontend && pnpm exec msw init public --save   # --save, or it prompts and dies with no TTY
 ```
-
-Both `gen:api` steps read the exported spec, so export first. `--save` is required on `msw init`
-(without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
@@ -98,7 +102,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
-  template's revision; shipped read-only ones in a template's `presets.json`).
+  template's revision; a template's own read-only ones in the `presets` list of its
+  `model.json`, with a legacy `presets.json` still read).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
@@ -113,19 +118,24 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
   `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes now; `/mcp` and the agent's own sockets later) uses the one allowlist in
+  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
-  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
+  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  a session they are denied as "needs approval");
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`.
-  - Database: the agent owns the `ai_*` tables. Schema changes are appended to
-    `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
+  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
+  auth in `src/auth/`); every `/api/v1` operation needs a tool or a
+  `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
+  - Database: the agent owns the `ai_*` tables. Schema changes are new files in
+    `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
     start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
-    ledger `ai_migrations` with a sha256 per entry: an edited merged entry stops the
+    ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
     service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
     envelope-encrypted with `src/secrets.ts` under the KEK in
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
@@ -134,6 +144,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.
+  - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
+    `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
+    plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
+    forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
+    redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
+    follows both with the header). Claude Code renames tool-name characters outside
+    `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
+    colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
@@ -141,8 +159,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
-  line 185) describes the backend container; the
-  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
+  §4, "Architecture") describes the backend container; the
+  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
+  09-27 template-pipelines spec makes Postgres and Temporal required.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
@@ -150,11 +169,30 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
   the authoritative manifest check.
 
+## Migrations (#491)
+
+Both services keep one file per migration, named by UTC timestamp plus a slug:
+`backend/scadbuddy/migrations/` (ledger `scadbuddy_migrations`, applied by
+`render/pg_store.py` `migrate`) and `agent/src/db/migrations/` (ledger `ai_migrations`,
+applied by `src/db/migrations.ts`). To add one, create a NEW file named
+`$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else. Never
+edit, rename or remove a merged file; the agent checks each applied file's sha256 and
+stops at start on a mismatch. At start every file not yet in the ledger is applied, in
+timestamp order, under the service's advisory lock; that includes a file OLDER than ones
+already applied (a branch that merged late), so a migration may depend only on files
+already on main. The pre-#491 positional entries are frozen as `LEGACY_VERSIONS` in each
+module; a ledger still keyed by position is rewritten to file ids once, and a positional
+row main never had (a dev database that ran an unmerged branch's entry) stops the
+service with `MigrationLedgerError` rather than being guessed at. The agent's files reach
+the image because `pnpm build` copies them into `dist/db/migrations/`.
+
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image `openscad/openscad:dev` is a rolling nightly. The Dockerfile asserts
-  `OPENSCAD_VERSION` (currently 2026.09.23) and fails the build on drift. When it
-  fires, re-verify spec §3 against the new build and bump it in the same commit.
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
+  (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
+  deliberately: re-verify spec §3 against the new build, then change the tag,
+  digest and `OPENSCAD_VERSION` in the same commit.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv
   provides 3.12. Do not switch to a Python base with OpenSCAD installed beside it —
   the facts below were measured on this exact image.
@@ -200,8 +238,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
   `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
-  `frontend/pnpm-workspace.yaml` must be copied into the Docker build (it holds
-  `allowBuilds`); `agent/` has none because no dependency has an install script.
+  `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
+  the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
   Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
@@ -218,8 +256,12 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   only when every finding in the review for *this* commit is fixed or tracked in an
   open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
   to the PR files those `pr-feedback` issues automatically.
-- The freshness job may push a `chore: regenerate committed generated files` commit to
-  your branch; pull before pushing again.
+- When claude-code-action's workflow-validation guard skips the review (the PR's
+  `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
+  itself edits that file**. A PR merely branched before `main` changed it fails closed
+  (#487): merge `main` and re-dispatch the review.
+- Never commit `backend/openapi.json` or either `schema.d.ts`. An API change shows up
+  as the `freshness` job's diff comment on the PR, not in the PR's own diff.
 
 ## Known flakes
 

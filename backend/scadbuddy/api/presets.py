@@ -11,18 +11,20 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    FetcherDep,
     HistoryDep,
     PathsDep,
     PresetsDep,
     SlugPath,
 )
-from scadbuddy.api.jobs import require_valid_params, schema_of
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
     MAX_PRESET_NAME,
     TEMPLATE_ID_PREFIX,
@@ -35,11 +37,15 @@ from scadbuddy.library.presets import (
     PresetNotFoundError,
     TooManyPresetsError,
 )
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
 
-PresetIdPath = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,64}$")]
+#: A saved preset's 32 hex digits, or ``template-`` plus a template preset's key.
+PresetIdPath = Annotated[
+    str, Path(pattern=rf"^[a-z0-9-]{{1,{len(TEMPLATE_ID_PREFIX) + MAX_SLUG_LENGTH}}}$")
+]
 
 
 async def _require_valid(
@@ -50,30 +56,19 @@ async def _require_valid(
     history: ModelHistory,
     config: Config,
     assets: AssetStore,
+    fetcher: CheckoutFetcher,
 ) -> None:
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
-    source, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
-    require_valid_params(schema, params)
-    # A `file` value names an upload or a sample, as a render requires (#204); and
-    # checking it marks the upload used, so the sweep cannot take it from under the
-    # preset being saved (#296).
-    if any(parameter.type == "file" for parameter in schema.parameters):
-        try:
-            await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
-        except ValueError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    # Stricter than a render, which takes any value of the right type: a preset is
-    # kept and replayed, so it holds only what the dropdown itself could pick.
-    by_name = {parameter.name: parameter for parameter in schema.parameters}
-    for name, value in params.items():
-        options = [option.value for option in by_name[name].options]
-        if options and value not in options:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"{value!r} is not one of the options of {name!r}",
-                parameters=[name],
-            )
+    await require_valid_presets(
+        slug,
+        [params],
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
+    )
 
 
 def _unreadable(error: InvalidPresetsFileError) -> ApiError:
@@ -138,10 +133,17 @@ async def create_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     await _require_valid(
-        slug, body.params, paths=paths, history=history, config=config, assets=assets
+        slug,
+        body.params,
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
     )
     try:
         return await asyncio.to_thread(presets.create, slug, body)
@@ -176,6 +178,7 @@ async def duplicate_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     try:
@@ -185,7 +188,13 @@ async def duplicate_preset(
     except InvalidPresetsFileError as error:
         raise _unreadable(error) from None
     await _require_valid(
-        slug, source.params, paths=paths, history=history, config=config, assets=assets
+        slug,
+        source.params,
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
     )
     copy = ParamPresetCreate(name=body.name, params=source.params)
     try:
@@ -217,12 +226,19 @@ async def update_preset(
     assets: AssetsDep,
     history: HistoryDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
     if body.params is not None:
         await _require_valid(
-            slug, body.params, paths=paths, history=history, config=config, assets=assets
+            slug,
+            body.params,
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+            fetcher=fetcher,
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)

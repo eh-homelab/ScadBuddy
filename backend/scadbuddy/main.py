@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -9,35 +11,22 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import (
-    assets,
-    fonts,
-    health,
-    jobs,
-    libraries,
-    lsp,
-    metrics,
-    models,
-    outputs,
-    plates,
-    presets,
-    printing,
-    realtime,
-    settings,
-    upstream,
-    versions,
-)
+from scadbuddy.api import health, libraries, metrics, models
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
+from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
-from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
+from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
@@ -48,22 +37,24 @@ logger = logging.getLogger(__name__)
 DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 
 
+#: The `scadbuddy.api` modules whose router sits at the root rather than under
+#: :data:`API_PREFIX`.
+ROOT_ROUTE_MODULES = frozenset({"health", "metrics"})
+
+
 def _api_router() -> APIRouter:
+    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
+    is by name and does not matter, because no two routes match the same request
+    (`tests/api/test_routes.py`)."""
     router = APIRouter(prefix=API_PREFIX)
-    router.include_router(models.router)
-    router.include_router(upstream.router)
-    router.include_router(versions.router)
-    router.include_router(presets.router)
-    router.include_router(jobs.router)
-    router.include_router(assets.router)
-    router.include_router(outputs.router)
-    router.include_router(printing.router)
-    router.include_router(settings.router)
-    router.include_router(fonts.router)
-    router.include_router(plates.router)
-    router.include_router(libraries.router)
-    router.include_router(lsp.router)
-    router.include_router(realtime.router)
+    for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
+        if info.name in ROOT_ROUTE_MODULES:
+            continue
+        module = importlib.import_module(f"scadbuddy.api.{info.name}")
+        module_router = getattr(module, "router", None)
+        if isinstance(module_router, APIRouter):
+            router.include_router(module_router)
     return router
 
 
@@ -91,6 +82,16 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     app.openapi = openapi  # type: ignore[method-assign]
 
 
+async def _close_quietly(state: AppState) -> None:
+    """Close the queue and the bus after a failed start, logging (not raising) what
+    fails, so the start's own error is the one that propagates."""
+    for close in (state.events.aclose, state.queue.aclose):
+        try:
+            await close()
+        except Exception:
+            logger.exception("could not release what a failed start opened")
+
+
 def sweep_assets(state: AppState) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
@@ -105,6 +106,57 @@ def sweep_assets(state: AppState) -> list[str]:
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
+    return removed
+
+
+def _sweep_checkouts(state: AppState) -> list[str]:
+    """The thread half of :func:`sweep_library_checkouts`."""
+    # Every id any revision of any model.json -- live or deleted model, mine or a
+    # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
+    # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
+    # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
+    # no file of that name inside a model's folder.
+    named = state.history.object_ids_in(
+        f":(glob)*/{MODEL_META_NAME}",
+        f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
+        f":(literal){LOCKFILE_NAME}",
+    )
+    lock = read_lock(state.paths)
+    if lock is not None:
+        named |= {pin.commit for pin in lock.pins.values()}
+    # The image's seed (#169) is kept pinned or not: the boot would copy it back.
+    seed_dir = state.settings.resolve_seed_libraries_dir()
+    seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
+
+    def keep(name: str, commit: str) -> bool:
+        return (
+            commit in named
+            or (name, commit) in seeded
+            or bool(state.checkouts.leased(state.paths.libraries / name / commit))
+            # The live pins as a removal counts them: uncommitted edits, and a bare
+            # name or an unreadable model.json keeps every checkout of the library.
+            or bool(state.catalogue.library_users(name, commit))
+        )
+
+    return state.libraries.sweep_checkouts(keep)
+
+
+async def sweep_library_checkouts(state: AppState) -> list[str]:
+    """Remove the library checkouts that nothing pins (#271): no live model, and no
+    revision of any model in the history -- so restoring any revision never needs a
+    checkout this removed.
+
+    Under the checkout gate alone, as a removal: no pin or render in this process
+    runs meanwhile. Another replica sharing ``/data`` is kept apart by the age
+    guard in :meth:`LibraryStore.sweep_checkouts`. Without a repository there is
+    no history to read, so nothing is swept.
+    """
+    if not state.history.available:
+        return []
+    async with state.checkouts.removing():
+        removed = await asyncio.to_thread(_sweep_checkouts, state)
+    if removed:
+        logger.info("removed unpinned library checkouts", extra={"checkouts": removed})
     return removed
 
 
@@ -186,6 +238,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.libraries.sweep_staging)
     except OSError:
         logger.exception("could not sweep library staging clones")
+    # The curated libraries baked into the image (#169), so a fresh volume renders
+    # a BOSL2 model offline. Before the queue starts: the first render finds them.
+    seed_libraries_dir = state.settings.resolve_seed_libraries_dir()
+    if seed_libraries_dir is not None:
+        try:
+            await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
+        except OSError:
+            logger.exception("could not seed library checkouts from the image")
+    # After the migration, so every pin is where the sweep reads it. It logs and
+    # keeps what it cannot remove; one that cannot read the history removes nothing.
+    try:
+        await sweep_library_checkouts(state)
+    except (OSError, GitError):
+        logger.exception("could not sweep library checkouts")
     # The upload store's running total, recounted once (#390): uploads and sweeps
     # keep it from here, but a file added or removed while the process was down is
     # only counted by a scan.
@@ -196,12 +262,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    # After the queue, whose store migrated the database: the bus writes the event
+    # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
+    # was published before now (the built-in sync's commits) waited.
+    if isinstance(state.events, PgNotifyEventBus):
+        try:
+            await state.events.start()
+        except BaseException:
+            # Before the `try` below, so its `finally` never runs: release the
+            # queue that did start (workers, reaper, listener, pool) here, as
+            # `RenderQueue.start` releases its store when it fails.
+            await _close_quietly(state)
+            raise
+
     # Everything from here holds the queue's resources (the Postgres pool, its
     # workers), so it runs inside the `try` whose `finally` releases them: a
     # failure while starting up closes the queue as a shutdown does, rather than
     # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
     try:
+        # Follows the prints a previous process was following (#268).
+        await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
@@ -237,7 +318,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        await state.print_watcher.aclose()
         await state.queue.aclose()
+        if state.decisions is not None:
+            await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
 
 

@@ -5,11 +5,13 @@ import { AssistantChat } from './AssistantChat'
 interface Props {
   onClose: () => void
   focusKey: number
+  /** Inside Bambuddy's iframe (`AppShell`'s `embedded`). */
+  embedded?: boolean
   /** Tests pass one; the app loads whichever this build has. */
   factory?: ChatTransportFactory
 }
 
-export function AssistantPanel({ onClose, focusKey, factory }: Props) {
+export function AssistantPanel({ onClose, focusKey, factory, embedded }: Props) {
   const loaded = useAsync(async () => factory ?? (await loadChatTransportFactory()), [factory])
   if (loaded.loading) {
     return <p className="p-3 text-[12.5px] text-muted">Connecting to the assistant…</p>
@@ -21,5 +23,5 @@ export function AssistantPanel({ onClose, focusKey, factory }: Props) {
       </p>
     )
   }
-  return <AssistantChat factory={loaded.data} onClose={onClose} focusKey={focusKey} />
+  return <AssistantChat factory={loaded.data} onClose={onClose} focusKey={focusKey} embedded={embedded} />
 }

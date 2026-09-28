@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { api } from '../api/client'
 import type { PrintProgress } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
+import { fakeRealtime } from './realtime.fake'
 import { usePrintProgress } from './usePrintProgress'
 
 const OUTPUT_A = 'a'.repeat(32)
@@ -32,10 +33,13 @@ async function tick(ms: number) {
 
 describe('usePrintProgress', () => {
   let read: MockInstance<typeof api.getPrintProgress>
+  let realtime: ReturnType<typeof fakeRealtime>
 
   beforeEach(() => {
     vi.useFakeTimers()
     read = vi.spyOn(api, 'getPrintProgress')
+    // Unconfirmed: the hook reads at once rather than waiting for the socket.
+    realtime = fakeRealtime({ confirm: false })
   })
 
   afterEach(() => {
@@ -111,5 +115,50 @@ describe('usePrintProgress', () => {
     await settle()
 
     expect(read).not.toHaveBeenCalled()
+  })
+
+  describe('following a print (#268)', () => {
+    it('reads again on each event for the print, and not on the 2 s timer while the socket is up', async () => {
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
+      const { result } = renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      expect(realtime.following()).toEqual([`print:${OUTPUT_A}`])
+
+      await tick(10_000)
+      expect(read).toHaveBeenCalledTimes(1)
+
+      read.mockResolvedValue(fixtures.failedSliceProgress)
+      await realtime.signal(`print:${OUTPUT_A}`, 'print.settled')
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(result.current.polling).toBe(false)
+      expect(realtime.following()).toEqual([])
+    })
+
+    it('reads every 30 s while the socket is up, in case no event is coming', async () => {
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
+      renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      await tick(29_000)
+      expect(read).toHaveBeenCalledTimes(1)
+      await tick(2_000)
+      expect(read).toHaveBeenCalledTimes(2)
+    })
+
+    it('polls every 2 s while the socket is unavailable', async () => {
+      realtime.setStatus('unavailable')
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
+      renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      await tick(6_000)
+      expect(read).toHaveBeenCalledTimes(4)
+    })
+
+    it('stops following when the view goes', async () => {
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
+      const { unmount } = renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      unmount()
+      expect(realtime.following()).toEqual([])
+    })
   })
 })

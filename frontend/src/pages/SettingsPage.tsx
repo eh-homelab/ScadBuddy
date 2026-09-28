@@ -8,6 +8,7 @@ import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 
@@ -81,6 +82,15 @@ export function SettingsPage() {
     setUnit(settings.display_unit)
   }, [settings])
 
+  // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
+  // follows them; an edited one (`dirty`, below) is never overwritten, and says so.
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  const loadLatest = () => {
+    setChangedElsewhere(false)
+    setApiKey('')
+    settingsState.refresh()
+  }
+
   function draft(): SettingsUpdate {
     const body: SettingsUpdate = {
       bambuddy_url: url,
@@ -124,6 +134,22 @@ export function SettingsPage() {
         printerId !== idValue(settings.printer_id) ||
         defaultPlate !== (settings.default_plate ?? '') ||
         unit !== settings.display_unit))
+
+  // Read when the answer lands, not when the event came: typing may have started since.
+  const isDirty = useLatest(() => dirty)
+  useSubscription('settings', (signal) => {
+    // Save and Test connection both write the settings: that event is this tab's own.
+    if (signal === 'resync' || saving || testing) return
+    if (isDirty.current()) {
+      setChangedElsewhere(true)
+      return
+    }
+    settingsState.refresh(() => {
+      if (!isDirty.current()) return true
+      setChangedElsewhere(true)
+      return false
+    })
+  })
 
   function formValues() {
     return Object.fromEntries(Object.entries(form).map(([field, [value]]) => [field, value]))
@@ -214,7 +240,7 @@ export function SettingsPage() {
     setTest(null)
     try {
       // The server tests what it has stored, so save first or the test lags the form.
-      await api.putSettings(draft())
+      settingsState.setData(await api.putSettings(draft()))
       setApiKey('')
       setTest(await api.testSettings())
     } catch (cause) {
@@ -252,6 +278,21 @@ export function SettingsPage() {
           How ScadBuddy reaches Bambuddy. The API key is stored on the server and never sent
           back to the browser.
         </p>
+
+        {changedElsewhere && (
+          <div
+            role="status"
+            className="mt-4 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>Settings were changed elsewhere. Your unsaved changes here are kept until you load them.</span>
+            <Button size="sm" onClick={loadLatest}>
+              Load the latest
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setChangedElsewhere(false)}>
+              Keep mine
+            </Button>
+          </div>
+        )}
 
         <section className="mt-5 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Connection</h2>

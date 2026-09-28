@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -116,12 +116,134 @@ class Archive(BambuddyModel):
 
     id: int
     printer_id: int | None = None
+    project_id: int | None = None
+    plate_id: int | None = None
     status: str | None = None
     bed_type: str | None = None
     print_name: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime | None = None
+    #: SHA-256 of the file that was printed. The same bytes as the sliced library
+    #: file, whose ``file_hash`` it therefore equals (#305 plan, L6).
+    content_hash: str | None = None
+
+
+#: The prefix Bambuddy gives the photo it captures when a print finishes
+#: (``main.py:5346`` at v1.2.5.6). An uploaded photo is ``uuid[:8] + ext``.
+FINISH_PHOTO_PREFIX = "finish_"
+
+
+class ArchiveDetail(Archive):
+    """``GET /api/v1/archives/{id}`` (``ArchiveResponse``), as far as print history
+    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them."""
+
+    filename: str | None = None
+    file_size: int | None = None
+    thumbnail_path: str | None = None
+    timelapse_path: str | None = None
+    #: The slicer's project 3MF, when one was attached; served at ``/source``.
+    source_3mf_path: str | None = None
+    print_time_seconds: int | None = None
+    actual_time_seconds: int | None = None
+    filament_used_grams: float | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    layer_height: float | None = None
+    nozzle_diameter: float | None = None
+    cost: float | None = None
+    notes: str | None = None
+    tags: str | None = None
+    photos: list[str] = Field(default_factory=list)
+    failure_reason: str | None = None
+    quantity: int = 1
+    run_count: int = 0
+    successful_run_count: int = 0
+    failed_run_count: int = 0
+    last_run_at: datetime | None = None
+
+    @field_validator("photos", mode="before")
+    @classmethod
+    def _no_photos(cls, value: Any) -> Any:
+        # `ArchiveResponse.photos` is `list | None`.
+        return value if value is not None else []
+
+    @property
+    def finish_photo(self) -> str | None:
+        """The photo Bambuddy took when the print finished, if it took one."""
+        return next((name for name in self.photos if name.startswith(FINISH_PHOTO_PREFIX)), None)
+
+
+class ArchiveRun(BambuddyModel):
+    """One run of an archive (``PrintLogEntrySchema``): a reprint is another run."""
+
+    id: int
+    archive_id: int | None = None
+    printer_id: int | None = None
+    printer_name: str | None = None
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: int | None = None
+    filament_type: str | None = None
+    filament_color: str | None = None
+    filament_used_grams: float | None = None
+    cost: float | None = None
+    failure_reason: str | None = None
+
+
+class ArchiveRunList(BambuddyModel):
+    items: list[ArchiveRun] = Field(default_factory=list)
+    total: int = 0
+
+
+class TimelapseInfo(BambuddyModel):
+    duration: float
+    width: int
+    height: int
+    fps: float
+    codec: str
+    file_size: int
+    has_audio: bool = False
+
+
+class TimelapseThumbnails(BambuddyModel):
+    """Poster frames. Inline base64 JPEGs, not URLs."""
+
+    thumbnails: list[str] = Field(default_factory=list)
+    timestamps: list[float] = Field(default_factory=list)
+
+
+class LocalTimelapse(BambuddyModel):
+    name: str
+    size: int = 0
+
+
+class PrinterMediaFile(BambuddyModel):
+    name: str
+    path: str
+    size: int = 0
+    mtime: datetime | None = None
+    #: ``timelapse`` or ``ipcam``.
+    kind: str
+
+
+class PrinterMedia(BambuddyModel):
+    """``GET /archives/{id}/printer-media``. Without ``can_control_printer`` the printer
+    is not listed and ``warnings`` carries ``printer_files_forbidden``."""
+
+    archive_id: int
+    printer_id: int | None = None
+    local_timelapse: LocalTimelapse | None = None
+    remote_files: list[PrinterMediaFile] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ArchivePhotoUpload(BambuddyModel):
+    status: str
+    #: The name Bambuddy gave the photo, not the one it was uploaded under.
+    filename: str
+    photos: list[str] = Field(default_factory=list)
 
 
 class NozzleInfo(BambuddyModel):
@@ -291,24 +413,6 @@ class Pipeline(BambuddyModel):
     fanout_strategy: FanoutStrategy = "max_parallel"
 
 
-class PipelineCreate(BambuddyModel):
-    """``POST /api/v1/slicer-pipelines/``.
-
-    ``SlicerPipelineCreate`` carries **no** target or fanout fields even though
-    ``SlicerPipelineResponse`` returns them — a pipeline is created against the
-    defaults and re-targeted with ``PUT``, which ScadBuddy does not do.
-    """
-
-    name: str
-    description: str | None = None
-    printer_preset: PresetRef
-    process_preset: PresetRef
-    #: One per AMS slot, in the source plate's filament-slot order. Bambuddy rejects
-    #: an empty list (``minItems: 1``).
-    filament_presets: list[PresetRef]
-    bed_type: str | None = None
-
-
 class PipelineList(BambuddyModel):
     pipelines: list[Pipeline] = Field(default_factory=list)
 
@@ -341,6 +445,22 @@ class SliceRequest(BambuddyModel):
     bed_type: str | None = None
     plate: int = 1
     use_embedded_settings: bool = False
+
+    @property
+    def preset_key(self) -> str:
+        """What makes two slices of the same source the same slice (#316).
+
+        The printer, process and filament presets — the preset triple — plus the plate
+        and the plate type: a slice of plate 2, or for another plate type, is a
+        different file even with the same presets. Recorded as
+        :attr:`~scadbuddy.library.outputs.SlicedCopy.preset_key`.
+        """
+        filaments = ",".join(f"{ref.source}:{ref.id}" for ref in self.filament_presets)
+        return (
+            f"{self.printer_preset.source}:{self.printer_preset.id}"
+            f"/{self.process_preset.source}:{self.process_preset.id}"
+            f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
+        )
 
 
 class SliceJobAccepted(BambuddyModel):
@@ -441,49 +561,6 @@ class PipelineRunRequest(BambuddyModel):
     source_archive_id: int | None = None
     copies: int = 1
     force: bool = False
-
-
-class EligibilityRequest(BambuddyModel):
-    """``POST /api/v1/slicer-pipelines/{id}/check-eligibility``. One source, as above."""
-
-    source_library_file_id: int | None = None
-    source_archive_id: int | None = None
-    force: bool = False
-
-
-class EligibilityIssue(BambuddyModel):
-    """``kind`` is an open enum here on purpose — Bambuddy adds kinds between
-    releases and an unknown one must still render, not 502 the whole report."""
-
-    kind: str
-    slot_index: int | None = None
-    expected: str | None = None
-    actual: str | None = None
-
-
-class PerPrinterReport(BambuddyModel):
-    printer_id: int
-    printer_name: str
-    ok: bool
-    issues: list[EligibilityIssue] = Field(default_factory=list)
-
-
-class EligibilityReport(BambuddyModel):
-    """Returned by ``check-eligibility`` and, on a 409, by ``run``.
-
-    Under ``target_kind="printer_class"`` ``ok`` is true when *at least one* matching
-    printer passes, and the per-printer detail moves to ``printer_reports`` — ``issues``
-    then carries only class-level problems. Reading ``ok`` as "every printer is ready"
-    is wrong for that target kind.
-    """
-
-    ok: bool
-    target_kind: TargetKind = "specific_printer"
-    target_printer_id: int | None = None
-    target_printer_name: str | None = None
-    target_model_class: str | None = None
-    issues: list[EligibilityIssue] = Field(default_factory=list)
-    printer_reports: list[PerPrinterReport] = Field(default_factory=list)
 
 
 class Spool(BambuddyModel):

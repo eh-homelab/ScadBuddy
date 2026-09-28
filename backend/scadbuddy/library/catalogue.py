@@ -23,6 +23,7 @@ from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
+    LEGACY_PRESETS_NAME,
     MODEL_META_NAME,
     SOURCE_NAME,
     DataPaths,
@@ -36,7 +37,9 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.presets import TemplatePreset, TemplatePresets
 from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
+from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -209,6 +212,16 @@ class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    #: The template's own presets (#326), replacing the list whole. Names unique
+    #: ignoring case, explicit ids unique; the route writes every key down.
+    presets: list[TemplatePreset] | None = None
+
+    @field_validator("presets")
+    @classmethod
+    def _presets_are_distinct(
+        cls, presets: list[TemplatePreset] | None
+    ) -> list[TemplatePreset] | None:
+        return None if presets is None else TemplatePresets(presets=presets).presets
 
     @field_validator("name")
     @classmethod
@@ -691,6 +704,12 @@ class Catalogue:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw)
+            if patch.presets is not None:
+                # The list written is the template's presets whole: a legacy file left
+                # beside it would add its entries back (they are read below model.json),
+                # so `[]` could never clear them. A client edits the merged list it
+                # read, so what it keeps of the legacy file is in the list it wrote.
+                (self.paths.model_dir(slug) / LEGACY_PRESETS_NAME).unlink(missing_ok=True)
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
@@ -1240,7 +1259,7 @@ class Catalogue:
         logged and keeps its previous mirror (or none), and the rest still sync.
         """
         try:
-            wanted = _templates_in(bundled)
+            wanted = [slug for slug in _templates_in(bundled) if _routable(slug)]
             mirror = self.paths.builtins
             mirror.mkdir(parents=True, exist_ok=True)
             present = sorted(mirror.iterdir())
@@ -1253,7 +1272,7 @@ class Catalogue:
         changed: list[str] = []
         for slug in wanted:
             try:
-                if _tree(bundled / slug) == _tree(mirror / slug):
+                if _same_tree(bundled / slug, mirror / slug):
                     continue
                 self._replace_builtin(bundled / slug, mirror / slug)
             except OSError:
@@ -1385,13 +1404,34 @@ class Catalogue:
             _remove_tree(retired)
 
 
-def _tree(directory: Path) -> dict[str, bytes]:
-    """Every file under ``directory`` by relative path, dotfiles left out as the copy
-    leaves them out. Empty when there is no such directory."""
+def _routable(slug: str) -> bool:
+    """Can a route reach ``builtin:<slug>``? A bundled directory whose name is no slug
+    would be a built-in nothing can address, so it is skipped (#197)."""
+    if is_slug(slug):
+        return True
+    logger.warning("not a usable slug; skipping this built-in template", extra={"slug": slug})
+    return False
+
+
+def _same_tree(source: Path, target: Path) -> bool:
+    """Does ``target`` hold what ``source`` does? The copy keeps each file's size and
+    mtime, so matching stats settle it without reading a byte; only when they differ
+    are the bytes compared (#206)."""
+    return _tree(source, _stat) == _tree(target, _stat) or _tree(source) == _tree(target)
+
+
+def _stat(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def _tree(directory: Path, read: Callable[[Path], object] = Path.read_bytes) -> dict[str, object]:
+    """``read`` of every file under ``directory`` by relative path, dotfiles left out
+    as the copy leaves them out. Empty when there is no such directory."""
     if not directory.is_dir():
         return {}
     return {
-        path.relative_to(directory).as_posix(): path.read_bytes()
+        path.relative_to(directory).as_posix(): read(path)
         for path in directory.rglob("*")
         if path.is_file()
         and not any(part.startswith(".") for part in path.relative_to(directory).parts)

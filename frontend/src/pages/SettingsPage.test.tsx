@@ -2,6 +2,7 @@ import { screen, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
@@ -182,5 +183,50 @@ describe('SettingsPage', () => {
     const usage = await screen.findByTestId('asset-usage')
     expect(usage).toHaveTextContent('2 (no limit)')
     expect(usage).toHaveTextContent('640 B (no limit)')
+  })
+})
+
+describe('SettingsPage, live (#269)', () => {
+  const OTHER = 'https://scadbuddy.elsewhere.test'
+
+  it('follows settings saved elsewhere while the form is untouched', async () => {
+    renderPage(<SettingsPage />)
+    const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
+    await api.putSettings({ public_url: OTHER })
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    await waitFor(() => expect(field).toHaveValue(OTHER))
+  })
+
+  it('keeps an edited form and says the settings changed elsewhere', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
+    // Seeded from the stored settings first; editing before that would be overwritten.
+    await waitFor(() => expect(field).not.toHaveValue(''))
+    await user.clear(field)
+    await user.type(field, 'https://mine.test')
+
+    await api.putSettings({ public_url: OTHER })
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    expect(await screen.findByText(/Settings were changed elsewhere/)).toBeInTheDocument()
+    expect(field).toHaveValue('https://mine.test')
+
+    await user.click(screen.getByRole('button', { name: 'Load the latest' }))
+    await waitFor(() => expect(field).toHaveValue(OTHER))
+  })
+
+  it("does not call this tab's own Test connection a change made elsewhere", async () => {
+    const { user } = renderPage(<SettingsPage />)
+    const field = await screen.findByLabelText(/ScadBuddy.s own URL/)
+    await waitFor(() => expect(field).not.toHaveValue(''))
+    await user.clear(field)
+    await user.type(field, 'https://tested.test')
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await screen.findByRole('status')
+
+    // The test saved the form; this is that save's own event.
+    emitRealtime('settings.changed', ['settings'], { section: 'connection' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
+    expect(field).toHaveValue('https://tested.test')
   })
 })

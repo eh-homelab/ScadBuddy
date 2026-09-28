@@ -15,138 +15,27 @@
 # The one exception is `--target agent`: the AI agent service, a separate
 # Node image deployed as a sidecar container beside this one (see its stage).
 
-# ── frontend bundle ───────────────────────────────────────────────────────────
-# Built here rather than copied from the host so a stale local `frontend/dist`
-# can never reach the image (.dockerignore drops it from the context too).
-# Node MAJORS here are LTS-only, and that is a constraint rather than a
-# preference. Odd-numbered releases (25, 27, ...) never become LTS, and they do
-# not ship corepack -- which the next line depends on. Installing it from npm
-# does not rescue them either: corepack 0.36 declares
-# `node: ^22.22.2 || ^24.15.0 || >=26.0.0`, so npm refuses node 25 outright.
-# Dependabot bumped this 24 -> 25 in #55 and broke every build on main; that is
-# now excluded in .github/dependabot.yml. Move it deliberately, to the next
-# EVEN major, together with ci.yml's `node-version` (they must not diverge --
-# a mismatch passes the frontend job and fails only in the image).
-FROM node:24-bookworm-slim AS frontend
-
-WORKDIR /src/frontend
-
-# corepack reads the `packageManager` field in package.json, so the pnpm
-# version is pinned by the frontend's own lockfile rather than by this file.
-RUN corepack enable
-
-# Manifest + lockfile + workspace config first: `pnpm install` is the expensive
-# layer and only these can invalidate it.
-#
-# pnpm-workspace.yaml is NOT optional and is easy to leave out. pnpm 10+ refuses
-# to silently skip a dependency's build scripts — it hard-errors with
-# ERR_PNPM_IGNORED_BUILDS — and the approvals live in that file
-# (`allowBuilds: {esbuild, msw}`), not in package.json. Copying only the
-# manifest and lockfile produced an install that worked in the `frontend` CI job
-# (whole tree checked out) and failed only here, which is the worst shape for
-# this class of bug. Verified on CI run 35820566117.
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY frontend/ ./
-RUN pnpm build
-
-# ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
-# A SEPARATE image, reached with `--target agent` and deployed as a second
-# container in the ScadBuddy pod — the sidecar layout the AI design spec picks
-# in §4.1 (docs/superpowers/specs/2026-09-27-ai-integration-design.md): one
-# process per container, no supervisor under tini, independent restarts. It
-# shares nothing with the OpenSCAD stages below, and it sits ABOVE them so
-# `runtime` stays the last stage and a bare `docker build .` still produces the
-# backend image.
-#
-# Same Node major as the `frontend` stage and ci.yml, for the same reasons
-# (see the comment on that stage); move all three together.
-FROM node:24-bookworm-slim AS agent-build
-
-WORKDIR /src/agent
-RUN corepack enable
-
-# agent/ has no pnpm-workspace.yaml because none of its dependencies has an
-# install script to approve (a frozen install passes without one). If one ever
-# does, pnpm fails here with ERR_PNPM_IGNORED_BUILDS: add the file with its
-# `allowBuilds` entry and copy it in on this line, as the frontend stage does.
-COPY agent/package.json agent/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY agent/ ./
-RUN pnpm build
-
-# Production dependencies only, installed from the same lockfile in a stage of
-# their own so the shipped node_modules carries no eslint/vitest/typescript.
-FROM node:24-bookworm-slim AS agent-deps
-
-WORKDIR /src/agent
-RUN corepack enable
-COPY agent/package.json agent/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod
-
-FROM node:24-bookworm-slim AS agent
-
-# tini for the same reason as the backend image: the Agent SDK spawns the
-# Claude Code binary as a child process per query, and node as PID 1 does not
-# reap orphans.
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
-    && rm -rf /var/lib/apt/lists/*
-
-# Numeric uid 10001, the same as the backend image, so one pod
-# securityContext covers both containers. The state directory is the only
-# writable tree the service needs (agent/src/harness/options.ts
-# DEFAULT_STATE_DIR): `claude/` is CLAUDE_CONFIG_DIR, `work/` the scratch cwd.
-# Mount an emptyDir (or the data volume) there and the root filesystem can be
-# read-only (spec §4.4).
-RUN groupadd --gid 10001 scadbuddy \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/scadbuddy-agent --shell /usr/sbin/nologin scadbuddy \
-    && install -d -o 10001 -g 10001 /var/lib/scadbuddy-agent /var/lib/scadbuddy-agent/claude /var/lib/scadbuddy-agent/work
-
-WORKDIR /app/agent
-COPY --from=agent-deps /src/agent/node_modules ./node_modules
-COPY --from=agent-build /src/agent/package.json ./
-COPY --from=agent-build /src/agent/dist ./dist
-
-# The Claude Code binary the Agent SDK bundles is pinned the way
-# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
-# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
-# the harness underneath every query. This fails the build when either the
-# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
-# from the pin. Bump it together with the SDK version in agent/package.json.
-# It runs against the node_modules that ship, for the platform being built.
-ARG CLAUDE_CODE_VERSION=2.1.283
-RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
-ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
-    NODE_ENV=production \
-    HOME=/var/lib/scadbuddy-agent \
-    CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
-
-USER 10001:10001
-EXPOSE 8081
-
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/main.js"]
-
-# No curl in this image; node's fetch is the probe. Exec form, like the
-# backend's, so the exit status is the signal.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+# The library pins the `libraries` stage bakes in (#169), global so that stage and
+# the `app` stage's catalogue check read one value. See that stage.
+# Moving BOSL2_REF/BOSL2_COMMIT or baking in another library: update THIRD_PARTY_NOTICES.md.
+ARG BOSL2_REF=v2.0.761
+ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
 # ── uv ────────────────────────────────────────────────────────────────────────
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.18 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
-FROM openscad/openscad:dev AS base
+# Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
+# cannot move under a build. OpenSCAD's only stable release (2021.01) has no
+# Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
+# OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
+FROM openscad/openscad:dev.2026-09-28@sha256:992508950d86ed5ea6a6ed19934e7d65aa6b1959df69823666f575e9c1579b49 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
-# a rolling nightly on Debian trixie, so a pinned version here would break the
+# a nightly on Debian trixie, so a pinned version here would break the
 # build the first time trixie moves, which is the opposite of reproducibility.
 #
 # Fonts are runtime dependencies, not niceties — `text()` in a .scad silently
@@ -207,6 +96,156 @@ RUN groupadd --gid 10001 scadbuddy \
 # `fc-list` (the font dropdown in the customizer) answers immediately.
 RUN fc-cache --force --system-only
 
+# ── api-spec: the OpenAPI spec the clients are typed against ──────────────────
+# backend/openapi.json and both schema.d.ts files are not committed (#492). The
+# spec is exported here, off `base`, with the backend's own interpreter and
+# locked dependencies, and the `frontend` and `agent-build` stages copy it in to
+# generate their clients (their `pnpm gen:api` reads SCADBUDDY_OPENAPI_JSON).
+# That is why `uv` and `base` sit above the Node stages: a stage can only copy
+# from one defined before it.
+FROM base AS api-spec
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_LINK_MODE=copy
+
+WORKDIR /src/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# The venv's python, not `uv run`: that would sync the dev group too.
+COPY backend/ ./
+RUN uv sync --frozen --no-dev \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+
+# ── frontend bundle ───────────────────────────────────────────────────────────
+# Built here rather than copied from the host so a stale local `frontend/dist`
+# can never reach the image (.dockerignore drops it from the context too).
+# Node MAJORS here are LTS-only, and that is a constraint rather than a
+# preference. Odd-numbered releases (25, 27, ...) never become LTS, and they do
+# not ship corepack -- which the next line depends on. Installing it from npm
+# does not rescue them either: corepack 0.36 declares
+# `node: ^22.22.2 || ^24.15.0 || >=26.0.0`, so npm refuses node 25 outright.
+# Dependabot bumped this 24 -> 25 in #55 and broke every build on main; that is
+# now excluded in .github/dependabot.yml. Move it deliberately, to the next
+# EVEN major, together with ci.yml's `node-version` (they must not diverge --
+# a mismatch passes the frontend job and fails only in the image).
+FROM node:24-bookworm-slim AS frontend
+
+WORKDIR /src/frontend
+
+# corepack reads the `packageManager` field in package.json, so the pnpm
+# version is pinned by the frontend's own lockfile rather than by this file.
+RUN corepack enable
+
+# Manifest + lockfile + workspace config first: `pnpm install` is the expensive
+# layer and only these can invalidate it.
+#
+# pnpm-workspace.yaml is NOT optional and is easy to leave out. pnpm 10+ refuses
+# to silently skip a dependency's build scripts — it hard-errors with
+# ERR_PNPM_IGNORED_BUILDS — and the approvals live in that file
+# (`allowBuilds: {esbuild, msw}`), not in package.json. Copying only the
+# manifest and lockfile produced an install that worked in the `frontend` CI job
+# (whole tree checked out) and failed only here, which is the worst shape for
+# this class of bug. Verified on CI run 35820566117.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# After the install, so an API change does not re-download node_modules.
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+
+COPY frontend/ ./
+RUN pnpm build
+
+# ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
+# A SEPARATE image, reached with `--target agent` and deployed as a second
+# container in the ScadBuddy pod — the sidecar layout the AI design spec picks
+# in §4.1 (docs/superpowers/specs/2026-09-27-ai-integration-design.md): one
+# process per container, no supervisor under tini, independent restarts. It
+# shares nothing with the OpenSCAD stages except the exported spec (`api-spec`),
+# and it sits above `app` so `runtime` stays the last stage and a bare
+# `docker build .` still produces the backend image.
+#
+# Same Node major as the `frontend` stage and ci.yml, for the same reasons
+# (see the comment on that stage); move all three together.
+FROM node:24-bookworm-slim AS agent-build
+
+WORKDIR /src/agent
+RUN corepack enable
+
+# agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
+# install script that is declined there); without it the frozen install fails
+# with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
+# stage does.
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+
+COPY agent/ ./
+RUN pnpm build
+
+# Production dependencies only, installed from the same lockfile in a stage of
+# their own so the shipped node_modules carries no eslint/vitest/typescript.
+FROM node:24-bookworm-slim AS agent-deps
+
+WORKDIR /src/agent
+RUN corepack enable
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+
+FROM node:24-bookworm-slim AS agent
+
+# tini for the same reason as the backend image: the Agent SDK spawns the
+# Claude Code binary as a child process per query, and node as PID 1 does not
+# reap orphans.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Numeric uid 10001, the same as the backend image, so one pod
+# securityContext covers both containers. The state directory is the only
+# writable tree the service needs (agent/src/harness/options.ts
+# DEFAULT_STATE_DIR): `claude/` is CLAUDE_CONFIG_DIR, `work/` the scratch cwd.
+# Mount an emptyDir (or the data volume) there and the root filesystem can be
+# read-only (spec §4.4).
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/scadbuddy-agent --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o 10001 -g 10001 /var/lib/scadbuddy-agent /var/lib/scadbuddy-agent/claude /var/lib/scadbuddy-agent/work
+
+WORKDIR /app/agent
+COPY --from=agent-deps /src/agent/node_modules ./node_modules
+COPY --from=agent-build /src/agent/package.json ./
+COPY --from=agent-build /src/agent/dist ./dist
+
+# The Claude Code binary the Agent SDK bundles is pinned the way
+# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
+# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
+# the harness underneath every query. This fails the build when either the
+# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
+# from the pin. Bump it together with the SDK version in agent/package.json.
+# It runs against the node_modules that ship, for the platform being built.
+ARG CLAUDE_CODE_VERSION=2.1.283
+RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    NODE_ENV=production \
+    HOME=/var/lib/scadbuddy-agent \
+    CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
+
+USER 10001:10001
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/main.js"]
+
+# No curl in this image; node's fetch is the probe. Exec form, like the
+# backend's, so the exit status is the signal.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
 # the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt
@@ -246,6 +285,41 @@ RUN case "$TARGETARCH" in \
     && install -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
     && openscad-lsp --version
 
+# ── libraries: the catalogue's common libraries, baked in (#169) ──────────────
+# A fresh install renders a BOSL2 model offline: at boot the backend copies each
+# checkout here onto the volume if it is not there yet
+# (backend/scadbuddy/library/library_seed.py). Laid out as the volume lays out
+# checkouts, `<name>/<commit>/<name>/`, without `.git`.
+#
+# The ref is the curated catalogue's (CURATED in
+# backend/scadbuddy/library/libraries.py; the `app` stage fails the build when
+# they differ), and the commit it resolves to is pinned here the way
+# OPENSCAD_VERSION is: a tag moved upstream fails the build rather than shipping a
+# different tree under the same commit's name. Bump the pair together with the
+# catalogue's ref.
+#
+# Only BOSL2, by size: its checkout is ~12 MB. dotSCAD (~17 MB) and NopSCADlib
+# (~44 MB) are left to be cloned when pinned; Round-Anything's ~8 MB is almost all
+# a demo STL; MCAD already ships in the base image
+# (/usr/local/share/openscad/libraries) and its catalogue ref is a branch, which
+# would fail this check on every upstream commit. Each seeded library costs its
+# size twice: once in the image, once on each volume.
+FROM base AS libraries
+
+ARG BOSL2_REF
+ARG BOSL2_COMMIT
+
+WORKDIR /opt/scadbuddy-libraries
+RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
+        https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
+    && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
+    && if [ "$actual" != "$BOSL2_COMMIT" ]; then \
+         echo "ERROR: BOSL2 '${BOSL2_REF}' now resolves to '${actual}', this build pins '${BOSL2_COMMIT}'." >&2; \
+         echo "       Check what moved the tag upstream, then bump BOSL2_COMMIT." >&2; \
+         exit 1; \
+       fi \
+    && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git"
+
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
 
@@ -255,11 +329,11 @@ FROM base AS app
 # The assertion is deliberate and it is meant to break the build. Every
 # structural fact the render pipeline depends on (the .param schema fields, the
 # basematerials + per-triangle `p1` index, the `displaycolor` alpha quirk) was
-# measured against one nightly. `:dev` is a rolling tag, so a silent OpenSCAD
-# swap would change render output with nothing anywhere reporting it. When this
-# fires, re-verify §3 of the design spec against the new build and bump the
-# default below in the same commit.
-ARG OPENSCAD_VERSION=2026.09.23
+# measured against one nightly. The base is pinned by digest, so this should
+# never fire; it stays as the check that the tag, digest and version agree. When
+# bumping the base, re-verify §3 of the design spec against the new build and
+# change the FROM line and the default below in the same commit.
+ARG OPENSCAD_VERSION=2026.09.28
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
@@ -355,6 +429,17 @@ ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/scadbuddy
+
+# The baked-in libraries (see the `libraries` stage), after everything above so a
+# bump rebuilds only these two layers. Root-owned and read-only: the boot copies
+# them onto the volume and never writes here. The check fails the build when a
+# seeded ref is not the catalogue's, the seed holds anything not listed, or
+# THIRD_PARTY_NOTICES.md does not name each seeded library's ref and commit.
+ARG BOSL2_REF
+COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
+RUN python -m scadbuddy.library.library_seed verify /app/libraries \
+        /app/THIRD_PARTY_NOTICES.md "BOSL2=${BOSL2_REF}"
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is

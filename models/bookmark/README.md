@@ -36,7 +36,7 @@ missing-file behaviour) is the shared ScadBuddy file-parameter convention
 | `pointed` | The bottom end comes to a rounded point `end_length` long. |
 | `ribbon` | Swallowtail: a V notch `end_length` deep in the bottom end. |
 | `corner` | Triangular pocket that slips over the corner of a page (below). |
-| `rounded_tab` | The top end is a full semicircle. |
+| `rounded_tab` | The top end is a full semicircle (flattened to a half-ellipse when the bookmark is wider than it is long). |
 | `scalloped` | Every edge is a row of round scallops. |
 | `star_top` / `heart_top` | A star or heart `topper_size` wide on top of the strip, in `topper_color`. |
 | `custom_mask` | The outline comes from `mask_file` (same as `mask_mode = outline`). |
@@ -76,7 +76,7 @@ some sag; raise it if the first bridge layer droops onto the back plate.
 | `hole_on_any_shape` | `false` | Cord hole in the other shapes too. |
 | `end_length` | `18` | Pointed: length of the point. Ribbon: depth of the notch. |
 | `scallop_size` | `8` | Scallop diameter, mm. |
-| `topper_size` | `56` | Width of the star / heart on top, mm (at most 2.5 x `width`). |
+| `topper_size` | `56` | Width of the star / heart on top, mm (at most 2.5 x `width`, and no taller than 60 % of the length; a NOTE says when it is reduced). |
 
 ### Corner clip
 
@@ -131,7 +131,7 @@ bookmark can have a cutout mask *and* a colour overlay.
 | `overlay_type` | `auto` | As `mask_type`. |
 | `overlay_style` | `inlay` | `inlay` (flush, `inlay_depth` deep) or `raised` (`relief` high). |
 | `overlay_scale` | `55` | Picture width as % of the bookmark width (`corner_size` on the corner). |
-| `overlay_x`, `overlay_y` | `0`, `46` | Position from the centre of the strip, mm (from the right-angle corner on the page corner). |
+| `overlay_x`, `overlay_y` | `0`, `46` | Position from the centre of the strip, mm (from the right-angle corner on the page corner). A NOTE warns when the centre is off the bookmark, e.g. the default 46 on a bookmark under 92 mm long. |
 | `overlay_rotation` | `0` | Degrees. |
 | `overlay_invert` | `false` | Swap picture and background. |
 
@@ -145,7 +145,7 @@ bookmark can have a cutout mask *and* a colour overlay.
 | `text_style` | `inlay` | Flush inlay or raised. |
 | `text_size` | `11` | Letter height, mm. |
 | `auto_fit` | `true` | Shrink (never enlarge) the text to fit inside the rim and clear of the cord hole. |
-| `text_y` | `-12` | Move the text along the strip, mm. |
+| `text_y` | `-12` | Move the text along the strip, mm. The text keeps clear of the ends and the cord hole; a `text_y` that would put it off the strip is pulled back with a NOTE. |
 
 ### Layers
 
@@ -276,7 +276,7 @@ tie bars; ScadBuddy renders once more per colour for the closed parts.
 ## Verifying
 
 ```bash
-./verify.sh                      # 35 cases
+./verify.sh                      # 43 cases
 ONLY='corner|missing' ./verify.sh    # a subset by name regex
 ```
 
@@ -309,7 +309,7 @@ render the same parts, of the same volume), and the largest bookmark. For each i
   the classic `width` x `length`); refused names are never opened and are
   logged with a NOTE.
 
-Last run: `OK: all cases passed` (35 cases, 415 checks).
+Last run: `OK: all cases passed` (43 cases, 521 checks).
 
 ## Upload widget (#204)
 

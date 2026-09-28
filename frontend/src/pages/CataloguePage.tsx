@@ -1,30 +1,55 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
 import { useAgentHandlers } from '../agent/useAgentHandlers'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
+import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import {
+  type CatalogueQuery,
+  clearFilters,
+  filterModels,
+  fold,
+  parseQuery,
+  tagCounts,
+  toParams,
+} from '../lib/catalogueQuery'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
-  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [])
+  // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
+  const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
+  const query = useMemo(() => parseQuery(params), [params])
+  const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
+  // Counted over what the other filters leave, so a chip's count is what clicking it shows.
+  const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
 
-  // #254 — the catalogue's browser tools. There is no search box on this page, so
-  // `search` filters the list the page already holds rather than typing anywhere.
+  function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
+    setParams(toParams(next), options)
+  }
+
+  function addTag(tag: string) {
+    if (!query.tags.includes(tag)) setQuery({ ...query, tags: [...query.tags, tag] })
+  }
+
+  // #254 — the catalogue's browser tools. `search` filters the list the page already
+  // holds rather than typing into the search box; the filters on screen (#276) are
+  // URL state, which the global `navigate` tool sets (`/?q=…&tag=…`).
   useAgentHandlers(
     'catalogue',
     {
@@ -46,7 +71,7 @@ export function CataloguePage() {
         return { route: modelPath(slug) }
       },
     },
-    () => ({ loading, error: error?.message, models: data?.length }),
+    () => ({ loading, error: error?.message, models: data?.length, shown: shown.length }),
   )
 
   function added(model: ModelSummary) {
@@ -93,12 +118,27 @@ export function CataloguePage() {
         )}
 
         {data && data.length > 0 && (
+          <CatalogueFilters
+            query={query}
+            onChange={setQuery}
+            tags={tags}
+            shown={shown.length}
+            total={data.length}
+          />
+        )}
+
+        {data && data.length > 0 && shown.length === 0 && (
+          <NoResults onClear={() => setQuery(clearFilters(query))} />
+        )}
+
+        {shown.length > 0 && (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {data.map((model) => (
+            {shown.map((model) => (
               <ModelCard
                 key={model.slug}
                 model={model}
-                upstreamName={data.find((m) => m.slug === model.upstream?.id)?.name}
+                upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
+                onTag={addTag}
               />
             ))}
           </ul>
@@ -125,13 +165,21 @@ export function CataloguePage() {
   )
 }
 
-function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?: string }) {
+function ModelCard({
+  model,
+  upstreamName,
+  onTag,
+}: {
+  model: ModelSummary
+  upstreamName?: string
+  onTag: (tag: string) => void
+}) {
   const origin = safeHttpUrl(model.origin_url)
   return (
     <li
       data-model-card={model.slug}
       className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
-      <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
+      <Link to={modelPath(model.slug)} className="block p-3 pb-0 focus-visible:rounded-[6px]">
         <ModelThumbnail
           src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
           alt={model.name}
@@ -151,15 +199,21 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
             {model.description}
           </p>
         )}
-
+      </Link>
+      {/* Outside the card's link too: a tag is a button that adds it to the filter. */}
+      <div className="px-3 pb-3">
         {(model.tags ?? []).length > 0 && (
           <ul className="mt-2.5 flex flex-wrap gap-1">
             {(model.tags ?? []).map((tag) => (
-              <li
-                key={tag}
-                className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
-              >
-                {tag}
+              <li key={tag}>
+                <button
+                  type="button"
+                  aria-label={`Filter by ${tag}`}
+                  onClick={() => onTag(tag)}
+                  className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-surface-3 hover:text-ink"
+                >
+                  {tag}
+                </button>
               </li>
             ))}
           </ul>
@@ -168,7 +222,7 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
         <p className="mt-3 border-t border-line pt-2 text-[12px] text-faint">
           Updated {timeAgo(model.updated_at)}
         </p>
-      </Link>
+      </div>
       {/* Outside the card's link: an anchor cannot nest inside another. Only an
           http(s) origin is linked at all; anything else is not shown (#179). */}
       {origin && (
@@ -195,10 +249,10 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
 }
 
 function matches(model: ModelSummary, query: string): boolean {
-  const wanted = query.trim().toLowerCase()
+  const wanted = fold(query.trim())
   if (!wanted) return true
   return [model.slug, model.name, model.description ?? '', ...(model.tags ?? [])].some((text) =>
-    text.toLowerCase().includes(wanted),
+    fold(text).includes(wanted),
   )
 }
 
@@ -218,6 +272,20 @@ function hostOf(url: string): string {
   } catch {
     return url
   }
+}
+
+function NoResults({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
+      <h2 className="text-[15px] font-medium">No models match</h2>
+      <p className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed text-muted">
+        Nothing in the catalogue fits this search and these filters.
+      </p>
+      <Button className="mt-4" onClick={onClear}>
+        Clear filters
+      </Button>
+    </div>
+  )
 }
 
 function EmptyState({ onUpload, onImport }: { onUpload: () => void; onImport: () => void }) {

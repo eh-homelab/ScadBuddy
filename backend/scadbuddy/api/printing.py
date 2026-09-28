@@ -16,8 +16,10 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintProgressDep,
+    PrintWatcherDep,
     SettingsStoreDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
@@ -115,8 +117,10 @@ async def post_run(
     output_id: OutputIdPath,
     body: PrintRunRequest,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintRunResult:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -128,8 +132,9 @@ async def post_run(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await run_for_output(client, outputs, meta, settings, body)
+        result = await run_for_output(client, outputs, uploads, meta, settings, body)
     observer.started(meta)
+    await watcher.started(meta.id)
     return result
 
 
@@ -141,6 +146,7 @@ async def post_run(
 async def get_filaments(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
@@ -167,6 +173,7 @@ async def get_filaments(
         return await filament_options_for_output(
             client,
             outputs,
+            uploads,
             meta,
             settings,
             printer_id=printer_id,
@@ -183,6 +190,7 @@ async def get_filaments(
 async def get_choices(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
@@ -191,7 +199,9 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await choices_for_output(client, outputs, meta, settings, printer_id=printer_id)
+        return await choices_for_output(
+            client, outputs, uploads, meta, settings, printer_id=printer_id
+        )
 
 
 @router.get(
@@ -204,6 +214,7 @@ async def get_progress(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintProgress | None:
     """Follow this output's last print, slice then queue (#89).
 
@@ -216,6 +227,11 @@ async def get_progress(
     async with client_for(store.load()) as client:
         progress = await progress_for(client, meta)
     observer.observe(meta, progress)
+    # Someone is looking at a print that is still moving: make sure it is followed
+    # (#268). The watcher may not be, after a restart without a database, for a print
+    # sent before the watcher existed, or once it gave up on a quiet print.
+    if progress is not None and not progress.settled:
+        watcher.watch(meta.id)
     return progress
 
 

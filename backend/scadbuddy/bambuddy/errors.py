@@ -42,6 +42,9 @@ class Scope(StrEnum):
     MANAGE_LIBRARY = "Manage Library"
     MANAGE_QUEUE = "Manage Queue"
     MANAGE_PROJECTS = "Manage Projects"
+    #: ``can_manage_archives``: photo upload and delete, and pulling a timelapse off
+    #: the printer (Bambuddy ``auth.py:194-196`` at v1.2.5.6).
+    MANAGE_ARCHIVES = "Manage Archives"
 
 
 def not_configured(detail: str) -> ApiError:

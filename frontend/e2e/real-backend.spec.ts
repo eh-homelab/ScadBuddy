@@ -180,6 +180,36 @@ test.describe('real backend', () => {
   })
 
   /**
+   * Issue #408, end to end: a model that draws only a picture it cannot open fails on a
+   * real OpenSCAD (exit 1, "Current top level object is empty."), and the failed job
+   * still says which file it could not open -- a failure has no result to carry it.
+   */
+  test('says which file a failed render could not open', async ({ page, request }) => {
+    test.setTimeout(180_000)
+
+    const slug = `e2e-missing-svg-${Date.now().toString(36)}`
+    // A parameter to change: the customizer renders on a change, not on open.
+    const source = `// ${slug}\ntag = "a";\ncolor("red") linear_extrude(2) import("pic.svg");\n`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(source) },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+
+    try {
+      await page.goto(`/m/${slug}`)
+      await page.getByRole('region', { name: 'Parameters' }).getByRole('textbox').first().fill('b')
+      await expect(page.getByTestId('render-log')).toBeVisible({ timeout: 120_000 })
+      await expect(page.getByRole('region', { name: 'Render warnings' })).toContainText(
+        'OpenSCAD could not open pic.svg',
+      )
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
+
+  /**
    * Issue #95, end to end: openscad-lsp in the image, the WebSocket bridge, and the
    * editor's client. `polyhedron` appears nowhere in the model, so Monaco's own
    * word-based suggestions cannot produce it — and only the server labels a builtin
@@ -222,6 +252,38 @@ test.describe('real backend', () => {
         'polyhedron(points',
         { timeout: 30_000 },
       )
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
+
+  /**
+   * #269, end to end: details edited in one tab appear in another without a reload,
+   * through the backend's event bus and each tab's realtime socket.
+   */
+  test('shows details edited in one tab in another', async ({ context, request }) => {
+    const slug = `e2e-live-${Date.now().toString(36)}`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+    try {
+      const a = await context.newPage()
+      const b = await context.newPage()
+      await a.goto(`/m/${slug}`)
+      await b.goto(`/m/${slug}`)
+      await expect(b.getByRole('button', { name: 'Edit details' })).toBeVisible()
+
+      await a.getByRole('button', { name: 'Edit details' }).click()
+      const dialog = a.getByRole('dialog', { name: 'Edit details' })
+      await dialog.getByLabel('Name').fill('Renamed in tab A')
+      await dialog.getByRole('button', { name: 'Save' }).click()
+
+      await expect(b.getByRole('heading', { name: 'Renamed in tab A' })).toBeVisible({
+        timeout: 15_000,
+      })
     } finally {
       await request.delete(`/api/v1/models/${slug}`)
     }

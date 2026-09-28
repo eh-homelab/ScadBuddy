@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
-import { api } from '../api/client'
-import type { CustomizerSchema, Output } from '../api/types'
+import { ApiError, api } from '../api/client'
+import type { CustomizerSchema, LibraryCopy, Output } from '../api/types'
 import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
+import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
@@ -22,21 +23,32 @@ export function HistoryPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
-  const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
+  // on `print:<output id>`, which this list does not follow.
+  const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
-  const bambuddyUrl = useAsync(() => api.getSettings(), []).data?.bambuddy_url ?? undefined
+  const settings = useAsync(() => api.getSettings(), []).data
+  const bambuddyUrl = settings?.bambuddy_url ?? undefined
   const [sendFor, setSendFor] = useState<Output | undefined>(undefined)
   const [deleting, setDeleting] = useState<string | null>(null)
+  // #316 — an output with copies in Bambuddy asks first, and offers the inbox ones.
+  const [confirmFor, setConfirmFor] = useState<Output | undefined>(undefined)
 
-  async function remove(id: string) {
+  async function remove(id: string, deleteInboxCopies = false) {
     setDeleting(id)
     try {
-      await api.deleteOutput(id)
+      await api.deleteOutput(id, deleteInboxCopies)
       outputsState.setData((outputsState.data ?? []).filter((o) => o.id !== id))
+      setConfirmFor(undefined)
     } finally {
       setDeleting(null)
     }
+  }
+
+  function requestDelete(output: Output) {
+    if ((output.library_files ?? []).length === 0) void remove(output.id)
+    else setConfirmFor(output)
   }
 
   const loading = schemaState.loading || outputsState.loading
@@ -89,13 +101,23 @@ export function HistoryPage() {
                   })
                 }
                 onSend={() => setSendFor(output)}
-                onDelete={() => void remove(output.id)}
+                onDelete={() => requestDelete(output)}
                 bambuddyUrl={bambuddyUrl}
               />
             ))}
           </ul>
         )}
       </div>
+
+      <DeleteOutputDialog
+        output={confirmFor}
+        // Undefined until the settings load: every copy then reads as not yet placed,
+        // rather than being labelled against a guessed inbox.
+        inboxFolderId={settings === undefined ? undefined : (settings.library_folder_id ?? null)}
+        deleting={confirmFor !== undefined && deleting === confirmFor.id}
+        onClose={() => setConfirmFor(undefined)}
+        onConfirm={(output, deleteInboxCopies) => remove(output.id, deleteInboxCopies)}
+      />
 
       <SendDialog
         open={sendFor !== undefined}
@@ -104,6 +126,119 @@ export function HistoryPage() {
         onSent={() => outputsState.reload()}
       />
     </div>
+  )
+}
+
+/** The copy the output was last uploaded as; copies are recorded in upload order. */
+function lastCopy(output: Output): LibraryCopy | undefined {
+  const copies = output.library_files ?? []
+  return copies[copies.length - 1]
+}
+
+type CopyPlace = 'inbox' | 'project' | 'unknown'
+
+function placeOf(copy: LibraryCopy, inboxFolderId: number | null | undefined): CopyPlace {
+  if (inboxFolderId === undefined) return 'unknown'
+  return (copy.folder_id ?? null) === inboxFolderId ? 'inbox' : 'project'
+}
+
+/**
+ * #316 — deleting an output that has copies in Bambuddy's library. The copies in the
+ * inbox folder can go with it; a copy in a project's folder is that project's record
+ * of what it printed and always stays. While the inbox folder is not known yet, the
+ * server decides, and deletes a copy only if it is in the inbox.
+ */
+function DeleteOutputDialog({
+  output,
+  inboxFolderId,
+  deleting,
+  onClose,
+  onConfirm,
+}: {
+  output: Output | undefined
+  inboxFolderId: number | null | undefined
+  deleting: boolean
+  onClose: () => void
+  onConfirm: (output: Output, deleteInboxCopies: boolean) => Promise<void>
+}) {
+  const [alsoInbox, setAlsoInbox] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const copies = output?.library_files ?? []
+  const count = (place: CopyPlace) =>
+    copies.filter((copy) => placeOf(copy, inboxFolderId) === place).length
+  const removable = count('inbox') + count('unknown')
+
+  function close() {
+    if (deleting) return
+    setAlsoInbox(false)
+    setError(null)
+    onClose()
+  }
+
+  async function confirm() {
+    if (!output) return
+    setError(null)
+    try {
+      await onConfirm(output, alsoInbox && removable > 0)
+      setAlsoInbox(false)
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.detail : String(caught))
+    }
+  }
+
+  return (
+    <Dialog
+      open={output !== undefined}
+      title={`Delete ${output?.name ?? (output ? shortId(output.id) : '')}?`}
+      onClose={close}
+      footer={
+        <>
+          <Button variant="ghost" onClick={close} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={() => void confirm()} disabled={deleting} {...USER_ONLY}>
+            {deleting ? <Spinner /> : 'Delete output'}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-[13px] text-muted">This output has copies in Bambuddy&apos;s library:</p>
+      <ul className="mt-1 list-disc pl-5 text-[13px] text-muted" aria-label="Library copies">
+        {copies.map((copy) => {
+          const place = placeOf(copy, inboxFolderId)
+          return (
+            <li key={copy.id}>
+              <span className="sb-num">#{copy.id}</span>{' '}
+              {place === 'inbox'
+                ? 'in the inbox folder'
+                : place === 'project'
+                  ? 'in a project folder, kept'
+                  : 'folder not recorded; checked before deleting'}
+            </li>
+          )
+        })}
+      </ul>
+      {removable > 0 ? (
+        <label className="mt-3 flex items-center gap-2 text-[13px] text-ink">
+          <input
+            type="checkbox"
+            checked={alsoInbox}
+            onChange={(event) => setAlsoInbox(event.target.checked)}
+          />
+          Also delete the inbox copies in Bambuddy
+        </label>
+      ) : (
+        <p className="mt-3 text-[13px] text-muted">Copies in project folders stay in Bambuddy.</p>
+      )}
+      <p className="mt-2 text-[12px] text-faint">
+        Sliced files and project copies are never deleted from here.
+      </p>
+      {error && (
+        <p role="alert" className="mt-3 text-[13px] text-warn">
+          {error}
+        </p>
+      )}
+    </Dialog>
   )
 }
 
@@ -183,9 +318,9 @@ function OutputRow({
                 queued #{output.queue_item_id}
               </BambuddyId>
             )}
-            {!output.queue_item_id && output.library_file_id && (
+            {!output.queue_item_id && lastCopy(output) && (
               <BambuddyId className="ml-2 text-muted" href={bambuddyUrl && `${bambuddyUrl}/library`}>
-                in library #{output.library_file_id}
+                in library #{lastCopy(output)?.id}
               </BambuddyId>
             )}
           </p>

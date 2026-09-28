@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
@@ -156,6 +156,77 @@ describe('HistoryPage', () => {
 
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByTestId('outputs').children).toHaveLength(2)
+  })
+
+  it('asks before deleting an output with copies in Bambuddy, and keeps project copies', async () => {
+    let asked: string | null = null
+    server.use(
+      http.delete('/api/v1/outputs/:id', ({ request }) => {
+        asked = new URL(request.url).search
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const copies = within(dialog).getByRole('list', { name: 'Library copies' })
+    expect(copies).toHaveTextContent('#8790 in the inbox folder')
+    expect(copies).toHaveTextContent('#8789 in a project folder, kept')
+    await user.click(
+      within(dialog).getByRole('checkbox', { name: 'Also delete the inbox copies in Bambuddy' }),
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
+
+    await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
+    expect(asked).toBe('?delete_inbox_copies=true')
+  })
+
+  it('does not label a copy inbox or project before the settings have loaded', async () => {
+    server.use(http.get('/api/v1/settings', () => delay('infinite')))
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const copies = within(dialog).getByRole('list', { name: 'Library copies' })
+    expect(copies).not.toHaveTextContent('in the inbox folder')
+    expect(copies).not.toHaveTextContent('in a project folder')
+    expect(within(copies).getAllByText(/folder not recorded/)).toHaveLength(2)
+  })
+
+  it('leaves Bambuddy alone unless the inbox copies are ticked', async () => {
+    let asked: string | null = null
+    server.use(
+      http.delete('/api/v1/outputs/:id', ({ request }) => {
+        asked = new URL(request.url).search
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
+
+    await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
+    expect(asked).toBe('')
+  })
+
+  it('keeps the output and says why when Bambuddy refuses the delete', async () => {
+    server.use(
+      http.delete('/api/v1/outputs/:id', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'Bambuddy said no' },
+          { status: 502, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Bambuddy said no')
+    expect(screen.getByTestId('outputs').children).toHaveLength(3)
   })
 
   it('invites a first render when there is no history', async () => {

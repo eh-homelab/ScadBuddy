@@ -40,6 +40,8 @@ export const TOOLS = {
   navigate: tool({
     description:
       'Go to a route in the app, e.g. "/", "/settings", "/m/name-keychain", "/m/name-keychain/source". ' +
+      'The catalogue ("/") takes its search, filters, sort and view from the query: ' +
+      '"/?q=keychain&tag=a&tag=b&origin=builtin|mine&sort=name&view=list" (tags are ANDed). ' +
       'Returns the route that ended up on screen (an unknown path lands on "/").',
     risk: 'read',
     scope: 'global',

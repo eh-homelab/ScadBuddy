@@ -241,6 +241,7 @@ def test_a_record_left_without_its_image_is_rendered_again(
     assert _model(client)["thumbnail_source"] == "preview"
 
 
+@pytest.mark.requires_postgres
 def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
 ) -> None:
@@ -261,6 +262,7 @@ def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     assert _model(client)["thumbnail_source"] == "preview"
 
 
+@pytest.mark.requires_postgres
 def test_the_preview_is_never_listed_as_an_output(
     client: TestClient, state: AppState, stub: StubRender
 ) -> None:

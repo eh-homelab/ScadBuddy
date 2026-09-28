@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -45,6 +46,7 @@ def _prepared(client: TestClient, model: str, *, printer_id: int = 1) -> str:
     return output_id
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_remembered_options_ride_on_the_queue_item(client: TestClient, model: str) -> None:
     configure(client)
@@ -68,6 +70,7 @@ def test_remembered_options_ride_on_the_queue_item(client: TestClient, model: st
     assert record["queue_item_id"] == result["queue_item_ids"][0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_printer_option_applies_to_the_chosen_printer(client: TestClient, model: str) -> None:
     configure(client)
@@ -80,6 +83,7 @@ def test_a_per_printer_option_applies_to_the_chosen_printer(client: TestClient, 
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_printer_override_for_another_printer_is_ignored(
     client: TestClient, model: str
@@ -99,6 +103,7 @@ def test_a_per_printer_override_for_another_printer_is_ignored(
     assert queued["timelapse"] is True
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, model: str) -> None:
     """Another model's override must not leak onto this one: the global value stands."""
@@ -113,6 +118,7 @@ def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, m
     assert json.loads(queue.calls.last.request.read())["timelapse"] is True
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_with_no_printer_named_the_configured_one_prints_with_its_options(
     client: TestClient, model: str
@@ -137,6 +143,7 @@ def test_with_no_printer_named_the_configured_one_prints_with_its_options(
     assert result["printer_id"] == 1
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str) -> None:
     configure(client)
@@ -151,6 +158,7 @@ def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     client: TestClient, model: str
@@ -172,6 +180,7 @@ def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     assert result["printer_id"] == 7
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_quantity_is_queued_unless_copies_is_set(
     client: TestClient, model: str
@@ -197,6 +206,7 @@ def test_a_remembered_quantity_is_queued_unless_copies_is_set(
     assert explicit["copies"] == 2
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_project_is_not_filed_on_the_item(client: TestClient, model: str) -> None:
     """The picker's project comes from its own control, so a remembered project_id
@@ -212,6 +222,7 @@ def test_a_remembered_project_is_not_filed_on_the_item(client: TestClient, model
     assert result["project_id"] is None
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_pickers_own_options_ride_on_this_print_only(client: TestClient, model: str) -> None:
     """#78: the Print dialog's options disclosure, like the send bar's, overrides every

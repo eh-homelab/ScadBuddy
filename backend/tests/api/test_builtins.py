@@ -86,6 +86,7 @@ def test_every_read_route_takes_a_built_in(client: TestClient) -> None:
     assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
 
 
+@pytest.mark.requires_postgres
 def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: DataPaths) -> None:
     job_id = _finished_job(client, BUILTIN)
 
@@ -102,6 +103,48 @@ def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: Dat
     # `:` has no business in a file name a browser saves.
     download = client.get(f"/api/v1/outputs/{output['id']}/model.3mf")
     assert 'filename="keychain-blue.3mf"' in download.headers["content-disposition"]
+
+
+@pytest.mark.requires_postgres
+def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """`builtin:keychain` and `keychain` share a slug, never jobs, outputs or history (#206)."""
+    created = client.post("/api/v1/models", json={"name": "keychain", "source": "width = 5;\n"})
+    assert created.status_code == 201, created.text
+    mine = created.json()["slug"]
+    assert mine == "keychain"
+
+    jobs = {model_id: _finished_job(client, model_id) for model_id in (BUILTIN, mine)}
+    assert {
+        model_id: client.get(f"/api/v1/jobs/{job}").json()["slug"] for model_id, job in jobs.items()
+    } == {
+        BUILTIN: BUILTIN,
+        mine: mine,
+    }
+    outputs = {}
+    for model_id, job_id in jobs.items():
+        response = client.post(
+            f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id, "name": "Blue"}
+        )
+        assert response.status_code == 201, response.text
+        outputs[model_id] = response.json()
+
+    for model_id, output in outputs.items():
+        assert output["slug"] == model_id
+        assert output["model_version"] == _versions(client, model_id)[0]["commit"]
+        listed = client.get(f"/api/v1/models/{model_id}/outputs").json()
+        assert [row["id"] for row in listed] == [output["id"]]
+        assert (paths.outputs / model_id / output["id"]).is_dir()
+    assert outputs[BUILTIN]["model_version"] != outputs[mine]["model_version"]
+    assert [entry["message"] for entry in _versions(client, BUILTIN)] == [
+        "Sync built-in templates from the image"
+    ]
+    assert "Sync built-in templates from the image" not in [
+        entry["message"] for entry in _versions(client, mine)
+    ]
+    assert client.get(f"/api/v1/models/{BUILTIN}/source").text == SOURCE
+    assert client.get(f"/api/v1/models/{mine}/source").text == "width = 5;\n"
 
 
 def test_a_built_ins_history_is_its_own(client: TestClient, model: str) -> None:

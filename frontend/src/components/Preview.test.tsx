@@ -63,6 +63,11 @@ describe('Preview', () => {
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
 
+  it('names the step a running render is on (#267)', () => {
+    render(<Preview job={undefined} rendering stage="solids" />)
+    expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')
+  })
+
   it("shows ScadBuddy's own job warnings next to the template notes, apart from them (#383)", () => {
     render(<Preview job={job({ notes: TEMPLATE_NOTES, warnings: JOB_WARNINGS })} rendering={false} />)
 

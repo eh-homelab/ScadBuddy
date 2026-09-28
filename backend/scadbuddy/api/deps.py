@@ -7,10 +7,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
-from scadbuddy.bambuddy.progress import ProgressObserver
+from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -21,13 +25,15 @@ from scadbuddy.core.events import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutGate, LibraryStore
-from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -56,6 +62,9 @@ class AppState:
     history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
+    #: An output's uploads to Bambuddy's file library (#455), on the render queue's
+    #: Postgres pool. Without a database every use raises (#401).
+    uploads: BambuddyUploadStore
     presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
@@ -65,12 +74,17 @@ class AppState:
     queue: RenderQueue
     #: Default-render previews: the thumbnail of a model with none and no output.
     previews: PreviewScheduler
-    #: Where every state change is published (spec §7). In-process today; the
-    #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
+    #: Where every state change is published (spec §7): `PgNotifyEventBus` on
+    #: #241's database when one is configured, `InProcessEventBus` otherwise.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
+    #: Follows each started print until it settles (#268).
+    print_watcher: PrintWatcher
     metrics: Metrics
+    #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
+    #: (until #401 makes one required): the routes that persist answer 503.
+    decisions: DecisionStore | None
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -126,18 +140,43 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
-    store: JobBackend = (
-        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
-        if settings.database_url
-        else JobStore(paths)
+    # Nothing connects here: the job pool opens in `RenderQueue.start` and the event
+    # bus's in `PgNotifyEventBus.start`, both from the lifespan.
+    store: JobBackend
+    events: EventBus
+    if settings.database_url:
+        pg_store = PostgresJobStore(
+            settings.database_url, paths, pool_size=settings.database_pool_size
+        )
+        # One LISTEN connection per process: the bus shares the render queue's.
+        pg_events = PgNotifyEventBus(
+            settings.database_url,
+            listener=pg_store.pg_listener,
+            metrics=metrics,
+            retention=EventLogRetention(
+                seconds=settings.event_log_retention_seconds,
+                rows=settings.event_log_retention_rows,
+            ),
+        )
+        # Job events commit with the job change that they describe.
+        pg_store.events = pg_events
+        store, events = pg_store, pg_events
+    else:
+        # No database: the UI keeps working, events reach this process only.
+        store, events = JobStore(paths), InProcessEventBus()
+    decisions: DecisionStore | None = (
+        PostgresDecisionStore(settings.database_url) if settings.database_url else None
     )
     outputs = OutputStore(paths)
+    uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
     checkouts = CheckoutGate()
+    installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
+    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
+    # The render queue's: a route builds its own over its `LibrariesDep`.
+    fetcher = CheckoutFetcher(libraries, installs, checkouts)
     assets = AssetStore(
         paths.assets,
         max_total_bytes=config.asset_max_total_bytes,
@@ -164,6 +203,7 @@ def build_state(settings: Settings) -> AppState:
         metrics=metrics,
         events=events,
         checkouts=checkouts,
+        fetcher=fetcher,
         assets=assets,
     )
     previews = PreviewScheduler(
@@ -185,6 +225,13 @@ def build_state(settings: Settings) -> AppState:
         # Everything that can change whether a model needs a preview, or which one.
         catalogue.on_change = previews.request
         outputs.on_change = previews.request
+    settings_store = SettingsStore(paths.root / SETTINGS_NAME, settings, events=events)
+    print_progress = ProgressObserver(events)
+
+    async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        async with client_for(settings_store.load()) as client:
+            return await progress_for(client, meta)
+
     return AppState(
         settings=settings,
         config=config,
@@ -192,21 +239,32 @@ def build_state(settings: Settings) -> AppState:
         history=history,
         catalogue=catalogue,
         outputs=outputs,
+        uploads=uploads,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
+        settings_store=settings_store,
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
+        libraries=libraries,
         assets=assets,
         queue=queue,
         previews=previews,
         metrics=metrics,
+        decisions=decisions,
         events=events,
-        print_progress=ProgressObserver(events),
+        print_progress=print_progress,
+        print_watcher=PrintWatcher(
+            outputs=outputs,
+            observer=print_progress,
+            read=read_progress,
+            events=events,
+            prints=PgPrintLog(settings.database_url) if settings.database_url else None,
+            lock=PgWatchLock(settings.database_url) if settings.database_url else None,
+        ),
         checkouts=checkouts,
+        installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
@@ -263,6 +321,10 @@ def get_outputs(state: StateDep) -> OutputStore:
     return state.outputs
 
 
+def get_uploads(state: StateDep) -> BambuddyUploadStore:
+    return state.uploads
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -295,6 +357,29 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
+def get_print_watcher(state: StateDep) -> PrintWatcher:
+    return state.print_watcher
+
+
+#: Problem ``type`` for a route that needs the database when none is configured.
+DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
+
+
+def get_decisions(state: StateDep) -> DecisionStore | None:
+    return state.decisions
+
+
+def require_decisions(state: StateDep) -> DecisionStore:
+    """The decision store, or a 503 naming what is missing. There is no file fallback."""
+    if state.decisions is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
+            type_=DATABASE_REQUIRED_PROBLEM,
+        )
+    return state.decisions
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -312,6 +397,7 @@ PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
+UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
@@ -320,9 +406,20 @@ AssetsDep = Annotated[AssetStore, Depends(get_assets)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
+PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
+OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
+DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
+
+
+def get_fetcher(state: StateDep, libraries: LibrariesDep) -> CheckoutFetcher:
+    """Over the request's store, with the app's install permits and checkout gate."""
+    return CheckoutFetcher(libraries, state.installs, state.checkouts)
+
+
+FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
