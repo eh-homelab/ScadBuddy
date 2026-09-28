@@ -26,6 +26,7 @@ from scadbuddy.core.events import (
     SettingsChanged,
     Subscription,
 )
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
@@ -103,6 +104,8 @@ def test_a_real_mutation_is_delivered(client: TestClient) -> None:
         {"type": "subscribe", "topics": ["job:not-an-id"]},
         {"type": "subscribe", "topics": ["model:../etc"]},
         {"type": "subscribe", "topics": ["everything"]},
+        # The slug's characters are fine; its length is past MAX_MODEL_ID_LENGTH.
+        {"type": "subscribe", "topics": [f"model:{'a' * (MAX_MODEL_ID_LENGTH + 1)}"]},
         {"type": "subscribe", "topics": "models"},
         {"type": "shout"},
         [1, 2],
@@ -112,6 +115,13 @@ def test_a_bad_frame_is_answered_and_the_socket_stays_open(client: TestClient, f
     with client.websocket_connect(WS) as ws:
         ws.send_json(frame)
         assert ws.receive_json()["type"] == "error"
+        subscribe(ws, "models")
+
+
+def test_a_binary_frame_is_answered_and_the_socket_stays_open(client: TestClient) -> None:
+    with client.websocket_connect(WS) as ws:
+        ws.send_bytes(b'{"type": "subscribe", "topics": ["models"]}')
+        assert ws.receive_json() == {"type": "error", "message": "expected a text frame"}
         subscribe(ws, "models")
 
 

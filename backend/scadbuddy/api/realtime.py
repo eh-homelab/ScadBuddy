@@ -94,7 +94,8 @@ RATE_PER_SECOND = 20.0
 #: with the LSP bridge's whole-source messages) before it reaches here.
 MAX_FRAME_CHARS = 16_384
 
-LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+#: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings"})
 
@@ -228,22 +229,28 @@ async def _ping(send: Send) -> None:
 async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
     limit = RateLimit(RATE_BURST, RATE_PER_SECOND, time.monotonic)
     while True:
-        raw = await websocket.receive_text()
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
         if not limit.take():
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="too many frames")
             return
+        raw = message.get("text")
+        if raw is None:
+            await send({"type": "error", "message": "expected a text frame"})
+            continue
         if len(raw) > MAX_FRAME_CHARS:
             await send({"type": "error", "message": "frame too large"})
             continue
         try:
-            message = json.loads(raw)
+            frame = json.loads(raw)
         except ValueError:
             await send({"type": "error", "message": "not JSON"})
             continue
-        kind = message.get("type") if isinstance(message, dict) else None
+        kind = frame.get("type") if isinstance(frame, dict) else None
         if kind == "pong":
             continue
-        requested = message.get("topics") if isinstance(message, dict) else None
+        requested = frame.get("topics") if isinstance(frame, dict) else None
         if kind not in ("subscribe", "unsubscribe") or not isinstance(requested, list):
             await send({"type": "error", "message": "expected subscribe or unsubscribe"})
             continue
