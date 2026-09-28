@@ -305,7 +305,7 @@ async def plate_thumbnails(
     `render_timeout` rather than a new knob: this is the same job's time.
 
     The degradation is a 3MF with no cover images, NOT a failed job — the model
-    is what the user asked for and the cover is a nicety. `write_bambu_3mf` then
+    is what the user asked for and the cover is a nicety. `write_plates_3mf` then
     omits the png content type, the cover relationships and the plate's
     `thumbnail_file`/`top_file`/`pick_file` along with the images, so the package
     stays self-consistent rather than carrying dangling references.
@@ -315,7 +315,7 @@ async def plate_thumbnails(
     this work is O(faces) plus O(covered pixels) with no loop that can fail to
     terminate, whereas a `.scad` can legitimately spin forever. It is also why the
     queue passes its own `executor` (#116): on the loop's default one an orphan
-    holds a slot `write_bambu_3mf` needs, so a backlog of slow covers could stall
+    holds a slot `write_plates_3mf` needs, so a backlog of slow covers could stall
     jobs whose own render finished in budget. On a dedicated pool a backlog only
     queues the next cover, which then times out like any other.
     """

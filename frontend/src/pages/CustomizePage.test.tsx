@@ -851,6 +851,11 @@ describe('CustomizePage', () => {
     expect(checked).toContainEqual(['310', '1'])
     expect(checked.map(([x]) => x)).not.toContain('64.1')
     expect(screen.getByTestId('print')).toHaveTextContent('Too big on X')
+    // The Print button's tooltip names the plate too, not only the banner.
+    expect(screen.getByTestId('print')).toHaveAttribute(
+      'title',
+      'plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm)',
+    )
   })
 
   it('counts changes against the model defaults', async () => {

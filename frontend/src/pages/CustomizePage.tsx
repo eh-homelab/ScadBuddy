@@ -569,6 +569,7 @@ export function CustomizePage() {
             output={output}
             capture={capture}
             fit={fit}
+            fitProblems={misfit}
             onPrinterModel={setPrinterModel}
             onGenerated={(created) => {
               if (job) setSaved({ jobId: job.id, output: created })
