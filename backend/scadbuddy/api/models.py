@@ -26,15 +26,19 @@ from pydantic import BaseModel, Field, ValidationError
 from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
+    CheckoutsDep,
     ChecksDep,
     ConfigDep,
     EventsDep,
     HistoryDep,
+    InstallsDep,
+    LibrariesDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
 )
+from scadbuddy.api.library_pins import pinned_at_create
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
@@ -60,6 +64,7 @@ from scadbuddy.library.history import (
     GitUnavailableError,
 )
 from scadbuddy.library.libraries import (
+    NAME_PATTERN,
     LibraryDeclarationError,
     ModelLibrary,
     model_search_path,
@@ -220,6 +225,11 @@ class PastedSource(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     force: bool = Field(default=False, description="Save even when the parse check fails")
+    libraries: list[Annotated[str, Field(pattern=NAME_PATTERN)]] = Field(
+        default_factory=list,
+        description="Curated libraries to pin at the catalogue's ref, in the model's first "
+        "revision and before the parse check",
+    )
 
 
 class SourceUpdate(BaseModel):
@@ -330,7 +340,10 @@ async def _guard_source(
         "bundled model's directory); `application/json` posts "
         "`{name, source}` pasted straight in; `text/plain` posts the bare source and "
         "takes its name from the `X-Model-Name` header. All three derive the slug, "
-        "parse-check the source and build the customizer schema identically."
+        "parse-check the source and build the customizer schema identically. The JSON "
+        "and multipart bodies may name curated `libraries`: each is pinned at the "
+        "catalogue's ref, as `PUT /models/{slug}/libraries/{name}` would, recorded in "
+        "the model's first revision and on the parse check's library path."
     ),
     openapi_extra={
         "requestBody": {
@@ -348,6 +361,9 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     events: EventsDep,
+    libraries: LibrariesDep,
+    installs: InstallsDep,
+    checkouts: CheckoutsDep,
     file: Annotated[
         UploadFile | None,
         File(description=f"The .scad source, at most {MAX_SOURCE_CHARS:,} characters"),
@@ -369,6 +385,14 @@ async def create_model(
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
+    library_names: Annotated[
+        list[str] | None,
+        Form(
+            alias="libraries",
+            description="Curated libraries to pin at the catalogue's ref, one per field; "
+            "a pin the model.json carries wins",
+        ),
+    ] = None,
     model_name: Annotated[
         str | None, Header(alias="X-Model-Name", description="Name for a text/plain paste")
     ] = None,
@@ -381,19 +405,24 @@ async def create_model(
             pasted = PastedSource.model_validate(await request.json())
         except (*_BAD_JSON, ValidationError) as error:
             raise _malformed_body(error) from None
-        return await _create(
-            catalogue,
-            config,
-            checks,
-            events,
-            slug=_slug_from_name(pasted.name),
-            source=pasted.source,
-            meta=ModelMeta(
-                name=pasted.name, description=pasted.description, tags=list(pasted.tags)
-            ),
-            # Either spelling forces, as the design and the OpenAPI both promise.
-            force=force or pasted.force,
-        )
+        async with pinned_at_create(
+            pasted.libraries,
+            ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
+            libraries=libraries,
+            installs=installs,
+            checkouts=checkouts,
+        ) as pasted_meta:
+            return await _create(
+                catalogue,
+                config,
+                checks,
+                events,
+                slug=_slug_from_name(pasted.name),
+                source=pasted.source,
+                meta=pasted_meta,
+                # Either spelling forces, as the design and the OpenAPI both promise.
+                force=force or pasted.force,
+            )
 
     if content_type == "text/plain":
         if not model_name:
@@ -458,35 +487,43 @@ async def create_model(
     base = await _read_meta_part(meta, slug) if meta is not None else ModelMeta(name=slug)
     parsed_tags = _parse_tags(tags)
 
-    return await _create(
-        catalogue,
-        config,
-        checks,
-        events,
-        slug=slug,
-        source=source,
-        # The model.json's `source` attribution carries over. Its `origin_url` never
-        # does: that is set only by `POST /models/import`, which fetched the URL over
-        # https itself, and the catalogue renders it as a link -- taken from an
-        # uploaded file it would be a stored `javascript:` link waiting for a click.
-        meta=base.model_copy(
-            update={
-                "name": _first_name(name, base.name, slug),
-                # Blank is absent, as for the name; a non-blank one is kept as given.
-                "description": description
-                if description is not None and description.strip()
-                else base.description,
-                "tags": parsed_tags if parsed_tags is not None else base.tags,
-                "origin_url": None,
-                # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
-                # which template this one came from.
-                "upstream": None,
-            }
-        ),
-        force=force,
-        thumbnail=thumbnail_bytes,
-        readme=readme_text,
+    # The model.json's `source` attribution carries over. Its `origin_url` never
+    # does: that is set only by `POST /models/import`, which fetched the URL over
+    # https itself, and the catalogue renders it as a link -- taken from an
+    # uploaded file it would be a stored `javascript:` link waiting for a click.
+    uploaded = base.model_copy(
+        update={
+            "name": _first_name(name, base.name, slug),
+            # Blank is absent, as for the name; a non-blank one is kept as given.
+            "description": description
+            if description is not None and description.strip()
+            else base.description,
+            "tags": parsed_tags if parsed_tags is not None else base.tags,
+            "origin_url": None,
+            # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
+            # which template this one came from.
+            "upstream": None,
+        }
     )
+    async with pinned_at_create(
+        library_names or [],
+        uploaded,
+        libraries=libraries,
+        installs=installs,
+        checkouts=checkouts,
+    ) as uploaded_meta:
+        return await _create(
+            catalogue,
+            config,
+            checks,
+            events,
+            slug=slug,
+            source=source,
+            meta=uploaded_meta,
+            force=force,
+            thumbnail=thumbnail_bytes,
+            readme=readme_text,
+        )
 
 
 def _first_name(*candidates: str | None) -> str:
@@ -835,7 +872,7 @@ def duplicate_model(
     except ModelNotFoundError as error:
         # A concurrent delete got there first: of the upstream, or of the new copy
         # between its commit and its record (#215). The error names which.
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {error.args[0]!r}") from None
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {error.slug!r}") from None
     except GitError as error:
         # Reading the upstream at `base` failed; as every other route that reads
         # the history maps it. Nothing of the duplicate is left behind.

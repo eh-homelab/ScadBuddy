@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
@@ -63,10 +64,10 @@ SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
 #: A duplicate's staging folder under ``cache/`` (#156, #212).
 DUPLICATE_STAGING_PREFIX = "duplicate-"
-#: Seconds before the boot sweep treats a duplicate's staging as abandoned. A copy
-#: takes seconds, so anything this old is a crash, not another replica's live copy
-#: on a shared ``/data``.
-DUPLICATE_STAGING_MAX_AGE = 3600
+#: Seconds before a sweep treats a duplicate's staging as abandoned. A copy takes
+#: seconds, so anything this old is a crash, not another replica's live copy on a
+#: shared ``/data``. The default; ``SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`` sets it.
+DUPLICATE_STAGING_MAX_AGE = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 
 #: How many times a merge is worked out again when the template or its upstream
 #: moves between planning and writing it, before it is refused.
@@ -95,7 +96,7 @@ def _remove_tree(path: Path) -> bool:
         return False
     except OSError:
         if _still_there(path):
-            logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
+            logger.exception("could not remove a path", extra={"path": str(path)})
             return False
     return True
 
@@ -113,7 +114,11 @@ class _StaleMergeError(Exception):
 
 
 class ModelNotFoundError(KeyError):
-    pass
+    def __init__(self, slug: str) -> None:
+        super().__init__(slug)
+        #: The model that is missing, which need not be the one a caller asked
+        #: for: a duplicate can lose its upstream or its new copy (#215).
+        self.slug = slug
 
 
 class SidecarNotFoundError(KeyError):
@@ -263,11 +268,13 @@ class Catalogue:
         paths: DataPaths,
         history: ModelHistory | None = None,
         outputs: OutputStore | None = None,
+        duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
     ) -> None:
         self.paths = paths
         self.history = history
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
+        self.duplicate_staging_max_age = duplicate_staging_max_age
 
     def _commit(self, message: str, *slugs: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
@@ -620,8 +627,8 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
-        # And any an earlier duplicate crashed out of, once it is old enough not to
-        # be another replica's copy in flight: a single replica that crashed and
+        # Sweep any staging an earlier duplicate crashed out of, once it is old
+        # enough not to be another replica's copy in flight: a single replica that crashed and
         # restarted inside the hour clears it here rather than never. Best-effort:
         # the duplicate is committed, so a failure here is logged, not reported.
         try:
@@ -1033,14 +1040,15 @@ class Catalogue:
     def sweep_duplicate_staging(self) -> list[str]:
         """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
 
-        Runs at boot and after each duplicate. Another replica sharing ``/data`` may
-        be mid-copy, so only staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        Runs at boot, after each duplicate and with the periodic upload sweep.
+        Another replica sharing ``/data`` may be mid-copy, so only staging older
+        than ``duplicate_staging_max_age`` goes.
         One that cannot be read or removed is logged and the rest still go.
         """
         root = self.paths.cache
         if not root.is_dir():
             return []
-        cutoff = time.time() - DUPLICATE_STAGING_MAX_AGE
+        cutoff = time.time() - self.duplicate_staging_max_age
         removed: list[str] = []
         for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
             try:

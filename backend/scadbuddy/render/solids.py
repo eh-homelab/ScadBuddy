@@ -91,6 +91,7 @@ async def render_solids(
     work_dir: Path,
     *,
     config: Config,
+    extra_defines: Sequence[str] = (),
 ) -> SolidRender:
     """One closed solid per colour, rendered ``config.solid_slots()`` at a time (#282).
 
@@ -101,7 +102,8 @@ async def render_solids(
     all stopped -- except a mesh parse already running in its worker thread, which a
     cancel abandons rather than stops (it is bounded work). Each render's
     `SCADBUDDY_RENDER_TIMEOUT` starts when its process does, so a colour waiting for a
-    slot is not charged for the wait.
+    slot is not charged for the wait. ``extra_defines`` reach every wrapper render
+    too: a multi-plate render passes its ``$plate`` this way (spec §6.4).
     """
     slots = asyncio.Semaphore(config.solid_slots())
     wrapper = scad_path.parent / f"{WRAPPER_PREFIX}{secrets.token_hex(8)}.scad"
@@ -124,7 +126,7 @@ async def render_solids(
                     params,
                     out_path,
                     config=config,
-                    extra_defines=["-D", f"_sb_targets={targets}"],
+                    extra_defines=[*extra_defines, "-D", f"_sb_targets={targets}"],
                 )
                 # Parsing and joining the mesh is CPU work: off the loop, which every
                 # other job's drain, the queue and /healthz share -- and several colours
