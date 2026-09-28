@@ -957,6 +957,23 @@ describe('the prints mock', () => {
     expect(await ids()).toEqual({ ids: [38, 37, 36, 35], next: null })
   })
 
+  it("names each print's printer, and none for a deleted archive", async () => {
+    const body = (await (await fetch('/api/v1/prints')).json()) as {
+      items: { archive_id: number; printer_name: string | null }[]
+    }
+    expect(Object.fromEntries(body.items.map((item) => [item.archive_id, item.printer_name]))).toEqual({
+      38: null,
+      37: '3DP-H2C-042',
+      36: '3DP-31B-598',
+      35: '3DP-31B-598',
+    })
+    const detail = (await (await fetch('/api/v1/prints/37')).json()) as {
+      printer_name: string
+      outcome: { printer_name: string }
+    }
+    expect(detail.outcome.printer_name).toBe(detail.printer_name)
+  })
+
   it('filters and pages as the backend does', async () => {
     expect((await ids('?status=failed')).ids).toEqual([36])
     expect((await ids('?printer_id=2')).ids).toEqual([37])
