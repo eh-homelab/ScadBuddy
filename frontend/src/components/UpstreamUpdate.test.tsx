@@ -260,9 +260,42 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(
       await within(dialog).findByText('There is no update to take any more.'),
     ).toBeInTheDocument()
+    expect(dialog).toHaveAccessibleName('No update')
+    expect(dialog).toHaveTextContent(`This copy is up to date with ${UPSTREAM}.`)
+    expect(dialog).not.toHaveTextContent('has changed')
     expect(within(dialog).queryByTestId('merge-result')).not.toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeDisabled()
-    expect(within(dialog).getByRole('button', { name: 'Not now' })).toBeDisabled()
+    expect(within(dialog).queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeEnabled()
+  })
+
+  it('says the upstream is gone when it went while the dialog loaded (#404)', async () => {
+    await duplicateWithUpdate()
+    const status = await api.getUpstream(COPY)
+    const { user } = await renderButton()
+    let answer: (() => void) | undefined
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('/api/v1/models/:slug/upstream', async () => {
+        await answered
+        return HttpResponse.json({ ...status, state: 'gone', revision: null, preview: null })
+      }),
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    // In flight: framed by the state it was opened from.
+    const dialog = screen.getByRole('dialog', { name: 'Update available' })
+    expect(within(dialog).getByText('Working out the merge')).toBeInTheDocument()
+    answer?.()
+
+    expect(
+      await within(dialog).findByText('There is no update to take any more.'),
+    ).toBeInTheDocument()
+    expect(dialog).toHaveAccessibleName('No update')
+    expect(dialog).toHaveTextContent(`${UPSTREAM} no longer exists.`)
+    expect(dialog).not.toHaveTextContent('has changed')
+    expect(within(dialog).getByRole('button', { name: 'Take update' })).toBeDisabled()
+    expect(within(dialog).queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
   })
 
   it('offers Detach for an upstream that is gone', async () => {
