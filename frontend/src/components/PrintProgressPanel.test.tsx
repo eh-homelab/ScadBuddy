@@ -4,56 +4,49 @@ import * as fixtures from '../mocks/fixtures'
 import { PrintProgressPanel } from './PrintProgressPanel'
 
 describe('PrintProgressPanel', () => {
-  it('heads a pipeline run with how many copies have reached the queue', () => {
-    render(<PrintProgressPanel progress={fixtures.pipelineProgress} polling />)
-
-    const panel = screen.getByTestId('print-progress')
-    expect(panel).toHaveTextContent('Run #12 — 2 of 2 copies queued')
-  })
-
-  it('names the printer per copy, or says Bambuddy has still to pick one', () => {
-    render(<PrintProgressPanel progress={fixtures.pipelineProgress} polling />)
+  it('names the printer, or says Bambuddy has still to pick one', () => {
+    const entry = fixtures.queuedSliceProgress.copies_detail![0]!
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies_detail: [{ ...entry, printer_name: null }],
+        }}
+        polling
+      />,
+    )
 
     expect(screen.getByTestId('print-progress-copy-0')).toHaveTextContent(
-      'Copy 1 on 3DP-31B-598',
-    )
-    // `assigned_printer_name` is null until Bambuddy fans the run out; that is a normal
-    // state, not a missing value.
-    expect(screen.getByTestId('print-progress-copy-1')).toHaveTextContent(
-      'Copy 2 on a printer Bambuddy picks',
+      'Copy on a printer Bambuddy picks',
     )
   })
 
   it('deep-links each queue entry from the URL the backend sent', () => {
-    render(<PrintProgressPanel progress={fixtures.pipelineProgress} polling />)
+    render(<PrintProgressPanel progress={fixtures.queuedSliceProgress} polling />)
 
     const link = within(screen.getByTestId('print-progress-copy-0')).getByRole('link', {
-      name: '#4472',
+      name: '#4471',
     })
     expect(link).toHaveAttribute(
       'href',
-      'https://bambuddy.internal.nullreference.io/queue/4472',
+      'https://bambuddy.internal.nullreference.io/queue/4471',
     )
     // ScadBuddy runs inside Bambuddy's sandboxed iframe, so the link has to escape it.
     expect(link).toHaveAttribute('target', '_blank')
   })
 
-  it('shows the recorded failed run verbatim, with the fix the backend chose', () => {
-    // `backend/tests/bambuddy/recordings/pipeline-run.json`: a slice that failed while
-    // Bambuddy's own status still said `in_progress`.
-    const progress = fixtures.failedRunProgress
-    expect(progress.stage).toBe('failed')
-    expect(progress.settled).toBe(true)
-
+  it('shows a failed slice verbatim, with the fix the backend chose', () => {
+    const progress = fixtures.failedSliceProgress
     render(<PrintProgressPanel progress={progress} polling={false} />)
 
+    expect(screen.getByTestId('print-progress')).toHaveTextContent('Slice — failed')
     const error = screen.getByTestId('print-progress-error')
     expect(error).toHaveTextContent(
       'Slice failed: The selected printer is not compatible with the process preset in the 3mf.',
     )
     expect(error).toHaveClass('text-warn')
     expect(screen.getByTestId('print-progress-fix')).toHaveTextContent(
-      'Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix the model, and print again.',
+      'Bambuddy could not slice this plate. Change the plate or print settings, or fix the model, and print again.',
     )
   })
 
@@ -187,11 +180,11 @@ describe('PrintProgressPanel', () => {
 
   it('spins only while the caller is still polling', () => {
     const { container, rerender } = render(
-      <PrintProgressPanel progress={fixtures.pipelineProgress} polling />,
+      <PrintProgressPanel progress={fixtures.queuedSliceProgress} polling />,
     )
     expect(container.querySelector('.animate-spin')).toBeInTheDocument()
 
-    rerender(<PrintProgressPanel progress={fixtures.failedRunProgress} polling={false} />)
+    rerender(<PrintProgressPanel progress={fixtures.failedSliceProgress} polling={false} />)
     expect(container.querySelector('.animate-spin')).not.toBeInTheDocument()
   })
 
