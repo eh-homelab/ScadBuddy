@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated from the backend routes at build and CI time, never committed
+# (#492): `pnpm gen:api` in frontend/ and agent/ exports the spec and writes
+# each client.
+backend/openapi.json
+frontend/src/api/schema.d.ts
+agent/src/api/schema.d.ts
