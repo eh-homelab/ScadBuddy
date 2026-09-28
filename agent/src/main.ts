@@ -13,6 +13,7 @@ import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
@@ -129,7 +130,9 @@ const app = createApp({
     tools: ALL_TOOLS,
     services: {
       backend,
-      pending: new PendingActionStore(),
+      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
+      // database, an in-memory store whose actions are never confirmed.
+      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,

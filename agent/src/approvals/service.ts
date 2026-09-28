@@ -98,11 +98,15 @@ import { scrubForLog } from '../sessions/sdkEvents.js'
 //     periodically, and list/decide run it first).
 //   - a shutdown leaves the approval pending (it survives the restart).
 //
-// SEAM for #251 (PR #368): its MCP `prepare` / `confirm_action` pair uses this
-// store instead of its in-memory PendingActionStore: `prepare` → `create()`
-// (session optional, no turn) and returns the id and summary; the UI decides
-// through `decide()`; `confirm_action` → `waitFor()` then `consumeById()`,
-// running the tool only when that returns the approved row.
+// MCP PREPARE / CONFIRM (#251's tools, wired in approvals/mcp.ts): an outward
+// tool called over /mcp is not run but `create()`d with no session and no
+// turn, requested by the MCP principal; the UI decides it through `decide()`
+// like any other (so `authorize` refuses self-approval here too); and
+// `confirm_action` runs it only when `consumePrepared()` returns the row:
+// approved, unused, not voided, within `usable_until`, same principal, same
+// input hash, in one UPDATE, so it is used exactly once. Nothing parks for
+// these: a confirm before the decision answers "pending" and the client asks
+// again.
 
 /** ai_settings key: seconds an approval waits for a decision. */
 export const SETTING_APPROVAL_EXPIRY_SECONDS = 'approval_expiry_seconds'
@@ -789,6 +793,58 @@ export class ApprovalService {
     const [row] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_approvals SET consumed_at = now() WHERE id = $1 AND ${USABLE} RETURNING ${COLUMNS}`,
       [id],
+    )
+    return row ? record(row) : undefined
+  }
+
+  // -- prepared actions (MCP prepare / confirm_action, approvals/mcp.ts) ------
+
+  /** A principal's sessionless approvals still waiting for a decision, oldest first. */
+  async listPrepared(by: Owner): Promise<ApprovalRecord[]> {
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals
+       WHERE session_id IS NULL AND requested_by_kind = $1 AND requested_by_id = $2
+         AND decision IS NULL AND expires_at > now()
+       ORDER BY created_at, id LIMIT 500`,
+      [by.kind, by.id],
+    )
+    return rows.map(record)
+  }
+
+  /** How many sessionless approvals, from anyone, are waiting for a decision. */
+  async countPrepared(): Promise<number> {
+    const [row] = await this.deps.sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ai_approvals
+      WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+    return row?.n ?? 0
+  }
+
+  /** Cancels one pending approval; false when it was already decided. */
+  async cancel(id: string, reason: string): Promise<boolean> {
+    const settled = await this.settle(id, 'cancelled', undefined, reason)
+    if (settled?.sessionId) await this.refreshStatus(settled.sessionId)
+    return settled !== undefined
+  }
+
+  /** Expires this one approval if it is pending and past its time. */
+  async expireIfDue(id: string): Promise<void> {
+    if ((await this.row(id))?.due) await this.expire(id)
+  }
+
+  /**
+   * Uses a sessionless approval once (`confirm_action`): only the principal
+   * that asked for it, only for the input it was asked (and approved) for,
+   * only while it is approved, unused, not voided and within `usable_until`.
+   * One UPDATE decides all of that, so two confirms cannot both win.
+   */
+  async consumePrepared(id: string, by: Owner, hash: string): Promise<ApprovalRecord | undefined> {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql.unsafe<Row[]>(
+      `UPDATE ai_approvals SET consumed_at = now()
+       WHERE id = $1 AND session_id IS NULL AND requested_by_kind = $2 AND requested_by_id = $3
+         AND input_hash = $4 AND ${USABLE}
+       RETURNING ${COLUMNS}`,
+      [id, by.kind, by.id, hash],
     )
     return row ? record(row) : undefined
   }
