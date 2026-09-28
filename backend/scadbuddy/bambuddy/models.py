@@ -17,8 +17,6 @@ SliceStatus = Literal["pending", "running", "completed", "failed"]
 #: ``bed_levelling``, ``flow_cali`` and ``nozzle_offset_cali`` on the queue route.
 CalibrationMode = Literal["off", "on", "auto"]
 PreheatOverride = Literal["inherit", "on", "off"]
-TargetKind = Literal["specific_printer", "printer_class"]
-FanoutStrategy = Literal["max_parallel", "fill_one_first", "round_robin"]
 
 
 class BambuddyModel(BaseModel):
@@ -409,24 +407,6 @@ class FolderCreate(BambuddyModel):
     project_id: int | None = None
 
 
-class Pipeline(BambuddyModel):
-    id: int
-    name: str
-    description: str | None = None
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] = Field(default_factory=list)
-    bed_type: str | None = None
-    target_kind: TargetKind = "printer_class"
-    target_printer_id: int | None = None
-    target_model_class: str | None = None
-    fanout_strategy: FanoutStrategy = "max_parallel"
-
-
-class PipelineList(BambuddyModel):
-    pipelines: list[Pipeline] = Field(default_factory=list)
-
-
 class LibraryFile(BambuddyModel):
     """``POST /api/v1/library/files`` — the uploaded file."""
 
@@ -507,72 +487,6 @@ class SliceJob(BambuddyModel):
         return self.error or self.error_message or "Bambuddy did not say why"
 
 
-class PipelineJob(BambuddyModel):
-    """One copy of a run: the queue entry it became and the printer it landed on."""
-
-    id: int
-    pipeline_run_id: int
-    copy_index: int
-    assigned_printer_id: int | None = None
-    assigned_printer_name: str | None = None
-    queue_entry_id: int | None = None
-    status: str
-    error_message: str | None = None
-    dispatched_at: datetime | None = None
-    completed_at: datetime | None = None
-
-
-class PipelineRun(BambuddyModel):
-    id: int
-    pipeline_id: int | None = None
-    pipeline_name: str | None = None
-    source_library_file_id: int | None = None
-    source_archive_id: int | None = None
-    source_filename: str | None = None
-    copies: int = 1
-    copies_completed: int = 0
-    copies_failed: int = 0
-    copies_cancelled: int = 0
-    copies_in_progress: int = 0
-    status: str
-    slice_job_id: int | None = None
-    sliced_library_file_id: int | None = None
-    eligibility_overridden: bool = False
-    error_message: str | None = None
-    jobs: list[PipelineJob] = Field(default_factory=list)
-    #: **The only trustworthy terminal signal.** A run whose slice failed was recorded
-    #: on 2026-09-24 still reporting ``status: "in_progress"`` and
-    #: ``copies_in_progress: 1`` *with* ``completed_at`` set and an ``error_message``
-    #: explaining the failure — see ``recordings/pipeline-run.json``. Polling on
-    #: ``status`` or on the copy counters therefore never terminates.
-    created_at: datetime | None = None
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    parent_run_id: int | None = None
-    target_kind: TargetKind | None = None
-    target_printer_id: int | None = None
-    target_model_class: str | None = None
-    fanout_strategy: FanoutStrategy | None = None
-
-
-class PipelineRunList(BambuddyModel):
-    runs: list[PipelineRun] = Field(default_factory=list)
-    total: int = 0
-
-
-class PipelineRunRequest(BambuddyModel):
-    """``POST /api/v1/slicer-pipelines/{id}/run``.
-
-    Exactly one source must be set. ``force`` turns the 409 eligibility refusal into
-    a run that records ``eligibility_overridden``.
-    """
-
-    source_library_file_id: int | None = None
-    source_archive_id: int | None = None
-    copies: int = 1
-    force: bool = False
-
-
 class Spool(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools`` — Bambuddy's own spool inventory.
 
@@ -614,7 +528,7 @@ class SpoolFilamentPreset(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools/{id}/filament-presets``.
 
     One per printer model and nozzle size. A spool's own ``slicer_filament`` is only its
-    default — typically the 0.4 nozzle's — so a pipeline for another nozzle needs the
+    default — typically the 0.4 nozzle's — so a print on another nozzle needs the
     row that matches it (#161).
     """
 

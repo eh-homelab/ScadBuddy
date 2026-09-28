@@ -48,7 +48,6 @@ export function SettingsPage() {
   const [publicUrl, setPublicUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [folderId, setFolderId] = useState('')
-  const [pipelineId, setPipelineId] = useState('')
   const [printerId, setPrinterId] = useState('')
   const [defaultPlate, setDefaultPlate] = useState('')
   const [unit, setUnit] = useState<DisplayUnit>('mm')
@@ -81,7 +80,6 @@ export function SettingsPage() {
     setUrl(settings.bambuddy_url ?? '')
     setPublicUrl(settings.public_url ?? '')
     setFolderId(idValue(settings.library_folder_id))
-    setPipelineId(idValue(settings.pipeline_id))
     setPrinterId(idValue(settings.printer_id))
     setDefaultPlate(settings.default_plate ?? '')
     setUnit(settings.display_unit)
@@ -101,7 +99,6 @@ export function SettingsPage() {
       bambuddy_url: url,
       public_url: publicUrl || null,
       library_folder_id: asId(folderId),
-      pipeline_id: asId(pipelineId),
       printer_id: asId(printerId),
       default_plate: defaultPlate || null,
       display_unit: unit,
@@ -118,7 +115,6 @@ export function SettingsPage() {
     bambuddy_url: [url, setUrl, 'bambuddy-url'],
     public_url: [publicUrl, setPublicUrl, 'public-url'],
     library_folder_id: [folderId, setFolderId, 'library-folder'],
-    pipeline_id: [pipelineId, setPipelineId, 'slicer-pipeline'],
     printer_id: [printerId, setPrinterId, 'printer'],
     default_plate: [defaultPlate, setDefaultPlate, 'default-plate'],
     display_unit: [unit, (next: string) => setUnit(next as DisplayUnit), 'display-unit'],
@@ -126,7 +122,6 @@ export function SettingsPage() {
 
   const choices = {
     library_folder_id: ['', ...(targetsState.data?.folders ?? []).map((folder) => String(folder.id))],
-    pipeline_id: ['', ...(targetsState.data?.pipelines ?? []).map((pipeline) => String(pipeline.id))],
     printer_id: ['', ...(targetsState.data?.printers ?? []).map((printer) => String(printer.id))],
     default_plate: ['', ...plateNames, ...(defaultPlate && !plateNames.includes(defaultPlate) ? [defaultPlate] : [])],
     display_unit: ['mm', 'in'],
@@ -139,7 +134,6 @@ export function SettingsPage() {
       (url !== (settings.bambuddy_url ?? '') ||
         publicUrl !== (settings.public_url ?? '') ||
         folderId !== idValue(settings.library_folder_id) ||
-        pipelineId !== idValue(settings.pipeline_id) ||
         printerId !== idValue(settings.printer_id) ||
         defaultPlate !== (settings.default_plate ?? '') ||
         unit !== settings.display_unit))
@@ -176,7 +170,6 @@ export function SettingsPage() {
         api_key_typed: apiKey.length > 0,
         choices: {
           library_folder_id: (targetsState.data?.folders ?? []).map((folder) => ({ value: String(folder.id), name: folder.name })),
-          pipeline_id: (targetsState.data?.pipelines ?? []).map((pipeline) => ({ value: String(pipeline.id), name: pipeline.name })),
           printer_id: (targetsState.data?.printers ?? []).map((printer) => ({ value: String(printer.id), name: printer.name })),
           default_plate: plateNames,
           display_unit: ['mm', 'in'],
@@ -385,30 +378,6 @@ export function SettingsPage() {
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div>
-              <label htmlFor="slicer-pipeline" className="block text-[13px]">
-                Slicer pipeline
-              </label>
-              <select
-                id="slicer-pipeline"
-                value={pipelineId}
-                onChange={(event) => setPipelineId(event.target.value)}
-                className="sb-field mt-1.5 cursor-pointer"
-              >
-                <option value="">None — slice with the presets below</option>
-                {(targetsState.data?.pipelines ?? []).map((pipeline) => (
-                  <option key={pipeline.id} value={pipeline.id}>
-                    {pipeline.name}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1.5 text-[12px] text-muted">
-                The fallback for &ldquo;Slice and queue&rdquo; and for Print. A model given its
-                own pipeline in the print picker uses that instead. Without either, ScadBuddy
-                slices with the stored presets and queues to the printer below.
-              </p>
             </div>
 
             <div>

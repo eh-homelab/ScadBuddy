@@ -18,11 +18,9 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print import run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, run_routes
 from tests.api.test_send import BASE, configure, make_output
@@ -365,28 +363,6 @@ def test_each_run_records_its_sliced_file_against_its_copy(client: TestClient, m
     [[row]] = sliced(client, output_id)
     assert row["id"] == 77
     assert row["preset_key"]
-
-
-@respx.mock
-def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """Outputs sent before the spool-first run still follow their pipeline run; its
-    sliced file appears only on a later read, and is recorded then."""
-    output_id = set_up(client, model)
-    asyncio.run(
-        upload_store(client).record(
-            output_id, LibraryCopy(id=41, folder_id=INBOX, target_key=DEFAULT_PLATE.key)
-        )
-    )
-    OutputStore(paths).record_send(output_id, pipeline_run_id=12, print_route="pipeline")
-    assert sliced(client, output_id) == [[]]
-
-    respx.get(f"{API}/pipeline-runs/12").mock(return_value=httpx.Response(200, json=run_body()))
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
 
 
 # --- deleting an output --------------------------------------------------------------

@@ -90,9 +90,8 @@ DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 #: Where an applied diff would land, and what applying does today.
 ROUTE_NOTE = (
     "Applying records this diff as a decision at its scope; nothing sends it yet. A "
-    "print that uses it will have to slice and queue with the diff, since a pipeline "
-    "run carries no per-print settings (AI spec §11), and will go through the outward "
-    "approval of AI spec §8.2 before it does."
+    "print that uses it will slice and queue with the diff, and will go through the "
+    "outward approval of AI spec §8.2 before it does."
 )
 
 #: What a database that cannot be reached raises through the store.

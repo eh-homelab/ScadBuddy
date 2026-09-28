@@ -62,17 +62,26 @@ describe('SettingsPage', () => {
     expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
   })
 
-  it('offers the folders and pipelines Bambuddy reports', async () => {
+  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
     renderPage(<SettingsPage />)
     await seeded()
     expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
     // Bambuddy's ids are integers, so the <select> values are their decimal strings.
     expect(screen.getByLabelText('Library folder')).toHaveValue('2')
-    expect(screen.getByLabelText('Slicer pipeline')).toHaveValue('1')
     expect(screen.getByLabelText('Printer')).toHaveValue('1')
-    expect(
-      screen.getByRole('option', { name: 'Textured PEI · 0.20 mm · AMS' }),
-    ).toBeInTheDocument()
+    // #312: printing is the Print dialog's, which derives its own presets.
+    expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
+  })
+
+  it('never sends a pipeline', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('pipeline_id')
+    put.mockRestore()
   })
 
   it('sends the key only when one was typed', async () => {

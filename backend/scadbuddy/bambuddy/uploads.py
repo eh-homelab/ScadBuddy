@@ -38,8 +38,8 @@ class SlicedCopy(BaseModel):
 
     #: Bambuddy library file id of the sliced 3MF.
     id: int
-    #: What it was sliced with: the pipeline's id on a pipeline run, or the presets,
-    #: plate and plate type on the slice-and-queue route (``SliceRequest.preset_key``).
+    #: What it was sliced with: the presets, plate and plate type
+    #: (``SliceRequest.preset_key``). A row from before #312 may hold a pipeline's id.
     #: ``None`` when the route did not say.
     preset_key: str | None = None
 
