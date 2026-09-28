@@ -54,11 +54,18 @@ interface Props {
 
 export function Preview({ job, rendering, plate, captureRef }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
-  const [shown, setShown] = useState<{ url: string; bbox?: BoundingBox; colors: string[] } | undefined>()
+  const [shown, setShown] = useState<
+    { url: string; bbox?: BoundingBox; colors: string[]; plates: number } | undefined
+  >()
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url) {
-      setShown({ url: job.preview_url, bbox: job.bbox_mm ?? undefined, colors: job.colors ?? [] })
+      setShown({
+        url: job.preview_url,
+        bbox: job.bbox_mm ?? undefined,
+        colors: job.colors ?? [],
+        plates: Math.max(job.plates?.length ?? 0, 1),
+      })
     }
   }, [job])
 
@@ -117,7 +124,7 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
           )}
         </div>
 
-        {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} />}
+        {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
       </div>
 
       {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
@@ -141,7 +148,7 @@ function PlateBadge({ plate }: { plate: Plate }) {
   )
 }
 
-function Dimensions({ bbox }: { bbox: BoundingBox }) {
+function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
   const unit = useDisplayUnit()
   return (
     <dl
@@ -150,6 +157,15 @@ function Dimensions({ bbox }: { bbox: BoundingBox }) {
     >
       <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
       <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox, unit)}</dd>
+      {/* #289 — the preview draws every plate at once; the 3MF splits them. */}
+      {plates > 1 && (
+        <>
+          <dt className="mt-1 text-[10px] tracking-wide text-faint">Plates</dt>
+          <dd data-testid="plate-count" className="sb-num mt-0.5 text-[13px] text-ink">
+            {plates}, shown together
+          </dd>
+        </>
+      )}
     </dl>
   )
 }

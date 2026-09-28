@@ -27,7 +27,7 @@ import {
   diffFromDefaults,
   type ParamValues,
 } from '../lib/params'
-import { fitMessages } from '../lib/plate'
+import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
@@ -137,15 +137,20 @@ export function CustomizePage() {
   // A parameter change invalidates the saved output — Generate has to run again.
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
-  const bbox = job?.status === 'done' ? job.bbox_mm : undefined
-  const colours = job?.colors?.length ?? 1
+  // #289 — a multi-plate render is checked plate by plate.
+  const targets = useMemo(() => fitTargets(job), [job])
   const fitState = useAsync(
-    async () => (bbox ? await api.getPlateFit(printerModel, bbox.size, colours) : null),
-    [printerModel, bbox?.size, colours],
+    async () =>
+      targets.length > 0
+        ? await Promise.all(targets.map((target) => api.getPlateFit(printerModel, target.size, target.colours)))
+        : null,
+    // useAsync keys by the deps' JSON, so a re-render with equal targets fetches nothing.
+    [printerModel, targets],
   )
-  const fit = fitState.data ?? undefined
+  const fits = fitState.data ?? []
+  const fit = worstFit(fits)
   const unit = useDisplayUnit()
-  const misfit = fit ? fitMessages(fit, unit) : []
+  const misfit = platesFitMessages(fits, targets, unit)
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
