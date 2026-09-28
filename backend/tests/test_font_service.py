@@ -15,6 +15,7 @@ from scadbuddy.library.fonts import (
     FontNotFoundError,
     FontService,
     InstalledFamily,
+    list_fonts,
 )
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
@@ -276,3 +277,23 @@ async def test_a_font_on_the_data_volume_becomes_resolvable_after_a_real_fc_cach
         env=fonts.env(),
     ).stdout
     assert str(copied) in seen
+
+
+def test_fc_tools_never_see_the_process_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#281: list_fonts() without an env, or with a raw one, still runs fc-list on the allowlist."""
+    seen: list[dict[str, str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(dict(kwargs["env"]))  # type: ignore[call-overload]
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("SCADBUDDY_BAMBUDDY_API_KEY", "hunter2")
+
+    list_fonts()
+    list_fonts({"PATH": "/usr/bin", "AWS_SECRET_ACCESS_KEY": "shh"})
+
+    assert len(seen) == 2
+    assert all("SCADBUDDY_BAMBUDDY_API_KEY" not in env for env in seen)
+    assert seen[1] == {"PATH": "/usr/bin"}

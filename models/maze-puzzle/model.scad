@@ -8,6 +8,9 @@
 //
 // In ball_lid mode a flat lid with a snap skirt prints alongside, upside down,
 // so the ball stays in. Print the lid in a clear filament to see the maze.
+// When the tray and lid do not fit one bed together, the lid goes on a second
+// plate: the model echoes `plates = 2`, and draws only plate $plate when
+// ScadBuddy sets it (0, the default, draws both, side by side).
 //
 // Written to the MakerWorld Parametric Model Maker customizer conventions so
 // the same file works unchanged on MakerWorld and in ScadBuddy.
@@ -43,9 +46,6 @@ wall_thickness = 1.6; // [1.2:0.2:3]
 // Open tray, or a snap-on lid that keeps the ball in
 mode = "open_tray"; // [open_tray:Open tray, ball_lid:Ball with snap-on lid]
 
-// Snap-on lid only: which parts to put on the plate. A tray and lid too big to share the 300 x 320 mm bed print one at a time
-parts = "both"; // [both:Tray and lid, tray:Tray only, lid:Lid only]
-
 // Ball diameter in mm; corridors are widened to fit it
 ball_d = 6; // [4:0.5:12]
 
@@ -69,6 +69,9 @@ lid_color = "#FFFFFF"; // color
 /* [Hidden] */
 
 $fn = 48;
+
+// ScadBuddy's plate convention: 0 draws every plate, N only plate N.
+$plate = 0;
 
 floor_t = 2;          // floor thickness
 border_extra = 1.2;   // outer border is this much thicker than a maze wall
@@ -213,7 +216,7 @@ module vband(zc, hh, d, grow) {
 
 // ------------------------------------------------------------ parts
 
-if (show_tray) {
+if (on_plate(1)) {
     color(floor_color)
         difference() {
             linear_extrude(floor_t) outline_2d();
@@ -235,28 +238,34 @@ if (show_tray) {
 
 // The lid prints upside down beside the tray (plate on the bed, skirt up):
 // to the right if the pair fits the bed's 300 mm width with both nozzles,
-// else behind it within the 320 mm depth, else not at all -- then print the
-// tray and the lid one at a time with `parts`.
+// else behind it within the 320 mm depth, else on a plate of its own.
 BED = [300, 320];
 lid_grow = lid_fit + skirt_t;
 o_min = shape == "round" ? [cx - R_out, cy - R_out] : [-B, -B];
 o_max = shape == "round" ? [cx + R_out, cy + R_out] : [W * p + B, H * p + B];
 span = o_max - o_min;
 pair = [for (i = [0, 1]) 2 * span[i] + part_gap + 2 * lid_grow];
-lid_at = pair[0] <= BED[0] && span[1] + 2 * lid_grow <= BED[1] ? [span[0] + lid_grow + part_gap, 0]
+beside = [span[0] + lid_grow + part_gap, 0];
+lid_at = pair[0] <= BED[0] && span[1] + 2 * lid_grow <= BED[1] ? beside
        : pair[1] <= BED[1] && span[0] + 2 * lid_grow <= BED[0] ? [0, span[1] + lid_grow + part_gap]
        : undef;
 lid_mode = mode == "ball_lid";
-show_tray = !lid_mode || parts != "lid";
-show_lid = lid_mode && (parts == "lid" || (parts == "both" && lid_at != undef));
+lid_plate = lid_mode && lid_at == undef ? 2 : 1;
+lid_xy = lid_at == undef ? beside : lid_at;
 
-if (lid_mode && parts == "both" && lid_at == undef)
-    echo(str("NOTE: the tray and lid (", pair[0], " mm side by side) do not fit the bed ",
-             "together; the lid is left off. Render again with parts = lid"));
+// ScadBuddy reads this line and renders each plate with $plate = 1 .. plates.
+echo(plates = lid_plate);
+function on_plate(n) = $plate == 0 || $plate == n;
 
-if (show_lid)
+if (lid_plate == 2)
+    echo(str("NOTE: the tray and lid (", pair[0], " mm side by side) do not fit one bed ",
+             "together; the lid is on plate 2"));
+
+// On a plate of its own the lid sits where the tray would; drawn with
+// everything ($plate = 0) it stays beside the tray, past the edge of the bed.
+if (lid_mode && on_plate(lid_plate))
     color(lid_color)
-        translate(parts == "lid" ? [0, 0, 0] : [lid_at[0], lid_at[1], 0]) {
+        translate($plate == 2 ? [0, 0, 0] : [lid_xy[0], lid_xy[1], 0]) {
             linear_extrude(lid_t) offset(r = lid_fit + skirt_t) outline_2d();
             translate([0, 0, lid_t - 0.01]) linear_extrude(skirt_h + 0.01)
                 difference() {

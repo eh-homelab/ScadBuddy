@@ -53,8 +53,37 @@ Non-goals (v1):
 - Running OpenSCAD in the browser (openscad-wasm). Server-side render is
   simpler and uses the Manifold nightly; the door stays open.
 - Sandboxing OpenSCAD beyond a timeout and resource limits. `.scad` is a
-  scripting language, but it cannot touch the network and its file access is
-  limited to `import()`/`include` under the model's directory.
+  scripting language that cannot touch the network, but its file access is
+  **not** confined by OpenSCAD: `import()` and `surface()` open whatever path a
+  string hands them, relative or absolute, with the backend's uid (#281). What
+  bounds it is ScadBuddy, not the binary:
+  - A template is trusted code. Its own source, its `include`/`use`, and the
+    values it writes itself (a parameter's initial, a select's options) can name
+    any path the process can read.
+  - A value a *client* supplies cannot steer those calls out of the directory of
+    the file that reads it. A `// file:` parameter takes only a bare name — a
+    staged upload or a shipped sample (#204, #231). Every other string-valued
+    parameter (`string`, `font`, `color`, a string `select`) is refused with a
+    422 when its value starts with `/` or has a `..` path component; relative
+    names below that directory still pass. The check is by path component, so
+    ordinary text (`"Wait..."`, `"3/4 inch"`, `"AC/DC"`) is unaffected; the cost
+    is that text which genuinely starts with a slash (`"/r/3dprinting"`) or
+    contains `/../` cannot be rendered. It judges the value, not what the
+    template does with it: a template that builds a path by concatenation
+    (`str("/", name)`) must guard its own input, as `flexi-fabric`'s and
+    `bookmark`'s `safe_file()` do.
+  - openscad (and openscad-lsp, and fontconfig's `fc-*`) gets an allowlisted
+    environment — `PATH`, `HOME`, the `XDG_*` directories, locale (`LANG`,
+    `LANGUAGE`, `LC_*`), `TZ`, `TMPDIR` and fontconfig's own variables — never a
+    copy of the backend's (`core/fontconfig.py`), so `/proc/self/environ` holds
+    no API key or database URL.
+
+  Kernel-level confinement (a mount namespace, Landlock, a read-only bind of the
+  model directory) would close the rest — what a template itself reads. It stays
+  a non-goal for the same reason authentication is: anyone who can reach this
+  LAN-only instance can already upload or paste a template (#92), so the
+  boundary that matters is what the process can read at all, which is why the
+  environment is the part that is locked down.
 
 ## 3. Verified facts the design rests on
 
@@ -844,6 +873,105 @@ The semantics are unchanged from the sequential loop:
   stopping it, so a parse already under way runs to completion — bounded work,
   unlike an `openscad` run.
 
+### 6.4 More than one plate (#289)
+
+Some templates make parts that cannot share one bed: `models/maze-puzzle` in
+`ball_lid` mode at 15 x 15 cells and 16 mm pitch is a 244 mm tray plus a 248 mm
+lid, and the H2C reaches 300 x 320 mm with both nozzles. A template says which
+part goes on which plate with a **template convention**, not a new API field,
+so the same file still opens unchanged in OpenSCAD and on MakerWorld:
+
+```scad
+/* [Hidden] */
+$plate = 0;                        // 0 = every plate; ScadBuddy sets 1..N
+plates = lid_fits ? 1 : 2;
+echo(plates = plates);             // logs `ECHO: plates = 2`
+
+if ($plate == 0 || $plate == 1) tray();
+if ($plate == 0 || $plate == 2) translate($plate == 0 ? beside : [0, 0, 0]) lid();
+```
+
+- **`echo(plates = N)`** is how a template states its plate count. The render
+  reads `ECHO: plates = N` off the whole log (not the 50-line tail), the last
+  such line wins, and it may depend on parameters. Absent, or 1, and nothing
+  below happens: the pipeline and its 3MF are byte-for-byte what §6.1-§6.3
+  describe. More than `MAX_PLATES` (16) fails the job, since each plate is a
+  render and a solid render per colour of its own.
+- **`$plate`** is the plate being drawn. The template declares it as `0` in
+  `[Hidden]`, where 0 means "every plate, laid out as the template likes" —
+  what a plain OpenSCAD render, MakerWorld and ScadBuddy's preview all draw.
+  ScadBuddy renders plate *k* with `-D '$plate=k'`, which overrides the
+  template's own `$plate = 0`, and the solid wrapper of §6.3 passes it through
+  the same way. Measured on 2026.09.23: a `$`-variable is not exported to the
+  customizer schema even outside `[Hidden]`, and the `-D` override works through
+  the wrapper's `include`.
+- A special variable rather than a module or a parameter: it is dynamically
+  scoped, so a template can test it anywhere, including inside its own modules,
+  without threading an argument through; and it is not a customizer parameter, so
+  it never shows as a control and never reaches a preset.
+
+The pipeline for a multi-plate template:
+
+1. The ordinary render (no `$plate` set, so 0) gives the preview GLB, its
+   bounding box, the colour list and the **global extruder order** (§7) exactly
+   as for any template. Its log gives `plates`.
+2. For each plate *k*: a render with `$plate = k`, split by material, each part
+   mapped onto the global extruder list by colour (a colour plate 0 did not show
+   is appended, with a warning — the template drew something on one plate that
+   it does not draw on all of them), then the per-colour solids of §6.3 with
+   `$plate = k`. A plate that renders empty fails the job naming the plate.
+3. One cover image set per plate (`Metadata/plate_k.png`, `_small`, `top_k`,
+   `pick_k`), under the same single budget §6.2.1 gives the one plate.
+4. One 3MF with N plates (§6.2 generalised below).
+
+The job's result carries `plates`: for each, its index, bounding box and
+colours. The customizer checks every plate against the printer with
+`GET /plate/fit` and prefixes each problem with its plate; a one-plate job
+carries an empty list and is checked as before. The print dialog already offers
+a plate, or all of them, for any 3MF with more than one (#83, #240).
+
+**The 3MF.** Bambu Studio assigns objects to plates *by position*, not by the
+plate list in `model_settings.config`: `PartPlateList::load_from_3mf_structure`
+ends in `reload_all_objects`, which puts each instance on the first plate whose
+area its bounding box intersects (`src/slic3r/GUI/PartPlate.cpp`), and the CLI
+Bambuddy slices with runs the same code (`src/BambuStudio.cpp`). Plate *i*
+(0-based) of *n* sits at `(col * W * 1.2, -row * D * 1.2)`, where `W` x `D` is
+the printer's bed (`printable_area`, truncated to whole millimetres),
+`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
+`printable_area`, the CLI takes the printer's own as the file's
+(`old_printable_width = current_printable_width`), so there is no shrink and
+nothing moves (`shrink_to_new_bed == 0`). `compute_colum_count` does not spell
+it `ceil`: it rounds `sqrt(n)` to the nearest whole number and adds one when that
+rounded down. Rounding a non-integer root up gives its ceiling, and rounding it
+down and adding one gives the same; a whole root is its own ceiling. So the two
+agree for every `n`, and `bambu3mf.plate_columns` keeps Bambu Studio's form while
+a test checks it against `ceil(sqrt(n))` for `n` up to ten times `MAX_PLATES`.
+So:
+
+- Objects are numbered across plates: `object_1..object_M` are every plate's
+  parts in plate order, each a component of its plate's assembly, and the
+  assemblies take ids `M+1..M+N`. Each part's `extruder` in
+  `model_settings.config` is its index in the global filament list.
+- One build `<item>` per plate, at that plate's origin plus the placement §6.2
+  already computes for its parts (centred on the reachable area, a prime tower
+  only for a plate that uses more than one colour).
+- One `<plate>` per plate with `plater_id` 1..N, its `model_instance` and its
+  own cover entries. The package cover relationships keep pointing at plate 1.
+- `wipe_tower_x`/`wipe_tower_y` become per-plate arrays (Bambu Studio's
+  `coFloats`, indexed by plate); a plate with no tower repeats another plate's
+  value, which it never reads.
+- `replate_3mf` re-places every item on the chosen printer with that printer's
+  plate stride, and a `PlateFitError` names the plate that does not fit.
+- The mesh analysis (#284, `GET /outputs/{id}/geometry?plate=k`) measures one
+  plate at a time, reading the plate's parts from its assembly. Every plate is
+  drawn at the model origin, so measuring them together would superimpose
+  geometry that is never on one bed. The result's `plate` and `plates` say which
+  plate it is and how many there are.
+
+Not verified end to end: no Bambu Studio or Bambuddy runs in CI, so the layout
+rests on the source above, and slicing a multi-plate ScadBuddy file through
+Bambuddy is an acceptance check still to make on a live instance.
+
 ## 7. Bambuddy integration
 
 Settings (stored in `settings.json` on the PVC, editable in the UI):
@@ -893,7 +1021,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must already be a per-model pin `{name, url, ref, commit}` (#93): a bare name is a 422 naming it (no shared lockfile is left to resolve it against), a malformed pin a 422, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must already be a per-model pin `{name, url, ref, commit}` (#93): a bare name is a 422 naming it (no shared lockfile is left to resolve it against), a malformed pin a 422, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them before anything is cloned; each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |

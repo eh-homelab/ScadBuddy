@@ -99,6 +99,8 @@ const state = {
   assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
   /** #237 — other files a duplicate's merge takes or keeps; none unless a test sets them. */
   mergeFiles: {} as Record<string, MergeFiles>,
+  /** #289 — per-template plates of a multi-plate render; none unless a test sets them. */
+  plates: {} as Record<string, NonNullable<Job['plates']>>,
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -131,6 +133,7 @@ export function resetMockState(): void {
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
   state.mergeFiles = {}
+  state.plates = {}
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -150,6 +153,14 @@ type MergeFiles = Pick<MergePreview, 'taken' | 'kept'>
  */
 export function setMockMergeFiles(slug: string, files: MergeFiles): void {
   state.mergeFiles[slug] = files
+}
+
+/**
+ * #289 — the plates every finished render of `slug` reports, as a template that asks for
+ * more than one plate would (spec §6.4). Unset, a render is one plate: `plates: []`.
+ */
+export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>): void {
+  state.plates[slug] = plates
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -635,19 +646,38 @@ export const handlers = [
         description?: string
         tags?: string[]
         force?: boolean
+        libraries?: string[]
       }
       const pastedSlug = slugify(body.name)
       if (!pastedSlug) return problem(422, 'Unprocessable Content', 'that name yields no slug')
       if (state.models.some((m) => m.slug === pastedSlug)) {
         return problem(409, 'Conflict', `a model named '${pastedSlug}' already exists`)
       }
+      // #169 — curated names only, each pinned at the catalogue's ref.
+      const named = [...new Set(body.libraries ?? [])]
+      const unknown = named.filter((name) => !state.libraries.some((entry) => entry.name === name))
+      if (unknown.length > 0) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `not in the library catalogue: ${unknown.join(', ')}`,
+        )
+      }
       const check = checkOf(body.source)
       if (!check.ok && !body.force) return refusal(check)
+      const libraries = state.libraries
+        .filter((entry) => named.includes(entry.name))
+        .map((entry) => {
+          state.seq += 1
+          const commit = state.seq.toString(16).padStart(40, 'c')
+          return { name: entry.name, url: entry.url, ref: entry.ref, commit }
+        })
       const pasted: ModelSummary = {
         slug: pastedSlug,
         name: body.name,
         description: body.description ?? '',
         tags: body.tags ?? [],
+        libraries,
         updated_at: new Date().toISOString(),
         has_thumbnail: false,
         has_readme: false,
@@ -1400,6 +1430,7 @@ export const handlers = [
     job.status = 'done'
     job.bbox_mm = bboxOf(job.params ?? {})
     job.colors = colorsOf(job.slug, job.params ?? {})
+    job.plates = state.plates[job.slug] ?? []
     job.preview_url = `${base}/jobs/${job.id}/preview.glb`
     job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
     job.notes =

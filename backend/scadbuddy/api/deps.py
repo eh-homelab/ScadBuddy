@@ -137,7 +137,9 @@ def build_state(settings: Settings) -> AppState:
         max_count=config.asset_max_count,
     )
     # The outputs feed the catalogue's fallback thumbnail (#179).
-    catalogue = Catalogue(paths, history, outputs)
+    catalogue = Catalogue(
+        paths, history, outputs, duplicate_staging_max_age=config.duplicate_staging_max_age
+    )
     history.on_commit = announce_commits(events, catalogue)
     return AppState(
         settings=settings,
