@@ -36,7 +36,7 @@ export const settingsTools: Tool[] = [
     name: 'get_settings',
     description:
       'ScadBuddy settings: the Bambuddy URL, whether an API key is set (never the key), default printer, ' +
-      'pipeline, plate, presets and display unit.',
+      'plate and display unit.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings'],
@@ -57,11 +57,11 @@ export const settingsTools: Tool[] = [
   defineTool({
     name: 'get_print_targets',
     description:
-      "Bambuddy's printers (with model and live status), library folders and slicer pipelines: the farm " +
+      "Bambuddy's printers (with model and live status), and library folders: the farm " +
       'context a print is planned against.',
     input: z.object({}),
     risk: 'read',
-    bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
+    bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/settings/targets'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/settings/targets'), 'get print targets')),
   }),
@@ -70,16 +70,12 @@ export const settingsTools: Tool[] = [
     name: 'get_print_options',
     description:
       'Remembered print options (timelapse, bed levelling, AMS, …) at each scope: global, per printer and ' +
-      'per model, and the effective values for `slug`/`pipeline_id` when given.',
-    input: z.object({ slug: z.string().optional(), pipeline_id: z.number().int().optional() }),
+      'per model, and the printer the per-printer scope keys on (the Settings printer).',
+    input: z.object({ slug: z.string().optional() }),
     risk: 'read',
-    // Only to find a pipeline's target printer; answered without it when Bambuddy is unreachable.
-    bambuddyScope: ['Manage Queue'],
     routes: ['GET /api/v1/settings/print-options'],
-    handler: async ({ slug, pipeline_id }, { backend }) =>
-      json(
-        await ok(backend.GET('/api/v1/settings/print-options', { params: { query: { slug, pipeline_id } } }), 'get print options'),
-      ),
+    handler: async ({ slug }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/settings/print-options', { params: { query: { slug } } }), 'get print options')),
   }),
 
   // `outward`, deliberately, unlike the `remember_*` tools in print.ts (`write`).
