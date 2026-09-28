@@ -7,10 +7,10 @@ Presets are matched by **name and compatible printer**, never by id: the cloud t
 spells an id ``GP243`` and the standard tier spells the same preset by its name, and
 either tier may be the only one present (Bambu Cloud logged out).
 
-Controller rulings R8/R9 (task-3-addendum.md, 2026-09-27) override the original spec
-brief here: a live check found Bambuddy rejects every ``source: "local"`` printer
-preset with 400 "The selected printer is not compatible with the process preset in
-the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
+The spec's original plan of a ScadBuddy-authored printer preset was dropped (spec
+2026-09-27 §4.1, after §5's live tests): Bambuddy rejects every ``source: "local"``
+printer preset with 400 "The selected printer is not compatible with the process
+preset in the 3mf." So ScadBuddy never invents its own printer preset for High Flow or mixed
 nozzle sizes — it always names Bambu's own preset for ``nozzles[0].size``, adds a
 ``hf-unsupported`` warning when High Flow was asked for, and refuses mixed sizes
 outright rather than offering an override.
@@ -43,6 +43,7 @@ __all__ = [
     "PrintChoices",
     "Resolved",
     "Tier",
+    "choice_errors",
     "printer_preset_name",
     "resolve",
 ]
@@ -106,7 +107,7 @@ def _bambu_printer(size: str) -> str:
 def printer_preset_name(nozzles: list[NozzleChoice]) -> str:
     """Bambu's own printer preset for ``nozzles[0]``'s size.
 
-    Addendum R8: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
+    Spec §4.1: Bambuddy 400s on any ``source: "local"`` printer preset, so there is
     no ScadBuddy-authored name for High Flow or mixed sizes — every flow combination
     resolves to the same Bambu preset name, and ``resolve`` is what adds the
     ``hf-unsupported`` warning or the ``mixed-sizes`` error instead.
@@ -158,13 +159,17 @@ def _override_problem(
     return None
 
 
-def resolve(
-    options: FilamentOptions,
-    plan: FilamentPlan,
-    choices: PrintChoices,
-    catalogue: _Catalogue,
-    spool_presets: dict[int, list[SpoolFilamentPreset]],
-) -> Resolved:
+class _ChoiceResult(BaseModel):
+    printer_preset_name: str
+    printer_preset: PresetRef | None = None
+    process_preset: PresetRef | None = None
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+    errors: list[FilamentWarning] = Field(default_factory=list)
+
+
+def _resolve_choices(choices: PrintChoices, catalogue: _Catalogue) -> _ChoiceResult:
+    """Everything the choices decide on their own, without any plate's slots: the
+    nozzle sizes, the printer preset and the process preset."""
     warnings: list[FilamentWarning] = []
     errors: list[FilamentWarning] = []
     sizes = {nozzle.size for nozzle in choices.nozzles}
@@ -207,6 +212,35 @@ def resolve(
                 message=f"{process_name!r} is not a process Bambuddy has for a {size} mm nozzle.",
             )
         )
+    return _ChoiceResult(
+        printer_preset_name=name,
+        printer_preset=printer_ref,
+        process_preset=process_ref,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
+def choice_errors(choices: PrintChoices, catalogue: _Catalogue) -> list[FilamentWarning]:
+    """The errors :func:`resolve` would report from the choices alone, before any plate
+    is read — so a caller can refuse before uploading anything. Slot errors (no spool,
+    no filament preset, an unusable Advanced override) need the plate's slots, which
+    only a library file answers, and so are left to :func:`resolve`."""
+    return _resolve_choices(choices, catalogue).errors
+
+
+def resolve(
+    options: FilamentOptions,
+    plan: FilamentPlan,
+    choices: PrintChoices,
+    catalogue: _Catalogue,
+    spool_presets: dict[int, list[SpoolFilamentPreset]],
+) -> Resolved:
+    chosen = _resolve_choices(choices, catalogue)
+    warnings = list(chosen.warnings)
+    errors = list(chosen.errors)
+    size = choices.nozzles[0].size
+    printer = _bambu_printer(size)
 
     by_id = {option.spool_id: option for option in options.spools}
     #: Bambuddy's slice expects a per-AMS-slot array indexed by ``slot_id - 1``, not a
@@ -302,9 +336,9 @@ def resolve(
     filament_colours = [colour if colour is not None else "#FFFFFF" for colour in colours]
 
     return Resolved(
-        printer_preset_name=name,
-        printer_preset=printer_ref,
-        process_preset=process_ref,
+        printer_preset_name=chosen.printer_preset_name,
+        printer_preset=chosen.printer_preset,
+        process_preset=chosen.process_preset,
         filament_presets=filament_presets,
         filament_colours=filament_colours,
         bed_type=choices.bed_type,

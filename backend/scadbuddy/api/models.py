@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,6 +30,7 @@ from scadbuddy.api.deps import (
     ChecksDep,
     ConfigDep,
     EventsDep,
+    FetcherDep,
     HistoryDep,
     InstallsDep,
     LibrariesDep,
@@ -63,10 +65,12 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.library.libraries import (
     NAME_PATTERN,
+    CheckoutFetcher,
     LibraryDeclarationError,
     ModelLibrary,
     model_search_path,
     parse_declaration,
+    resolve_search_path,
     search_path,
 )
 from scadbuddy.library.scad import (
@@ -358,6 +362,7 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     events: EventsDep,
+    fetcher: FetcherDep,
     libraries: LibrariesDep,
     installs: InstallsDep,
     checkouts: CheckoutsDep,
@@ -520,6 +525,7 @@ async def create_model(
             force=force,
             thumbnail=thumbnail_bytes,
             readme=readme_text,
+            fetcher=fetcher,
         )
 
 
@@ -645,13 +651,15 @@ async def _create(
     force: bool,
     thumbnail: bytes | None = None,
     readme: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> ModelRecord:
     """The one path every create takes, whatever carried the source in."""
     if catalogue.exists(slug):
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
     # The pins a dropped model.json carries (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create. A
-    # pin whose checkout is not on this volume is the 409 every render would be.
+    # pin whose checkout is not on this volume is fetched again (#169), and one
+    # that cannot be is the 409 every render would be.
     # One entry per name: the first, as `use <NAME/...>` can only mean one.
     pins: list[ModelLibrary] = []
     for library in meta.libraries:
@@ -661,7 +669,9 @@ async def _create(
     library_path: tuple[Path, ...] = ()
     if pins:
         # A directory check per pin: off the event loop.
-        library_path = await asyncio.to_thread(search_path, catalogue.paths, pins)
+        library_path = await resolve_search_path(
+            fetcher, partial(search_path, catalogue.paths, pins)
+        )
     checked = await _guard_source(
         source, config=replace(config, library_path=library_path), force=force, limit=limit
     )
@@ -752,12 +762,15 @@ async def check_model_source(
     checks: ChecksDep,
     catalogue: CatalogueDep,
     paths: PathsDep,
+    fetcher: FetcherDep,
 ) -> SourceCheck:
     context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
     if body.slug and context is not None:
         # The model's own libraries, as its render will see them (#93).
         # Off the loop, like every other read of the PVC from an `async def`.
-        library_path = await asyncio.to_thread(model_search_path, paths, body.slug)
+        library_path = await resolve_search_path(
+            fetcher, partial(model_search_path, paths, body.slug)
+        )
         config = replace(config, library_path=library_path)
     try:
         return await unless_the_client_leaves(
@@ -921,6 +934,7 @@ async def put_source(
     config: ConfigDep,
     checks: ChecksDep,
     events: EventsDep,
+    fetcher: FetcherDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -940,7 +954,7 @@ async def put_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the source still has conflict markers; resolve every conflict first",
         )
-    library_path = await asyncio.to_thread(model_search_path, paths, slug)
+    library_path = await resolve_search_path(fetcher, partial(model_search_path, paths, slug))
     checked = await _guard_source(
         body.source,
         config=replace(config, library_path=library_path),
@@ -996,9 +1010,10 @@ async def get_schema(
     history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> CustomizerSchema:
     require_model_exists(catalogue, slug)
-    source = await resolve_source(slug, None, paths=paths, history=history)
+    source = await resolve_source(slug, None, paths=paths, history=history, fetcher=fetcher)
     try:
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
@@ -1052,7 +1067,8 @@ def _etag_matches(if_none_match: str | None, etag: str) -> bool:
     summary="Model thumbnail",
     description=(
         "The thumbnail set on the model or, when it has none, the plate image of its "
-        "first generated output. 404 when there is neither. Carries a strong `ETag` "
+        "first generated output, or else its default-render preview. 404 when there is "
+        "none of the three. Carries a strong `ETag` "
         "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
         "answered 304 with no body."
     ),
@@ -1115,7 +1131,9 @@ async def put_thumbnail(
     description=(
         "Removes the thumbnail set on the model, as one revision in its history. The "
         "record that comes back can still have one: a generated model falls back to "
-        "its first output's plate image (`thumbnail_source` is then `output`)."
+        "its first output's plate image (`thumbnail_source` is then `output`), and any "
+        "other to its default-render preview (`preview`) once that has rendered in the "
+        "background."
     ),
 )
 def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:

@@ -5,7 +5,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from scadbuddy.render.jobs import QueueFullError, RenderQueue
-from tests.api.conftest import FAIL_WIDTH, wait_for_job
+from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, wait_for_job
 
 
 def test_render_is_accepted_and_the_job_completes(client: TestClient, model: str) -> None:
@@ -70,6 +70,8 @@ def test_a_failed_render_carries_the_log_tail(client: TestClient, model: str) ->
     assert job["status"] == "failed"
     assert job["error"] == "openscad exited with 1"
     assert job["log_tail"] == ["ERROR: something broke"]
+    # A failed render has no result, and still says what it could (#408).
+    assert job["warnings"] == [FAILED_WARNING]
     assert job["preview_url"] is None
     assert job["bbox_mm"] is None
 

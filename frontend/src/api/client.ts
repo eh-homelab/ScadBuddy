@@ -60,7 +60,7 @@ export const API_BASE = '/api/v1'
 /** What a model thumbnail's URL is keyed on (#179). */
 export type ThumbnailKeyed = Pick<
   ModelSummary,
-  'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id'
+  'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
 >
 
 /** The optional parts of a model upload besides its source (#179). */
@@ -303,13 +303,20 @@ export const api = {
    * already on the page does not refetch the same URL. It joins the model's
    * revision (a thumbnail set or removed is a commit) with where the image comes
    * from and, for the output fallback, which output -- that fallback moves with no
-   * commit when the covering output is deleted or another becomes the first (#179).
+   * commit when the covering output is deleted or another becomes the first (#179)
+   * -- and, for the default-render preview, which render, as a re-render after a
+   * source edit is a new image with no commit of its own.
    */
   modelThumbnailUrl: (model: ThumbnailKeyed) => {
-    const key = [model.version, model.thumbnail_source, model.thumbnail_output_id]
+    const key = [
+      model.version,
+      model.thumbnail_source,
+      model.thumbnail_output_id,
+      model.thumbnail_preview_id,
+    ]
       .map((part) => part ?? '')
       .join('.')
-    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '..' ? '' : `?v=${seg(key)}`}`
+    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '...' ? '' : `?v=${seg(key)}`}`
   },
 
   /**

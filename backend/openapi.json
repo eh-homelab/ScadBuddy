@@ -2190,12 +2190,24 @@
             ],
             "title": "Thumbnail Output Id"
           },
+          "thumbnail_preview_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Preview Id"
+          },
           "thumbnail_source": {
             "anyOf": [
               {
                 "enum": [
                   "model",
-                  "output"
+                  "output",
+                  "preview"
                 ],
                 "type": "string"
               },
@@ -5823,7 +5835,7 @@
     },
     "/api/v1/libraries/{name}": {
       "delete": {
-        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.",
+        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout clones it again at that commit, and is a 409 only when that fails.",
         "operationId": "remove_library_api_v1_libraries__name__delete",
         "parameters": [
           {
@@ -7475,7 +7487,7 @@
     },
     "/api/v1/models/{slug}/thumbnail": {
       "delete": {
-        "description": "Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`).",
+        "description": "Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`), and any other to its default-render preview (`preview`) once that has rendered in the background.",
         "operationId": "delete_thumbnail_api_v1_models__slug__thumbnail_delete",
         "parameters": [
           {
@@ -7518,7 +7530,7 @@
         ]
       },
       "get": {
-        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
+        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output, or else its default-render preview. 404 when there is none of the three. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
         "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
         "parameters": [
           {
