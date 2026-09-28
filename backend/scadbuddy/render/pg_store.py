@@ -25,7 +25,10 @@ Schema changes are files in ``backend/scadbuddy/migrations/`` (`MIGRATIONS_DIR`)
 per migration, named by UTC timestamp and slug (``20260928T0612Z_settings.sql``). Add a
 new file; never edit, rename or remove a merged one. They are applied at `open`, in
 timestamp order and each once by file id, under an advisory lock so two starting pods
-cannot race each other.
+cannot race each other. They include the tables of the
+stores that share this pool through `PostgresJobStore.connection` -- the
+default-render previews' ``model_previews``
+(``20260928T0721Z_model_previews.sql``).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import logging
 import re
 import shutil
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -286,6 +290,11 @@ class PostgresJobStore:
     def close(self) -> None:
         self._pool.close()
 
+    def connection(self) -> AbstractContextManager[Connection[DictRow]]:
+        """A pooled connection (autocommit, dict rows) for the other stores that keep
+        their tables in this database. Usable once `open` has migrated it."""
+        return self._pool.connection()
+
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         """The process's one pool, shared with the other Postgres stores
@@ -431,6 +440,32 @@ class PostgresJobStore:
                     assert dropped is not None
                     superseded = _job(dropped)
                     self._announce(conn, superseded, "job.superseded")
+            if job.state == "done":
+                # Already answered, from the render kept under the template: on the
+                # row for the status poll, past the pending-key index and the limit.
+                conn.execute(
+                    "INSERT INTO render_jobs"
+                    " (id, slug, params, model_version, state, created_at, started_at,"
+                    "  finished_at, log_tail, result, diagnostics, diagnostics_dropped,"
+                    "  render_key)"
+                    " VALUES (%s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        job.id,
+                        job.slug,
+                        Jsonb(job.params),
+                        job.model_version,
+                        job.created_at,
+                        job.started_at,
+                        job.finished_at,
+                        Jsonb(job.log_tail),
+                        Jsonb(job.result.model_dump(mode="json")) if job.result else None,
+                        Jsonb([d.model_dump(mode="json") for d in job.diagnostics]),
+                        job.diagnostics_dropped,
+                        key,
+                    ),
+                )
+                self._announce(conn, job, "job.done")
+                return Submitted(job, cached=True, superseded=superseded)
             if max_pending:
                 # Inside the transaction: raising rolls the supersede above back,
                 # so a refusal changes nothing. A soft limit across replicas --
