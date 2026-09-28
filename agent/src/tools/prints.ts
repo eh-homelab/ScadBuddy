@@ -78,7 +78,8 @@ export const printHistoryTools: Tool[] = [
     name: 'pull_print_timelapse',
     description:
       "Download a timelapse still on the printer and attach it to the print. `filename` is a `remote_files[].name` " +
-      'of kind `timelapse` from get_print with `printer_media: true`. It is fetched over FTP from the printer.',
+      'of kind `timelapse` from get_print with `printer_media: true`. It is fetched over FTP from the printer. ' +
+      'Refused when the archive was deleted in Bambuddy.',
     input: z.object({
       archive_id: archiveId,
       filename: z.string().min(1).max(255).regex(/^[^/\\]+$/, 'must be a bare file name from printer_media'),

@@ -5,7 +5,7 @@ import { Route, Routes, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import type * as embed from '../lib/embed'
-import { downloadBlob, openExternal } from '../lib/embed'
+import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { outputs, prints, versionIds } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -53,7 +53,10 @@ async function section(name: string): Promise<HTMLElement> {
 }
 
 beforeEach(() => {
-  vi.mocked(downloadBlob).mockClear()
+  vi.mocked(downloadBlob).mockReset()
+  vi.mocked(downloadBlob).mockImplementation(async (load) => {
+    await load()
+  })
   vi.mocked(openExternal).mockClear()
 })
 
@@ -173,6 +176,22 @@ describe('PrintDetailPage (#311)', () => {
     expect(JSON.parse(await (await load()).text())).toMatchObject({ name: 'Reagan', text_size: 14 })
   })
 
+  it('says to allow pop-ups when a download is blocked inside Bambuddy', async () => {
+    vi.mocked(downloadBlob).mockRejectedValue(new DownloadBlockedError())
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: 'Download name-keychain-reagan.gcode.3mf' }))
+    expect(await within(files).findByRole('alert')).toHaveTextContent('Allow pop-ups')
+  })
+
+  it('says so when the parameters cannot be saved either', async () => {
+    vi.mocked(downloadBlob).mockRejectedValue(new DownloadBlockedError())
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: 'Download parameters as JSON' }))
+    expect(await within(files).findByRole('alert')).toHaveTextContent('Allow pop-ups')
+  })
+
   it('customizes from this print through the edit route', async () => {
     const { user } = render(35)
     await user.click(await screen.findByRole('link', { name: 'Customize from this' }))
@@ -248,6 +267,8 @@ describe('PrintDetailPage (#311)', () => {
     await user.click(within(timelapse).getByRole('button', { name: 'Look on the printer' }))
     const pull = await within(timelapse).findByRole('button', { name: 'Pull timelapse from printer' })
     expect(asked).toEqual(['', '?printer_media=1'])
+    // An outward write: only a person may press it, never the agent's fallback click.
+    expect(pull).toHaveAttribute('data-agent-user-only')
     // Only the timelapse is offered, not the camera recording.
     expect(timelapse).toHaveTextContent('video_2026-09-26_20-01-00.mp4')
     expect(timelapse).not.toHaveTextContent('ipcam-record')

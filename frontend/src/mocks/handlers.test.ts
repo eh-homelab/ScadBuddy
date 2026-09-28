@@ -1020,6 +1020,11 @@ describe('the print detail mock', () => {
     expect(detail.media.timelapse.url).toBe('/api/v1/prints/36/timelapse')
   })
 
+  it('refuses to pull a timelapse onto a print deleted in Bambuddy', async () => {
+    const pulled = await fetch('/api/v1/prints/38/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename: 'x.mp4' }) })
+    expect(pulled.status).toBe(409)
+  })
+
   it('answers a timelapse Range with a 206', async () => {
     const part = await fetch('/api/v1/prints/35/timelapse', { headers: { Range: 'bytes=4-7' } })
     expect(part.status).toBe(206)

@@ -138,6 +138,7 @@ def test_pull_timelapse_attaches_the_named_file(client: TestClient, model: str) 
     configure(client)
     output_id = make_output(client, model)
     link(client, output_id, 35)
+    mock_archive(35)
     select = respx.post(f"{API}/archives/35/timelapse/select").mock(
         return_value=httpx.Response(200, json={"status": "attached", "filename": TIMELAPSE})
     )
@@ -168,6 +169,25 @@ def test_pull_timelapse_drops_the_cached_archive(client: TestClient, model: str)
     assert before.call_count == 2, "the detail after a pull reads the archive again"
 
 
+@respx.mock
+def test_a_print_deleted_in_bambuddy_cannot_pull_a_timelapse(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1)
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    select = respx.post(f"{API}/archives/35/timelapse/select").mock(
+        return_value=httpx.Response(200, json={})
+    )
+
+    response = client.post("/api/v1/prints/35/timelapse/pull", json={"filename": TIMELAPSE})
+
+    assert response.status_code == 409
+    assert "deleted" in response.json()["detail"]
+    assert not select.called
+
+
 @pytest.mark.parametrize("filename", ["", "../etc/passwd", "a/b.mp4", "x" * 300])
 def test_pull_timelapse_takes_a_bare_file_name(
     client: TestClient, model: str, filename: str
@@ -186,6 +206,7 @@ def test_a_timelapse_not_on_the_printer_is_bambuddys_404(client: TestClient, mod
     configure(client)
     output_id = make_output(client, model)
     link(client, output_id, 35)
+    mock_archive(35)
     respx.post(f"{API}/archives/35/timelapse/select").mock(
         return_value=httpx.Response(404, json={"detail": "Timelapse 'x.mp4' not found on printer"})
     )

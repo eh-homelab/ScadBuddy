@@ -9,7 +9,8 @@ import { PrintAgainDialog } from '../components/PrintAgainDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
-import { downloadBlob, isEmbedded, openExternal } from '../lib/embed'
+import { USER_ONLY } from '../agent/dom'
+import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
 import { formatValue } from '../lib/format'
 import { DELETED, formatBytes, formatDuration, statusLabel } from '../lib/prints'
 import { useAsync } from '../lib/useAsync'
@@ -376,6 +377,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
                 className="ml-auto"
                 onClick={() => void pull(file.name)}
                 disabled={pulling !== null}
+                {...USER_ONLY}
               >
                 {pulling === file.name && <Spinner />}
                 Pull timelapse from printer
@@ -526,16 +528,21 @@ function FilesSection({ print }: { print: PrintDetail }) {
     setError(null)
     try {
       await download(file.url, file.name)
-    } catch {
-      setError(`Could not download ${file.name}.`)
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : `Could not download ${file.name}.`)
     } finally {
       setBusy(null)
     }
   }
 
-  function saveParams() {
+  async function saveParams() {
+    setError(null)
     const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
-    void downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
+    try {
+      await downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : 'Could not save the parameters.')
+    }
   }
 
   return (
@@ -569,7 +576,7 @@ function FilesSection({ print }: { print: PrintDetail }) {
             size="sm"
             className="ml-auto"
             aria-label="Download parameters as JSON"
-            onClick={saveParams}
+            onClick={() => void saveParams()}
           >
             Download
           </Button>

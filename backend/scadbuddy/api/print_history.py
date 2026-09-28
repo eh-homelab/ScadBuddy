@@ -738,7 +738,8 @@ class TimelapsePull(BaseModel):
         "timelapse (Bambuddy's `timelapse/select`, which fetches it over FTP). Only on "
         "an explicit request. The name is one of the detail's "
         "`printer_media.remote_files` (read with `printer_media=1`); Bambuddy answers "
-        "404 for a name the printer does not have. The key needs Manage Archives."
+        "404 for a name the printer does not have, and ScadBuddy 409 for an archive "
+        "deleted in Bambuddy, as for a reprint. The key needs Manage Archives."
     ),
 )
 async def pull_timelapse(
@@ -750,6 +751,12 @@ async def pull_timelapse(
 ) -> Response:
     await _require_print(links, archive_id)
     async with client_for(store.load()) as client:
+        if await cache.archive(client, archive_id) is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"archive {archive_id} was deleted in Bambuddy, so no timelapse can be "
+                "attached to it",
+            )
         await client.select_timelapse(archive_id, body.filename)
         cache.forget(client, archive_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -2175,6 +2175,9 @@ export const handlers = [
   http.post(`${base}/prints/:archiveId/timelapse/pull`, async ({ params, request }) => {
     const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
     if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so no timelapse can be attached to it`)
+    }
     const { filename } = (await request.json()) as { filename: string }
     if (!(fixtures.printerFiles[print.archive_id] ?? []).some((file) => file.name === filename)) {
       return problem(404, 'Not Found', `Bambuddy has no such resource when asked to attach a timelapse: Timelapse '${filename}' not found on printer`)
