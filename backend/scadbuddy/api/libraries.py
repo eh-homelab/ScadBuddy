@@ -49,7 +49,6 @@ from scadbuddy.library.libraries import (
     REF_PATTERN,
     CatalogueLibrary,
     CheckoutGate,
-    Declared,
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
@@ -158,7 +157,7 @@ async def _pin(
     installs: asyncio.Semaphore,
     checkouts: CheckoutGate,
     events: EventBus,
-    replacing: Declared | None = None,
+    replacing: ModelLibrary | None = None,
 ) -> ModelRecord:
     """Clone ``name`` and record the pin in ``slug``, with the same checks and status
     codes for a first pin and a re-pin. ``replacing`` is the entry a re-pin read:
@@ -214,26 +213,16 @@ async def repin_library(
     # A malformed declaration is the 409 every other reader of it gives
     # (install_library_handlers); PUT is the way to replace one.
     declared = await asyncio.to_thread(declared_libraries, paths.model_dir(slug))
-    current = next(
-        (
-            entry
-            for entry in declared
-            if (entry.name if isinstance(entry, ModelLibrary) else entry) == name
-        ),
-        None,
-    )
+    current = next((entry for entry in declared if entry.name == name), None)
     if current is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
         )
-    # A bare name from before per-model pins has no upstream of its own: the
-    # catalogue's, as `PUT` without a url.
-    pinned = current if isinstance(current, ModelLibrary) else None
     return await _pin(
         slug,
         name,
-        url=pinned.url if pinned else None,
-        ref=body.ref or (pinned.ref if pinned else None),
+        url=current.url,
+        ref=body.ref or current.ref,
         catalogue=catalogue,
         libraries=libraries,
         installs=installs,

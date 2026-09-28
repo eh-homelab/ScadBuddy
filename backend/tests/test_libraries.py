@@ -22,7 +22,6 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, LibraryNotDeclaredError, ModelMeta
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
-    LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
     LibraryDeclarationError,
@@ -33,14 +32,8 @@ from scadbuddy.library.libraries import (
     LibraryPin,
     LibraryStore,
     LibraryTooLargeError,
-    Lock,
     ModelLibrary,
     declared_libraries,
-    lock_at,
-    migrate_lockfile,
-    model_search_path,
-    pin_restored_declaration,
-    read_lock,
     search_path,
 )
 from scadbuddy.render.jobs import resolve_source
@@ -119,9 +112,8 @@ def test_resolve_clones_the_catalogue_default_and_records_nothing(
     # Laid out so `use <BOSL2/std.scad>` resolves with the parent on OPENSCADPATH.
     checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
     assert checkout.read_text(encoding="utf-8") == V1
-    # The pin is the model's to record; fetching it is no revision, and no lockfile.
+    # The pin is the model's to record; fetching it is no revision.
     assert history.head() == head
-    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
 def test_a_new_ref_is_a_second_checkout_beside_the_first(
@@ -564,7 +556,7 @@ def test_re_pinning_the_same_commit_is_not_a_revision(
     assert history.head() == head
 
 
-def test_pinning_replaces_a_bare_name_from_before_per_model_pins(
+def test_pinning_replaces_a_bare_string_entry_of_that_name(
     store: LibraryStore, catalogue: Catalogue, paths: DataPaths
 ) -> None:
     _create(catalogue)
@@ -625,6 +617,7 @@ def test_a_listing_is_not_stopped_by_an_entry_it_cannot_read(
             "ref",
         ),
         ([{"url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}], "name"),
+        (["BOSL2"], "'BOSL2' without a pin"),
         ("BOSL2", "not a list"),
     ],
 )
@@ -648,17 +641,12 @@ def test_a_pin_whose_checkout_is_gone_is_an_error(
         search_path(paths, [pin])
 
 
-def test_a_bare_name_with_no_lockfile_is_an_error(paths: DataPaths) -> None:
-    with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
-        search_path(paths, ["BOSL2"])
-
-
 def test_declared_libraries_reads_model_json(tmp_path: Path) -> None:
     pin = {"name": "dotSCAD", "url": "https://x.invalid/d.git", "ref": "v1", "commit": "a" * 40}
     (tmp_path / "model.json").write_text(
-        json.dumps({"name": "x", "libraries": ["BOSL2", pin]}), encoding="utf-8"
+        json.dumps({"name": "x", "libraries": [pin]}), encoding="utf-8"
     )
-    assert declared_libraries(tmp_path) == ["BOSL2", ModelLibrary.model_validate(pin)]
+    assert declared_libraries(tmp_path) == [ModelLibrary.model_validate(pin)]
     assert declared_libraries(tmp_path / "missing") == []
 
 
@@ -716,11 +704,7 @@ def test_restoring_a_revision_restores_its_pins_and_no_others(
     assert written_against is not None
     catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
 
-    history.restore(
-        "widget",
-        written_against,
-        also=lambda commit: pin_restored_declaration(history, paths, "widget", commit),
-    )
+    history.restore("widget", written_against)
 
     assert [lib.commit for lib in catalogue.record("widget").libraries] == [commits["v1"]]
     assert [lib.commit for lib in catalogue.record("gadget").libraries] == [commits["v2"]]
@@ -742,180 +726,3 @@ def test_the_orphan_sweep_leaves_libraries_alone(
     catalogue.sweep_orphans()
 
     assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad").is_file()
-
-
-# ── the legacy lockfile ───────────────────────────────────────────────────────
-
-
-def _write_legacy(
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    lock: dict[str, Any] | str,
-    **declared: list[str],
-) -> str:
-    """A models repository as it was before per-model pins: bare names in each
-    model, the pins in one shared lockfile. Returns that revision."""
-    for slug, names in declared.items():
-        _create(catalogue, slug)
-        catalogue.write_raw_meta(slug, {"name": slug.title(), "libraries": names})
-    body = lock if isinstance(lock, str) else json.dumps(lock, indent=2)
-    (paths.models / LOCKFILE_NAME).write_text(body, encoding="utf-8")
-    commit = history.commit("legacy", LOCKFILE_NAME, *declared)
-    assert commit is not None
-    return commit
-
-
-def _pin(store: LibraryStore, ref: str = "v1") -> dict[str, str]:
-    """A fetched pin as the legacy lockfile wrote it: no name."""
-    return store.resolve("BOSL2", ref=ref).model_dump(exclude={"name"})
-
-
-def test_the_migration_moves_each_pin_into_the_models_that_declare_it(
-    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
-) -> None:
-    pin = _pin(store)
-    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"], gadget=[])
-
-    migrated = migrate_lockfile(paths, history, ["widget", "gadget"])
-
-    assert migrated == ["widget"]
-    stored = json.loads(paths.model_meta("widget").read_text(encoding="utf-8"))
-    assert stored["libraries"] == [{"name": "BOSL2", **pin}]
-    assert not (paths.models / LOCKFILE_NAME).exists()
-    latest = history.log(limit=1)[0]
-    assert sorted(change.path for change in latest.files) == [LOCKFILE_NAME, "widget/model.json"]
-    # Nothing left to do on the next boot.
-    assert migrate_lockfile(paths, history, ["widget", "gadget"]) == []
-
-
-def test_the_migration_leaves_a_name_the_lock_cannot_pin(
-    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
-) -> None:
-    pin = _pin(store)
-    broken = {**pin, "commit": "HEAD"}
-    _write_legacy(
-        catalogue, history, paths, {"BOSL2": pin, "broken": broken}, widget=["BOSL2", "broken"]
-    )
-
-    migrate_lockfile(paths, history, ["widget"])
-
-    declared = declared_libraries(paths.model_dir("widget"))
-    assert declared == [ModelLibrary(name="BOSL2", **pin), "broken"]
-    with pytest.raises(LibraryNotInstalledError, match="'broken'"):
-        search_path(paths, declared)
-
-
-def test_an_unreadable_lockfile_is_not_migrated_or_removed(
-    catalogue: Catalogue, history: ModelHistory, paths: DataPaths
-) -> None:
-    _write_legacy(catalogue, history, paths, "{not json", widget=["BOSL2"])
-
-    assert migrate_lockfile(paths, history, ["widget"]) == []
-
-    assert (paths.models / LOCKFILE_NAME).read_text(encoding="utf-8") == "{not json"
-    lock = read_lock(paths)
-    assert lock is not None
-    with pytest.raises(LibraryDeclarationError, match="not valid JSON"):
-        search_path(paths, ["BOSL2"], lock)
-
-
-async def test_a_revision_from_before_the_migration_renders_against_its_lockfile(
-    store: LibraryStore,
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    _, commits = upstream
-    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": _pin(store)}, widget=["BOSL2"])
-    migrate_lockfile(paths, history, ["widget"])
-    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
-
-    old = await resolve_source("widget", legacy, paths=paths, history=history)
-
-    assert old.library_path == (paths.libraries / "BOSL2" / commits["v1"],)
-
-
-def test_restoring_a_revision_from_before_the_migration_pins_it_in_the_model(
-    store: LibraryStore,
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    _, commits = upstream
-    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": _pin(store)}, widget=["BOSL2"])
-    migrate_lockfile(paths, history, ["widget"])
-    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
-
-    history.restore(
-        "widget",
-        legacy,
-        also=lambda commit: pin_restored_declaration(history, paths, "widget", commit),
-    )
-
-    assert [lib.commit for lib in catalogue.record("widget").libraries] == [commits["v1"]]
-    # The lockfile stays gone: the restore is the model's alone.
-    assert not (paths.models / LOCKFILE_NAME).exists()
-
-
-def test_lock_at_reads_the_lock_as_it_was_at_a_revision(
-    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
-) -> None:
-    before_any = history.head()
-    assert before_any is not None
-    pin = _pin(store)
-    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
-
-    assert lock_at(history, before_any) == Lock()
-    assert lock_at(history, legacy).pins["BOSL2"] == LibraryPin.model_validate(pin)
-
-
-def _builtin(paths: DataPaths, slug: str, libraries: list[Any]) -> str:
-    """A built-in's mirror, as the boot sync writes it from the image."""
-    builtin = f"builtin:{slug}"
-    paths.model_dir(builtin).mkdir(parents=True)
-    paths.model_source(builtin).write_text(SOURCE, encoding="utf-8")
-    meta = {"name": slug.title(), "libraries": libraries}
-    paths.model_meta(builtin).write_text(json.dumps(meta), encoding="utf-8")
-    return builtin
-
-
-def test_the_migration_never_writes_a_built_in_and_keeps_the_lock_it_needs(
-    store: LibraryStore,
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    """A built-in's model.json is the image's: the boot sync would put a rewrite
-    back, with the lockfile gone. So it is left as mirrored, and the lockfile stays
-    for its renders to read."""
-    _, commits = upstream
-    pin = _pin(store)
-    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
-    builtin = _builtin(paths, "kit", ["BOSL2"])
-    mirrored = paths.model_meta(builtin).read_text(encoding="utf-8")
-
-    migrated = migrate_lockfile(paths, history, ["widget", builtin])
-
-    assert migrated == ["widget"]
-    assert paths.model_meta(builtin).read_text(encoding="utf-8") == mirrored
-    assert (paths.models / LOCKFILE_NAME).is_file()
-    assert model_search_path(paths, builtin) == (paths.libraries / "BOSL2" / commits["v1"],)
-    # Its own model is migrated all the same, and a second boot changes nothing.
-    assert declared_libraries(paths.model_dir("widget")) == [ModelLibrary(name="BOSL2", **pin)]
-    assert migrate_lockfile(paths, history, ["widget", builtin]) == []
-
-
-def test_the_lock_goes_once_no_built_in_declares_by_name(
-    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
-) -> None:
-    pin = _pin(store)
-    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
-    builtin = _builtin(paths, "kit", [{"name": "BOSL2", **pin}])
-
-    migrate_lockfile(paths, history, ["widget", builtin])
-
-    assert not (paths.models / LOCKFILE_NAME).exists()

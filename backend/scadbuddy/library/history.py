@@ -44,7 +44,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -437,15 +437,8 @@ class ModelHistory:
             return bool(self._out("ls-files", "--cached").strip())
         return self._run("diff", "--cached", "--quiet", check=False).returncode != 0
 
-    def restore(
-        self, slug: str, commit: str, *, also: Callable[[str], Sequence[str]] | None = None
-    ) -> str:
-        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite.
-
-        ``also`` is called with the resolved commit under the write lock, and the
-        paths it returns go into the same commit -- how a revision from before
-        per-model library pins comes back pinned (#93).
-        """
+    def restore(self, slug: str, commit: str) -> str:
+        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
         resolved = self.resolve(commit)
         with self._exclusive():
             present = set(self._files_at(resolved, slug))
@@ -457,8 +450,7 @@ class ModelHistory:
             for path in self._tracked(slug):
                 if path not in present:
                     (self.root / path).unlink(missing_ok=True)
-            extra = also(resolved) if also is not None else []
-            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, *extra)
+            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug)
             touched = self._touched_by(created)
         self._announce(created, touched)
         if created is None:

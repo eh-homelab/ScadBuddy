@@ -35,7 +35,6 @@ from scadbuddy.api.deps import (
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.libraries import (
-    LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
@@ -129,7 +128,6 @@ def test_pinning_a_library_records_it_in_that_model_alone(
     assert record["libraries"] == [pinned]
     assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == [pinned]
     assert lib_client.get("/api/v1/models/gadget").json()["libraries"] == []
-    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
 def test_two_models_render_one_library_at_two_refs(
@@ -668,42 +666,6 @@ def test_restoring_a_revision_restores_its_pins_and_no_others(
     assert [lib["commit"] for lib in gadget["libraries"]] == [commits["v2"]]
 
 
-# ── pins from before they moved into each model ───────────────────────────────
-
-
-def test_boot_moves_the_lockfile_into_the_models(
-    app: FastAPI, paths: DataPaths, tmp_path: Path
-) -> None:
-    history: ModelHistory = getattr(app.state, STATE_ATTR).history
-    url, commits = make_library_upstream(tmp_path / "legacy", {"v1": "cube(1);\n"})
-    lock = {"BOSL2": {"url": url, "ref": "v1", "commit": commits["v1"]}}
-    (paths.model_dir(SLUG)).mkdir(parents=True)
-    (paths.model_source(SLUG)).write_text(SOURCE, encoding="utf-8")
-    paths.model_meta(SLUG).write_text(
-        json.dumps({"name": "Widget", "libraries": ["BOSL2"]}), encoding="utf-8"
-    )
-    history.ensure_repo()
-    (paths.models / LOCKFILE_NAME).write_text(json.dumps(lock), encoding="utf-8")
-    assert history.commit("legacy", LOCKFILE_NAME, SLUG) is not None
-
-    with TestClient(app) as client:
-        record = client.get(f"/api/v1/models/{SLUG}").json()
-
-    assert record["libraries"] == [{"name": "BOSL2", **lock["BOSL2"]}]
-    assert not (paths.models / LOCKFILE_NAME).exists()
-
-
-def test_a_failed_migration_does_not_stop_the_boot(
-    app: FastAPI, caplog: pytest.LogCaptureFixture
-) -> None:
-    with (
-        patch("scadbuddy.main.migrate_lockfile", side_effect=OSError("EIO")),
-        TestClient(app) as client,
-    ):
-        assert client.get("/healthz").status_code == 200
-    assert "could not migrate the library lockfile" in caplog.text
-
-
 # ── a dropped model.json's pins (#179) ────────────────────────────────────────
 
 
@@ -721,11 +683,11 @@ def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Respons
 def test_a_dropped_model_json_cannot_name_a_library_without_a_pin(
     lib_client: TestClient,
 ) -> None:
-    """A bare name has no shared lockfile left to resolve it; nothing is created."""
+    """A bare name is not a pin: nothing is created."""
     refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
 
     assert refused.status_code == 422
-    assert refused.json()["libraries"] == ["BOSL2"]
+    assert "'BOSL2' without a pin" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
@@ -955,24 +917,24 @@ def test_every_checkout_goes_once_nothing_pins_the_library(
 def test_a_name_only_declaration_counts_as_a_pin_of_every_commit(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
-    """A bare name from before per-model pins, or an unreadable model.json, cannot say
+    """A hand-edited entry with no commit, or an unreadable model.json, cannot say
     which checkout it needs, so it keeps them all."""
     _, commits = upstream
     create_model(lib_client)
-    create_model(lib_client, "legacy")
+    create_model(lib_client, "edited")
     create_model(lib_client, "broken")
     pin(lib_client, "BOSL2")
     assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
-    meta = json.loads(paths.model_meta("legacy").read_text(encoding="utf-8"))
-    paths.model_meta("legacy").write_text(
-        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+    meta = json.loads(paths.model_meta("edited").read_text(encoding="utf-8"))
+    paths.model_meta("edited").write_text(
+        json.dumps({**meta, "libraries": [{"name": "BOSL2"}]}), encoding="utf-8"
     )
     paths.model_meta("broken").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
 
     refused = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
 
     assert refused.status_code == 409
-    assert refused.json()["models"] == ["broken", "legacy"]
+    assert refused.json()["models"] == ["broken", "edited"]
 
 
 def test_a_removal_refuses_what_is_not_a_checkout(lib_client: TestClient) -> None:
@@ -1155,11 +1117,12 @@ def test_the_sweep_keeps_a_checkout_a_live_edit_names(
     libraries_app: FastAPI,
     paths: DataPaths,
 ) -> None:
-    """Named by a bare name only, uncommitted: every checkout of it stays."""
+    """Named by a hand-edited entry with no commit, uncommitted: every checkout of
+    it stays."""
     create_model(lib_client)
     meta = json.loads(paths.model_meta(SLUG).read_text(encoding="utf-8"))
     paths.model_meta(SLUG).write_text(
-        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+        json.dumps({**meta, "libraries": [{"name": "BOSL2"}]}), encoding="utf-8"
     )
     kept = _fake_checkout(paths, "BOSL2", "c" * 40)
     state: AppState = getattr(libraries_app.state, STATE_ATTR)

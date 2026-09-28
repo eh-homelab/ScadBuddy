@@ -506,18 +506,11 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
 def _failing_backfill(
     booted: AppState, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> list[str]:
-    """`list_models` fails on its second call -- the preview backfill's, after the
-    queue has opened; the first is the lockfile migration's, before it. Returns
-    the log of what was closed."""
-    real = booted.catalogue.list_models
-    calls = 0
+    """`list_models` fails: its first call at boot is the preview backfill's, after
+    the queue has opened. Returns the log of what was closed."""
 
     def listing() -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise error
-        return real()
+        raise error
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []

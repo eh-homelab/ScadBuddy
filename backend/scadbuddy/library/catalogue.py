@@ -35,7 +35,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.libraries import ModelLibrary, entry_name
 from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -170,9 +170,9 @@ class ModelMeta(BaseModel):
     @field_validator("libraries", mode="before")
     @classmethod
     def _readable_pins(cls, value: Any) -> Any:
-        """Only the entries that are pins. A bare name from before per-model pins,
-        or a hand-edited entry, must not stop the model listing; its render says
-        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        """Only the entries that are pins. A hand-edited entry that is not one must
+        not stop the model listing; its render says what is wrong with it
+        (`parse_declaration`), and pinning it again fixes it."""
         if not isinstance(value, list):
             return []
         readable: list[ModelLibrary] = []
@@ -522,10 +522,10 @@ class Catalogue:
         """The models whose live ``model.json`` pins ``name`` (at ``commit``).
 
         Read leniently and counted conservatively, because the answer decides
-        whether a checkout may be deleted: an entry that only names the library --
-        a bare name from before per-model pins, or a hand edit with no readable
-        commit -- counts at every commit, and a ``model.json`` that is not JSON
-        counts when its text mentions the name at all.
+        whether a checkout may be deleted: an entry that names the library with no
+        readable commit -- a hand edit -- counts at every commit, and a
+        ``model.json`` that is not JSON counts when its text mentions the name at
+        all.
         """
         users: list[str] = []
         for slug in self.slugs():
@@ -697,7 +697,7 @@ class Catalogue:
         return self.record(slug)
 
     def pin_library(
-        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+        self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
     ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
         or at the end. One revision of the model; no other model moves.
@@ -1434,14 +1434,12 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     return resolved
 
 
-def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+def _declares(entries: list[Any], name: str, expected: ModelLibrary) -> bool:
     """Is ``expected`` still the entry ``entries`` has for ``name``?"""
     found = [entry for entry in entries if entry_name(entry) == name]
     if len(found) != 1:
         return False
     [entry] = found
-    if isinstance(expected, str):
-        return bool(entry == expected)
     try:
         return ModelLibrary.model_validate(entry) == expected
     except ValidationError:

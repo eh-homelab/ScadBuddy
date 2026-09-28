@@ -39,7 +39,6 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
-from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
@@ -115,18 +114,14 @@ def sweep_assets(state: AppState) -> list[str]:
 def _sweep_checkouts(state: AppState) -> list[str]:
     """The thread half of :func:`sweep_library_checkouts`."""
     # Every id any revision of any model.json -- live or deleted model, mine or a
-    # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
+    # built-in -- ever held: ONE `git log -p`. A restore
     # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
     # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
     # no file of that name inside a model's folder.
     named = state.history.object_ids_in(
         f":(glob)*/{MODEL_META_NAME}",
         f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
-        f":(literal){LOCKFILE_NAME}",
     )
-    lock = read_lock(state.paths)
-    if lock is not None:
-        named |= {pin.commit for pin in lock.pins.values()}
     # The image's seed (#169) is kept pinned or not: the boot would copy it back.
     seed_dir = state.settings.resolve_seed_libraries_dir()
     seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
@@ -136,8 +131,8 @@ def _sweep_checkouts(state: AppState) -> list[str]:
             commit in named
             or (name, commit) in seeded
             or bool(state.checkouts.leased(state.paths.libraries / name / commit))
-            # The live pins as a removal counts them: uncommitted edits, and a bare
-            # name or an unreadable model.json keeps every checkout of the library.
+            # The live pins as a removal counts them: uncommitted edits, and an
+            # entry with no commit or an unreadable model.json keeps every checkout.
             or bool(state.catalogue.library_users(name, commit))
         )
 
@@ -228,13 +223,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     except OSError:
         logger.exception("could not sweep preview scratch directories")
-    # Pins from before they moved into each model (#93): once, then the shared
-    # lockfile is gone. It logs what it cannot record, so it never stops the boot.
-    try:
-        slugs = [record.slug for record in await asyncio.to_thread(state.catalogue.list_models)]
-        await asyncio.to_thread(migrate_lockfile, state.paths, state.history, slugs)
-    except (OSError, ValueError, GitError):
-        logger.exception("could not migrate the library lockfile")
     # A library clone the process died in the middle of. Nothing is cloning yet:
     # no request has been served.
     try:
@@ -249,8 +237,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
         except OSError:
             logger.exception("could not seed library checkouts from the image")
-    # After the migration, so every pin is where the sweep reads it. It logs and
-    # keeps what it cannot remove; one that cannot read the history removes nothing.
+    # It logs and keeps what it cannot remove; one that cannot read the history removes nothing.
     try:
         await sweep_library_checkouts(state)
     except (OSError, GitError):
