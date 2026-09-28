@@ -381,11 +381,12 @@ export function SettingsPage() {
               </p>
               {settings?.render_key_fallback && (
                 <p
-                  role="alert"
+                  role="status"
                   data-testid="render-key-fallback"
                   className="mt-1.5 rounded-[6px] border border-warn px-2 py-1.5 text-[12px]"
                 >
-                  Render workers hold the full Bambuddy key; template code can print.
+                  Render workers hold the full Bambuddy key; template code can print. Create a key
+                  with only Manage Library in Bambuddy and paste it above as the render key.
                 </p>
               )}
             </div>
@@ -570,6 +571,10 @@ export function SettingsPage() {
                   {ofLimit(formatBytes(usage.bytes), usage.max_total_bytes, formatBytes)}
                 </dd>
               </dl>
+              <p className="mt-1.5 text-[12px] text-muted">
+                Where is the store this process uses; it moves to the Blob store choice above at
+                its next restart, so the two can differ until then.
+              </p>
               <p className="mt-1.5 text-[12px] text-muted">
                 Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded
                 fonts. What no job, output or preset uses is removed once unused for the
