@@ -64,8 +64,18 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   // means "show me the assistant": it leaves full screen and opens the panel, rather
   // than opening (or closing) it out of sight.
   const toggle = useCallback(() => {
-    if (leaveFullscreen() || !open) openPanel()
-    else closePanel()
+    if (leaveFullscreen()) {
+      openPanel()
+      // The browser's own full screen ends a moment later, and until it has, nothing
+      // outside it can take the focus: give it to the panel again once it has.
+      if (document.fullscreenElement) {
+        document.addEventListener('fullscreenchange', openPanel, { once: true })
+      }
+    } else if (open) {
+      closePanel()
+    } else {
+      openPanel()
+    }
   }, [open, closePanel, openPanel])
 
   useEffect(() => {

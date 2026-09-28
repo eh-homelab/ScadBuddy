@@ -29,8 +29,9 @@ export function leaveFullscreen(): boolean {
  * when its `<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`), and
  * Bambuddy's External Link frame is only known to set its sandbox flags (spec §1);
  * Safari on iPhone offers the API for video alone. Wherever the API is refused, the
- * element covers the window instead: the same toggle, and Escape leaves either — the
- * browser handles it for the API.
+ * element covers the window instead: the same toggle, and Escape leaves either. In the
+ * API's full screen the key is the browser's, which leaves even when a dialog in the
+ * element would take it; only the stand-in lets the dialog have it first.
  */
 export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
   const [native, setNative] = useState(false)
@@ -69,6 +70,30 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
     return () => window.removeEventListener('keydown', onKey)
   }, [windowed])
 
+  // The stand-in only covers the rest of the page, and Tab still reaches what it
+  // covers: a control nobody can see could navigate away. So while full screen lasts
+  // everything outside the element is inert, and exactly what this made inert is given
+  // back. The API's full screen needs none of it in Chromium, which already keeps focus
+  // inside (measured), but gets the same, so the two cannot drift apart.
+  const active = native || windowed
+  const inert = useRef<Element[]>([])
+  const release = useCallback(() => {
+    for (const other of inert.current) other.removeAttribute('inert')
+    inert.current = []
+  }, [])
+  useEffect(() => {
+    const element = ref.current
+    if (!active || !element) return
+    for (let node = element; node !== document.body && node.parentElement; node = node.parentElement) {
+      for (const sibling of node.parentElement.children) {
+        if (sibling === node || sibling.hasAttribute('inert')) continue
+        sibling.setAttribute('inert', '')
+        inert.current.push(sibling)
+      }
+    }
+    return release
+  }, [ref, active, release])
+
   useEffect(() => {
     const leave = (event: Event) => {
       // The document, not `native`, which waits for the browser's event; and a request
@@ -80,10 +105,13 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
       if (entering) withdrawn.current = true
       if (onScreen) document.exitFullscreen().catch(() => undefined)
       setWindowed(false)
+      // Now, not when the browser's exit lands: whatever asked is about to take the
+      // focus (the assistant's composer), and focus cannot enter an inert page.
+      release()
     }
     window.addEventListener(LEAVE, leave)
     return () => window.removeEventListener(LEAVE, leave)
-  }, [ref, windowed])
+  }, [ref, windowed, release])
 
   const toggle = useCallback(() => {
     const element = ref.current

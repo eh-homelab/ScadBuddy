@@ -1,4 +1,28 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Frame, type Page } from '@playwright/test'
+
+/**
+ * Where `count` presses of Tab land, as seen from `where` (the page, or the frame that
+ * holds the app): `view` inside the full-screen workspace, `page` for the document
+ * itself (past the last control, before the browser wraps round), or else the label of
+ * whatever outside the view took the focus.
+ */
+async function tabStops(page: Page, where: Page | Frame, count: number): Promise<string[]> {
+  const stops: string[] = []
+  for (let press = 0; press < count; press += 1) {
+    await page.keyboard.press('Tab')
+    stops.push(
+      String(
+        await where.evaluate(`(() => {
+          const focused = document.activeElement
+          if (!focused || focused === document.body) return 'page'
+          if (focused.closest('[data-testid="workspace"]')) return 'view'
+          return focused.getAttribute('aria-label') || focused.textContent.trim()
+        })()`),
+      ),
+    )
+  }
+  return stops
+}
 
 test.describe('customizer', () => {
   // These drive the msw worker. Against a real backend the numbers are the real
@@ -65,6 +89,11 @@ test.describe('customizer', () => {
     await expect(bbox).toContainText('64.1')
     await expect(parameters).toBeHidden()
     await expect(page.getByTestId('generate')).toBeHidden()
+    // Tab stays in the view: nothing full screen hides takes the focus. The browser's own
+    // full screen sees to that; the stand-in's inert page is checked in the frame below.
+    const stops = await tabStops(page, page, 8)
+    expect(stops).toContain('view')
+    expect(stops.filter((stop) => stop !== 'view' && stop !== 'page')).toEqual([])
 
     // The parameters fly out over the scene, and a change renders while in full screen.
     await page.getByRole('button', { name: 'Parameters', exact: true }).click()
@@ -113,7 +142,15 @@ test.describe('customizer', () => {
     await expect
       .poll(() => canvas.boundingBox())
       .toEqual({ x: 180, y: 56, width: 1100, height: 664 })
+    // Covered is not gone: Tab must still not reach the page under the stand-in.
+    const app = page.frames().find((candidate) => candidate.url().includes('/m/name-keychain'))
+    if (!app) throw new Error('the ScadBuddy frame is not loaded')
+    const stops = await tabStops(page, app, 8)
+    expect(stops).toContain('view')
+    expect(stops.filter((stop) => stop !== 'view' && stop !== 'page')).toEqual([])
 
+    // Tab may have carried the focus out to the page around the frame.
+    await frame.getByRole('button', { name: 'Exit full screen' }).focus()
     await page.keyboard.press('Escape')
     await expect(frame.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
     await expect.poll(() => canvas.boundingBox()).toEqual(docked)

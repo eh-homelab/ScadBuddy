@@ -226,6 +226,55 @@ describe('useFullscreen', () => {
     expect(result.current.mode).toBeNull()
   })
 
+  it('makes the rest of the page inert while full screen, and gives back only that', () => {
+    const header = document.createElement('header')
+    const main = document.createElement('main')
+    const toolbar = document.createElement('div')
+    const view = document.createElement('div')
+    // Inert for reasons of its own, so it must stay that way afterwards.
+    const aside = document.createElement('aside')
+    aside.setAttribute('inert', '')
+    main.append(toolbar, view)
+    document.body.append(header, main, aside)
+    const ref = { current: view }
+    const { result } = renderHook(() => useFullscreen(ref))
+
+    act(() => result.current.toggle())
+    expect(result.current.mode).toBe('window')
+    expect(header).toHaveAttribute('inert')
+    expect(toolbar).toHaveAttribute('inert')
+    expect(main).not.toHaveAttribute('inert')
+    expect(view).not.toHaveAttribute('inert')
+
+    act(() => result.current.toggle())
+    expect(header).not.toHaveAttribute('inert')
+    expect(toolbar).not.toHaveAttribute('inert')
+    expect(aside).toHaveAttribute('inert')
+    for (const node of [header, main, aside]) node.remove()
+  })
+
+  it('gives the page back as soon as it is asked to leave, not when the browser has', async () => {
+    const header = document.createElement('header')
+    const view = document.createElement('div')
+    document.body.append(header, view)
+    const api = offerFullscreen(view)
+    // The browser takes its time over the exit.
+    api.exit.mockImplementation(() => new Promise<void>(() => {}))
+    const ref = { current: view }
+    const { result } = renderHook(() => useFullscreen(ref))
+    await act(async () => result.current.toggle())
+    expect(result.current.mode).toBe('screen')
+    expect(header).toHaveAttribute('inert')
+
+    // Whatever asked (the assistant) takes the focus next, and inert would refuse it.
+    act(() => {
+      leaveFullscreen()
+    })
+    expect(api.exit).toHaveBeenCalledOnce()
+    expect(header).not.toHaveAttribute('inert')
+    for (const node of [header, view]) node.remove()
+  })
+
   it('fills the window when the browser refuses full screen', async () => {
     const { element, result } = mount()
     const api = offerFullscreen(element, { refuse: true })

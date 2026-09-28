@@ -1069,6 +1069,20 @@ describe('full screen', () => {
     expect(generate).toBeVisible()
   })
 
+  it('takes the page around the view out of reach while full screen', async () => {
+    const { user } = render()
+    await firstRender()
+    const versions = screen.getByRole('link', { name: 'Versions' })
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    // Covered, so Tab must not reach it and navigate away unseen.
+    expect(versions.closest('[inert]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Exit full screen' }).closest('[inert]')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }))
+    expect(versions.closest('[inert]')).toBeNull()
+  })
+
   it('opens each full screen on the view alone', async () => {
     const { user } = render()
     await firstRender()

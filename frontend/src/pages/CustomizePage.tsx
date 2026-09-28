@@ -40,10 +40,11 @@ const NOTHING: ParamValues = Object.freeze({})
 
 const FLYOUT_ID = 'parameters-flyout'
 /**
- * The flyout's width from `md` up (its `md:w-[360px]`, the docked column's widest);
- * below that it is a sheet over the whole view.
+ * The flyout's width, which the readouts move clear of: set on the full-screen workspace
+ * per breakpoint (`--sb-flyout`), a sheet over the whole view below `md` and the docked
+ * column's widest, 360px, from there up.
  */
-const FLYOUT_WIDTH = '360px'
+const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
@@ -533,9 +534,12 @@ export function CustomizePage() {
 
       <div
         ref={workspace}
+        data-testid="workspace"
         className={`grid min-h-0 grid-cols-1 ${
           full
-            ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}`
+            ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
+                fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
+              }`
             : 'lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]'
         }`}
       >
@@ -544,7 +548,7 @@ export function CustomizePage() {
           hidden={full && !flyout}
           className={
             full
-              ? 'absolute inset-y-0 left-0 z-20 w-full shadow-2xl md:w-[360px]'
+              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
               : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
