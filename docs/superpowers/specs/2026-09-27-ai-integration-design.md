@@ -147,6 +147,42 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 - Playwright's `extraHTTPHeaders` context option: "An object containing additional HTTP
   headers to be sent with every request. Defaults to none." [Playwright
   `browser.newContext`][pw-extra-headers]
+- **Measured in #349** on `@playwright/mcp` 0.0.82, Claude Code 2.1.283 (SDK 0.3.283)
+  and `chromium_headless_shell-1246`, by `agent/test/headlessBrowser.server.test.ts`
+  (the server over stdio), `agent/test/headlessBrowser.e2e.test.ts` (the real SDK and
+  CLI against the fake endpoint) and a run inside the `agent` image
+  (`docs/ai/headless-browser.md`, "Measured"):
+  - A local plugin's MCP server is named `plugin:<plugin>:<server>` and its tools
+    `mcp__plugin_<plugin>_<server>__<tool>` (here `mcp__plugin_playwright_playwright__`).
+    With `strictMcpConfig: true` Claude Code starts **no** plugin MCP server (the
+    plugin is listed, no server or tool appears); with it off and `settingSources: []`,
+    a `.mcp.json` in the cwd is still not loaded.
+  - `disallowedTools` removes a plugin server's tools from the init message and the
+    request; a call by name gets `No such tool available`. The server offers 25 core
+    tools, `browser_run_code_unsafe`, `browser_evaluate`, `browser_file_upload` and
+    `browser_drop` among them.
+  - `network.allowedOrigins` blocks navigations, subresources and page `fetch` to other
+    origins (`net::ERR_BLOCKED_BY_CLIENT`; the other origin receives nothing). A
+    **redirect** off the origin is followed: the tool usually returns an error, but the
+    other origin has received the request.
+  - `browser.contextOptions.extraHTTPHeaders` from the config file reaches every request
+    of the isolated context, and a page `fetch` that sets the same header gets the
+    context's value, not its own.
+  - `--isolated`: two servers do not share storage. Claude Code starts a plugin stdio
+    server per process, i.e. per query, so a session gets a fresh browser every turn.
+  - Files: unnamed output goes to `outputDir`; a named one resolves against the
+    server's cwd (Claude Code's cwd); `../x` and absolute paths outside those roots are
+    refused ("outside allowed roots").
+  - Claude Code starts a plugin's stdio server with its own environment (so with the
+    credential); `/usr/bin/env -i` in the server's `command` leaves only what is listed.
+  - With `browserName: "chromium"` and no `channel`, the server launches Playwright's
+    `chromium-headless-shell` and sets `chromiumSandbox: false` on Linux
+    (`--no-sandbox`). It runs as uid 10001 with a read-only root, `/tmp` and the state
+    directory on tmpfs, and no network, and reports WebGL available. Its profile goes
+    under `TMPDIR`, whose path must stay short (the `SingletonSocket` Unix-socket
+    limit): under the session directory the launch fails. Installed with
+    `install-browser --with-deps --only-shell chromium`, the layer is 603 MB
+    uncompressed (268 MB of browser); full Chromium is 740 MB.
 
 **This repository** (read from the files named):
 
@@ -179,14 +215,7 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 | Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
 | Whether a 3MF that claims `Application: BambuStudio-…` has its `project_settings.config` override the pipeline's process preset (main spec §3 measured the preset winning before the claim was made) | §11 | #284 |
 | Which process preset each "level of detail" choice maps to | §11 | #284 |
-| Whether `network.allowedOrigins` in the pinned `@playwright/mcp` blocks requests made by page JavaScript (`fetch`, XHR, WebSocket, workers) as well as navigations and subresources. The README says only "the browser … request" and that the list "*does not* serve as a security boundary and *does not* affect redirects" (§3.1); measure it with a page that fetches another origin | §5.3 | #349 |
-| Whether a navigation to an origin not on the allow-list is refused with an error the tool returns, and what a redirect off the origin does | §5.3 | #349 |
-| Whether `browser.contextOptions.extraHTTPHeaders` in the config file reaches the isolated context `@playwright/mcp` creates, is sent on every request the page makes, and can't be removed or overridden by page JavaScript (`browser_evaluate`, a `fetch` with its own headers) | §5.3, §8.2 | #349 |
-| Whether `--isolated` gives each MCP client connection (one per session) its own context, and whether the stdio server the plugin runs is one process per session in the SDK | §5.3 | #349 |
-| The tool names the SDK gives a plugin's MCP server (the prefix `disallowedTools` must match), and that deny rules remove `browser_run_code_unsafe`, `browser_evaluate`, `browser_file_upload` and `browser_drop` from a plugin server as they do for a configured one | §5.3 | #349 |
-| Whether `outputDir` plus the default workspace-root file restriction keeps every write (screenshots named by the model, `filename` arguments) inside the session's scratch directory | §5.3 | #349 |
-| How the backend learns that an outward request carrying the agent-actor marker belongs to an approved, unconsumed outward action (a lookup in the shared database, or a call to the agent service), and that it can consume it exactly once | §5.3, §8.2 | #349 |
-| The Chromium build that `playwright` 1.64 needs on the `agent` image's base, how it is installed at build time (`playwright install --with-deps chromium` or a distro package), whether it runs as the non-root user under a read-only root filesystem without `--no-sandbox`, and the image-size cost | §5.3, §4.4 | #349 |
+| How the backend learns that an outward request carrying the agent-actor marker belongs to an approved, unconsumed outward action (a lookup in the shared database, or a call to the agent service), and that it can consume it exactly once. #349 built the refusing half (`backend/scadbuddy/api/agent_actor.py`); the lookup needs approvals | §5.3, §8.2 | #258 |
 
 ## 4. Architecture
 
@@ -327,22 +356,32 @@ headless browser never sees it.
   image carries its own copy of the plugin whose `.mcp.json` starts the vendored
   `cli.js`, and the harness loads it by local path, as for every plugin (§3.1,
   [Plugins][sdk-plugins]). The loader checks `plugins` and `plugin_errors` in the init
-  message. Bumping the version re-runs every item in the §3.2 rows for §5.3.
+  message. Bumping the version re-runs the #349 measurements in §3.1. As built
+  (`agent/src/harness/headlessBrowser.ts`): the image carries the upstream manifest
+  (pinned commit in `agent/plugins/playwright/README.md`), and the harness writes a
+  copy per session whose `.mcp.json` starts the server under `/usr/bin/env -i`, so the
+  credential in Claude Code's environment never reaches it. Queries with the plugin
+  set `strictMcpConfig: false`, without which no plugin server starts (§3.1).
 - **Locked to ScadBuddy's own origin.** The server starts with `--headless` and a
   `--config` file that sets `network.allowedOrigins` to the backend's origin
   (`SCADBUDDY_BACKEND_URL`, which serves the SPA) and nothing else. The README says the
   allow-list is not a security boundary and ignores redirects (§3.1), so it is not the
   only guard: page JavaScript coverage is in §3.2, and the approval rule below does not
   depend on it. `--allow-unrestricted-file-access` is never passed; `outputDir` is the
-  session's scratch directory; `--caps` is left empty and `--no-webmcp` is set.
+  session's scratch directory; `--caps` is left empty and `--no-webmcp` is set. The
+  harness also refuses, before the server sees the call, any tool `url` off the origin
+  and any `filename` with a directory part. Redirects off the origin are followed
+  (§3.1), so the backend's origin must not serve open redirects.
 - **Tools the model can't see.** `browser_run_code_unsafe` is RCE-equivalent in the
   agent container (§3.1), which D7 rules out, and `browser_evaluate`,
   `browser_file_upload` and `browser_drop` reach page JavaScript or the filesystem. All
   four go in `disallowedTools`, which removes a tool from the request
-  ([permissions][sdk-permissions]); the exact names are in §3.2.
+  ([permissions][sdk-permissions]), with `browser_install` (it downloads a browser);
+  the exact names are in §3.1.
 - **Isolated context per session.** `--isolated`, no `--user-data-dir`, no
   `--storage-state`: the profile stays in memory and dies with the session (§3.1). One
-  server per session (§3.2), so two sessions never share cookies or a page.
+  server per query (§3.1), so two sessions never share cookies or a page, and each
+  turn starts a fresh browser.
 - **Off unless enabled.** A harness setting in the database (D4, §9), off by default,
   enables it; changing it is a settings write, so it needs approval (§8.3). With AI off
   it is hidden with the rest of the assistant.
@@ -360,10 +399,12 @@ headless browser never sees it.
   unconsumed outward action for that session authorises that request; the backend
   consumes it once. The marker is not authentication: a request without it is exactly
   as trusted as today (§4.3, §8.3), and forging one can only get a request refused. What
-  it removes is the headless path around §8.2. The mechanism is **not yet verified**:
-  whether the header reaches every request and survives page JavaScript, and how the
-  backend looks up the approval, are in §3.2, and #349 must prove them with the
-  negative test in §13 before the setting can be turned on.
+  it removes is the headless path around §8.2. #349 measured that the header reaches
+  every request and survives page JavaScript (§3.1), and built the refusing half
+  (`AgentActorGate`: default deny for every non-safe route not on an allowlist of
+  read/write routes, which the agent's tests keep equal to the tool registry's). How
+  the backend looks up an approval is still in §3.2; until it is built, every marked
+  outward request is refused.
 
 ### 5.4 Resources
 
@@ -464,8 +505,9 @@ including `disabled`. Where it is enforced:
   human-readable summary) then `confirm`, where the confirm completes only after the UI
   approval.
 - **Headless browser (#349):** the backend refuses outward routes on requests that carry
-  the agent-actor marker unless an approved outward action authorises them (§5.3). Until
-  the §3.2 items for that mechanism are verified, the headless browser stays off.
+  the agent-actor marker unless an approved outward action authorises them (§5.3). The
+  refusal is built; the approval lookup waits for #258 (§3.2), and until then no marked
+  outward request passes. The headless browser stays off by default.
 
 ### 8.3 MCP auth modes
 

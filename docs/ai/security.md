@@ -26,8 +26,11 @@ print, delete, settings or credential writes). A tool ScadBuddy does not recogni
 
 The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/harness/permissions.ts):
 
-- `decide(toolName, tierOf)`: an unknown tool (`tierOf` returns `undefined`) is treated
-  as `outward`. `read` and `write` are allowed. `outward` gets `needs_approval`.
+- `decide(toolName, tierOf, input, guard)`: an optional `InputGuard` may deny a call
+  by its arguments first, at any tier (the headless browser's origin and file-name
+  checks, [headless-browser.md](headless-browser.md)). Then an unknown tool (`tierOf`
+  returns `undefined`) is treated as `outward`. `read` and `write` are allowed.
+  `outward` gets `needs_approval`.
 - **Approvals are not built** (#258, open PR #471). Until then `needs_approval` is
   answered with a **deny**, whose message tells the model to explain rather than retry.
   An outward tool therefore never runs unattended.
@@ -46,7 +49,10 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - `tools: []`, which removes all built-in tools: no Bash, file or web tools.
 - `settingSources: []`, so nothing is read from a host `~/.claude` or a project
   `.claude/`.
-- `strictMcpConfig: true` and `mcpServers: {}`.
+- `strictMcpConfig: true` and `mcpServers: {}`. A query with the headless browser
+  sets `strictMcpConfig: false`, because with it Claude Code 2.1.283 starts no plugin
+  MCP server at all (measured, #349); `settingSources: []` still keeps settings-file
+  MCP configs out, which the e2e test checks with a planted `.mcp.json`.
 - A service-owned `CLAUDE_CONFIG_DIR` and `cwd`.
 - An explicit `env`, so the service's own environment (the database URL above all) does
   not reach the Claude Code subprocess.
@@ -191,6 +197,49 @@ not checked, because it only extends the Bash tool's PATH. `buildHarness()` call
 (PR #379, row 8). Fetching, pinning and reviewing user plugins (spec §10) is **not
 built** (open PR #464).
 
+**The one exception is the headless browser** (#349). Its plugin is not read from
+anyone's directory: `materializeHeadlessBrowser()` in
+[`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts)
+writes it per session from the vendored manifest, with a single stdio server that
+starts under `/usr/bin/env -i` and gets `HOME`, `TMPDIR` and `PLAYWRIGHT_BROWSERS_PATH`
+only, so the credential never reaches it or Chromium (measured from
+`/proc/<pid>/environ`). `assertHeadlessPlugin()` checks that file instead of
+`assertPluginAllowed()`, which would refuse it.
+
+## Headless browser (#349)
+
+Spec §8.6's row "Headless browser used to click past an approval, or to reach other
+origins or files", as built. Details and measurements are in
+[headless-browser.md](headless-browser.md).
+
+- **Off by default**: the `ai_settings` key `headless_browser_enabled` must be `true`
+  and the session manager must be given `headlessBrowser` (nothing in `main.ts` does).
+- **Tools the model cannot see**: `browser_run_code_unsafe`, `browser_evaluate`,
+  `browser_file_upload`, `browser_drop`, `browser_install` are in `disallowedTools`.
+  Every other tool has an explicit tier; a new one is `outward`, so denied.
+- **Origins**: the harness denies any `url` not on the backend's origin before the
+  server sees it (`browserInputProblem()`, using `normaliseOrigin()` from
+  `origins.ts`), and the server's `network.allowedOrigins` blocks navigations,
+  subresources and page `fetch` to other origins. **Redirects are not blocked**
+  (measured): a same-origin URL that redirects elsewhere reaches the other origin.
+- **Files**: `filename` arguments must be plain names; the server's own
+  workspace-root restriction refuses `../` and outside absolute paths too. No
+  `--allow-unrestricted-file-access`, no downloads (`acceptDownloads: false`).
+- **Approvals cannot be bypassed through the UI**: every request carries
+  `X-ScadBuddy-Agent-Session` (a page `fetch` cannot replace it, measured), and
+  `AgentActorGate` in
+  [`backend/scadbuddy/api/agent_actor.py`](../../backend/scadbuddy/api/agent_actor.py)
+  answers `403` to every non-safe route that is not on its allowlist of read/write
+  routes. Default deny: a new route is refused until listed. Approvals do not exist yet,
+  so no marked outward request ever passes. The marker is not authentication; forging
+  it can only get a request refused.
+- **Isolation**: `--isolated`, no profile on disk, one server per query, so no state
+  crosses sessions (or turns).
+- **Chromium runs without its sandbox** (`--no-sandbox`, Playwright's default for
+  Chromium; the server does not change it). It only ever loads ScadBuddy's own origin,
+  but a renderer exploit there would land in the agent container. Enabling the sandbox
+  needs user namespaces in the pod; not measured.
+
 ## Event-log scrubbing (#377)
 
 Each session's panel events go into `ai_session_events` and are replayed to every
@@ -238,9 +287,12 @@ From the merged code and PR bodies:
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
 7. **Plugins are vetted, never loaded in production.** No plugin path is passed in
-   `main.ts` today.
+   `main.ts` today, and the headless browser is not wired in either.
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
+9. **The headless browser follows redirects off its origin** (see above), and the
+   agent-actor gate's "unless an approved action authorises it" half waits for
+   approvals (#258, open PR #471).
 
 ## Spec §3.2 items still open
 
@@ -257,14 +309,9 @@ merged code.
 | Whether `/local-presets/` can create a derived process preset | #284 |
 | Whether a BambuStudio-claimed 3MF's `project_settings.config` overrides the pipeline preset | #284 |
 | Which process preset each level of detail maps to | #284 |
-| Whether `network.allowedOrigins` in `@playwright/mcp` blocks page-JS requests | #349 |
-| How off-allowlist navigation and redirects fail | #349 |
-| Whether `extraHTTPHeaders` reaches every request and survives page JS | #349 |
-| Whether `--isolated` gives one context per session | #349 |
-| Tool names of a plugin's MCP server, and whether deny rules remove the four dangerous Playwright tools | #349 |
-| Whether `outputDir` confines every write | #349 |
-| How the backend matches the agent-actor marker to an approved outward action | #349 |
-| Chromium on the agent image: install, non-root, read-only root, size | #349 |
+| How the backend matches the agent-actor marker to an approved outward action | #349, #258 |
 
-The headless browser (spec §5.3, merged as a spec in #363) stays off until its rows are
-verified (spec §8.2).
+#349 measured the other headless-browser rows and moved them to spec §3.1 (see
+[headless-browser.md](headless-browser.md), "Measured"). The approval lookup cannot be
+measured before approvals exist; until then the backend refuses every marked outward
+request, and the headless browser stays off (spec §8.2).
