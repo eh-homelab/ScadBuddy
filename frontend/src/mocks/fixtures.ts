@@ -1187,8 +1187,8 @@ export const prints: PrintDetail[] = [
     cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
     has_timelapse: true,
     media: {
-      finish_photo: null,
-      photos: [{ name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` }],
+      finish_photo: { name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+      photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
         info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },

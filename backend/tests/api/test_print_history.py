@@ -308,14 +308,12 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
     assert files["source"]["name"] == "name-keychain-9427184559df41f085d4737a2aafa514.3mf"
 
     media = body["media"]
-    # Unverified which photo is the finish photo (plan §2.4): all of them are photos.
-    assert media["finish_photo"] is None
-    assert media["photos"] == [
-        {
-            "name": "finish_20260927_015703_93372185.jpg",
-            "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
-        }
-    ]
+    # The photo Bambuddy captured at the end of the print (plan L11), not also a photo.
+    assert media["finish_photo"] == {
+        "name": "finish_20260927_015703_93372185.jpg",
+        "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
+    }
+    assert media["photos"] == []
     timelapse = media["timelapse"]
     assert timelapse["url"] == "/api/v1/prints/35/timelapse"
     assert timelapse["info"]["duration"] == pytest.approx(5.208256)
@@ -381,11 +379,25 @@ def test_a_failed_print_without_a_timelapse(client: TestClient, model: str) -> N
     assert body["outcome"]["failure_reason"] == "Spaghetti detected"
     assert body["media"]["timelapse"] is None
     assert not routes["info"].called and not routes["thumbnails"].called
-    assert [photo["name"] for photo in body["media"]["photos"]] == [
-        "a1b2c3d4.jpg",
-        "finish_20260927_015703_93372185.jpg",
-    ]
+    # Wherever Bambuddy lists it, the finish photo is the `finish_` one.
+    assert body["media"]["finish_photo"]["name"] == "finish_20260927_015703_93372185.jpg"
+    assert [photo["name"] for photo in body["media"]["photos"]] == ["a1b2c3d4.jpg"]
     assert "source" not in {file["kind"] for file in body["files"]}
+
+
+@respx.mock
+def test_without_a_finish_photo_every_photo_is_a_photo(client: TestClient, model: str) -> None:
+    # Bambuddy's `capture_finish_photo` was off: only uploaded photos.
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, photos=["a1b2c3d4.jpg", "e5f6a7b8.png"])
+    mock_detail_reads()
+
+    media = client.get("/api/v1/prints/35").json()["media"]
+
+    assert media["finish_photo"] is None
+    assert [photo["name"] for photo in media["photos"]] == ["a1b2c3d4.jpg", "e5f6a7b8.png"]
 
 
 @respx.mock

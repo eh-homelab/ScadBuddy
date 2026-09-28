@@ -180,9 +180,10 @@ class PrintAttachment(_Response):
 
 
 class PrintMedia(_Response):
-    #: Always None for now: which photo is the finish photo is unverified (plan
-    #: §2.4), so every photo is in ``photos``.
+    #: The photo Bambuddy captured when the print finished, named
+    #: ``finish_<ts>_<hex>.jpg`` (plan L11); None when it took none.
     finish_photo: PrintPhoto | None = None
+    #: Every other photo of the print, in Bambuddy's order.
     photos: list[PrintPhoto] = []
     timelapse: PrintTimelapse | None = None
     plate_thumbnails: list[PlateThumbnail] = []
@@ -532,11 +533,14 @@ async def _media(
             ],
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
+    photos = [
+        PrintPhoto(name=name, url=_prints_url(archive.id, f"photos/{name}"))
+        for name in _photos(archive)
+    ]
+    finish = next((photo for photo in photos if photo.name == archive.finish_photo), None)
     return PrintMedia(
-        photos=[
-            PrintPhoto(name=name, url=_prints_url(archive.id, f"photos/{name}"))
-            for name in _photos(archive)
-        ],
+        finish_photo=finish,
+        photos=[photo for photo in photos if photo is not finish],
         timelapse=timelapse,
         plate_thumbnails=(
             [PlateThumbnail(index=plate, url=_prints_url(archive.id, f"plates/{plate}/thumbnail"))]
