@@ -789,7 +789,8 @@ class RenderQueue:
         self.paths = paths
         #: The upload store the renders stage `file` parameters from: the app's own
         #: (`AppState.assets`), so one instance serves the routes and the workers.
-        #: Built from ``paths`` only when none is given, for tests that render.
+        #: Built from ``paths`` only when none is given, for tests that render no
+        #: upload: without a database pool, every lookup in it raises.
         self.assets = assets if assets is not None else AssetStore(paths.assets)
         self.history = history
         #: Told of every state a job enters (`job.*`), whichever path moved it.
