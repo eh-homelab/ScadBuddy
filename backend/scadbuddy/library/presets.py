@@ -3,9 +3,11 @@ printed with, so a print only needs the one value that differs this time.
 
 Two kinds, listed together:
 
-- **template** presets ship inside the template's directory as ``presets.json``
-  (:data:`TEMPLATE_PRESETS_NAME`). They are part of the template -- a built-in's come
-  from the image -- and are read-only here.
+- **template** presets are defined by the template itself, in the ``presets`` list of
+  its ``model.json`` (#326). They are part of the template -- a built-in's come from
+  the image -- and are read-only here; a template of mine edits them through its
+  metadata. A legacy ``presets.json`` (:data:`LEGACY_PRESETS_NAME`) beside the source
+  is still read, below ``model.json``.
 - **mine** are the ones saved through the API, one file per template under
   ``data/presets/`` (:meth:`DataPaths.model_presets`), for built-ins as much as for
   templates of mine.
@@ -21,25 +23,45 @@ import json
 import logging
 import threading
 import uuid
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from scadbuddy.core.files import write_atomic
-from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
+from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugError, slugify
 from scadbuddy.render.schema import ParamValue
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 #: A preset name is a label in a picker, not prose.
 MAX_PRESET_NAME = 80
 #: Per template. Far past what a picker is usable with; it bounds the file a
 #: template's presets live in, which is rewritten whole on every save.
 MAX_PRESETS = 200
-#: A template preset's id is this plus its position, so it can never be taken for the
-#: id of a saved one (32 hex digits) and a write addressed to it can be refused.
+#: A preset's description and tags (#327): short enough that the most presets a
+#: template can define still make a small model.json commit.
+MAX_PRESET_DESCRIPTION = 2000
+MAX_PRESET_TAGS = 20
+MAX_PRESET_TAG = 40
+#: A template preset's id is this plus its key (:func:`template_preset_keys`), so it can
+#: never be taken for the id of a saved one (32 hex digits) and a write addressed to
+#: it can be refused.
 TEMPLATE_ID_PREFIX = "template-"
+#: The key in ``model.json`` that holds a template's own presets.
+PRESETS_KEY = "presets"
 
 PresetOrigin = Literal["template", "mine"]
 
@@ -117,8 +139,87 @@ class _StoredPresets(BaseModel):
     presets: list[_StoredPreset] = Field(default_factory=list)
 
 
-class _TemplatePresets(BaseModel):
-    presets: list[_PresetBody] = Field(default_factory=list)
+class TemplatePreset(_PresetBody):
+    """One preset a template defines in its ``model.json``.
+
+    ``id`` is what keeps it the same preset when the list is reordered or it is
+    renamed; without one, the key is derived from the name (:func:`template_preset_keys`).
+    ``description`` and ``tags`` are carried for #327, which puts them in the API.
+    """
+
+    id: str | None = Field(default=None, pattern=SLUG_PATTERN, max_length=MAX_SLUG_LENGTH)
+    # A factory, not `= ""`: a literal default makes the generated TypeScript type
+    # require the field, which a client editing presets has no reason to send.
+    description: str = Field(default_factory=str, max_length=MAX_PRESET_DESCRIPTION)
+    tags: list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG)]] = Field(
+        default_factory=list, max_length=MAX_PRESET_TAGS
+    )
+
+
+def _checked(presets: list[TemplatePreset]) -> list[TemplatePreset]:
+    """Names unique ignoring case, and explicit ids unique, as a picker needs them."""
+    names: set[str] = set()
+    ids: set[str] = set()
+    for preset in presets:
+        folded = preset.name.casefold()
+        if folded in names:
+            raise ValueError(f"two presets are named {preset.name!r}")
+        names.add(folded)
+        if preset.id is not None:
+            if preset.id in ids:
+                raise ValueError(f"two presets have the id {preset.id!r}")
+            ids.add(preset.id)
+    return presets
+
+
+class TemplatePresets(BaseModel):
+    """A template's whole ``presets`` list, checked as one."""
+
+    presets: list[TemplatePreset] = Field(default_factory=list)
+
+    @field_validator("presets")
+    @classmethod
+    def _unique(cls, presets: list[TemplatePreset]) -> list[TemplatePreset]:
+        # The same bound as a template's saved presets: model.json is committed on
+        # every edit, so an unbounded list is an unbounded commit.
+        if len(presets) > MAX_PRESETS:
+            raise ValueError(f"a template defines at most {MAX_PRESETS} presets")
+        return _checked(presets)
+
+
+_PRESET_LIST: TypeAdapter[list[TemplatePreset]] = TypeAdapter(list[TemplatePreset])
+
+
+def template_preset_keys(presets: Sequence[TemplatePreset]) -> list[str]:
+    """Each preset's key: its ``id``, else its name as a slug, else its position.
+
+    A derived key that another preset already has gets ``-2``, ``-3`` and so on, in
+    list order, so every key is unique however the ids were written.
+    """
+    taken = {preset.id for preset in presets if preset.id is not None}
+    keys: list[str] = []
+    for index, preset in enumerate(presets):
+        if preset.id is not None:
+            keys.append(preset.id)
+            continue
+        try:
+            base = slugify(preset.name)
+        except InvalidSlugError:
+            base = f"preset-{index + 1}"
+        key, suffix = base, 2
+        while key in taken:
+            key, suffix = f"{base}-{suffix}", suffix + 1
+        taken.add(key)
+        keys.append(key)
+    return keys
+
+
+def with_keys(presets: Sequence[TemplatePreset]) -> list[TemplatePreset]:
+    """``presets`` with every ``id`` filled in, so the keys are written down and stay."""
+    return [
+        preset.model_copy(update={"id": key})
+        for preset, key in zip(presets, template_preset_keys(presets), strict=True)
+    ]
 
 
 class ParamPreset(BaseModel):
@@ -126,7 +227,7 @@ class ParamPreset(BaseModel):
     name: str
     params: dict[str, ParamValue]
     origin: PresetOrigin = Field(
-        description="`template`: shipped in the template's presets.json, read-only. "
+        description="`template`: defined by the template in its model.json, read-only. "
         "`mine`: saved here, editable -- on built-ins too."
     )
     updated_at: datetime | None = None
@@ -136,44 +237,96 @@ def _same_name(a: str, b: str) -> bool:
     return a.casefold() == b.casefold()
 
 
+@dataclass
+class _TemplateLock:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Holders and waiters: the entry is dropped when this reaches none.
+    users: int = 0
+
+
 class PresetStore:
     """Reads a template's presets and writes the saved ones.
 
-    One lock for the store: every write is a read-modify-write of one small file, and
-    this process is the only writer.
+    One lock per template: every write is a read-modify-write of that template's one
+    small file, and this process is the only writer. Per template, not one for the
+    store, because :meth:`with_names_free` holds it across a git commit, and that must
+    not stall a save on some other template.
     """
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self._lock = threading.Lock()
+        #: Only the templates someone holds or waits on: an entry goes with its last
+        #: user, so a slug created and deleted leaves nothing behind.
+        self._locks: dict[str, _TemplateLock] = {}
+        self._locks_lock = threading.Lock()
+
+    @contextmanager
+    def _lock(self, model_id: str) -> Iterator[None]:
+        with self._locks_lock:
+            entry = self._locks.setdefault(model_id, _TemplateLock())
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._locks_lock:
+                entry.users -= 1
+                if entry.users == 0:
+                    del self._locks[model_id]
+
+    def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
+        """``raw`` as a checked preset list, or none when it is not one (logged)."""
+        try:
+            return _checked(_PRESET_LIST.validate_python(raw))
+        except (ValidationError, ValueError, RecursionError) as error:
+            logger.warning(
+                "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
+            )
+            return []
+
+    def _read_json(self, model_id: str, name: str) -> Any:
+        """A JSON file of the template's, or None when it is missing or unreadable."""
+        path = self.paths.model_dir(model_id) / name
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+            logger.warning("could not read %s", name, extra={"slug": model_id})
+            return None
 
     def template_presets(self, model_id: str) -> list[ParamPreset]:
-        """The template's own, in the order its ``presets.json`` lists them.
+        """The template's own: its ``model.json`` list, then any from a legacy
+        ``presets.json`` whose key or name ``model.json`` does not already have.
 
-        A file that cannot be read is logged and treated as no presets: it costs the
-        picker its template presets, never the page.
+        A list that is not a valid one is logged and treated as no presets: it costs
+        the picker that template's presets, never the page or the model.
         """
-        path = self.paths.model_dir(model_id) / TEMPLATE_PRESETS_NAME
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return []
-        except (OSError, UnicodeDecodeError):
-            logger.exception("could not read template presets", extra={"slug": model_id})
-            return []
-        try:
-            loaded = _TemplatePresets.model_validate_json(raw)
-        except (ValidationError, RecursionError) as error:
-            logger.warning("ignored a template's presets.json: %s", error, extra={"slug": model_id})
-            return []
+        meta = self._read_json(model_id, MODEL_META_NAME)
+        defined: list[TemplatePreset] = []
+        if isinstance(meta, dict) and meta.get(PRESETS_KEY) is not None:
+            defined = self._defined(model_id, MODEL_META_NAME, meta[PRESETS_KEY])
+        legacy = self._read_json(model_id, LEGACY_PRESETS_NAME)
+        if isinstance(legacy, dict) and legacy.get(PRESETS_KEY) is not None:
+            keys = set(template_preset_keys(defined))
+            names = {preset.name.casefold() for preset in defined}
+            for preset in with_keys(
+                self._defined(model_id, LEGACY_PRESETS_NAME, legacy[PRESETS_KEY])
+            ):
+                if preset.id not in keys and preset.name.casefold() not in names:
+                    defined.append(preset)
+        # Keyed again over the merged list, not with the keys above: those only decide
+        # which legacy entries are new. The legacy ones arrive with their keys written
+        # in as ids (`with_keys`), so this second pass keeps them, and keeps every
+        # model.json key, and is what guarantees the final ids are unique together.
         return [
             ParamPreset(
-                id=f"{TEMPLATE_ID_PREFIX}{index}",
+                id=f"{TEMPLATE_ID_PREFIX}{key}",
                 name=preset.name,
                 params=preset.params,
                 origin="template",
             )
-            for index, preset in enumerate(loaded.presets)
+            for preset, key in zip(defined, template_preset_keys(defined), strict=True)
         ]
 
     def _read(self, model_id: str) -> _StoredPresets:
@@ -222,6 +375,18 @@ class PresetStore:
                 return preset
         raise PresetNotFoundError(preset_id)
 
+    def with_names_free(self, model_id: str, names: Iterable[str], write: Callable[[], T]) -> T:
+        """Run ``write`` -- a change to the template's own presets -- once none of
+        ``names`` is a saved preset's, ignoring case: the other direction of
+        :meth:`_require_free`. Under the template's lock, as a save is, so a save and the
+        template's list can never each pass their check before the other lands."""
+        with self._lock(model_id):
+            saved = [preset.name for preset in self._read(model_id).presets]
+            for name in names:
+                if any(_same_name(name, other) for other in saved):
+                    raise PresetExistsError(name)
+            return write()
+
     def _require_free(self, model_id: str, stored: _StoredPresets, name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""
         taken = [p.name for p in stored.presets if p.id != own]
@@ -231,7 +396,7 @@ class PresetStore:
 
     def create(self, model_id: str, body: ParamPresetCreate) -> ParamPreset:
         now = datetime.now(UTC)
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             if len(stored.presets) >= MAX_PRESETS:
                 raise TooManyPresetsError(f"a template keeps at most {MAX_PRESETS} presets")
@@ -248,7 +413,7 @@ class PresetStore:
         return self._view(preset)
 
     def update(self, model_id: str, preset_id: str, patch: ParamPresetUpdate) -> ParamPreset:
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             preset = next((p for p in stored.presets if p.id == preset_id), None)
             if preset is None:
@@ -263,7 +428,7 @@ class PresetStore:
         return self._view(preset)
 
     def delete(self, model_id: str, preset_id: str) -> None:
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             kept = [p for p in stored.presets if p.id != preset_id]
             if len(kept) == len(stored.presets):
@@ -276,7 +441,9 @@ class PresetStore:
         The duplicate's own template presets came with its directory; these are the
         ones kept beside it. Fresh ids, so the two sets are edited independently.
         """
-        with self._lock:
+        # Both, in a fixed order, so two copies the other way round cannot deadlock.
+        first, second = sorted((source_id, target_id))
+        with self._lock(first), self._lock(second):
             source = self._read(source_id)
             if not source.presets:
                 return

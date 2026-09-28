@@ -1008,9 +1008,11 @@ jobs:
         if: ${{ steps.detect.outputs.backend == 'true' }}
         run: |
           set -uo pipefail
+          # Actions runs `bash -e`, so capture diff's exit here: 1 means the API
+          # changed, which is the point of this step, not a failure.
+          status=0
           diff -u --label "main (${BASE_SHA:0:7})" --label "this PR" \
-            "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/api.diff"
-          status=$?
+            "$RUNNER_TEMP/base.json" "$RUNNER_TEMP/head.json" > "$RUNNER_TEMP/api.diff" || status=$?
           if [ "$status" -gt 1 ]; then
             echo "::error::diff failed (exit $status)"
             exit 1
