@@ -15,6 +15,7 @@ import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
+import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
 import { registerPluginRoutes } from './routes/plugins.js'
 import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
@@ -25,7 +26,8 @@ import type { KekStatus } from './secrets.js'
 // routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
 // plugin registry routes (#297, routes/plugins.ts), the plugin package routes
 // (#297, routes/pluginPackages.ts), the MCP token routes (#251,
-// routes/mcpTokens.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/mcpTokens.ts), the headless-browser setting (#349,
+// routes/headlessBrowser.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -67,6 +69,8 @@ export type AppDeps = {
   now?: () => number
   /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
   approvals?: ApprovalService
+  /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) answers 503 without it. */
+  settings?: SettingsRepo | undefined
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
@@ -222,6 +226,13 @@ export function createApp(deps: AppDeps): AgentApp {
   registerPluginPackageRoutes(app, {
     packages: deps.pluginPackages,
     installer: deps.packageInstaller,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerHeadlessBrowserRoutes(app, {
+    settings: deps.settings,
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,

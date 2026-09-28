@@ -93,6 +93,8 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
+  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
+  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
@@ -203,6 +205,7 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
+  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
@@ -278,6 +281,11 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 /** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
+export function setMockMedia(slug: string, media: MediaView[]): void {
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -2429,6 +2437,20 @@ export const handlers = [
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
+
+  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/settings/headless-browser`, () =>
+    HttpResponse.json({ enabled: state.headlessBrowser }),
+  ),
+
+  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
+    const body = (await request.json()) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
+    }
+    state.headlessBrowser = body.enabled
+    return HttpResponse.json({ enabled: state.headlessBrowser })
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {
