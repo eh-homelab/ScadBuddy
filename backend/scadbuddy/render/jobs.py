@@ -799,7 +799,7 @@ async def render_main(
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         work.mkdir(parents=True, exist_ok=True)
-        with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
             return await _render_main(prepared, schema, staged, params, work, config=config)
 
 
@@ -819,7 +819,7 @@ async def render_solids_stage(
     beside the files it names, which is what :func:`finish_piece_stage` reads."""
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
-        with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
             return await _render_solids(
                 prepared, schema, staged, params, work, output, config=config, stage=no_stage
             )
