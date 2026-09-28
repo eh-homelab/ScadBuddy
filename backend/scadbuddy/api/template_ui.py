@@ -14,7 +14,6 @@ from fastapi.responses import Response
 from scadbuddy.api.deps import (
     CatalogueDep,
     CommitPath,
-    FetcherDep,
     HistoryDep,
     PathsDep,
     SlugPath,
@@ -22,7 +21,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.jobs import _resolve_version
 from scadbuddy.api.models import _etag_matches, require_model_exists
 from scadbuddy.core.problems import ApiError
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import source_directory
 
 router = APIRouter(tags=["models"])
 
@@ -60,16 +59,24 @@ UiPath = Annotated[
 
 
 def _ui_file(directory: FsPath, path: str) -> FsPath:
+    missing = ApiError(status.HTTP_404_NOT_FOUND, f"no ui file {path!r}")
+    if any(not part or part.startswith(".") for part in path.split("/")):
+        raise missing
     base = (directory / UI_DIR).resolve()
-    target = (base / path).resolve()
-    if (
-        any(not part or part.startswith(".") for part in path.split("/"))
-        # Resolved, so a symlink out of ui/ is caught as well as a `..`.
-        or not target.is_relative_to(base)
-        or target.suffix.lower() not in UI_MEDIA_TYPES
-        or not target.is_file()
-    ):
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no ui file {path!r}")
+    try:
+        target = (base / path).resolve()
+        servable = (
+            # Resolved, so a symlink out of ui/ is caught as well as a `..`.
+            target.is_relative_to(base)
+            and target.suffix.lower() in UI_MEDIA_TYPES
+            and target.is_file()
+        )
+    except (ValueError, OSError):
+        # A NUL byte (ValueError), or a name the filesystem refuses (too long): the
+        # same 404 as any other path that is not a servable file.
+        servable = False
+    if not servable:
+        raise missing
     return target
 
 
@@ -118,14 +125,15 @@ async def get_ui_file_at(
     catalogue: CatalogueDep,
     history: HistoryDep,
     paths: PathsDep,
-    fetcher: FetcherDep,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, commit)
-    source = await resolve_source(slug, requested, paths=paths, history=history, fetcher=fetcher)
-    file = await asyncio.to_thread(_ui_file, source.scad.parent, path)
-    # `resolve_source` answers the current revision with the live directory, which an
-    # uncommitted edit can change; only an export is immutable.
-    exported = source.scad.parent != paths.model_dir(slug)
+    # The directory only: the UI's files need no library checkout, so a pinned library
+    # that is missing (and cannot be fetched offline) does not stop the UI mounting.
+    directory, _ = await source_directory(slug, requested, paths=paths, history=history)
+    file = await asyncio.to_thread(_ui_file, directory, path)
+    # The current revision is answered from the live directory, which an uncommitted
+    # edit can change; only an export is immutable.
+    exported = directory != paths.model_dir(slug)
     return await asyncio.to_thread(_serve, file, pinned=exported, if_none_match=if_none_match)
