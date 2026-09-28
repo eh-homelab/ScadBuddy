@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -62,9 +62,28 @@ interface Props {
   /** #81 — the chosen printer's plate, or the configured default. Undrawn until known. */
   plate?: Plate
   captureRef?: React.RefObject<PreviewCapture | null>
+  /** Laid over the scene's top left, before the plate: the page's own buttons. */
+  leading?: ReactNode
+  /** Laid over the scene's top right: the page's own buttons. */
+  controls?: ReactNode
+  /**
+   * How much of the scene's left edge the page covers, as a CSS length — the
+   * parameters flyout in full screen. The readouts keep clear of it; the scene does not
+   * move, so the camera's view stays as it was.
+   */
+  covered?: string
 }
 
-export function Preview({ job, rendering, stage, plate, captureRef }: Props) {
+export function Preview({
+  job,
+  rendering,
+  stage,
+  plate,
+  captureRef,
+  leading,
+  controls,
+  covered,
+}: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
   // one rendering.
@@ -95,9 +114,15 @@ export function Preview({ job, rendering, stage, plate, captureRef }: Props) {
 
   const theme = useViewerTheme()
   const failed = job?.status === 'failed'
+  const clear = covered ? { left: covered } : undefined
 
   return (
-    <div className="relative h-full min-h-0 w-full bg-bg">
+    <div
+      // min-w-0: the canvas is sized in pixels, and without it that width holds the
+      // column open, so the view never narrows again after full screen or a smaller
+      // window.
+      className="relative h-full min-h-0 w-full min-w-0 bg-bg"
+    >
       <Canvas
         key={theme.bg}
         data-testid="preview-canvas"
@@ -138,15 +163,26 @@ export function Preview({ job, rendering, stage, plate, captureRef }: Props) {
         />
       </Canvas>
 
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
+      <div
+        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3"
+        style={clear}
+      >
         <div className="flex items-start justify-between gap-3">
-          {plate ? <PlateBadge plate={plate} /> : <span />}
-          {rendering && (
-            <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
-              <Spinner /> Rendering
-              {stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
-            </span>
-          )}
+          {/* Beside the flyout the room can run short: the left side wraps, so the
+              right side's controls stay on screen. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {leading}
+            {plate && <PlateBadge plate={plate} />}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {rendering && (
+              <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
+                <Spinner /> Rendering
+                {stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
+              </span>
+            )}
+            {controls}
+          </div>
         </div>
 
         {!failed && (
@@ -158,10 +194,19 @@ export function Preview({ job, rendering, stage, plate, captureRef }: Props) {
         )}
       </div>
 
-      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} warnings={job.warnings ?? []} />}
+      {failed && (
+        <RenderError
+          log={(job.log_tail ?? []).join('\n')}
+          warnings={job.warnings ?? []}
+          covered={covered}
+        />
+      )}
 
       {!shown && !failed && !rendering && (
-        <p className="absolute inset-0 flex items-center justify-center text-[13px] text-faint">
+        <p
+          className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
+          style={clear}
+        >
           Change a parameter to render.
         </p>
       )}
@@ -250,9 +295,20 @@ export function RenderWarnings({ warnings, inline = false }: { warnings: string[
   )
 }
 
-function RenderError({ log, warnings }: { log?: string; warnings: string[] }) {
+function RenderError({
+  log,
+  warnings,
+  covered,
+}: {
+  log?: string
+  warnings: string[]
+  covered?: string
+}) {
   return (
-    <div className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm">
+    <div
+      className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
+      style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
+    >
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         OpenSCAD could not render these parameters.
       </p>

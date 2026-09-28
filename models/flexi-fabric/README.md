@@ -76,9 +76,11 @@ most fabric-like spacing that still keeps every gap at least `clearance`.
 **`link_size` and `bar_width` are adjusted automatically.** If the links would
 come closer than `clearance`, the bar width is reduced in 0.1 mm steps down to
 0.8 mm (two 0.4 mm lines); if that is still not enough, `link_size` is raised
-in 0.5 mm steps. The render log says so (`NOTE:` / `WARNING:`). `link_size` is
-also capped at a quarter of the sheet's narrower side, so there are always
-several links across.
+in 0.5 mm steps. `link_size` is also capped at a quarter of the sheet's
+narrower side, so there are several links across (a clearance raise after
+that cap can leave fewer than four; the NOTE says so). Every one of these
+adjustments is reported with a `NOTE:` line, which ScadBuddy shows beside the
+preview.
 
 `square_links` and `diamond` spacing is exact (closed form in `model.scad`).
 The other three use linear fits of the spacing and clearance measured with a
@@ -92,7 +94,7 @@ rendered gaps (below).
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `shape` | `rectangle` | Sheet outline: rectangle, circle/ellipse, hexagon, heart, star. A link is placed when its whole bounding box is inside the outline; links left with no neighbour are dropped. A star or heart too small for two links falls back to the rectangle. |
+| `shape` | `rectangle` | Sheet outline: rectangle, circle/ellipse, hexagon, heart, star. A link is placed when its whole bounding box is inside the outline; links left with no neighbour are dropped. A star or heart too small for two links falls back to the rectangle, with a NOTE. |
 | `width` | `120` | Sheet width, mm (40-300). |
 | `height` | `120` | Sheet height, mm (40-300). |
 | `pattern` | `square_links` | Link pattern, see above. |
@@ -116,7 +118,7 @@ a bridge sagging.
 | Parameter | Default | What it does |
 |---|---|---|
 | `colour_mode` | `rainbow` | `single`, `checker`, `stripes` (vertical), `rows` (horizontal), `gradient_bands` (left to right), `rainbow` (arcs, `palette_1` outermost), `random_seeded`, `overlay_only` (all `palette_1`, plus the overlay). |
-| `colour_count` | `8` | How many palette colours `stripes`, `rows`, `gradient_bands`, `rainbow` and `random_seeded` use. |
+| `colour_count` | `8` | How many palette colours `stripes`, `rows`, `gradient_bands`, `rainbow` and `random_seeded` use. `checker` ignores it and uses the fewest colours that keep neighbours apart (2, or 3 for `hex_scales`), with a NOTE when this differs from `colour_count`. |
 | `stripe_width` | `2` | Stripe / row width in links. |
 | `seed` | `7` | Seed for `random_seeded`. |
 | `palette_1` … `palette_8` | red, orange, yellow, green, teal, blue, purple, pink | The palette. `palette_1` is the single / base colour. |
@@ -240,7 +242,7 @@ is checked for:
   through a `color()`-filtering wrapper like ScadBuddy's closed-part renderer,
   and the closed parts' volumes add up to the whole render's.
 
-Last run: `OK: all cases passed` (37 cases). Sampled minimum gaps at 0.3 mm
+Last run: `OK: all cases passed` (40 cases). Sampled minimum gaps at 0.3 mm
 clearance: square 0.600 (the vertical gap), rings 0.404, diamond 0.419, hexagon
 0.458, TriFlex 0.353.
 

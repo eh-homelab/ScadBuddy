@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
@@ -9,6 +9,7 @@ import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import { PresetPicker } from '../components/PresetPicker'
@@ -31,10 +32,19 @@ import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
+import { useFullscreen } from '../lib/useFullscreen'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
+
+const FLYOUT_ID = 'parameters-flyout'
+/**
+ * The flyout's width, which the readouts move clear of: set on the full-screen workspace
+ * per breakpoint (`--sb-flyout`), a sheet over the whole view below `md` and the docked
+ * column's widest, 360px, from there up.
+ */
+const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
@@ -334,6 +344,29 @@ export function CustomizePage() {
     }),
   )
 
+  // Full screen takes the whole workspace, not the viewer alone, so the parameters can
+  // come along as a flyout over the scene and a change is watched as it renders. It is
+  // the same element throughout, whichever way it fills the screen: moving the canvas
+  // would reload the model and lose the camera, and moving the panel would lose its tab.
+  const workspace = useRef<HTMLDivElement>(null)
+  const fullscreen = useFullscreen(workspace)
+  const full = fullscreen.mode !== null
+  const [flyout, setFlyout] = useState(false)
+  // Each full screen opens on the view alone.
+  if (!full && flyout) setFlyout(false)
+  const flyoutButton = useRef<HTMLButtonElement>(null)
+  const flyoutClose = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (flyout) flyoutClose.current?.focus()
+  }, [flyout])
+
+  const closeFlyout = useCallback(() => {
+    setFlyout(false)
+    // It was only covered, so it can take the focus straight back.
+    flyoutButton.current?.focus()
+  }, [])
+
   if (reopenId && reopenState.error) {
     // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
     // that message; sending the reader there keeps one copy of it.
@@ -500,8 +533,26 @@ export function CustomizePage() {
         )}
       </div>
 
-      <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
-        <div className="min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line">
+      <div
+        ref={workspace}
+        data-testid="workspace"
+        className={`grid min-h-0 grid-cols-1 ${
+          full
+            ? `bg-bg [--sb-flyout:100%] md:[--sb-flyout:360px] ${
+                fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'
+              }`
+            : 'lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]'
+        }`}
+      >
+        <div
+          id={FLYOUT_ID}
+          hidden={full && !flyout}
+          className={
+            full
+              ? 'absolute inset-y-0 left-0 z-20 w-(--sb-flyout) shadow-2xl'
+              : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
+          }
+        >
           <ParameterPanel
             schema={schema}
             slug={slug}
@@ -512,14 +563,17 @@ export function CustomizePage() {
             onReset={onReset}
             reveal={reveal}
             toolbar={
-              <PresetPicker
-                // A preset picked on one model means nothing on the next.
-                key={slug}
-                slug={slug}
-                schema={schema}
-                values={values}
-                onApply={onApplyPreset}
-              />
+              <>
+                {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
+                <PresetPicker
+                  // A preset picked on one model means nothing on the next.
+                  key={slug}
+                  slug={slug}
+                  schema={schema}
+                  values={values}
+                  onApply={onApplyPreset}
+                />
+              </>
             }
           />
         </div>
@@ -538,6 +592,19 @@ export function CustomizePage() {
               stage={renderStage}
               plate={plate}
               captureRef={captureRef}
+              leading={
+                full && (
+                  <ParametersButton
+                    ref={flyoutButton}
+                    open={flyout}
+                    flyout={FLYOUT_ID}
+                    onClick={() => setFlyout((open) => !open)}
+                  />
+                )
+              }
+              controls={<FullscreenButton active={full} onClick={fullscreen.toggle} />}
+              // The flyout lies over the scene; the readouts move clear of it.
+              covered={full && flyout ? FLYOUT_WIDTH : undefined}
             />
           </Suspense>
           {misfit.length > 0 && (
@@ -563,23 +630,26 @@ export function CustomizePage() {
               {renderError.message}
             </p>
           )}
-          <ActionBar
-            slug={slug}
-            job={job}
-            rendering={rendering || !settled}
-            upToDate={upToDate}
-            output={output}
-            capture={capture}
-            fit={fit}
-            fitProblems={misfit}
-            onPrinterModel={setPrinterModel}
-            onGenerated={(created) => {
-              if (job) setSaved({ jobId: job.id, output: created })
-              outputsState.reload()
-            }}
-            onSent={() => outputsState.reload()}
-            onRan={() => outputsState.reload()}
-          />
+          {/* Full screen is the view and its parameters; the actions wait outside it. */}
+          <div hidden={full}>
+            <ActionBar
+              slug={slug}
+              job={job}
+              rendering={rendering || !settled}
+              upToDate={upToDate}
+              output={output}
+              capture={capture}
+              fit={fit}
+              fitProblems={misfit}
+              onPrinterModel={setPrinterModel}
+              onGenerated={(created) => {
+                if (job) setSaved({ jobId: job.id, output: created })
+                outputsState.reload()
+              }}
+              onSent={() => outputsState.reload()}
+              onRan={() => outputsState.reload()}
+            />
+          </div>
         </div>
       </div>
     </div>

@@ -13,7 +13,7 @@
 #   - prints without supports: no downward-facing surface more than 45
 #     degrees from vertical except flat bridges
 #   - text inside the front face and flush with it
-#   - no OpenSCAD warnings
+#   - no OpenSCAD warnings, and a NOTE for every value the model changes
 #
 # The XML checking runs on the host with python3 and the standard library.
 set -euo pipefail
@@ -67,6 +67,10 @@ CASES+=(
     'no-cable|cable_slot=false;text="Mia"'
     'one-colour|front_color="#546E7A";text="Solo"'
     'text-lobster|text="Leo";font="Lobster Two:style=Bold";style="cutout"'
+    # Values the model has to change must be reported with a NOTE.
+    'floor-and-cable-clamped|floor_height=4;thickness=10;width=40;cable_width=24'
+    'channel-clamped|floor_height=6;cable_channel_height=20'
+    'cutout-no-windows|style="cutout";lip_height=40;backrest_length=30'
 )
 
 : > "$OUT/cases.txt"
@@ -287,7 +291,23 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, len(have) == len(named), "each of the %d colours rendered on its own" % len(named))
         check(name, abs(total - vol) <= 1e-3 * vol,
               "colour parts do not overlap: %.1f mm3 summed, %.1f mm3 whole" % (total, vol))
-    check(name, "WARNING" not in open(os.path.join(OUT, name + ".log")).read(), "no OpenSCAD warnings")
+    log = open(os.path.join(OUT, name + ".log")).read()
+    check(name, "WARNING" not in log, "no OpenSCAD warnings")
+
+    # Every value the model changes is reported, and nothing else is.
+    cw_max = p["width"] - 2 * t
+    L_sin = L * math.sin(a)
+    win_z0 = max(lip_top, fz + 0.2 * L_sin) + 2
+    win_z1 = fz + 0.85 * L_sin
+    win_hw = min(p["width"] / 2 - max(8, p["width"] * 0.15), (win_z1 - win_z0) / 1.2)
+    notes = {
+        "NOTE: floor_height raised": p["floor_height"] < t + 1,
+        "NOTE: cable_width reduced": p["cable_slot"] and p["cable_width"] > cw_max,
+        "NOTE: cable_channel_height reduced": p["cable_slot"] and p["cable_channel_height"] > fz - 2,
+        "NOTE: no room for windows": p["style"] == "cutout" and not (win_hw > 4 and win_z1 - win_z0 > 8),
+    }
+    for note, want in notes.items():
+        check(name, (note in log) == want, "%s %s" % ("logs" if want else "no", note))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

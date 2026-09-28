@@ -46,7 +46,7 @@ backrest_length = 90; // [30:5:250]
 // Height of the lip in front of the device, above the slot floor, in mm
 lip_height = 10; // [3:1:40]
 
-// Height of the slot floor above the desk, in mm (room under the device for a charging plug)
+// Height of the slot floor above the desk, in mm (room under the device for a charging plug; at least thickness + 1)
 floor_height = 14; // [4:1:40]
 
 // Wall / plate thickness, in mm
@@ -57,7 +57,7 @@ thickness = 5; // [3:0.5:10]
 // Cable pass-through: a slot in the floor under the charging port and a channel along the underside to the back
 cable_slot = true;
 
-// Width of the cable slot and channel, in mm (fits the plug, not just the cable)
+// Width of the cable slot and channel, in mm (fits the plug, not just the cable; capped at width - 2 x thickness)
 cable_width = 12; // [6:1:24]
 
 // Height of the channel along the underside, in mm (clamped to 2 mm below the slot floor)
@@ -121,6 +121,13 @@ echo(STAND = [x_rear, dev_com_x, xb0, T1[1], slot_w, fz]);
 
 cw = min(cable_width, width - 2 * t);
 ch = min(cable_channel_height, fz - 2);
+if (floor_height < fz)
+    echo(str("NOTE: floor_height raised from ", floor_height, " to ", fz, " mm (thickness + 1)"));
+if (cable_slot && cw < cable_width)
+    echo(str("NOTE: cable_width reduced from ", cable_width, " to ", cw, " mm to leave the side walls"));
+if (cable_slot && ch < cable_channel_height)
+    echo(str("NOTE: cable_channel_height reduced from ", cable_channel_height, " to ", ch,
+             " mm (2 mm below the slot floor)"));
 
 // ---- side profile: x from the front face (0) back, y up ----------------------
 
@@ -164,8 +171,11 @@ win_z0 = max(lip_top, fz + 0.2 * backrest_length * sin(a)) + 2;
 win_z1 = fz + 0.85 * backrest_length * sin(a);
 win_rail = max(8, width * 0.15);
 win_hw = min(width / 2 - win_rail, (win_z1 - win_z0) / 1.2);
+has_windows = win_hw > 4 && win_z1 - win_z0 > 8;
+if (style == "cutout" && !has_windows)
+    echo("NOTE: no room for windows in the backrest (raise backrest_length or lower lip_height); the cut-out is hollow inside only");
 module windows() {
-    if (style == "cutout" && win_hw > 4 && win_z1 - win_z0 > 8)
+    if (style == "cutout" && has_windows)
         translate([t + 1, 0, 0]) rotate([90, 0, 90]) linear_extrude(x_rear)
             polygon([[-win_hw, win_z0], [win_hw, win_z0], [win_hw, win_z1 - 1.2 * win_hw],
                      [0, win_z1], [-win_hw, win_z1 - 1.2 * win_hw]]);

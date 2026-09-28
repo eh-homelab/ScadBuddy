@@ -15,6 +15,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    FetcherDep,
     HistoryDep,
     JobIdPath,
     PathsDep,
@@ -33,6 +34,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
@@ -103,6 +105,8 @@ class JobStatus(BaseModel):
     preview_url: str | None = None
     bbox_mm: BoundingBox | None = None
     colors: list[str] | None = None
+    #: ScadBuddy's own warnings: a done job's result's, or what a failed one could
+    #: still say (#408), say a file parameter's asset OpenSCAD could not open.
     warnings: list[str] | None = None
     #: What the template echoed as `NOTE:`/`WARNING:` on a successful render (#285).
     notes: list[str] | None = None
@@ -148,7 +152,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         preview_url=preview_url if result is not None else None,
         bbox_mm=result.bbox_mm if result else None,
         colors=result.colors if result else None,
-        warnings=result.warnings if result else None,
+        warnings=result.warnings if result else job.warnings or None,
         notes=result.notes if result else None,
         parts=result.parts if result else None,
         plates=result.plates if result else None,
@@ -187,6 +191,7 @@ async def schema_of(
     history: ModelHistory,
     config: Config,
     version: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> tuple[ModelSource, CustomizerSchema]:
     """The source a render of ``slug`` at ``requested`` reads, and its schema.
 
@@ -196,7 +201,9 @@ async def schema_of(
     ``version`` is what the client asked for, for the 404's message.
     """
     try:
-        source = await resolve_source(slug, requested, paths=paths, history=history)
+        source = await resolve_source(
+            slug, requested, paths=paths, history=history, fetcher=fetcher
+        )
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
         )
@@ -252,11 +259,18 @@ async def render_model(
     config: ConfigDep,
     queue: QueueDep,
     assets: AssetsDep,
+    fetcher: FetcherDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
-        slug, requested, paths=paths, history=history, config=config, version=body.version
+        slug,
+        requested,
+        paths=paths,
+        history=history,
+        config=config,
+        version=body.version,
+        fetcher=fetcher,
     )
     require_valid_params(schema, body.params)
     try:

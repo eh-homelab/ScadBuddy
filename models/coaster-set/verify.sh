@@ -2,7 +2,8 @@
 # Render models/coaster-set with the defaults and each major variation (every
 # pattern, every shape, face down, cork recess, holder, alternating colours,
 # per-coaster monograms, SVG and PNG overlays, refused and missing overlay
-# files, a set too big for the plate) and check each 3MF:
+# files, a set too big for the plate, the biggest coaster with its holder)
+# and check each 3MF:
 #
 #   - no uncoloured geometry, the expected colour parts, and the colour parts
 #     do not overlap (each colour rendered closed on its own through a
@@ -100,8 +101,12 @@ CASES+=(
     'overlay-refused-backslash|overlay_file="..\\sample-overlay.svg";count=1'
     'too-many-for-plate|count=12;size=150'
     'twelve-small-holder|count=12;size=60;holder=true;pattern="sunburst";holder_color="#8D6E63"'
+    # Too big for two holder-sized cells: the coaster sits above the holder.
+    'holder-biggest-stacked|count=4;size=150;holder=true;holder_clearance=3;gap=20;holder_color="#8D6E63"'
     'thin-recess-clamped|thickness=3;underside="recess";recess_depth=4;inlay_depth=1;count=2;shape="square"'
     'thin-recess-none|thickness=3;underside="recess";inlay_depth=2;count=2;shape="round"'
+    'text-empty-note|pattern="text";text="";count=1'
+    'monogram-blank-note|pattern="monogram";letters=" ";count=1'
     'fine-stripes-big|pattern="stripes";spacing=5;line_width=0.8;size=150;count=2;pattern_rotation=30'
 )
 
@@ -236,6 +241,13 @@ for line in open(os.path.join(OUT, "cases.txt")):
     boxes = [(pos(i), ext_x / 2, ext_y / 2) for i in range(n)]
     if hold:
         boxes.append((pos(n), cell_x / 2, cell_y / 2))
+    # Not even one coaster fits beside its holder in two holder-sized cells:
+    # the coaster sits in its own-size cell above the holder, gap cut to fit.
+    stacked = hold and not cs
+    s_gap = min(gap, BED_Y - ext_y - cell_y)
+    if stacked:
+        W, H = max(ext_x, cell_x), ext_y + s_gap + cell_y
+        boxes = [((0, H / 2 - ext_y / 2), ext_x / 2, ext_y / 2), ((0, -H / 2 + cell_y / 2), cell_x / 2, cell_y / 2)]
     bw = max(c[0] + hx for c, hx, hy in boxes) - min(c[0] - hx for c, hx, hy in boxes)
     bh = max(c[1] + hy for c, hx, hy in boxes) - min(c[1] - hy for c, hx, hy in boxes)
     face_down = p["face"] == "down" or p["underside"] == "recess"
@@ -256,7 +268,9 @@ for line in open(os.path.join(OUT, "cases.txt")):
     dx, dy, dz = max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)
 
     cols_expected = {p["coaster_color"].upper()}
-    if p["pattern"] != "none" and not (p["pattern"] == "monogram" and p["letters"].strip() == ""):
+    blank = (p["pattern"] == "monogram" and p["letters"].strip() == "") or (p["pattern"] == "text" and p["text"] == "")
+    check(name, ("NOTE: pattern is" in log) == blank, "%s the empty-pattern note" % ("logs" if blank else "no"))
+    if p["pattern"] != "none" and not blank:
         cols_expected.add(p["pattern_color"].upper())
     if p["border_width"] > 0:
         cols_expected.add(p["border_color"].upper())
@@ -275,7 +289,9 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, "NOTE: recess reduced" in log and (recess > 0 or "no recess cut" in log),
               "the log says the recess was reduced to %.2f mm" % recess)
     if n < p["count"]:
-        check(name, "NOTE: only %d coasters" % n in log, "the log says how many fit")
+        check(name, "NOTE: only %d coaster%s of" % (n, "" if n == 1 else "s") in log, "the log says how many fit")
+    if stacked and s_gap < gap:
+        check(name, "NOTE: gap reduced from" in log, "the log says the gap was cut to %.1f mm" % s_gap)
     check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))
     check(name, abs(dx - bw) <= 0.02 and abs(dy - bh) <= 0.02, "plate %.2f x %.2f == %.2f x %.2f" % (dx, dy, bw, bh))
     check(name, abs(dz - top) <= 0.02, "height %.2f == %.2f" % (dz, top))
