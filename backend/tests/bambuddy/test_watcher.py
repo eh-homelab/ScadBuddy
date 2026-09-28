@@ -327,6 +327,56 @@ def test_a_deleted_output_ends_the_watch(paths: DataPaths) -> None:
     assert asyncio.run(scenario()).reads == 0
 
 
+def test_a_quiet_print_given_up_on_is_forgotten(paths: DataPaths) -> None:
+    async def scenario() -> tuple[Script, list[str]]:
+        write_output(paths)
+        clock = [NOW]
+        read = Script(progress("running"))
+
+        async def reading(meta: OutputMeta) -> PrintProgress | None:
+            clock[0] += timedelta(hours=10)
+            return await read(meta)
+
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, _ = watcher_for(paths, reading, prints=log, max_age=timedelta(hours=24))
+        watcher.now = lambda: clock[0]
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return read, await log.since(NOW - timedelta(days=365))
+
+    read, remembered = asyncio.run(scenario())
+    # Moved once, then quiet for more than a day: given up on, and its row gone.
+    assert read.reads == 4
+    assert remembered == []
+
+
+class FlakyOutputs(OutputStore):
+    """An output store whose disk drops out for the first ``failures`` reads."""
+
+    def __init__(self, paths: DataPaths, failures: int) -> None:
+        super().__init__(paths)
+        self.failures = failures
+
+    def get(self, output_id: str) -> OutputMeta:
+        if self.failures > 0:
+            self.failures -= 1
+            raise OSError("read error")
+        return super().get(output_id)
+
+
+def test_an_output_read_blip_does_not_end_the_watch(paths: DataPaths) -> None:
+    async def scenario() -> Script:
+        write_output(paths)
+        read = Script(progress("done", settled=True))
+        watcher, _ = watcher_for(paths, read)
+        watcher.outputs = FlakyOutputs(paths, 2)
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return read
+
+    assert asyncio.run(scenario()).reads == 1
+
+
 def test_start_resumes_recent_prints_after_a_restart(paths: DataPaths) -> None:
     async def scenario() -> set[str]:
         log = MemoryPrintLog({"1" * 32: NOW, "2" * 32: NOW - timedelta(hours=30)})

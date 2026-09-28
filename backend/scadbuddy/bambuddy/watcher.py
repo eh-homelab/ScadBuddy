@@ -403,12 +403,19 @@ class PrintWatcher:
                     interval = self.error_interval
                     continue
             if self.now() - max(active, printed_at or active) > self.max_age:
+                # Given up on: forget it too, or its row outlives the print for good.
+                await self._done(output_id)
                 return
             try:
                 meta = await asyncio.to_thread(self.outputs.get, output_id)
             except OutputNotFoundError:
                 await self._done(output_id)
                 return
+            except Exception:
+                # A disk blip or a half-written meta.json: keep watching, slowly.
+                logger.exception("could not read the output", extra={"output_id": output_id})
+                interval = self.error_interval
+                continue
             try:
                 progress = await self.read(meta)
             except ApiError as error:

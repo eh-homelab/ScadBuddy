@@ -170,6 +170,23 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
 
 
 @respx.mock
+def test_a_send_starts_the_print_watcher(client: TestClient, model: str) -> None:
+    configure(client, pipeline_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    pipelines_route()
+    printers_route()
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(200, json=run_body())
+    )
+    sent = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+    assert sent.status_code == 200, sent.text
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert output_id in state.print_watcher.watching
+
+
+@respx.mock
 def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     """#268: the backend follows the print itself from the moment it starts."""
     configure(client)
