@@ -3,7 +3,7 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
-import { FailClosedTokenStore } from './auth/tokens.js'
+import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
@@ -156,11 +156,11 @@ const app = createApp({
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
     },
-    // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
-    // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
-    // Until then `bearer` (the default) verifies no token, so /mcp answers
-    // 401 to every request in production: fail closed, not open.
-    tokens: new FailClosedTokenStore(),
+    // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
+    // Without a database /mcp answers 503 before auth (app.ts), and the
+    // fail-closed store only makes sure nothing could verify anyway.
+    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
+    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
