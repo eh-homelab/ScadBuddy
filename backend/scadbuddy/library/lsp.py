@@ -19,6 +19,12 @@ A server that stops answering (alive, but wedged) would hold its session's permi
 as long as the editor stays open, so a request left unanswered for
 ``REQUEST_TIMEOUT`` seconds ends the session: the server is killed and the socket
 closed with 1011, and the editor carries on without one as it does on any failure.
+
+A killed server is given ``KILL_WAIT`` seconds to be reaped, then its permit is let go
+whether or not it has died. That is deliberate: a process stuck in the kernel (a hung
+filesystem) cannot be killed, and holding the permit for it wedges the editor all the
+same. The cost is that such processes are not counted against ``SCADBUDDY_LSP_SESSIONS``,
+so each one is logged with how many are still unreaped.
 """
 
 from __future__ import annotations
@@ -50,6 +56,9 @@ REQUEST_TIMEOUT = 60.0
 #: Seconds to wait for a killed server to be reaped before letting the permit go;
 #: asyncio's child watcher reaps it whenever it does die.
 KILL_WAIT = 5.0
+
+#: Killed servers that outlived ``KILL_WAIT``; each drops out once asyncio reaps it.
+_unreaped: set[asyncio.subprocess.Process] = set()
 
 
 def frame(body: bytes) -> bytes:
@@ -125,8 +134,9 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
     server_root = root.as_uri() + "/"
     roots = _Roots(DEFAULT_CLIENT_ROOT, server_root)
     initialized = False
-    # The client's requests the server has yet to answer, by id: when each was sent.
-    unanswered: dict[int | str, float] = {}
+    # The client's requests the server has yet to answer, by id: when each was sent,
+    # oldest first. A list, so a client that reuses an id still has each one watched.
+    unanswered: dict[int | str, list[float]] = {}
     close_code = status.WS_1000_NORMAL_CLOSURE
 
     async def to_server() -> None:
@@ -157,7 +167,7 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             message = roots.inbound(message)
             request_id = message.get("id")
             if "method" in message and isinstance(request_id, int | str):
-                unanswered.setdefault(request_id, time.monotonic())
+                unanswered.setdefault(request_id, []).append(time.monotonic())
             try:
                 stdin.write(frame(json.dumps(message).encode()))
                 await stdin.drain()
@@ -180,15 +190,22 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 return
             if "method" not in message:
                 request_id = message.get("id")
-                if isinstance(request_id, int | str):
-                    unanswered.pop(request_id, None)
+                sent = unanswered.get(request_id) if isinstance(request_id, int | str) else None
+                if sent:
+                    sent.pop(0)
+                    if not sent:
+                        del unanswered[request_id]
             await websocket.send_text(json.dumps(roots.outbound(message)))
 
     async def watchdog() -> None:
         nonlocal close_code
         while True:
             await anyio.sleep(REQUEST_TIMEOUT / 10)
-            if unanswered and time.monotonic() - min(unanswered.values()) > REQUEST_TIMEOUT:
+            if (
+                unanswered
+                and time.monotonic() - min(sent[0] for sent in unanswered.values())
+                > REQUEST_TIMEOUT
+            ):
                 logger.warning(
                     "openscad-lsp left a request unanswered for %gs; ending the session",
                     REQUEST_TIMEOUT,
@@ -217,11 +234,15 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 await process.wait()
             if waiting.cancelled_caught:
                 # Stuck in the kernel: holding the permit for it would be the wedge
-                # all over again.
+                # all over again, so it is let go and counted instead.
+                _unreaped.difference_update([p for p in _unreaped if p.returncode is not None])
+                _unreaped.add(process)
                 logger.warning(
-                    "killed openscad-lsp (pid %d) was not reaped within %gs",
+                    "killed openscad-lsp (pid %d) was not reaped within %gs; "
+                    "%d killed server(s) not yet reaped",
                     process.pid,
                     KILL_WAIT,
+                    len(_unreaped),
                 )
             # Anything but our own kill means it went on its own: say so, or a server
             # that crashes on every session is invisible.

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import signal
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,6 +32,7 @@ from .conftest import MODEL_SLUG, set_fake_env
 FAKE_LSP = """#!/usr/bin/env python3
 import json
 import os
+import signal
 import pathlib
 import sys
 import time
@@ -75,6 +78,9 @@ while True:
     if method == "hang":
         # Alive, but never answers again: a wedged server.
         time.sleep(60)
+    if method == "delay":
+        # Answers, but only after a while.
+        time.sleep(message["params"]["seconds"])
     if method == "emit":
         # Writes raw bytes as its whole output, then stops writing without exiting.
         stdout.write(message["params"]["raw"].encode())
@@ -464,6 +470,72 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
             assert "result" in _initialize(again)
 
     assert _wait_until(lambda: _gone(pid))
+
+
+def test_unreaped_servers_are_counted(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that outlives its kill no longer holds a permit, so the log keeps
+    count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    monkeypatch.setattr(lsp, "_unreaped", set())
+    spawn = asyncio.create_subprocess_exec
+
+    async def unkillable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+
+        async def never() -> int:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process, "kill", lambda: None)
+        monkeypatch.setattr(process, "wait", never)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unkillable)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    pids: list[int] = []
+    try:
+        with TestClient(app) as client:
+            logging.getLogger().addHandler(caplog.handler)
+            for _ in range(2):
+                with client.websocket_connect(route) as session:
+                    _initialize(session)
+                    pids.append(int(pid_file.read_text()))
+                    session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+                    with pytest.raises(WebSocketDisconnect) as closed:
+                        session.receive_json()
+                assert closed.value.code == 1011
+
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert "2 killed server(s) not yet reaped" in caplog.text
+    finally:
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_reused_request_id_is_still_watched(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests in flight under one id: the first reply leaves the second watched."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        session.send_json(
+            {"jsonrpc": "2.0", "id": 2, "method": "delay", "params": {"seconds": 0.3}}
+        )
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+        assert session.receive_json()["id"] == 2
+        with pytest.raises(WebSocketDisconnect) as closed:
+            session.receive_json()
+    assert closed.value.code == 1011
 
 
 def test_an_idle_session_is_not_ended(
