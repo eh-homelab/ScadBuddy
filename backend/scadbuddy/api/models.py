@@ -962,14 +962,18 @@ async def delete_model(
     # links (#306). Bambuddy's own files and archives are left alone, as a single
     # output's delete leaves them unless asked. Best effort, like the rest of the
     # cleanup after a delete: the model is gone.
+    # Each on its own, so a failed upload cleanup cannot leave links serving archives.
     if output_ids:
         try:
             await uploads.delete_outputs(output_ids)
-            await links.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception(
-                "could not forget a deleted model's Bambuddy records", extra={"slug": slug}
+                "could not forget a deleted model's Bambuddy uploads", extra={"slug": slug}
             )
+        try:
+            await links.delete_outputs(output_ids)
+        except (DatabaseRequiredError, psycopg.Error):
+            logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
     emit(events, ModelEvent(kind="model.deleted", slug=slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

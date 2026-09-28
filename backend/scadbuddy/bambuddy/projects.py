@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
 from fastapi import status
 from pydantic import BaseModel, Field
 
@@ -32,6 +33,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
 from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -222,7 +224,11 @@ async def attach_results(
         if item.archive_id is not None:
             archives.append(item.archive_id)
             if output_id is not None and links is not None:
-                await link_item(links, output_id, item)
+                # A side effect of the attach, which must not fail over it.
+                try:
+                    await link_item(links, output_id, item)
+                except (psycopg.Error, DatabaseRequiredError):
+                    logger.exception("could not link a queue item's archive", extra={"id": item_id})
 
     if queue_item_ids:
         await client.add_queue_items_to_project(project_id, queue_item_ids)

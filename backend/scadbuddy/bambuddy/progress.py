@@ -22,53 +22,28 @@ by which stage produced it, so it stays right when Bambuddy rewords a message.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import OrderedDict
 from typing import Literal
 
+import psycopg
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.linking import link_by_hash, link_item, link_run
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.stages import Stage, stage_of
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, SlicedCopy
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
 
+logger = logging.getLogger(__name__)
+
 QUEUE_PATH = "/queue"
-
-#: Normalised across both routes. ``unknown`` is a real state: Bambuddy's status
-#: vocabularies differ per object and a new value must render as "still going" rather
-#: than silently as "done", which would stop the polling on a print that is still live.
-Stage = Literal["running", "queued", "done", "failed", "cancelled", "unknown"]
-
-#: Bambuddy's own words for a finished state, per object. Anything outside these is
-#: treated as still in flight.
-_DONE = {"completed", "complete", "done", "finished", "success", "succeeded", "printed"}
-_FAILED = {"failed", "error", "errored"}
-_CANCELLED = {"cancelled", "canceled", "aborted"}
-_QUEUED = {"queued", "pending", "waiting", "scheduled"}
-
-
-def stage_of(status: str | None) -> Stage:
-    """Map one of Bambuddy's status strings onto the shared vocabulary."""
-    if not status:
-        return "unknown"
-    value = status.strip().lower()
-    if value in _DONE:
-        return "done"
-    if value in _FAILED:
-        return "failed"
-    if value in _CANCELLED:
-        return "cancelled"
-    if value in _QUEUED:
-        return "queued"
-    if value in {"running", "printing", "in_progress", "slicing", "dispatching"}:
-        return "running"
-    return "unknown"
 
 
 class CopyProgress(BaseModel):
@@ -260,10 +235,31 @@ def from_queue(
 HASH_SCAN_INTERVAL = 600.0
 _last_hash_scan: dict[str, float] = {}
 
+#: What recording a link can fail with. Linking is a side effect of the progress read:
+#: none of these may fail the read, nor another plate's read beside it (#522 review).
+_LINK_ERRORS = (ApiError, psycopg.Error, DatabaseRequiredError)
+
+
+def _claim_hash_scan(output_id: str, now: float) -> bool:
+    """Claim an output's hash scan; False when one ran within HASH_SCAN_INTERVAL.
+
+    Entries past the interval are dropped here, so the map holds only recent scans.
+    """
+    last = _last_hash_scan.get(output_id)
+    if last is not None and now - last < HASH_SCAN_INTERVAL:
+        return False
+    for stale in [key for key, at in _last_hash_scan.items() if now - at >= HASH_SCAN_INTERVAL]:
+        del _last_hash_scan[stale]
+    _last_hash_scan[output_id] = now
+    return True
+
 
 class _Linker:
     """Records the archives a progress read comes across (#306): the one a queue item
-    reports, or, when an item is gone, those found by the sliced file's hash."""
+    reports, or, when an item is gone, those found by the sliced file's hash.
+
+    Best effort: a failure is logged and the read goes on as if nothing were linked.
+    """
 
     def __init__(
         self,
@@ -279,9 +275,24 @@ class _Linker:
         self._searched = False
 
     async def item(self, item: QueueItem, plate_id: int | None) -> None:
-        await link_item(self.links, self.meta.id, item, plate_id=plate_id)
+        try:
+            await link_item(self.links, self.meta.id, item, plate_id=plate_id)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a queue item's archive",
+                extra={"output_id": self.meta.id, "queue_item_id": item.id},
+            )
 
     async def gone(self, queue_item_id: int) -> None:
+        try:
+            await self._gone(queue_item_id)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a gone queue item's archives",
+                extra={"output_id": self.meta.id, "queue_item_id": queue_item_id},
+            )
+
+    async def _gone(self, queue_item_id: int) -> None:
         if self._searched:
             return
         # An item linked before it went needs nothing; another plate's gone item still
@@ -293,15 +304,18 @@ class _Linker:
         self._searched = True
         # And at most once per output every HASH_SCAN_INTERVAL: a settled print is read
         # again whenever its dialog opens, and each scan pages Bambuddy's archive list.
-        now = time.monotonic()
-        last = _last_hash_scan.get(self.meta.id)
-        if last is not None and now - last < HASH_SCAN_INTERVAL:
+        if not _claim_hash_scan(self.meta.id, time.monotonic()):
             return
-        _last_hash_scan[self.meta.id] = now
         await link_by_hash(self.client, self.uploads, self.links, self.meta)
 
     async def run(self, run: PipelineRun) -> None:
-        await link_run(self.client, self.links, self.meta.id, run)
+        try:
+            await link_run(self.client, self.links, self.meta.id, run)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a pipeline run's archives",
+                extra={"output_id": self.meta.id, "pipeline_run_id": run.id},
+            )
 
 
 async def _queued_progress(

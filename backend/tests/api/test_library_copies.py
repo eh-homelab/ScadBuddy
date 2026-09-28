@@ -477,6 +477,15 @@ def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
         raise psycopg.OperationalError("the database went away")
 
     monkeypatch.setattr(upload_store(client), "delete_outputs", fail)
+    links = getattr(client.app.state, STATE_ATTR).print_links  # type: ignore[attr-defined]
+    forgotten: list[object] = []
+
+    async def forget(ids: object) -> None:
+        forgotten.append(ids)
+
+    monkeypatch.setattr(links, "delete_outputs", forget)
 
     assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+    # The upload records' failure does not keep the links serving its archives.
+    assert forgotten == [[output_id]]

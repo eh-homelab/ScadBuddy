@@ -23,6 +23,7 @@ from fastapi import status
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.stages import Stage, stage_of
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -33,9 +34,11 @@ logger = logging.getLogger(__name__)
 ARCHIVE_PAGE = 100
 #: How many pages one scan reads at most: a thousand archives since the output was made.
 MAX_ARCHIVE_PAGES = 10
-#: Pipeline job states whose queue entry can carry an archive: a copy cancelled
-#: mid-print has one too (queue 34 → archive 18 in the spike).
-DISPATCHED_JOB_STATES = frozenset({"printing", "completed", "failed", "cancelled"})
+#: Pipeline job stages whose queue entry can carry an archive: a copy cancelled
+#: mid-print has one too (queue 34 → archive 18 in the spike). Read through the progress
+#: read's vocabulary, since the pipeline route's job states were not measured live and
+#: Bambuddy may say ``complete`` or ``canceled`` (#522 review).
+DISPATCHED_STAGES: frozenset[Stage] = frozenset({"running", "done", "failed", "cancelled"})
 
 
 async def link_item(
@@ -66,7 +69,7 @@ async def link_run(
     linked = await links.linked_queue_items(output_id)
     for job in run.jobs:
         entry = job.queue_entry_id
-        if entry is None or entry in linked or job.status not in DISPATCHED_JOB_STATES:
+        if entry is None or entry in linked or stage_of(job.status) not in DISPATCHED_STAGES:
             continue
         try:
             item = await client.queue_item(entry)

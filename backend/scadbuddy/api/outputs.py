@@ -243,14 +243,18 @@ async def delete_output(
             await remove_inbox_copies(client, uploads, meta, settings)
     outputs.delete(output_id)
     # After the files: a failed delete keeps the output, and so must keep its records.
-    # Best effort once the files are gone, as for a deleted model: the output is.
+    # Best effort once the files are gone, as for a deleted model: the output is. Each
+    # on its own, so a failed upload cleanup cannot leave links serving its archives.
     try:
         await uploads.delete_outputs([output_id])
-        await links.delete_outputs([output_id])
     except (DatabaseRequiredError, psycopg.Error):
         logger.exception(
-            "could not forget a deleted output's Bambuddy records", extra={"id": output_id}
+            "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
         )
+    try:
+        await links.delete_outputs([output_id])
+    except (DatabaseRequiredError, psycopg.Error):
+        logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
