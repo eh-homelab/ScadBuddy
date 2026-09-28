@@ -352,5 +352,16 @@ The session manager reads the enabled packages at the start of each turn
 cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
 turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
 `SessionManager`, but nothing starts a session over HTTP yet (the comment on `sessions`
-in `main.ts`). The Settings UI for the review and the approval is not built.
+in `main.ts`).
+
+Settings has an "Assistant plugins" area with two sections: "Plugin packages"
+([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
+and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+You install, review, approve and re-pin packages there. The approval dialog shows the
+full commit SHA and content hash, and you must tick a confirmation before it sends
+exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
+in-page agent's `click` and `fill` refuse it. The area follows the assistant's
+availability (`useAiAvailability()`), so it is hidden in production builds until the
+agent service is deployed.
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
@@ -6,6 +7,8 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { useSubscription } from '../lib/realtime'
@@ -61,6 +64,9 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
+  // The plugin sections talk to the agent service (#297), so they follow the
+  // assistant's availability: hidden while AI is off.
+  const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -597,6 +603,18 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Applied as you go, not by Save changes: each action is its own request. */}
+        {ai.available && (
+          <div className="mt-8">
+            <h2 className="text-[15px] font-semibold tracking-tight">Assistant plugins</h2>
+            <p className="mt-0.5 text-[13px] text-muted">
+              What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            </p>
+            <PluginPackagesPanel />
+            <RemotePluginsPanel />
+          </div>
+        )}
       </div>
     </div>
   )
