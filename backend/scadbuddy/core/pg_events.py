@@ -127,6 +127,10 @@ _INSERT_SQL = (
 _NOTIFY_SQL = "SELECT pg_notify(%s, %s)"
 
 
+class EventLogMissingError(RuntimeError):
+    """The bus was started on a database the job store has not migrated."""
+
+
 @dataclass(frozen=True)
 class EventLogRetention:
     """How much of the log to keep. 0 is no limit on that dimension."""
@@ -237,9 +241,26 @@ class PgNotifyEventBus:
     # -- lifecycle ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect, then start draining the outbox, listening and pruning. The
-        ``events`` table must exist: open the job store (which migrates) first."""
-        await self._pool.open(wait=True, timeout=self.connect_timeout)
+        """Connect, then start draining the outbox, listening and pruning.
+
+        The ``events`` table must exist: open the job store (which migrates) first.
+        Raises `EventLogMissingError` when it does not, rather than failing later
+        in every write. A failed start closes the pool it opened, so the caller's
+        `aclose` -- in a ``finally`` a failed start never reaches -- is not needed
+        to release it."""
+        try:
+            await self._pool.open(wait=True, timeout=self.connect_timeout)
+            async with self._pool.connection() as conn:
+                cursor = await conn.execute("SELECT to_regclass(%s)", (EVENTS_TABLE,))
+                row = await cursor.fetchone()
+            if row is None or row[0] is None:
+                raise EventLogMissingError(
+                    f"the {EVENTS_TABLE!r} table does not exist: open the job store, which "
+                    "migrates the database, before starting the event bus"
+                )
+        except BaseException:
+            await self._pool.close()
+            raise
         outbox = Subscription(
             maxsize=self.outbox_size,
             kinds=None,

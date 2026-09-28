@@ -87,6 +87,16 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     app.openapi = openapi  # type: ignore[method-assign]
 
 
+async def _close_quietly(state: AppState) -> None:
+    """Close the queue and the bus after a failed start, logging (not raising) what
+    fails, so the start's own error is the one that propagates."""
+    for close in (state.events.aclose, state.queue.aclose):
+        try:
+            await close()
+        except Exception:
+            logger.exception("could not release what a failed start opened")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
@@ -131,9 +141,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
     # After the queue, whose store migrated the database: the bus writes the event
-    # log. What was published before now (the built-in sync's commits) waited.
+    # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
+    # was published before now (the built-in sync's commits) waited.
     if isinstance(state.events, PgNotifyEventBus):
-        await state.events.start()
+        try:
+            await state.events.start()
+        except BaseException:
+            # Before the `try` below, so its `finally` never runs: release the
+            # queue that did start (workers, reaper, listener, pool) here, as
+            # `RenderQueue.start` releases its store when it fails.
+            await _close_quietly(state)
+            raise
     logger.info(
         "scadbuddy started",
         extra={

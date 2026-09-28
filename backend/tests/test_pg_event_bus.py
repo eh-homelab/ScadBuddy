@@ -33,6 +33,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import (
     MAX_PAYLOAD_BYTES,
     POSTGRES_NOTIFY_LIMIT,
+    EventLogMissingError,
     EventLogRetention,
     PgNotifyEventBus,
 )
@@ -160,6 +161,19 @@ async def test_events_published_before_start_are_sent_on_start(pg_conninfo: str)
     finally:
         await early.aclose()
         await hears.aclose()
+
+
+@pytest.mark.requires_postgres
+async def test_starting_before_the_store_migrated_says_so(pg_conninfo: str) -> None:
+    """The ordering the lifespan relies on, asserted: an unmigrated database is a
+    clear error at start, not `relation "events" does not exist` in every write."""
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
+
+    with pytest.raises(EventLogMissingError, match="open the job store"):
+        await bus.start()
+
+    assert bus._pool.closed  # a failed start released what it opened
+    await bus.aclose()  # and closing after it is still safe
 
 
 # --- the payload cap -----------------------------------------------------------------

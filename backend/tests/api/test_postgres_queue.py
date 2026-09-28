@@ -4,6 +4,7 @@ the queue from it."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from functools import partial
@@ -12,6 +13,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg_pool import PoolTimeout
 
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -99,3 +101,33 @@ def test_without_a_database_url_events_stay_in_process(settings: Settings) -> No
     with TestClient(app) as client:
         assert client.put("/api/v1/settings", json={"pipeline_id": 3}).status_code == 200
     assert [e.kind for e in heard if isinstance(e, SettingsChanged)] == ["settings.changed"]
+
+
+@pytest.mark.requires_postgres
+def test_a_bus_that_fails_to_start_releases_the_queue_that_did(
+    settings: Settings, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bus starts after the queue and before the lifespan's `try`, whose
+    `finally` a failed start never reaches: the lifespan must close both itself."""
+    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
+    state = app.state.scadbuddy
+    bus, queue = state.events, state.queue
+    assert isinstance(bus, PgNotifyEventBus)
+    store = queue.store
+    assert isinstance(store, PostgresJobStore)
+    started: list[asyncio.Task[None]] = []
+
+    async def unreachable(*args: object, **kwargs: object) -> None:
+        started.extend(queue._tasks)  # the queue is fully up by now
+        raise PoolTimeout("the database refused a second pool")
+
+    monkeypatch.setattr(bus._pool, "open", unreachable)
+    with pytest.raises(PoolTimeout), TestClient(app):
+        pass
+
+    assert started, "the queue had started before the bus failed"
+    assert all(task.done() for task in started)
+    assert queue._tasks == []
+    assert store._pool.closed
+    assert bus._pool.closed
+    assert store.pg_listener.backend_pid is None
