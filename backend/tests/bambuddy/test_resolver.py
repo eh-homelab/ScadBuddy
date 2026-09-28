@@ -299,6 +299,29 @@ def test_a_used_slot_with_no_spool_chosen_says_so_rather_than_pointing_at_advanc
     ]
 
 
+def test_every_slot_erroring_leaves_no_filament_presets_to_send() -> None:
+    """With nothing resolved there is no preset to pad with, so the array is empty —
+    never ``None``-padded — and every used slot carries its own error, which is what
+    makes the caller refuse before Bambuddy sees the array."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[SlotNeed(slot_id=1, colour="#FFFFFF"), SlotNeed(slot_id=2, colour="#FF1493")],
+        spools=[BASIC],
+    )
+    resolved = resolve(
+        built,
+        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=1)]),
+        PrintChoices(
+            nozzles=[NozzleChoice(size="0.2")],
+            filament_overrides={1: PresetRef(source="cloud", id="GONE404")},
+        ),
+        recorded(),
+        {},
+    )
+    assert resolved.filament_presets == []
+    assert [(e.kind, e.slot_id) for e in resolved.errors] == [("no-preset", 1), ("no-choice", 2)]
+
+
 def test_mixed_sizes_are_always_an_error() -> None:
     """Addendum R9: no ``allow_mixed_sizes`` escape hatch — Bambuddy can't slice it."""
     nozzles = [NozzleChoice(size="0.2"), NozzleChoice(size="0.4")]

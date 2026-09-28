@@ -152,6 +152,27 @@ def test_a_choice_the_resolver_refuses_uploads_nothing(
 
 
 @respx.mock
+def test_every_slot_refused_is_a_422_with_nothing_sliced(client: TestClient, model: str) -> None:
+    """No slot resolves, so ``filament_presets`` is empty: the run refuses rather than
+    ever handing Bambuddy an empty (or ``null``-padded) preset array."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "filament_plan": {"slots": []}},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "Slot 1 has no spool chosen." in detail
+    assert "Slot 2 has no spool chosen." in detail
+    assert not sliced.called
+
+
+@respx.mock
 def test_high_flow_slices_with_bambus_standard_preset_and_says_so(
     client: TestClient, model: str
 ) -> None:
