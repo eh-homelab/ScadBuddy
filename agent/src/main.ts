@@ -114,6 +114,8 @@ const toolServices: ToolServices = {
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
 }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
 /**
  * The tool principal a session's in-process tools run as (spec §8.1): the
@@ -172,6 +174,7 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -194,7 +197,7 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     // TODO(#251 follow-up): the auth mode read from `ai_settings`.
-    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
+    tokens,
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
