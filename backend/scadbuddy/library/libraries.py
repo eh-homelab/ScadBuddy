@@ -239,28 +239,34 @@ def parse_declaration(meta: Any) -> list[ModelLibrary]:
         raise LibraryDeclarationError(NOT_A_LIST)
     declared: list[ModelLibrary] = []
     for entry in raw:
-        problem = entry_problem(entry)
-        if problem is not None:
-            raise LibraryDeclarationError(problem)
-        declared.append(ModelLibrary.model_validate(entry))
+        checked = _check_entry(entry)
+        if isinstance(checked, str):
+            raise LibraryDeclarationError(checked)
+        declared.append(checked)
     return declared
 
 
 NOT_A_LIST = f"`libraries` in {MODEL_META_NAME} is not a list"
 
 
-def entry_problem(entry: Any) -> str | None:
-    """Why :func:`parse_declaration` refuses one entry of ``libraries``, or None
-    for a pin."""
+def _check_entry(entry: Any) -> ModelLibrary | str:
+    """One entry of ``libraries`` as a pin, or why :func:`parse_declaration`
+    refuses it."""
     if isinstance(entry, str):
         return f"{MODEL_META_NAME} names library {entry!r} without a pin; pin it again"
     try:
-        ModelLibrary.model_validate(entry)
+        return ModelLibrary.model_validate(entry)
     except ValidationError as error:
         name = entry_name(entry)
         label = repr(name) if name is not None else "an entry"
         return f"{MODEL_META_NAME} library {label} is not valid: {_problems(error)}; pin it again"
-    return None
+
+
+def entry_problem(entry: Any) -> str | None:
+    """Why :func:`parse_declaration` refuses one entry of ``libraries``, or None
+    for a pin."""
+    checked = _check_entry(entry)
+    return checked if isinstance(checked, str) else None
 
 
 class InvalidLibraryEntry(BaseModel):

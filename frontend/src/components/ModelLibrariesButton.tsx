@@ -202,7 +202,13 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
                   className="mt-2 divide-y divide-line rounded-[6px] border border-line"
                 >
                   {invalid.map((entry, index) => (
-                    <InvalidRow key={`invalid-${index}`} slug={slug} entry={entry} apply={apply} />
+                    <InvalidRow
+                      key={`invalid-${index}`}
+                      slug={slug}
+                      entry={entry}
+                      position={index + 1}
+                      apply={apply}
+                    />
                   ))}
                   {pins.map((pin) => (
                     <PinnedRow key={pin.name} slug={slug} pin={pin} apply={apply} />
@@ -327,17 +333,21 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
 function InvalidRow({
   slug,
   entry,
+  position,
   apply,
 }: {
   slug: string
   entry: InvalidLibraryEntry
+  /** 1-based among the invalid entries: names repeat, or are missing, so the row's
+   * accessible name carries it to stay unique. */
+  position: number
   apply: Apply
 }) {
   const { busy, error, run } = useAction(apply)
   const { name } = entry
 
   return (
-    <li aria-label={name ?? 'Invalid entry'} className="px-3 py-2.5">
+    <li aria-label={`Invalid entry ${position}: ${name ?? 'unnamed'}`} className="px-3 py-2.5">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0">
           <span className="text-[13px] font-medium">{name ?? 'Unnamed entry'}</span>
