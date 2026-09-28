@@ -829,6 +829,42 @@ describe('CataloguePage list mode (#278)', () => {
     expect(within(rowOf('Keychain Template')).getByTestId('builtin-badge')).toBeInTheDocument()
   })
 
+  it('says on a row what it was duplicated from, linked by name, as a card does', async () => {
+    await api.duplicateModel(BUILTIN_SLUG, 'My Keychain')
+    renderCatalogue('/?view=list')
+
+    await screen.findByRole('heading', { name: 'My Keychain' })
+    const copy = rowOf('My Keychain')
+    expect(within(copy).getByTestId('duplicated-from')).toHaveTextContent(
+      'Duplicated from Keychain Template',
+    )
+    expect(within(copy).getByRole('link', { name: 'Keychain Template' })).toHaveAttribute(
+      'href',
+      `/m/${encodeURIComponent(BUILTIN_SLUG)}`,
+    )
+    expect(within(rowOf('Crème Coaster')).queryByTestId('duplicated-from')).not.toBeInTheDocument()
+  })
+
+  it('links a row back to where an imported model came from, and nothing else', async () => {
+    const origin = 'https://raw.githubusercontent.com/someone/models/main/bin.scad'
+    const list = models.map((model) =>
+      model.slug === GALLERY_SLUG
+        ? { ...model, origin_url: origin }
+        : model.slug === 'gridfinity-bin'
+          ? { ...model, origin_url: 'javascript:alert(1)' }
+          : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    const link = within(rowOf('Crème Coaster')).getByRole('link', { name: 'raw.githubusercontent.com' })
+    expect(link).toHaveAttribute('href', origin)
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.closest('p')).toHaveTextContent('From raw.githubusercontent.com')
+    expect(within(rowOf('Gridfinity Bin')).queryByText(/^From/)).not.toBeInTheDocument()
+  })
+
   it('adds a row tag to the filter', async () => {
     const { user } = renderCatalogue('/?view=list')
     await screen.findByRole('heading', { name: 'Crème Coaster' })

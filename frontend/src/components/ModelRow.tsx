@@ -4,13 +4,16 @@ import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
-import { DuplicateModelButton } from './DuplicateModelButton'
+import { DuplicatedFrom, DuplicateModelButton } from './DuplicateModelButton'
 import { namedSlides, type Slide } from './media/slides'
+import { ModelOrigin } from './ModelOrigin'
 import { ModelThumbnail } from './ModelThumbnail'
 import { UpstreamBadge } from './UpstreamUpdate'
 
 interface Props {
   model: ModelSummary
+  /** The upstream's display name, for "Duplicated from", when the catalogue has it. */
+  upstreamName?: string
   /** Opens the page's lightbox on the template's slides, at `index`. */
   onOpen: (slides: Slide[], index: number) => void
   onTag: (tag: string) => void
@@ -19,9 +22,10 @@ interface Props {
 /**
  * #278 — one template in the catalogue's list mode: a small cover (which opens the
  * lightbox, never navigates), the name (which does), then the details a card shows.
- * No carousel. On narrow widths the description, badge and time are dropped; Duplicate stays.
+ * No carousel. On narrow widths the description, badge, origin and time are dropped;
+ * the duplicate's attribution and Duplicate stay.
  */
-export function ModelRow({ model, onOpen, onTag }: Props) {
+export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
   const slides = useMemo(() => namedSlides(model), [model])
   // The backend's cover rule (`catalogue._cover`): a video with no poster has no frame
   // to show, so the cover is the first image or poster'd video. It only picks the
@@ -103,6 +107,12 @@ export function ModelRow({ model, onOpen, onTag }: Props) {
           <p className="mt-0.5 hidden truncate text-[13px] text-muted sm:block">
             {model.description}
           </p>
+        )}
+        {(model.upstream || model.origin_url) && (
+          <div className="mt-0.5 flex min-w-0 items-baseline gap-3">
+            <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
+            <ModelOrigin url={model.origin_url} className="hidden min-w-0 sm:block" />
+          </div>
         )}
         {tags.length > 0 && (
           <ul className="mt-1.5 flex flex-wrap gap-1">
