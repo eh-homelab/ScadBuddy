@@ -51,7 +51,7 @@ class LocalBlobStore:
         return self._path(key).stat().st_mtime
 
 
-_OBJECT = re.compile(r"^(piece|snapshot|asset|font)/[0-9a-f]{64}$")
+_OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
 _CHUNK = 1 << 20
 
 
@@ -65,7 +65,8 @@ class LocalContentBackend:
         self.root = root
 
     def _path(self, backend_id: str) -> Path:
-        if not _OBJECT.match(backend_id):
+        # fullmatch: `$` would also accept an id ending in a newline.
+        if not _OBJECT.fullmatch(backend_id):
             raise ValueError(f"not a local object id: {backend_id!r}")
         return self.root / backend_id
 

@@ -53,7 +53,9 @@ class StoreUsage(BaseModel):
 
 
 class StoreFullError(Exception):
-    """A put would take the store past SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT."""
+    """A put would take the store past SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT.
+
+    The caps are checked, not reserved: they are soft by one blob per concurrent put."""
 
 
 class BlobCorruptError(Exception):
