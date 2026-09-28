@@ -95,6 +95,8 @@ must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only
 and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
+Drain renders before flipping `SCADBUDDY_TEMPORAL_ADDRESS` either way: a restart
+across the flip fails the renders in flight (a pending one carries over).
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:

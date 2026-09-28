@@ -40,6 +40,8 @@ from scadbuddy.render.pg_store import JOB_COLUMNS, TransactionalEvents, migrate
 logger = logging.getLogger(__name__)
 
 CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
+#: A render the legacy queue was running when the API restarted onto Temporal.
+LEGACY_INTERRUPTED_ERROR = "interrupted: the API restarted onto Temporal"
 
 PROJECTION_COLUMNS = (
     *JOB_COLUMNS,
@@ -228,6 +230,20 @@ class JobProjection:
             if row is None:
                 return None
             return self._release(conn, row, error=CANCELLED_ERROR)
+
+    def fail_legacy_running(self, error: str) -> list[Job]:
+        """At boot on Temporal: fail the rows the legacy queue was running (no
+        workflow), which its reaper will never come back for. Its pending rows need
+        nothing: the reconciler starts them."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE state = 'running' AND workflow_id IS NULL RETURNING *",
+                (error,),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
 
     # -- the workflow's writes (each guarded by the state it expects) -----------
 
