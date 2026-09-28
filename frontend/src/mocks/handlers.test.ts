@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelPatch, ModelSummary } from '../api/types'
+import type { ModelPatch, ModelSummary, PrintRunRequest } from '../api/types'
+import { DEFAULT_NOZZLES } from '../lib/printChoices'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -937,6 +938,50 @@ describe('mock API: metadata PATCH on a model that is not there', () => {
     const twice = { presets: [{ name: 'X' }, { name: 'x' }] }
     await expect(api.updateModel('no-such-model', twice)).rejects.toMatchObject({ status: 422 })
     await expect(api.updateModel(BUILTIN_SLUG, twice)).rejects.toMatchObject({ status: 422 })
+  })
+})
+
+describe('library print', () => {
+  beforeEach(() => resetMockState())
+
+  const runBody: PrintRunRequest = {
+    printer_id: 1,
+    filament_plan: { slots: [], force_colour_match: false },
+    choices: {
+      nozzles: DEFAULT_NOZZLES,
+      tier: 'standard',
+      process_name: null,
+      bed_type: 'Textured PEI Plate',
+      filament_overrides: {},
+    },
+    plate_id: 1,
+    all_plates: false,
+  }
+
+  it('lists the root 3MFs, and every file under all', async () => {
+    const plain = await api.listLibrary({ folderId: null, all: false })
+    const every = await api.listLibrary({ folderId: null, all: true })
+    expect(plain.files?.map((file) => file.id)).toEqual([89])
+    expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
+    expect(plain.hidden).toBe(1)
+  })
+
+  it('remembers the choices per file', async () => {
+    await api.putLibraryChoices(89, {
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+    })
+    expect((await api.getLibraryChoices(89)).model_choices?.nozzles?.[0]?.size).toBe('0.2')
+    expect((await api.getLibraryChoices(67)).model_choices?.nozzles ?? []).toEqual([])
+  })
+
+  it('refuses a sliced file and a missing one', async () => {
+    await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
+    await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
   })
 })
 

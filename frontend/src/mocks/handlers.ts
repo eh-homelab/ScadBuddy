@@ -11,6 +11,7 @@ import type {
   FontFamily,
   Job,
   CatalogueLibrary,
+  LibraryListing,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -55,6 +56,7 @@ import {
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { choicesView } from './choices'
+import { libraryFiles, libraryFolders, MULTI_PLATE_FILE } from './library'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
@@ -96,6 +98,8 @@ const state = {
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
+  /** #313 — per library-file choices, the store's `library_choices`. */
+  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
@@ -204,6 +208,7 @@ export function resetMockState(): void {
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
@@ -580,6 +585,34 @@ function problem(status: number, title: string, detail?: string, extensions: obj
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
+}
+
+/** #313 — what the library routes answer for a file that is gone or not printable. */
+function libraryRefusal(fileId: number) {
+  const file = libraryFiles.find((row) => row.id === fileId)
+  if (!file) {
+    return problem(
+      404,
+      'Not Found',
+      `Bambuddy has no such resource when asked to read library file ${fileId}`,
+    )
+  }
+  if (file.file_type === 'gcode.3mf') {
+    return problem(422, 'Unprocessable Content', `${file.filename} is sliced already. Print it from Bambuddy.`)
+  }
+  if (!file.printable) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `ScadBuddy prints only 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
+    )
+  }
+  return null
+}
+
+function pngResponse() {
+  const bytes = Uint8Array.from(atob(fixtures.MEDIA_PNG_BASE64), (char) => char.charCodeAt(0))
+  return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
 
@@ -2307,6 +2340,93 @@ export const handlers = [
       } satisfies PrintProgress)
     }
     return HttpResponse.json(null)
+  }),
+
+  // --- #313: printing a file already in Bambuddy's library ---------------------------
+
+  http.get(`${base}/print/library`, ({ request }) => {
+    const search = new URL(request.url).searchParams
+    const asked = search.get('folder_id')
+    const folderId = asked === null ? null : Number(asked)
+    const all = search.get('all') === 'true'
+    const here = libraryFiles.filter((file) => (file.folder_id ?? null) === folderId)
+    const files = all ? here : here.filter((file) => file.file_type === '3mf')
+    return HttpResponse.json({
+      folder_id: folderId,
+      all,
+      folders: libraryFolders,
+      files,
+      hidden: here.length - files.length,
+    } satisfies LibraryListing)
+  }),
+
+  http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
+  http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+
+  http.get(`${base}/print/library/:id/plates`, ({ params }) => {
+    const file = libraryFiles.find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', 'Bambuddy has no such resource')
+    if (file.file_type === 'stl') return HttpResponse.json([] satisfies OutputPlate[])
+    const count = file.id === MULTI_PLATE_FILE ? 2 : 1
+    return HttpResponse.json(
+      Array.from({ length: count }, (_, n) => ({ index: n + 1, has_thumbnail: true })) satisfies OutputPlate[],
+    )
+  }),
+
+  http.get(`${base}/print/library/:id/choices`, ({ params, request }) => {
+    const refused = libraryRefusal(Number(params['id']))
+    if (refused) return refused
+    const remembered = state.libraryChoices[String(params['id'])] ?? NO_MODEL_CHOICES
+    const asked = new URL(request.url).searchParams.get('printer_id')
+    const printerId =
+      asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
+    return HttpResponse.json({
+      ...choicesView,
+      printer_id: printerId,
+      filaments: { ...choicesView.filaments, library_file_id: Number(params['id']), printer_id: printerId },
+      model_choices: remembered,
+    } satisfies ChoicesView)
+  }),
+
+  http.put(`${base}/print/library/:id/choices`, async ({ params, request }) => {
+    const key = String(params['id'])
+    const body = (await request.json()) as ModelPrintChoices
+    if (isNoModelChoices(body)) delete state.libraryChoices[key]
+    else state.libraryChoices[key] = { ...NO_MODEL_CHOICES, ...body }
+    return HttpResponse.json(state.libraryChoices[key] ?? NO_MODEL_CHOICES)
+  }),
+
+  http.get(`${base}/print/library/:id/filaments`, ({ params, request }) => {
+    const refused = libraryRefusal(Number(params['id']))
+    if (refused) return refused
+    const printerId = new URL(request.url).searchParams.get('printer_id')
+    return HttpResponse.json({
+      ...fixtures.filamentOptions,
+      ...(printerId === null ? { nozzles: [] } : {}),
+      library_file_id: Number(params['id']),
+      printer_id: printerId === null ? null : Number(printerId),
+    } satisfies FilamentOptions)
+  }),
+
+  http.post(`${base}/print/library/:id/run`, async ({ params, request }) => {
+    const fileId = Number(params['id'])
+    const refused = libraryRefusal(fileId)
+    if (refused) return refused
+    const body = (await request.json()) as PrintRunRequest
+    await delay(200)
+    return HttpResponse.json({
+      route: 'slice_queue',
+      library_file_id: fileId,
+      printer_id: body.printer_id ?? null,
+      slice_job_id: nextNumber(),
+      sliced_library_file_id: nextNumber(),
+      queue_item_ids: [nextNumber()],
+      copies: body.copies ?? 1,
+      warnings: [],
+      project_id: body.project_id ?? null,
+      folder_id: null,
+      bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+    } satisfies PrintRunResult)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),
