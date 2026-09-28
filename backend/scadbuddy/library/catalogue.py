@@ -6,10 +6,12 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -35,6 +37,19 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.media import (
+    LEGACY_ID,
+    MAX_MEDIA_ITEMS,
+    MEDIA_DIR,
+    MEDIA_UPLOAD_PREFIX,
+    VIDEO_EXTENSIONS,
+    MediaItem,
+    MediaView,
+    StagedMedia,
+    content_type_of,
+    new_media_id,
+    readable_media,
+)
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -123,6 +138,18 @@ class SidecarNotFoundError(KeyError):
     """The model exists, but the thumbnail or README being removed does not."""
 
 
+class MediaNotFoundError(KeyError):
+    """The model exists, but has no media item (or poster) of that id."""
+
+
+class MediaOrderError(ValueError):
+    """A reorder that is not a permutation of the template's media ids."""
+
+
+class TooManyMediaError(ValueError):
+    """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
+
+
 class ModelExistsError(ValueError):
     pass
 
@@ -163,6 +190,14 @@ class ModelMeta(BaseModel):
     #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
     #: a fetched commit, set by `pin_library`, never typed in.
     libraries: list[ModelLibrary] = Field(default_factory=list)
+    #: The template's images and videos (#274), in order; the first is the cover. Not
+    #: in `ModelPatch`: the media routes write it, beside the files it names.
+    media: list[MediaItem] = Field(default_factory=list)
+
+    @field_validator("media", mode="before")
+    @classmethod
+    def _readable_media(cls, value: Any) -> list[MediaItem]:
+        return readable_media(value)
 
     @field_validator("libraries", mode="before")
     @classmethod
@@ -181,7 +216,7 @@ class ModelMeta(BaseModel):
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
-DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries"})
+DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries", "media"})
 
 
 def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
@@ -246,6 +281,9 @@ class ModelRecord(ModelMeta):
     # Where a duplicate stands against its upstream (#157); None for a template
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
+    #: As stored, plus what the disk says of each file. A template with only a
+    #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
+    media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
 
 
 class Catalogue:
@@ -343,9 +381,13 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
-    def thumbnail_source(self, slug: str) -> tuple[ThumbnailSource | None, str | None]:
-        """Where the thumbnail comes from, and which output when it is the fallback."""
-        if self.thumbnail_path(slug).is_file():
+    def thumbnail_source(
+        self, slug: str, media: list[MediaView] | None = None
+    ) -> tuple[ThumbnailSource | None, str | None]:
+        """Where the thumbnail comes from, and which output when it is the fallback.
+        ``media`` is the template's, when the caller has already listed it."""
+        listed = self.list_media(slug) if media is None else media
+        if self._cover(slug, listed) is not None:
             return "model", None
         if self.outputs is not None:
             output_id = self.outputs.plate_cover_output(slug)
@@ -353,17 +395,31 @@ class Catalogue:
                 return "output", output_id
         return None, None
 
-    def thumbnail(self, slug: str) -> bytes | None:
-        """The catalogue thumbnail: the model's own, else the first generated
-        output's plate cover, else None."""
+    def _cover(self, slug: str, media: list[MediaView]) -> tuple[Path, str] | None:
+        """The template's own cover image and its content type: the first item that
+        is an image or a video with a poster. A missing file is passed over, and so
+        is a video without a poster -- a card cannot show a frame of it."""
+        for item in media:
+            if item.missing:
+                continue
+            if item.kind == "image":
+                return self._media_file(slug, item.id, item.file), item.content_type
+            if item.poster is not None:
+                return self.media_dir(slug) / item.poster, content_type_of(item.poster)
+        return None
+
+    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        """The catalogue thumbnail and its content type: the template's cover, else
+        the first generated output's plate cover, else None."""
         self._require(slug)
-        try:
-            return self.thumbnail_path(slug).read_bytes()
-        except FileNotFoundError:
-            pass
+        cover = self._cover(slug, self.list_media(slug))
+        if cover is not None:
+            with contextlib.suppress(FileNotFoundError):
+                return cover[0].read_bytes(), cover[1]
         if self.outputs is None:
             return None
-        return self.outputs.plate_cover(slug)
+        png = self.outputs.plate_cover(slug)
+        return (png, "image/png") if png is not None else None
 
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
@@ -435,9 +491,11 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug)
+        media = self._views(slug, meta.media, legacy=raw.get("media") is None)
+        thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug, media)
         return ModelRecord(
-            **meta.model_dump(),
+            **meta.model_dump(exclude={"media"}),
+            media=media,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail_source is not None,
@@ -521,7 +579,9 @@ class Catalogue:
         directory = self._claim(slug)
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
-            self.write_raw_meta(slug, meta.model_dump())
+            # No `media: []`: that would say "no media", and the thumbnail given
+            # here would not be listed as the cover (#274).
+            self.write_raw_meta(slug, meta.model_dump(exclude=set() if meta.media else {"media"}))
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
             if readme is not None:
@@ -569,6 +629,9 @@ class Catalogue:
                     self.history.export(model_path(upstream_id), base, staged)
                 except RevisionNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
+                # Videos are not in the history (#274): the revision has their
+                # entries but not their files, so they come from the working tree.
+                self._copy_videos(upstream_id, staged / MEDIA_DIR)
             else:
                 try:
                     # Dotfiles are left out: a `.model-*.scad` is a source write in
@@ -625,6 +688,16 @@ class Catalogue:
         except OSError:
             logger.exception("could not sweep duplicate staging")
         return self.record(slug)
+
+    def _copy_videos(self, upstream_id: str, target: Path) -> None:
+        """Copy the upstream's video files into ``target`` (its ``media/``)."""
+        source = self.media_dir(upstream_id)
+        if not source.is_dir():
+            return
+        for path in sorted(source.iterdir()):
+            if path.suffix.lstrip(".").lower() in VIDEO_EXTENSIONS and path.is_file():
+                target.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target / path.name)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
         self._require(slug)
@@ -691,16 +764,257 @@ class Catalogue:
         return self.record(slug)
 
     def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
-        """Set or replace the model's own thumbnail, as one revision."""
-        self._write_sidecar(slug, THUMBNAIL_NAME, png)
-        self._commit(f"Set {slug} thumbnail", slug)
+        """Set or replace the model's own thumbnail, as one revision.
+
+        Once the template has media (#274), the thumbnail is its cover: the PNG
+        takes the place of a first item that is an image, or goes in front of a
+        first item that is a video. It gets a new id, since an id never changes
+        its contents."""
+        self._require(slug)
+        if self.read_raw_meta(slug).get("media") is None:
+            self._write_sidecar(slug, THUMBNAIL_NAME, png)
+            self._commit(f"Set {slug} thumbnail", slug)
+            return self.record(slug)
+        item_id = new_media_id()
+        cover = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            replaced = edit.items[0] if edit.items and edit.items[0].kind == "image" else None
+            self._media_directory(slug)
+            write_atomic(self.media_dir(slug) / cover.file, png)
+            edit.items[: 1 if replaced is not None else 0] = [cover]
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Set {slug} thumbnail", change, slug)
         return self.record(slug)
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
         """Remove the model's own thumbnail, as one revision. The record may still
-        report one: the fallback takes over when the model has been generated."""
-        self._remove_sidecar(slug, THUMBNAIL_NAME)
-        self._commit(f"Remove {slug} thumbnail", slug)
+        report one: the next item's, or the fallback's when the model has been
+        generated. With media, that is the first item when it is an image."""
+        self._require(slug)
+        if self.read_raw_meta(slug).get("media") is None:
+            self._remove_sidecar(slug, THUMBNAIL_NAME)
+            self._commit(f"Remove {slug} thumbnail", slug)
+            return self.record(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            if not edit.items or edit.items[0].kind != "image":
+                raise SidecarNotFoundError(THUMBNAIL_NAME)
+            del edit.items[0]
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Remove {slug} thumbnail", change, slug)
+        return self.record(slug)
+
+    # ── media (#274) ──────────────────────────────────────────────────────────
+
+    def media_dir(self, slug: str) -> Path:
+        return self.paths.model_dir(slug) / MEDIA_DIR
+
+    def _media_directory(self, slug: str) -> Path:
+        """``media/``, made if need be -- but never the model directory itself: a
+        write racing a delete fails with the delete's 404."""
+        directory = self.media_dir(slug)
+        try:
+            directory.mkdir(exist_ok=True)
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
+        return directory
+
+    def _media_file(self, slug: str, item_id: str, file: str) -> Path:
+        """Where an item's file is: ``media/<file>``, or the model's own
+        ``thumbnail.png`` for the synthesized legacy item."""
+        if item_id == LEGACY_ID and file == THUMBNAIL_NAME:
+            return self.thumbnail_path(slug)
+        return self.media_dir(slug) / file
+
+    def _views(self, slug: str, items: list[MediaItem], *, legacy: bool) -> list[MediaView]:
+        """``items`` with what the disk says of each. ``legacy`` is a model.json with
+        no ``media`` at all: its ``thumbnail.png``, if any, is the one item."""
+        if legacy:
+            size = _file_size(self.thumbnail_path(slug))
+            if size is None:
+                return []
+            return [
+                MediaView(
+                    id=LEGACY_ID,
+                    file=THUMBNAIL_NAME,
+                    kind="image",
+                    content_type=content_type_of(THUMBNAIL_NAME),
+                    size=size,
+                )
+            ]
+        views: list[MediaView] = []
+        for item in items:
+            size = _file_size(self._media_file(slug, item.id, item.file))
+            poster = item.poster
+            if poster is not None and _file_size(self.media_dir(slug) / poster) is None:
+                poster = None
+            views.append(
+                MediaView(
+                    **item.model_dump(exclude={"poster"}),
+                    poster=poster,
+                    missing=size is None,
+                    content_type=content_type_of(item.file),
+                    size=size,
+                )
+            )
+        return views
+
+    def list_media(self, slug: str) -> list[MediaView]:
+        """The template's images and videos, in order; the first is the cover."""
+        self._require(slug)
+        raw = self.read_raw_meta(slug)
+        return self._views(slug, self._meta(slug, raw).media, legacy=raw.get("media") is None)
+
+    def media_item(self, slug: str, item_id: str) -> tuple[MediaView, Path]:
+        """One item and its file, or :class:`MediaNotFoundError` -- for an unknown
+        id and for an entry whose file is missing alike."""
+        for item in self.list_media(slug):
+            if item.id == item_id and not item.missing:
+                return item, self._media_file(slug, item.id, item.file)
+        raise MediaNotFoundError(item_id)
+
+    def media_poster(self, slug: str, item_id: str) -> Path:
+        """The poster of one item, or :class:`MediaNotFoundError`."""
+        for item in self.list_media(slug):
+            if item.id == item_id and item.poster is not None:
+                return self.media_dir(slug) / item.poster
+        raise MediaNotFoundError(item_id)
+
+    def _edit_media(self, slug: str) -> _MediaEdit:
+        """The stored items, to change and pass to :meth:`_save_media`. A legacy
+        ``thumbnail.png`` comes back as an ordinary item with an id of its own,
+        which the save moves into ``media/`` -- the first write converts it."""
+        raw = self.read_raw_meta(slug)
+        if raw.get("media") is not None:
+            return _MediaEdit(raw, self._meta(slug, raw).media, None)
+        if not self.thumbnail_path(slug).is_file():
+            return _MediaEdit(raw, [], None)
+        item_id = new_media_id()
+        legacy = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
+        return _MediaEdit(raw, [legacy], legacy)
+
+    def _resolve_id(self, edit: _MediaEdit, item_id: str) -> str:
+        """``thumbnail`` names the converted legacy item until the first write."""
+        if item_id == LEGACY_ID and edit.legacy is not None:
+            return edit.legacy.id
+        return item_id
+
+    def _save_media(self, slug: str, edit: _MediaEdit) -> None:
+        """Write ``edit.items`` to model.json, then remove the files of every item
+        it no longer holds. Under the history's write lock, as every change is."""
+        before = readable_media(edit.raw.get("media"))
+        if edit.legacy is not None:
+            if any(item.id == edit.legacy.id for item in edit.items):
+                directory = self._media_directory(slug)
+                os.replace(self.thumbnail_path(slug), directory / edit.legacy.file)
+            else:
+                before.append(edit.legacy)
+        edit.raw["media"] = [item.model_dump(exclude_defaults=True) for item in edit.items]
+        try:
+            self.write_raw_meta(slug, edit.raw)
+        except BaseException:
+            if edit.legacy is not None and any(i.id == edit.legacy.id for i in edit.items):
+                with contextlib.suppress(OSError):
+                    os.replace(self.media_dir(slug) / edit.legacy.file, self.thumbnail_path(slug))
+            raise
+        kept = {name for item in edit.items for name in (item.file, item.poster) if name}
+        for item in before:
+            for name in (item.file, item.poster):
+                if name is None or name in kept:
+                    continue
+                if edit.legacy is not None and item.id == edit.legacy.id:
+                    self.thumbnail_path(slug).unlink(missing_ok=True)
+                else:
+                    (self.media_dir(slug) / name).unlink(missing_ok=True)
+
+    def add_media(
+        self,
+        slug: str,
+        upload: StagedMedia,
+        caption: str = "",
+        poster: StagedMedia | None = None,
+    ) -> ModelRecord:
+        """Move a staged upload (and its poster) into ``media/`` as the last item,
+        as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`."""
+        self._require(slug)
+        item_id = new_media_id()
+        item = MediaItem(
+            id=item_id,
+            file=f"{item_id}.{upload.extension}",
+            kind=upload.kind,
+            caption=caption,
+            poster=f"{item_id}-poster.{poster.extension}" if poster is not None else None,
+        )
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            if len(edit.items) >= MAX_MEDIA_ITEMS:
+                raise TooManyMediaError(slug)
+            directory = self._media_directory(slug)
+            os.replace(upload.path, directory / item.file)
+            if poster is not None and item.poster is not None:
+                os.replace(poster.path, directory / item.poster)
+            edit.items.append(item)
+            self._save_media(slug, edit)
+
+        kind = "video" if upload.kind == "video" else "image"
+        self._commit_change(f"Add {kind} {item_id} to {slug}", change, slug)
+        return self.record(slug)
+
+    def set_caption(self, slug: str, item_id: str, caption: str) -> ModelRecord:
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = self._resolve_id(edit, item_id)
+            for index, item in enumerate(edit.items):
+                if item.id == wanted:
+                    edit.items[index] = item.model_copy(update={"caption": caption})
+                    break
+            else:
+                raise MediaNotFoundError(item_id)
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Caption {item_id} in {slug}", change, slug)
+        return self.record(slug)
+
+    def reorder(self, slug: str, ids: list[str]) -> ModelRecord:
+        """Put the items in the order of ``ids``, which must name each exactly
+        once; otherwise :class:`MediaOrderError`."""
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = [self._resolve_id(edit, item_id) for item_id in ids]
+            by_id = {item.id: item for item in edit.items}
+            if len(wanted) != len(by_id) or set(wanted) != set(by_id):
+                raise MediaOrderError("the order must name every media item exactly once")
+            edit.items[:] = [by_id[item_id] for item_id in wanted]
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Reorder {slug} media", change, slug)
+        return self.record(slug)
+
+    def remove_media(self, slug: str, item_id: str) -> ModelRecord:
+        """Remove one item and its files, as one revision. An entry whose file is
+        already gone is removed all the same."""
+        self._require(slug)
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = self._resolve_id(edit, item_id)
+            kept = [item for item in edit.items if item.id != wanted]
+            if len(kept) == len(edit.items):
+                raise MediaNotFoundError(item_id)
+            edit.items[:] = kept
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Remove {item_id} from {slug}", change, slug)
         return self.record(slug)
 
     def read_readme(self, slug: str) -> str:
@@ -1021,11 +1335,13 @@ class Catalogue:
         return removed
 
     def sweep_duplicate_staging(self) -> list[str]:
-        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
+        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left,
+        and the ``cache/media-upload-*`` files an upload killed mid-stream left.
 
         Runs at boot, after each duplicate and with the periodic upload sweep.
         Another replica sharing ``/data`` may be mid-copy, so only staging older
-        than ``duplicate_staging_max_age`` goes.
+        than ``duplicate_staging_max_age`` goes (an upload in flight writes its
+        file, so its age is since its last chunk).
         One that cannot be read or removed is logged and the rest still go.
         """
         root = self.paths.cache
@@ -1033,7 +1349,11 @@ class Catalogue:
             return []
         cutoff = time.time() - self.duplicate_staging_max_age
         removed: list[str] = []
-        for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
+        entries = [
+            *root.glob(f"{DUPLICATE_STAGING_PREFIX}*"),
+            *root.glob(f"{MEDIA_UPLOAD_PREFIX}*"),
+        ]
+        for entry in sorted(entries):
             try:
                 if entry.stat().st_mtime > cutoff:
                     continue
@@ -1297,6 +1617,25 @@ class Catalogue:
         finally:
             _remove_tree(staged)
             _remove_tree(retired)
+
+
+@dataclass
+class _MediaEdit:
+    """A template's media being changed: its raw model.json, the items, and the
+    legacy thumbnail they converted, if any (see :meth:`Catalogue._edit_media`)."""
+
+    raw: dict[str, Any]
+    items: list[MediaItem]
+    legacy: MediaItem | None
+
+
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when there is none."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
 
 
 def _tree(directory: Path) -> dict[str, bytes]:

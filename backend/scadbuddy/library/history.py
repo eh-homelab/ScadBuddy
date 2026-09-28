@@ -185,6 +185,12 @@ def _gitignore_body(wrapper_prefix: str) -> str:
         "# source, so versioning it would only add noise to the history.\n"
         f"{transient}\n"
         f"{LOCK_NAME}\n"
+        "# Template videos (#274) stay out of the history so the repository stays\n"
+        "# small; their order in model.json is still committed. Images are kept.\n"
+        "*/media/*.mp4\n"
+        "*/media/*.webm\n"
+        "_builtin/*/media/*.mp4\n"
+        "_builtin/*/media/*.webm\n"
     )
 
 

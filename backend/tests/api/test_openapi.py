@@ -107,7 +107,12 @@ def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path
         return set(paths[path][method]["responses"]["200"]["content"])
 
     assert success_types("/api/v1/models/{slug}/readme", "get") == {"text/markdown"}
-    assert success_types("/api/v1/models/{slug}/thumbnail", "get") == {"image/png"}
+    # The cover is whatever image the template's media holds first (#274).
+    assert success_types("/api/v1/models/{slug}/thumbnail", "get") == {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+    }
     assert success_types("/api/v1/models/{slug}/source", "get") == {"text/plain"}
     for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
         for method in ("put", "delete"):
