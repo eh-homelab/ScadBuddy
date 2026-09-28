@@ -729,13 +729,18 @@ own subtree.
 `SCADBUDDY_SOLID_CONCURRENCY` at a time rather than one after another: a colour
 costs one whole-model `openscad` run, and dollhouse-kit's window piece has 16 live
 colours (an AMS template can have 28). The default, `0`, derives the bound from the
-CPUs the process may use — its affinity mask, capped by a cgroup v2 `cpu.max` limit
-(a pod's `limits.cpu`, rounded up) — divided by `SCADBUDDY_RENDER_CONCURRENCY`, since
-every worker can be in this stage at once; at least 1, at most 8. With the 8-CPU
-limit the eh-homelab/clusters deployment runs today and two workers that is 4; under
-a 2-CPU limit it is 1, the old sequential loop. The bound deliberately never oversubscribes the
-CPUs: each wrapper render has its own `SCADBUDDY_RENDER_TIMEOUT`, so contention that
-stretched every child would turn closed parts into timed-out fallbacks. The clock
+CPUs the process may use — its affinity mask, capped by a cgroup CPU limit (a pod's
+`limits.cpu`, rounded up; cgroup v2 `cpu.max`, or v1 `cpu.cfs_quota_us`) — less
+`SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, since every
+worker can be in this stage at once; at least 1, at most 8. With the 8-CPU limit the
+eh-homelab/clusters deployment runs today, two workers and one check that is 3, so
+the pod's worst case (§9) is 2 × 3 + 1 = 7 processes on 8 CPUs; under a 2-CPU limit
+it is 1, the old sequential loop. Above that floor the derived bound never
+oversubscribes the CPUs: each wrapper render has its own `SCADBUDDY_RENDER_TIMEOUT`,
+so contention that stretched every child would turn closed parts into timed-out
+fallbacks. When no cgroup CPU controller is readable at all, a limit may be going
+unseen, so the process logs a warning once and sizes for the affinity mask; set the
+value explicitly there. The clock
 starts when a colour's process does, not while it waits for a slot, so a 28-colour
 job is not charged for the queue. Set it explicitly to size memory as well; the
 derivation reads only CPUs.
@@ -850,8 +855,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 - **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` × the solid concurrency +
   `SCADBUDDY_CHECK_CONCURRENCY` concurrent `openscad` processes**, not the render figure
   alone: each worker in its closed-parts stage runs up to `SCADBUDDY_SOLID_CONCURRENCY`
-  wrapper renders at once (§6.3; by default the CPUs divided between the workers, so
-  about one process per CPU plus the check). The
+  wrapper renders at once (§6.3; by default the CPUs the checks leave, divided between
+  the workers, so the whole sum stays at one process per CPU). The
   editor's parse check (#92) does not go through the render queue — the queue caps
   itself with N worker tasks, so there is no semaphore to share — and it is reached on
   a 700 ms debounce from every open editor tab. It therefore carries its own declared

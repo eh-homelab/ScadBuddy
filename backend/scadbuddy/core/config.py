@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import functools
+import logging
 import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_OPENSCAD = "openscad"
 DEFAULT_DATA_DIR = Path("/data")
@@ -135,45 +138,80 @@ class Config:
         """How many of one job's per-colour wrapper renders may run at once."""
         if self.solid_concurrency:
             return self.solid_concurrency
-        return default_solid_concurrency(available_cpus(), self.render_concurrency)
+        return default_solid_concurrency(
+            available_cpus(), self.render_concurrency, self.check_concurrency
+        )
 
 
-def default_solid_concurrency(cpus: int, render_concurrency: int) -> int:
-    """The CPUs this process may use, shared out between its render workers.
+def default_solid_concurrency(cpus: int, render_concurrency: int, check_concurrency: int) -> int:
+    """The CPUs this process may use, less the editor checks', shared out between its
+    render workers.
 
-    Every worker can be in its solids stage at once, so the pod's worst case is
-    ``render_concurrency`` x this many `openscad` processes. Splitting the CPUs keeps
-    that at one process per core rather than oversubscribing them, and the timeout is
-    why that matters: each wrapper render gets its own `SCADBUDDY_RENDER_TIMEOUT`, so
-    a colour slowed by contention is one that times out and falls back to its open
-    split mesh. Never below one (sequential, as before #282), never above
+    The pod's worst case is ``render_concurrency`` x this many `openscad` processes
+    (every worker in its solids stage at once) plus ``check_concurrency`` parse checks,
+    which do not go through the queue. Sizing it this way keeps that sum at one
+    process per CPU rather than oversubscribing them, and the timeout is why that
+    matters: each wrapper render gets its own `SCADBUDDY_RENDER_TIMEOUT`, so a colour
+    slowed by contention is one that times out and falls back to its open split mesh.
+    Never below one (sequential, as before #282), never above
     `MAX_DEFAULT_SOLID_CONCURRENCY`.
     """
-    return max(1, min(MAX_DEFAULT_SOLID_CONCURRENCY, cpus // max(1, render_concurrency)))
+    spare = cpus - check_concurrency
+    return max(1, min(MAX_DEFAULT_SOLID_CONCURRENCY, spare // max(1, render_concurrency)))
+
+
+def _cgroup_cpu_limit(cgroup_root: Path) -> float | None:
+    """The CPU limit the cgroup sets, ``inf`` when it sets none, or None when no
+    cgroup CPU controller could be read at all.
+
+    cgroup v2 says it in `cpu.max` ("<quota> <period>" or "max <period>"); v1 in
+    `cpu.cfs_quota_us` (-1 for none) and `cpu.cfs_period_us`, under a `cpu` or
+    `cpu,cpuacct` mount.
+    """
+    try:
+        quota, period = (cgroup_root / "cpu.max").read_text(encoding="utf-8").split()[:2]
+        return math.inf if quota == "max" else int(quota) / int(period)
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    for controller in ("cpu", "cpu,cpuacct"):
+        directory = cgroup_root / controller
+        try:
+            quota_us = int((directory / "cpu.cfs_quota_us").read_text(encoding="utf-8"))
+            if quota_us < 0:
+                return math.inf
+            period_us = int((directory / "cpu.cfs_period_us").read_text(encoding="utf-8"))
+            return quota_us / period_us
+        except (OSError, ValueError, ZeroDivisionError):
+            continue
+    return None
 
 
 @functools.cache
 def available_cpus(cgroup_root: Path = CGROUP_ROOT) -> int:
     """The CPUs this process may actually use: its affinity mask, capped by a cgroup
-    v2 CPU limit (a Kubernetes `limits.cpu`) where there is one.
+    CPU limit (a Kubernetes `limits.cpu`) where there is one.
 
     `os.cpu_count()` alone is the node's core count, which inside a pod limited to two
     CPUs would size the pool for the whole host. A fractional limit rounds up: 1.5
-    CPUs can keep two processes busy for most of a period.
+    CPUs can keep two processes busy for most of a period. When no cgroup CPU
+    controller can be read, a limit the runtime set may be going unseen, so that is
+    logged -- once, as this is cached -- rather than silently sizing for the node.
     """
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
     cpus = cpus or 1
-    try:
-        quota, period = (cgroup_root / "cpu.max").read_text(encoding="utf-8").split()[:2]
-    except (OSError, ValueError):
+    limit = _cgroup_cpu_limit(cgroup_root)
+    if limit is None:
+        logger.warning(
+            "no cgroup CPU limit is readable under %s; sizing the default "
+            "SCADBUDDY_SOLID_CONCURRENCY for all %d CPUs of the affinity mask. "
+            "If this container has a CPU limit, set SCADBUDDY_SOLID_CONCURRENCY.",
+            cgroup_root,
+            cpus,
+        )
         return cpus
-    if quota == "max":
+    if math.isinf(limit):
         return cpus
-    try:
-        limit = math.ceil(int(quota) / int(period))
-    except (ValueError, ZeroDivisionError):
-        return cpus
-    return max(1, min(cpus, limit))
+    return max(1, min(cpus, math.ceil(limit)))
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:

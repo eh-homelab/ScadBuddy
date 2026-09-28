@@ -88,10 +88,12 @@ for the project picker).
   editor still works, without completion and hover.
   A render's closed parts take one more `openscad` run per colour, and
   `SCADBUDDY_SOLID_CONCURRENCY` of those run at once per render. Left at 0 it is
-  the CPUs the container may use (a cgroup CPU limit counts) divided by
-  `SCADBUDDY_RENDER_CONCURRENCY`, between 1 and 8, so all the workers together
-  stay at about one process per CPU. It reads no memory limit: when you set it by
-  hand, size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
+  the CPUs the container may use (a cgroup v1 or v2 CPU limit counts), less
+  `SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, between
+  1 and 8, so renders and checks together stay at one process per CPU. If no
+  cgroup CPU controller is readable, a warning is logged at the first render and it
+  sizes for every CPU it can see; set it by hand there. It reads no memory limit:
+  size memory for `SCADBUDDY_RENDER_CONCURRENCY` × this many processes.
   Each of them gets the whole `SCADBUDDY_RENDER_TIMEOUT` from when it starts.
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
