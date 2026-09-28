@@ -17,6 +17,7 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
@@ -101,6 +102,8 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
@@ -142,6 +145,7 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -160,7 +164,9 @@ const app = createApp({
     resources,
     services: {
       backend,
-      pending: new PendingActionStore(),
+      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
+      // database, an in-memory store whose actions are never confirmed.
+      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
       pollIntervalMs: 1000,
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
@@ -169,7 +175,7 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     // TODO(#251 follow-up): the auth mode read from `ai_settings`.
-    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
+    tokens,
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
