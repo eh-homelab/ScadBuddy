@@ -1,6 +1,7 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 import type { Principal } from '../auth/principal.js'
 import { errorResult, type Progress, runTool, type Tool, type ToolServices } from './registry.js'
 
@@ -49,10 +50,38 @@ function signalFrom(extra: unknown): AbortSignal {
 }
 
 /**
+ * The shape as the Agent SDK's in-process server validates it. That server is
+ * the SDK's own bundled copy of the MCP server and of zod (4.4.3 in SDK
+ * 0.3.283, sdk.mjs), which builds the top-level object itself and treats a key
+ * as omittable only when its schema's `_zod.optin` is `"optional"`. Our zod
+ * (4.6.5, zod/v4/core/schemas.js `$ZodDefault`) marks a `.default()` field
+ * `"defaulted"`, and `.optional()` on top keeps that, so the bundled parser
+ * refused every call that left such a field out ("expected nonoptional";
+ * test/harnessWiring.test.ts, `delete_model` without `force`). A top-level
+ * `.default()` field is therefore offered as its inner type, `.optional()`,
+ * with the default (and any description) as metadata, which renders the same
+ * JSON Schema (test/projections.test.ts compares the two listings). `runTool`
+ * parses the arguments with the tool's own schema, which applies the default.
+ * Nested fields are parsed by our zod's own schemas and need nothing.
+ */
+function sdkShape(shape: z.ZodRawShape): z.ZodRawShape {
+  return Object.fromEntries(
+    Object.entries(shape).map(([key, field]) => {
+      if (!(field instanceof z.ZodDefault)) return [key, field]
+      const inner = field.unwrap() as z.ZodType
+      return [key, inner.optional().meta({ ...z.globalRegistry.get(field), default: field.def.defaultValue })]
+    }),
+  )
+}
+
+/**
  * Harness projection: an in-process SDK MCP server, so the tools reach Claude
  * as `mcp__scadbuddy__<name>` (custom tools,
  * https://code.claude.com/docs/en/agent-sdk/custom-tools). The principal is the
  * session's own (the browser user, or a flow's declared permissions, spec §8.1).
+ * Only for a harness query, whose permission seam gates outward tools before
+ * they reach this server: given to anything else, an outward call would run
+ * unapproved.
  */
 export function createHarnessServer(
   tools: readonly Tool[],
@@ -66,9 +95,17 @@ export function createHarnessServer(
       sdkTool(
         t.name,
         t.description,
-        t.shape,
+        sdkShape(t.shape),
         (args, extra) =>
-          runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: signalFrom(extra) }),
+          // `gate: 'harness'`: the query's permission seam has already parked
+          // an outward call for approval (registry.ts ToolContext.gate).
+          runTool(t, args, {
+            ...services,
+            principal,
+            progress: progressFrom(extra),
+            signal: signalFrom(extra),
+            gate: 'harness',
+          }),
         { annotations: t.annotations },
       ),
     ),

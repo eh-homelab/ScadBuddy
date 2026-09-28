@@ -1,14 +1,23 @@
 import { randomUUID } from 'node:crypto'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { MAX_APPROVAL_EXPIRY_SECONDS } from '../approvals/service.js'
+import type { ToolContext } from './registry.js'
 
 // Pending outward actions, the `prepare` half of spec §8.2's two-step flow for
 // external MCP clients: an outward tool call records what it would do and
 // returns an id and a human-readable summary instead of doing it.
 //
-// The `confirm` half completes only after a human approves in the ScadBuddy
-// UI. That UI and its approval records are #258; until they exist
-// `confirm_action` always refuses, so no outward action runs from an agent.
-// In memory for now: pending actions die with the process, which is the safe
-// direction (nothing can be approved that was not shown in this process).
+// This store holds what the call would RUN (the tool and its full arguments),
+// in memory. The approval itself (who asked, the decision, the input hash and
+// its single use) is a row in `ai_approvals` with the same id, recorded by
+// runTool through `ToolServices.approvals` (registry.ts, approvals/service.ts),
+// so a human decides it in the ScadBuddy UI like a session's. `confirm_action`
+// (approvals.ts) needs both: the row says whether it may run, this says what.
+// The arguments stay out of the table on purpose: ai_approvals keeps a
+// scrubbed summary and an HMAC of the input, never the input
+// (db/migrations/20260928T0734Z_approvals.sql). So a pending action dies with
+// the process, which is the safe direction: after a restart, or on another
+// replica, an approved row has nothing to run and the caller prepares again.
 
 export type PendingAction = {
   readonly id: string
@@ -16,6 +25,8 @@ export type PendingAction = {
   readonly args: unknown
   readonly summary: string
   readonly principalId: string
+  /** Runs the prepared call (the tool's handler, past the gate); set by runTool. */
+  readonly run?: (ctx: ToolContext) => Promise<CallToolResult>
   readonly createdAt: Date
   readonly expiresAt: Date
 }
@@ -42,12 +53,20 @@ export class PendingActionStore {
   readonly #total: number
 
   constructor(options: PendingLimits = {}) {
-    this.#ttlMs = options.ttlMs ?? 15 * 60_000
+    // As long as its approval can matter: the longest wait for a decision
+    // plus the longest an approved one stays usable (approvals/service.ts).
+    this.#ttlMs = options.ttlMs ?? 2 * MAX_APPROVAL_EXPIRY_SECONDS * 1000
     this.#perPrincipal = options.perPrincipal ?? 50
     this.#total = options.total ?? 10_000
   }
 
-  prepare(input: { tool: string; args: unknown; summary: string; principalId: string }): PendingAction {
+  prepare(input: {
+    tool: string
+    args: unknown
+    summary: string
+    principalId: string
+    run?: (ctx: ToolContext) => Promise<CallToolResult>
+  }): PendingAction {
     this.#sweep()
     // Map iteration order is insertion order, so this list is oldest first.
     const own = [...this.#actions.values()].filter((a) => a.principalId === input.principalId)
@@ -74,6 +93,11 @@ export class PendingActionStore {
     this.#sweep()
     const action = this.#actions.get(id)
     return action && action.principalId === principalId ? action : undefined
+  }
+
+  /** Forgets an action: once it ran, or once its approval can no longer let it run. */
+  remove(id: string): void {
+    this.#actions.delete(id)
   }
 
   list(principalId: string): PendingAction[] {

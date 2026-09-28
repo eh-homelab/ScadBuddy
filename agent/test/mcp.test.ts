@@ -291,7 +291,8 @@ describe('/mcp: oidc mode', () => {
   })
 })
 
-describe('/mcp: outward tools prepare, and confirm is refused until approvals exist (#258)', () => {
+// With ai_approvals behind it, confirm runs an approved call: test/confirm.pg.test.ts.
+describe('/mcp: outward tools prepare, and with no approval store confirm is refused (#258)', () => {
   it('prepares a pending action instead of printing, and refuses to confirm it', async () => {
     // No backend handler for the print routes: an attempt to call them would
     // fail the test through onUnhandledRequest: 'error'.

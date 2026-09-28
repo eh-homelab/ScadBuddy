@@ -2,13 +2,14 @@ import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
-import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { mcpAuthSettings } from './auth/authenticate.js'
 import { FailClosedTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { bundledPluginPaths } from './harness/plugins.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
@@ -18,6 +19,7 @@ import { loadKek } from './secrets.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
+import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
 
@@ -93,6 +95,14 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// The registry's services (#251), shared by /mcp and every session's in-process tools.
+const toolServices = {
+  backend,
+  pending: new PendingActionStore(),
+  pollIntervalMs: 1000,
+  renderWaitMs: 10 * 60_000,
+  publicBaseUrl: config.publicUrl,
+}
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
@@ -104,6 +114,10 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // ScadBuddy's tools and their tiers (tools/harness.ts), and its own
+        // plugin, vetted once here and again per query (harness/plugins.ts).
+        ...harnessTools(toolServices),
+        pluginPaths: bundledPluginPaths((message) => console.error(message)),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
@@ -150,18 +164,17 @@ const app = createApp({
   mcp: {
     tools: ALL_TOOLS,
     services: {
-      backend,
-      pending: new PendingActionStore(),
-      pollIntervalMs: 1000,
-      renderWaitMs: 10 * 60_000,
-      publicBaseUrl: config.publicUrl,
+      ...toolServices,
+      // Prepared outward calls wait for the UI in ai_approvals (tools/approvals.ts).
+      ...(sessions ? { approvals: sessions.approvals } : {}),
     },
     // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
-    // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
-    // Until then `bearer` (the default) verifies no token, so /mcp answers
-    // 401 to every request in production: fail closed, not open.
+    // migration in db/migrations/). Until then `bearer` (the default)
+    // verifies no token, so /mcp answers 401 to every request in production:
+    // fail closed, not open. The mode and the anonymous cap are ai_settings
+    // keys, read per request (auth/authenticate.ts `mcpAuthSettings`).
     tokens: new FailClosedTokenStore(),
-    authSettings: () => DEFAULT_MCP_AUTH,
+    authSettings: mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`)),
   },
 })
 

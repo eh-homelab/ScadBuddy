@@ -274,13 +274,19 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credential.
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
-  The keys read today are `model` (`main.ts`), and `session_max_turns` and
+  The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts));
+  `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)); and
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§9](#9-mcp-auth-mode)).
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
-  "HTTP routes").
+  `20260928T0107Z_sessions.sql`). `main.ts` builds the session manager, but no HTTP
+  route starts a session yet (#266, #300).
+- `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
+  prepares (#471, `20260928T0734Z_approvals.sql`; see
+  [security.md](security.md#prepare-and-confirm-over-mcp)).
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
@@ -293,3 +299,42 @@ Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 U
 them "placeholders until Settings stores per-session caps". Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
 #377 body, "Budget and turns").
+
+## 9. MCP auth mode
+
+The `/mcp` auth mode and the anonymous cap are `ai_settings` keys, never environment
+variables (spec §8.3, §9). They are read on every `/mcp` request by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
+so a change applies to the next request on every replica, with no restart:
+
+| Key | Values | Unset |
+|---|---|---|
+| `mcp_auth_mode` | `"bearer"`, `"disabled"`, `"oidc"` (answers 501 until #262) | `"bearer"` |
+| `mcp_anonymous_cap` | `"read"`, `"write"`, `"outward"` (used in `disabled` mode only) | `"outward"` |
+
+A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
+`disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
+this once, and again after any change to either key. Settings has no route or UI for
+these keys yet (#255), so set them in the database for now. Each value is a JSON
+string:
+
+```sql
+INSERT INTO ai_settings (key, value) VALUES ('mcp_auth_mode', '"disabled"')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- back to the default:
+DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
+```
+
+Outward tools still need a human approval in the UI in every mode (spec §8.2; see
+[security.md](security.md#prepare-and-confirm-over-mcp)).
+
+## 10. The bundled ScadBuddy plugin
+
+The image carries ScadBuddy's own Claude plugin (#299) at `/app/plugins/scadbuddy`
+([`Dockerfile`](../../Dockerfile), `agent` stage), and every session query loads it
+(spec §10). The path is fixed by the image layout, not configured: `BUNDLED_PLUGIN_DIR`
+in [`agent/src/harness/plugins.ts`](../../agent/src/harness/plugins.ts). At start,
+`bundledPluginPaths()` vets it. If it is missing or refused, the agent logs
+`the ScadBuddy plugin at ... is not loaded: ...` and sessions run without its skills.
+Contents and vetting are in [claude-plugin.md](claude-plugin.md) and
+[security.md](security.md#plugin-vetting).

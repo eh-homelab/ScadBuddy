@@ -13,10 +13,14 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **The agent service has no authentication.** Its credential writes are *gated*, but
   not authenticated (see [Origin gate](#dns-rebinding-defence)). The limitation is
   stated in the header of [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts).
-- **No `/mcp`, no tool registry, no approvals** exist on `main`. Those are open PRs
-  #368 and #471. The only tool paths today are the harness's in-process MCP servers
-  (none registered in `main.ts`) and the browser bridge in the user's own tab
-  ([browser-bridge.md](browser-bridge.md)).
+- **`/mcp`, the tool registry and approvals** are on `main` (#368, #471):
+  [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts),
+  [`agent/src/tools/`](../../agent/src/tools/) and
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts). The tool
+  paths are `/mcp`, the harness's in-process `scadbuddy` server (every session's
+  queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)),
+  and the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
+  Nothing starts a session over HTTP yet (#266, #300).
 
 ## Risk tiers and the permission seam
 
@@ -28,9 +32,23 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 
 - `decide(toolName, tierOf)`: an unknown tool (`tierOf` returns `undefined`) is treated
   as `outward`. `read` and `write` are allowed. `outward` gets `needs_approval`.
-- **Approvals are not built** (#258, open PR #471). Until then `needs_approval` is
-  answered with a **deny**, whose message tells the model to explain rather than retry.
-  An outward tool therefore never runs unattended.
+- **Approvals** (#258, `ai_approvals`). In a session turn, `needs_approval` parks the
+  call in `canUseTool` until a human decides in the UI
+  ([`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts) `gate()`).
+  A query with no approval gate answers it with a **deny**, whose message tells the
+  model to explain rather than retry. An outward tool therefore never runs unattended.
+- **The registry's tiers.** Sessions get `tierOf` from
+  [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts): each registry tool
+  under its harness name `mcp__scadbuddy__<name>` maps to its `risk`, and every other
+  name (a plugin's tool) stays unknown, so `outward`. An outward registry tool that the
+  gate approved runs at once: the harness projection passes `gate: 'harness'` to
+  `runTool()` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts)), which
+  skips the `/mcp` prepare step. That is safe only because the in-process server is
+  reachable from a harness query alone, whose seam has already stopped the call.
+- **The session's principal.** The tools run as the session owner
+  (`harnessPrincipal()` in [`agent/src/auth/principal.ts`](../../agent/src/auth/principal.ts)):
+  the browser user with every tier, any other owner with `read` only, until the
+  `sessions.*` MCP tools and flows pass the tiers of the token or flow behind it.
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -39,6 +57,55 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 - **Wiring.** `buildHarness()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)
   sets both on every query, together with `permissionMode: 'default'`. If `tierOf`
   is omitted, every tool resolves to `outward`.
+
+## MCP auth mode
+
+Spec §8.3 makes the mode "a database setting", and §9 lists "MCP auth mode" with the
+AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts):
+
+- `mcp_auth_mode`: `"bearer"` (the default when unset), `"disabled"` or `"oidc"` (501
+  until #262);
+- `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
+  `"outward"` by default (spec §8.3, "full access by default").
+
+It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
+warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
+verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
+While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
+and again whenever the settings change, not on every request. Outward calls still stop
+at the approval gate in every mode. There is no Settings route or UI for these keys yet
+(#255); [operating.md](operating.md#9-mcp-auth-mode) shows how to set them.
+
+## Prepare and confirm over `/mcp`
+
+Spec §8.2: external MCP clients get "a two-step `prepare` ... then `confirm`, where the
+confirm completes only after the UI approval". As built:
+
+- **Prepare.** An outward tool called over `/mcp` runs nothing. `runTool()` in
+  [`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts) keeps the call (the
+  tool and a copy of its parsed arguments) in memory
+  ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)) and records a
+  pending approval in `ai_approvals` under the same id: no session, no turn, requested
+  by the caller's principal, with the scrubbed summary and the input HMAC that session
+  approvals use. The UI decides it like any other (`GET /api/v1/ai/approvals`, then
+  `POST /api/v1/ai/approvals/{id}/approve` or `/deny`, in
+  [`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)).
+- **Confirm.** `confirm_action` in
+  [`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts) runs the call only
+  when all of these hold: the pending action is the caller's; the approval row is
+  visible to the caller as its requester; the row's tool and `input_hash` match the
+  prepared call; the row is approved and usable; and `consumeById()` marks it used.
+  That last step is one conditional `UPDATE`, so of two concurrent confirms one runs
+  and the other is refused. A pending, denied, expired, cancelled or used approval is
+  refused with the reason, and nothing is sent.
+- **The arguments are never stored.** They live only in the agent's memory, as
+  `ai_approvals` holds no inputs. An approval approved after a restart, or confirmed on
+  another replica, has nothing to run, and the caller prepares again.
+- **Without a database** outward calls are still prepared, and every confirm is
+  refused.
+
+Measured in [`agent/test/confirm.pg.test.ts`](../../agent/test/confirm.pg.test.ts).
 
 **Least privilege** (spec D7, §4.4). `buildQueryOptions()` in
 [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts) sets:
@@ -187,9 +254,19 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 [plugin manifest reference](https://code.claude.com/docs/en/plugins-reference) and the
 [hooks reference](https://code.claude.com/docs/en/hooks), cited in the file. `bin/` is
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
-`assertPluginAllowed()` for every `pluginPaths` entry. ScadBuddy's own plugin passes
-(PR #379, row 8). Fetching, pinning and reviewing user plugins (spec §10) is **not
-built** (open PR #464).
+`assertPluginAllowed()` for every `pluginPaths` entry.
+
+**ScadBuddy's own plugin is loaded** in every session query (#299, spec §10). The
+agent image carries `plugins/scadbuddy/` at `/app/plugins/scadbuddy`
+([`Dockerfile`](../../Dockerfile), `agent` stage), and `main.ts` passes
+`bundledPluginPaths()` from `plugins.ts`. That vets it once at start and leaves it
+out, with a log line, if it is missing or refused. Every query then vets it again.
+Its `.mcp.json`, the remote `scadbuddy` server for Claude Code installs, is not started
+in the harness, because `strictMcpConfig` ignores plugin MCP configurations
+(`sdk.d.ts` 0.3.283). The harness reaches the same tools in-process. The init message
+reports the plugin with no `plugin_errors`
+([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)).
+Fetching, pinning and reviewing user plugins (spec §10) is **not built** (open PR #464).
 
 ## Event-log scrubbing (#377)
 
@@ -228,8 +305,10 @@ From the merged code and PR bodies:
 4. **Secrets as JS strings** stay in the heap until garbage-collected (`secrets.ts`,
    "PLAINTEXT IN MEMORY").
 5. **Scrubbing is name-based.** A tool that takes a secret under a name
-   `SENSITIVE_KEY` does not match would log it. The registry must let such tools
-   declare it before #251/#258 wire in real outward tools (spec §6; seam comment in
+   `SENSITIVE_KEY` does not match would log it. No registry tool takes a secret
+   argument today (the inputs in [`agent/src/tools/`](../../agent/src/tools/)). A tool
+   that does must declare it to the registry, and `scrubForLog` must read that
+   declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
    - `SessionStore` is `@alpha` in SDK 0.3.283;
@@ -237,10 +316,15 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, never loaded in production.** No plugin path is passed in
-   `main.ts` today.
+7. **Only ScadBuddy's own plugin is loaded.** `main.ts` passes the bundled
+   `plugins/scadbuddy` and nothing else (see [Plugin vetting](#plugin-vetting)); user
+   plugins are open PR #464.
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
+9. **Prepared `/mcp` calls live in one process.** Their arguments are kept in memory
+   only, so an approval decided after a restart, or confirmed through another replica,
+   cannot run and the call has to be prepared again (see
+   [Prepare and confirm](#prepare-and-confirm-over-mcp)).
 
 ## Spec §3.2 items still open
 

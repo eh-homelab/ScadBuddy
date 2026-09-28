@@ -220,6 +220,11 @@ WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
+# ScadBuddy's own Claude plugin (#299; AI spec §10, "baked into the image and
+# loaded by path"): skills and subagents, Markdown only. The service loads it
+# from /app/plugins/scadbuddy, three levels above dist/harness/plugins.js
+# (agent/src/harness/plugins.ts BUNDLED_PLUGIN_DIR), after vetting it.
+COPY plugins/scadbuddy /app/plugins/scadbuddy
 
 # The Claude Code binary the Agent SDK bundles is pinned the way
 # OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
