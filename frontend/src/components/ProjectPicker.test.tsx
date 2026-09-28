@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { ProjectRequest } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -116,6 +117,35 @@ describe('ProjectPicker', () => {
     // relationship between a model and a project — which prints belong to a project is
     // on the project's own page, and a second answer here would go stale.
     await waitFor(() => expect(select()).toHaveValue('1'))
+  })
+
+  it('re-reads a list missing the value without moving the value back to the remembered one', async () => {
+    // The remembered project stays 1, as while the PUT for the new choice is in flight;
+    // the re-read lists the new project (the mock's own list) but still remembers 1.
+    await api.rememberProject(1)
+    function Harness() {
+      const [value, setValue] = useState<number | null>(null)
+      return (
+        <>
+          <ProjectPicker value={value} onChange={setValue} onLoaded={setValue} testId="first" id="first" />
+          <ProjectPicker value={value} onChange={setValue} onLoaded={setValue} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await listed()
+    await waitFor(() => expect(screen.getByTestId('first')).toHaveValue('1'))
+
+    await user.selectOptions(select(), 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+    await user.click(screen.getByTestId('create-project'))
+    await waitFor(() => expect(select().selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    const created = select().value
+
+    // The first picker's list predates the project, so it re-reads; the value is kept.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(select()).toHaveValue(created)
+    expect(screen.getByTestId('first')).toHaveValue(created)
   })
 
   it('opens unset when nothing has been sent yet', async () => {
