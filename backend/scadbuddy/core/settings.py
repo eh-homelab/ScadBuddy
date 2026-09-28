@@ -244,6 +244,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " credential."
         ),
         "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "allowed_origins": (
+            "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
+            " decides who can reach the server, so it belongs to the deployment."
+        ),
         "seed_models_dir": "Image layout, fixed when the image is built.",
         "seed_libraries_dir": "Image layout, fixed when the image is built.",
         "frontend_dir": "Image layout, fixed when the image is built.",
@@ -255,11 +259,6 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "openscad_lsp": (
             "The binary the server runs for the editor. Choosing it from a web form would let"
             " anyone who can reach the page run any program."
-        ),
-        "allowed_origins": (
-            "Which pages may reach the server's realtime socket besides the public URL's"
-            " (#266). Like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES it decides who may"
-            " talk to the deployment, so it belongs to the deployment, not to a web form."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",

@@ -8,8 +8,8 @@ import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
 import type { McpAuthMode } from '../api/mcpTokens'
-import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpAuthSection } from '../components/McpAuthSection'
+import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -150,8 +150,8 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   const webMcp = useWebMcpEnabled()
-  const ai = useAiAvailability()
   const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
+  const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
