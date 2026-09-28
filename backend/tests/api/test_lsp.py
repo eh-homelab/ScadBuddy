@@ -247,23 +247,28 @@ def test_a_client_that_names_no_root_is_shown_no_server_path(
 def test_messages_before_initialize_are_rewritten(client: TestClient, model: str) -> None:
     """A server that talks before `initialize` names no container path either (#194);
     the client's own root, once named, takes over."""
-    definition = {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "textDocument/definition",
-        "params": {"textDocument": {"uri": DEFAULT_CLIENT_ROOT + "model.scad"}},
-    }
+
+    def definition(request_id: int, root: str) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "textDocument/definition",
+            "params": {"textDocument": {"uri": root + "model.scad"}},
+        }
+
+    assert CLIENT_ROOT != DEFAULT_CLIENT_ROOT
     with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
-        session.send_json(definition)
+        session.send_json(definition(2, DEFAULT_CLIENT_ROOT))
         early = session.receive_json()["result"]
         _initialize(session)
-        session.send_json({**definition, "id": 3})
+        session.send_json(definition(3, CLIENT_ROOT))
         late = session.receive_json()["result"]
 
+    real = f"/data/models/{model}/model.scad"
     assert early["location"]["uri"] == DEFAULT_CLIENT_ROOT + "helper.scad"
-    assert json.loads(early["seen"])["textDocument"]["uri"].endswith(
-        f"/data/models/{model}/model.scad"
-    )
+    assert json.loads(early["seen"])["textDocument"]["uri"].endswith(real)
+    # After `initialize`, the client's own root is the one rewritten, both ways.
+    assert json.loads(late["seen"])["textDocument"]["uri"].endswith(real)
     assert late["location"]["uri"] == CLIENT_ROOT + "helper.scad"
 
 
@@ -416,6 +421,49 @@ def test_a_wedged_server_is_killed_and_its_slot_freed(
         assert "left a request unanswered" in caplog.text
         with client.websocket_connect(route) as again:
             assert "result" in _initialize(again)
+
+
+def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process stuck in the kernel outlives SIGKILL; waiting on it forever would
+    hold the permit all the same (#201), so cleanup gives up after KILL_WAIT."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    spawn = asyncio.create_subprocess_exec
+
+    async def unreapable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+
+        async def never() -> int:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process, "wait", never)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unreapable)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client:
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(route) as session:
+            _initialize(session)
+            pid = int(pid_file.read_text())
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                session.receive_json()
+
+        assert closed.value.code == 1011
+        assert "was not reaped within 0.2s" in caplog.text
+        with client.websocket_connect(route) as again:
+            assert "result" in _initialize(again)
+
+    assert _wait_until(lambda: _gone(pid))
 
 
 def test_an_idle_session_is_not_ended(

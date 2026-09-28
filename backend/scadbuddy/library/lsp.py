@@ -45,6 +45,7 @@ _CONTENT_LENGTH = b"content-length"
 #: by the client's ``initialize``.
 DEFAULT_CLIENT_ROOT = "file:///workspace/"
 #: Seconds a client's request may go unanswered before the server is taken as wedged.
+#: The watchdog checks every tenth of it, so detection takes up to 1.1x this.
 REQUEST_TIMEOUT = 60.0
 #: Seconds to wait for a killed server to be reaped before letting the permit go;
 #: asyncio's child watcher reaps it whenever it does die.
