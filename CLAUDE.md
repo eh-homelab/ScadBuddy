@@ -124,7 +124,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
-  the mocked e2e run.
+  the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
+  `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
+  up without editing `handlers.ts`, and must export `handlers` (and optionally
+  `reset`) (#508).
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,

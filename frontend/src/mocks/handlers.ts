@@ -44,7 +44,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -236,7 +236,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -961,8 +961,9 @@ export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
   ...aiPluginHandlers,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // Each feature's own mocks (`features/`), then the agent service's MCP OIDC routes;
+  // the rest of this list is the backend.
+  ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
