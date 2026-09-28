@@ -219,7 +219,11 @@ export class ChatConnection {
     this.emit(snapshot)
   }
 
-  receive(raw: string): Promise<void> {
+  /**
+   * Takes one inbound frame: the text of a text frame, or whatever else the
+   * socket delivered (a binary frame's bytes), which is refused as `invalid`.
+   */
+  receive(raw: unknown): Promise<void> {
     // The cap is checked before the frame is parsed, so a flood of frames is
     // refused with `busy` whether or not they parse: a malformed frame costs the
     // process a parse and a reply, and that is the work the cap bounds.
@@ -232,6 +236,12 @@ export class ChatConnection {
         }),
       )
       return Promise.resolve()
+    }
+    if (typeof raw !== 'string') {
+      // A binary frame is answered through the queue too, so it counts against the cap.
+      return this.enqueue(async () => {
+        this.emit(event({ type: 'error', code: 'invalid', message: 'frames must be JSON text' }))
+      })
     }
     const parsed = parseClientFrame(raw)
     if (!parsed.ok) {
@@ -397,18 +407,26 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           })
           void connection.open()
         },
-        onMessage: (evt: MessageEvent, ws: WSContext) => {
-          if (typeof evt.data !== 'string') {
-            ws.send(JSON.stringify(event({ type: 'error', code: 'invalid', message: 'frames must be JSON text' })))
-            return
-          }
-          void connection?.receive(evt.data)
-        },
+        // Every frame, binary ones included, goes through the connection, so
+        // the queue cap and its `busy` answer apply to all of them.
+        onMessage: (evt: MessageEvent) => void connection?.receive(evt.data),
         onClose: () => connection?.close(),
-        onError: () => connection?.close(),
+        onError: (evt: Event) => {
+          // A transport error is ours to know about, like every other failure here.
+          log(`chat: socket error: ${socketError(evt)}`)
+          connection?.close()
+        },
       }
     }),
   )
+}
+
+/** What a socket's error event says: the `ErrorEvent`'s error or message, or just its type. */
+function socketError(evt: Event): string {
+  const { error, message } = evt as { error?: unknown; message?: unknown }
+  if (error instanceof Error) return error.stack ?? error.message
+  if (typeof message === 'string' && message !== '') return message
+  return evt.type
 }
 
 /** `WebSocket.OPEN` (the WHATWG readyState, which `ws` uses too); `Pingable` stays structural for tests. */

@@ -25,7 +25,8 @@ import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } fr
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
 //                                                 (a reconnect) or else `?after=`, then
-//                                                 live; `id:` is the seq,
+//                                                 live (400 when either is not a seq);
+//                                                 `id:` is the seq,
 //                                                 and every event is an unnamed `message`
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
@@ -221,8 +222,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('read', async (c, sessions) => {
       const id = idOf(c)
       // Last-Event-ID first: an EventSource reconnects to the same URL, `?after=`
-      // included, and adds the last seq it got, which is where to resume.
-      const after = seqFrom(c.req.header('last-event-id')) ?? seqFrom(c.req.query('after')) ?? 0
+      // included, and adds the last seq it got, which is where to resume. One
+      // that is not a seq is refused like a bad `limit`, not replayed from 0.
+      let after = 0
+      for (const [name, raw] of [
+        ['Last-Event-ID', c.req.header('last-event-id')],
+        ['after', c.req.query('after')],
+      ] as const) {
+        if (raw === undefined) continue
+        const seq = seqFrom(raw)
+        if (seq === undefined) return c.json({ detail: `${name} must be a non-negative integer` }, 400)
+        after = seq
+        break
+      }
       // Checks visibility before the stream starts, so an unknown id is a 404, not an empty stream.
       await sessions.get(id, BROWSER_USER)
       // No proxy in the path may buffer this (spec §8.4); X-Accel-Buffering
