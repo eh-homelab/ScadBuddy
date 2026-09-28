@@ -437,10 +437,27 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
 ) -> None:
     store = PresetStore(paths)
     held: list[bool] = []
+
+    def write() -> None:
+        held.append(store._locks["m"].lock.locked())
+
     # Held from the check to the write, so a save cannot land between them.
-    assert store.with_names_free("m", ["A"], lambda: held.append(store._lock("m").locked())) is None
+    assert store.with_names_free("m", ["A"], write) is None
     assert held == [True]
-    assert not store._lock("m").locked()
+    # And gone once released: a template nobody holds keeps no lock.
+    assert store._locks == {}
+
+
+def test_a_template_s_lock_goes_with_its_last_user(paths: DataPaths) -> None:
+    store = PresetStore(paths)
+    inside: list[set[str]] = []
+    with store._lock("a"), store._lock("b"):
+        inside.append(set(store._locks))
+    assert inside == [{"a", "b"}]
+    # Released, even when the body raised.
+    with pytest.raises(RuntimeError), store._lock("c"):
+        raise RuntimeError
+    assert store._locks == {}
 
 
 @pytest.mark.requires_git

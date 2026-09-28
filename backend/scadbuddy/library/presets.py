@@ -23,7 +23,9 @@ import json
 import logging
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -235,6 +237,13 @@ def _same_name(a: str, b: str) -> bool:
     return a.casefold() == b.casefold()
 
 
+@dataclass
+class _TemplateLock:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Holders and waiters: the entry is dropped when this reaches none.
+    users: int = 0
+
+
 class PresetStore:
     """Reads a template's presets and writes the saved ones.
 
@@ -246,12 +255,24 @@ class PresetStore:
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self._locks: dict[str, threading.Lock] = {}
+        #: Only the templates someone holds or waits on: an entry goes with its last
+        #: user, so a slug created and deleted leaves nothing behind.
+        self._locks: dict[str, _TemplateLock] = {}
         self._locks_lock = threading.Lock()
 
-    def _lock(self, model_id: str) -> threading.Lock:
+    @contextmanager
+    def _lock(self, model_id: str) -> Iterator[None]:
         with self._locks_lock:
-            return self._locks.setdefault(model_id, threading.Lock())
+            entry = self._locks.setdefault(model_id, _TemplateLock())
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with self._locks_lock:
+                entry.users -= 1
+                if entry.users == 0:
+                    del self._locks[model_id]
 
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
