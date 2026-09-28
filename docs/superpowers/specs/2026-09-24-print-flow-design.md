@@ -67,6 +67,9 @@ path and given a name. The pipeline is never bypassed — the slice borrows *its
 means what it meant. `PrintRunResult` gains `route`, `slice_job_id` and
 `queue_item_ids` so both routes report through one shape.
 
+> Superseded for the print picker by `2026-09-27-spool-first-print-design.md` §0; the
+> one-click send bar still runs the configured pipeline until #312.
+
 **What actually escalates, as shipped.** Only a **filament plan** (`run_for_output`) or
 **queue-level print options** (`_queue_send`, #88) take the second route. A `printer_id`
 on its own does not: it scopes the picker and binds the queue item *once a plan already

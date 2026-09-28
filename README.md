@@ -32,9 +32,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
   plate cover images and a layout sized for the target printer's plate.
 - **Send to Bambuddy**: upload to a library folder, or slice and queue it.
-- **Print picker**: run one of Bambuddy's slicer pipelines, or create a new one. It
-  shows eligibility per pipeline, and lets you set copies, a project, filaments per
-  colour from spool inventory, and print options.
+- **Print picker**: spool-first — pick spools, nozzle size, a quality tier and a plate,
+  and ScadBuddy derives the printer, process and filament presets and slices and queues
+  through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
+  nozzle flow, the full process list and a per-slot filament preset override. Also lets
+  you set copies, a project, and print options.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
@@ -70,7 +72,10 @@ for the project picker).
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
   outputs, saved presets (`presets/`, outside the git repository), settings,
-  downloaded fonts and caches. Back up the volume.
+  downloaded fonts and caches. Back up the volume. The image carries BOSL2 at the
+  catalogue's ref and copies it into `/data/libraries` at start when it is not
+  there, so a fresh install renders BOSL2 models without network access (licence:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
@@ -78,6 +83,11 @@ for the project picker).
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
   `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
+  `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
+  generated output is rendered at its default settings in the background, one at
+  a time and behind any render someone asked for, and that plate image is its
+  catalogue thumbnail; `false` renders nothing, and such a model shows no image
+  until one is set or generated);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -132,6 +142,19 @@ for the project picker).
     PVC run one replica, as the design does.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
     startup.
+  - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
+    Postgres too: each change is appended to an `events` table and sent with
+    `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
+    hear it once over the same `LISTEN` connection the render queue uses. After
+    that connection drops and comes back, subscribers get a `bus.resync` event.
+    The table keeps events for `Last-Event-ID` replay:
+    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
+    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
+    replica every 5 minutes. Unset, events stay in the process as before.
+    `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
+    `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
+    `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
+    database, so give each deployment its own database, not just its own schema.
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
     than this for a worker, unrendered.
   - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
@@ -172,6 +195,11 @@ ScadBuddy runs on the homelab cluster from
 (`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD). That manifest
 pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
+
+With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
+database at startup (migration 3 adds the `events` log). The event log's retention
+is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
+(see the render queue settings above); the defaults need no manifest change.
 
 ```mermaid
 flowchart LR

@@ -18,9 +18,7 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import Scope
 from scadbuddy.bambuddy.models import (
-    EligibilityRequest,
     FolderCreate,
-    PipelineCreate,
     PipelineRunRequest,
     PresetRef,
     ProjectCreate,
@@ -150,118 +148,6 @@ async def test_a_configured_pipeline_carries_its_target_and_fanout(
     assert pipeline.fanout_strategy == "max_parallel"
     assert pipeline.printer_preset == PresetRef(source="cloud", id="GM041")
     assert pipeline.bed_type == "Textured PEI Plate"
-
-
-@respx.mock
-async def test_creating_a_pipeline_sends_only_the_create_schemas_fields(
-    bambuddy: BambuddyClient,
-) -> None:
-    """``SlicerPipelineCreate`` has no target or fanout — those are response-only."""
-    route = respx.post(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(
-            200, json=recording("slicer-pipelines-configured.json")["pipelines"][0]
-        )
-    )
-
-    pipeline = await bambuddy.create_pipeline(
-        PipelineCreate(
-            name="ScadBuddy",
-            printer_preset=PresetRef(source="cloud", id="GM041"),
-            process_preset=PresetRef(source="cloud", id="GP243"),
-            filament_presets=[PresetRef(source="cloud", id="GFSG00_23")],
-            bed_type="Textured PEI Plate",
-        )
-    )
-
-    assert pipeline.id == 1
-    body = sent(route)
-    assert body["filament_presets"] == [{"source": "cloud", "id": "GFSG00_23"}]
-    assert "target_kind" not in body
-    assert "fanout_strategy" not in body
-    # description was never set, so it is absent rather than null.
-    assert "description" not in body
-
-
-@respx.mock
-async def test_check_eligibility_returns_the_report_rather_than_raising(
-    bambuddy: BambuddyClient,
-) -> None:
-    """An ineligible answer here is a 200 — only ``run`` turns it into a 409."""
-    report = {
-        "ok": False,
-        "target_kind": "specific_printer",
-        "target_printer_id": 1,
-        "target_printer_name": "3DP-31B-598",
-        "issues": [
-            {
-                "kind": "filament_type_mismatch",
-                "slot_index": 0,
-                "expected": "PLA",
-                "actual": "PETG",
-            }
-        ],
-        "printer_reports": [],
-    }
-    route = respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
-        return_value=httpx.Response(200, json=report)
-    )
-
-    result = await bambuddy.check_eligibility(1, EligibilityRequest(source_library_file_id=41))
-
-    assert result.ok is False
-    assert [(i.kind, i.slot_index, i.expected, i.actual) for i in result.issues] == [
-        ("filament_type_mismatch", 0, "PLA", "PETG")
-    ]
-    assert sent(route) == {"source_library_file_id": 41, "force": False}
-
-
-@respx.mock
-async def test_a_class_targeted_report_keeps_the_per_printer_detail(
-    bambuddy: BambuddyClient,
-) -> None:
-    """Under ``printer_class`` ``ok`` means "at least one passes", and the per-printer
-    reasons live in ``printer_reports``, not ``issues``."""
-    respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "ok": True,
-                "target_kind": "printer_class",
-                "target_model_class": "H2C",
-                "issues": [],
-                "printer_reports": [
-                    {"printer_id": 1, "printer_name": "3DP-31B-598", "ok": True, "issues": []},
-                    {
-                        "printer_id": 2,
-                        "printer_name": "3DP-99Z-000",
-                        "ok": False,
-                        "issues": [{"kind": "printer_offline"}],
-                    },
-                ],
-            },
-        )
-    )
-
-    result = await bambuddy.check_eligibility(1, EligibilityRequest(source_archive_id=4))
-
-    assert result.ok is True
-    assert result.issues == []
-    assert [(r.printer_id, r.ok) for r in result.printer_reports] == [(1, True), (2, False)]
-    assert result.printer_reports[1].issues[0].kind == "printer_offline"
-
-
-@respx.mock
-async def test_an_unknown_issue_kind_still_parses(bambuddy: BambuddyClient) -> None:
-    """Bambuddy adds issue kinds between releases; one must not 502 the whole report."""
-    respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
-        return_value=httpx.Response(
-            200, json={"ok": False, "issues": [{"kind": "some_kind_shipped_later"}]}
-        )
-    )
-
-    result = await bambuddy.check_eligibility(1, EligibilityRequest(source_library_file_id=41))
-
-    assert result.issues[0].kind == "some_kind_shipped_later"
 
 
 @respx.mock
@@ -624,28 +510,9 @@ async def test_reading_one_pipeline_returns_its_presets_and_target(
         ),
         (lambda c: c.pipeline(1), "/slicer-pipelines/1", "get", Scope.MANAGE_QUEUE),
         (
-            lambda c: c.check_eligibility(1, EligibilityRequest(source_archive_id=1)),
-            "/slicer-pipelines/1/check-eligibility",
-            "post",
-            Scope.MANAGE_QUEUE,
-        ),
-        (
             lambda c: c.pipeline_runs(1),
             "/slicer-pipelines/1/runs",
             "get",
-            Scope.MANAGE_QUEUE,
-        ),
-        (
-            lambda c: c.create_pipeline(
-                PipelineCreate(
-                    name="x",
-                    printer_preset=PresetRef(source="cloud", id="a"),
-                    process_preset=PresetRef(source="cloud", id="b"),
-                    filament_presets=[PresetRef(source="cloud", id="c")],
-                )
-            ),
-            "/slicer-pipelines/",
-            "post",
             Scope.MANAGE_QUEUE,
         ),
     ],

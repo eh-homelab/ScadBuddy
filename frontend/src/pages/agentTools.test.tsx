@@ -67,6 +67,28 @@ describe('catalogue tools', () => {
   })
 })
 
+function CatalogueShell() {
+  useGlobalAgentTools()
+  return <CataloguePage />
+}
+
+describe('catalogue filters through navigate (#276)', () => {
+  it('sets the search, tags, origin and sort from the route', async () => {
+    renderPage(<CatalogueShell />)
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    expect(await bridge.call('navigate', { route: '/?tag=keychain&sort=name' })).toEqual({
+      ok: true,
+      result: { route: '/?tag=keychain&sort=name' },
+    })
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Gridfinity Bin' })).toBeNull())
+    expect(
+      screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent),
+    ).toEqual(['Keychain Template', 'Name Keychain'])
+    expect(screen.getByTestId('result-count')).toHaveTextContent('2 of 4')
+  })
+})
+
 function renderSource(slug = 'name-keychain') {
   return renderPage(<EditSourcePage />, { route: `/m/${slug}/source`, path: '/m/:slug/source' })
 }
