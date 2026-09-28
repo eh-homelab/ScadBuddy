@@ -26,8 +26,16 @@ export class EventLog {
   private readonly sql: Sql
   private readonly pollMs: number
   private readonly emitter = new EventEmitter()
-  /** Bumped on every local append, so a follower cannot miss a wake between read and wait. */
-  private readonly versions = new Map<string, number>()
+  /**
+   * Per session with at least one local follower: how many follow it, and a
+   * counter bumped on every wake, so a follower cannot miss a wake between its
+   * read and its wait. The entry exists only while a follower does (created
+   * by the first, deleted by the last), so the map is bounded by the number
+   * of sessions being watched on this replica, not by every session it has
+   * ever written. A wake with no entry has nobody to wake; a follower that
+   * starts later reads the table first, so it cannot miss those events.
+   */
+  private readonly watched = new Map<string, { followers: number; version: number }>()
 
   constructor(sql: Sql, options: { pollMs?: number } = {}) {
     this.sql = sql
@@ -68,18 +76,32 @@ export class EventLog {
    * (or the consumer stops iterating).
    */
   async *follow(sessionId: string, afterSeq = 0, signal?: AbortSignal): AsyncGenerator<LoggedEvent> {
-    let last = afterSeq
-    while (!signal?.aborted) {
-      const version = this.versions.get(sessionId) ?? 0
-      const rows = await this.read(sessionId, last)
-      for (const row of rows) {
-        if (signal?.aborted) return
-        yield row
-        last = row.seq
+    const entry = this.watched.get(sessionId) ?? { followers: 0, version: 0 }
+    entry.followers += 1
+    this.watched.set(sessionId, entry)
+    try {
+      let last = afterSeq
+      while (!signal?.aborted) {
+        const version = entry.version
+        const rows = await this.read(sessionId, last)
+        for (const row of rows) {
+          if (signal?.aborted) return
+          yield row
+          last = row.seq
+        }
+        if (rows.length === PAGE) continue
+        await this.waitForChange(sessionId, entry, version, signal)
       }
-      if (rows.length === PAGE) continue
-      await this.waitForChange(sessionId, version, signal)
+    } finally {
+      // Runs on abort, on the consumer's break/return, and on a read error.
+      entry.followers -= 1
+      if (entry.followers === 0 && this.watched.get(sessionId) === entry) this.watched.delete(sessionId)
     }
+  }
+
+  /** Sessions with a local follower right now (for tests and metrics). */
+  watchedSessions(): number {
+    return this.watched.size
   }
 
   /**
@@ -88,12 +110,19 @@ export class EventLog {
    * replicas, and the poll then only backs it up.
    */
   wake(sessionId: string): void {
-    this.versions.set(sessionId, (this.versions.get(sessionId) ?? 0) + 1)
+    const entry = this.watched.get(sessionId)
+    if (!entry) return
+    entry.version += 1
     this.emitter.emit(sessionId)
   }
 
-  private waitForChange(sessionId: string, seen: number, signal?: AbortSignal): Promise<void> {
-    if ((this.versions.get(sessionId) ?? 0) !== seen || signal?.aborted) return Promise.resolve()
+  private waitForChange(
+    sessionId: string,
+    entry: { version: number },
+    seen: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (entry.version !== seen || signal?.aborted) return Promise.resolve()
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timer)

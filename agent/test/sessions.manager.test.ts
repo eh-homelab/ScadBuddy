@@ -232,6 +232,68 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(logged).toContain('your key is [redacted], right?')
     })
 
+    it('redacts the credential from a failure in the turn’s set-up (after the credential was fetched)', async () => {
+      const paths = await tempPaths()
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'unused' }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      m.store.exists = () => Promise.reject(new Error('lookup failed for key sk-ant-test'))
+      expect(await (await m.send(session.id, agentA, 'hi')).done).toEqual({
+        kind: 'failed',
+        message: 'lookup failed for key [redacted]',
+      })
+      expect(runs).toHaveLength(0)
+      const logged = JSON.stringify(await m.events.read(session.id))
+      expect(logged).not.toContain('sk-ant-test')
+      expect(logged).toContain('lookup failed for key [redacted]')
+    })
+
+    it('keeps follower bookkeeping only while someone follows, and still wakes late followers', async () => {
+      const paths = await tempPaths()
+      const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
+      // A long poll, so only a local wake can deliver quickly.
+      const m = manager({ sql: db.sql, paths, run: runner, pollMs: 60_000 })
+      const sessions = await Promise.all([1, 2, 3].map(() => m.start(agentA, { origin: 'mcp' })))
+      for (const { session } of sessions) await (await m.send(session.id, agentA, 'hi')).done
+      // Many sessions written, nobody following: nothing retained.
+      expect(m.events.watchedSessions()).toBe(0)
+
+      const id = sessions[0]!.session.id
+      const last = (await m.events.read(id)).at(-1)!.seq
+      const a = new AbortController()
+      const b = new AbortController()
+      const followA = await m.attach(id, agentA, { afterSeq: last, signal: a.signal })
+      const followB = await m.attach(id, agentA, { afterSeq: last, signal: b.signal })
+      const gotA = collectUntil(followA, (e) => e.event.type === 'session.status' && e.event.status === 'idle', 5_000)
+      const gotB = collectUntil(followB, (e) => e.event.type === 'session.status' && e.event.status === 'idle', 5_000)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(m.events.watchedSessions()).toBe(1)
+      const started = Date.now()
+      await (await m.send(id, agentA, 'again')).done
+      expect((await gotA).at(0)?.event.type).toBe('user.turn')
+      expect((await gotB).at(0)?.event.type).toBe('user.turn')
+      expect(Date.now() - started).toBeLessThan(5_000)
+      // collectUntil stopped iterating: both followers detached, the entry is gone.
+      expect(m.events.watchedSessions()).toBe(0)
+
+      // A follower that starts after the entry was dropped still replays and goes live.
+      const c = new AbortController()
+      const late = collectUntil(
+        await m.attach(id, agentA, { afterSeq: last, signal: c.signal }),
+        (e) => e.event.type === 'user.turn' && e.event.text === 'third',
+        5_000,
+      )
+      await (await m.send(id, agentA, 'third')).done
+      expect((await late).filter((e) => e.event.type === 'user.turn').map((e) => (e.event.type === 'user.turn' ? e.event.text : ''))).toEqual([
+        'again',
+        'third',
+      ])
+      expect(m.events.watchedSessions()).toBe(0)
+      a.abort()
+      b.abort()
+      c.abort()
+    })
+
     it('frees a claim whose replica died once its lease runs out', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'ok' }))

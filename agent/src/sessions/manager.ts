@@ -493,13 +493,15 @@ export class SessionManager {
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
     try {
-      const [credential, cwd, resume, model] = await Promise.all([
-        this.deps.credential(),
+      // The credential first, and into `secrets` at once: whatever fails
+      // after this point is redacted before it reaches the event log.
+      const credential = await this.deps.credential()
+      secrets = [credential.secret]
+      const [cwd, resume, model] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
       ])
-      secrets = [credential.secret]
       const run: HarnessRun = {
         paths: this.deps.paths,
         credential,
