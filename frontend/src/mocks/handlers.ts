@@ -11,6 +11,7 @@ import type {
   FontFamily,
   Job,
   CatalogueLibrary,
+  InvalidLibraryEntry,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -281,6 +282,13 @@ export function setMockUploadLimit(bytes: number): void {
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
+export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEntry[]): void {
+  state.models = state.models.map((m) =>
+    m.slug === slug ? { ...m, invalid_libraries: entries } : m,
+  )
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -2407,7 +2415,9 @@ export const handlers = [
     const libraries = current.some((row) => row.name === name)
       ? current.map((row) => (row.name === name ? pin : row))
       : [...current, pin]
-    const updated = { ...model, libraries }
+    // As the backend's `pin_library`: the pin takes the place of any entry of that name.
+    const invalid = (model.invalid_libraries ?? []).filter((entry) => entry.name !== name)
+    const updated = { ...model, libraries, invalid_libraries: invalid }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
@@ -2420,11 +2430,16 @@ export const handlers = [
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const current = model.libraries ?? []
-    if (!current.some((row) => row.name === name)) {
+    const invalid = model.invalid_libraries ?? []
+    if (![...current, ...invalid].some((row) => row.name === name)) {
       return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
     }
     await delay(50)
-    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    const updated = {
+      ...model,
+      libraries: current.filter((row) => row.name !== name),
+      invalid_libraries: invalid.filter((entry) => entry.name !== name),
+    }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),

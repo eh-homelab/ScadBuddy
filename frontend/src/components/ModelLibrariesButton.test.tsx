@@ -1,8 +1,9 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { MISSING_REF, models } from '../mocks/fixtures'
+import { setMockInvalidLibraries } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -274,6 +275,79 @@ describe('ModelLibrariesButton', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).getByText(/None yet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent(/^Libraries$/)
+  })
+})
+
+describe('ModelLibrariesButton, invalid entries (#217)', () => {
+  const BARE = "model.json names library 'threads' without a pin; pin it again"
+  const NAMELESS = 'model.json library an entry is not valid: name: Field required; pin it again'
+
+  it('lists an entry that is not a pin, says why, and removes it', async () => {
+    setMockInvalidLibraries('name-keychain', [
+      { name: 'threads', problem: BARE },
+      { name: null, problem: NAMELESS },
+    ])
+    const seen = watchPins()
+    const onSaved = vi.fn()
+    const { user } = renderPage(
+      <ModelLibrariesButton slug="name-keychain" name="Name Keychain" onSaved={onSaved} />,
+    )
+    const dialog = await openDialog(user, 'Libraries\\s*2')
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+
+    const bare = within(pinned).getByRole('listitem', { name: 'threads' })
+    expect(bare).toHaveTextContent('Invalid')
+    expect(bare).toHaveTextContent(BARE)
+    // No name the remove route can take: it says where to fix it instead.
+    const nameless = within(pinned).getByRole('listitem', { name: 'Invalid entry' })
+    expect(nameless).toHaveTextContent(NAMELESS)
+    expect(within(nameless).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() =>
+      expect(within(pinned).queryByRole('listitem', { name: 'threads' })).not.toBeInTheDocument(),
+    )
+    expect(within(pinned).getByRole('listitem', { name: 'Invalid entry' })).toBeInTheDocument()
+    expect(seen).toEqual(['DELETE threads'])
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(onSaved).toHaveBeenCalledTimes(1)
+  })
+
+  it('says why a 409 was refused and reads the model again', async () => {
+    const onSaved = vi.fn()
+    server.use(
+      http.delete(
+        '/api/v1/models/:slug/libraries/:name',
+        () => {
+          // Another request removed the entry while this one was on its way.
+          setMockInvalidLibraries('name-keychain', [])
+          return HttpResponse.json(
+            {
+              title: 'Invalid Model Metadata',
+              status: 409,
+              detail: "the model.json of 'name-keychain' is not valid: name: Input should be a valid string",
+            },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        },
+        { once: true },
+      ),
+    )
+    setMockInvalidLibraries('name-keychain', [{ name: 'threads', problem: BARE }])
+    const { user } = renderPage(
+      <ModelLibrariesButton slug="name-keychain" name="Name Keychain" onSaved={onSaved} />,
+    )
+    const dialog = await openDialog(user, 'Libraries\\s*1')
+    const bare = await within(dialog).findByRole('listitem', { name: 'threads' })
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    // The row is gone once the model is read again, so the reason is not left on it.
+    expect(await within(dialog).findByText(/None yet/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Libraries$/ })).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(onSaved).not.toHaveBeenCalled()
   })
 })
 

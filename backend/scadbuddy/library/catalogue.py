@@ -38,7 +38,12 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import (
+    InvalidLibraryEntry,
+    ModelLibrary,
+    entry_name,
+    invalid_entries,
+)
 from scadbuddy.library.media import (
     LEGACY_ID,
     MAX_MEDIA_ITEMS,
@@ -319,6 +324,9 @@ class ModelRecord(ModelMeta):
     #: As stored, plus what the disk says of each file. A template with only a
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+    #: The entries of ``libraries`` in model.json that are not pins, which
+    #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
+    invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
 
 
 class Catalogue:
@@ -605,6 +613,7 @@ class Catalogue:
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
             upstream_state=upstream_state,
+            invalid_libraries=invalid_entries(raw.get("libraries")),
         )
 
     @property

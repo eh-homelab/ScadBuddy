@@ -236,22 +236,62 @@ def parse_declaration(meta: Any) -> list[ModelLibrary]:
     if raw is None:
         return []
     if not isinstance(raw, list):
-        raise LibraryDeclarationError(f"`libraries` in {MODEL_META_NAME} is not a list")
+        raise LibraryDeclarationError(NOT_A_LIST)
     declared: list[ModelLibrary] = []
     for entry in raw:
-        if isinstance(entry, str):
-            raise LibraryDeclarationError(
-                f"{MODEL_META_NAME} names library {entry!r} without a pin; pin it again"
-            )
-        try:
-            declared.append(ModelLibrary.model_validate(entry))
-        except ValidationError as error:
-            name = entry_name(entry)
-            label = repr(name) if name is not None else "an entry"
-            raise LibraryDeclarationError(
-                f"{MODEL_META_NAME} library {label} is not valid: {_problems(error)}; pin it again"
-            ) from None
+        problem = entry_problem(entry)
+        if problem is not None:
+            raise LibraryDeclarationError(problem)
+        declared.append(ModelLibrary.model_validate(entry))
     return declared
+
+
+NOT_A_LIST = f"`libraries` in {MODEL_META_NAME} is not a list"
+
+
+def entry_problem(entry: Any) -> str | None:
+    """Why :func:`parse_declaration` refuses one entry of ``libraries``, or None
+    for a pin."""
+    if isinstance(entry, str):
+        return f"{MODEL_META_NAME} names library {entry!r} without a pin; pin it again"
+    try:
+        ModelLibrary.model_validate(entry)
+    except ValidationError as error:
+        name = entry_name(entry)
+        label = repr(name) if name is not None else "an entry"
+        return f"{MODEL_META_NAME} library {label} is not valid: {_problems(error)}; pin it again"
+    return None
+
+
+class InvalidLibraryEntry(BaseModel):
+    """An entry of a model's ``libraries`` that is not a pin (#217): a hand edit.
+    The model lists without it, but cannot render until it is removed or pinned
+    again."""
+
+    name: str | None = Field(
+        description="The name `DELETE /models/{slug}/libraries/{name}` removes it by; "
+        "null when it has none that route takes"
+    )
+    problem: str = Field(description="Why it is not a pin: the render's 409 detail")
+
+
+def invalid_entries(raw: Any) -> list[InvalidLibraryEntry]:
+    """The entries of a ``model.json``'s ``libraries`` (``raw``) that
+    :func:`parse_declaration` refuses, each with the reason it gives."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return [InvalidLibraryEntry(name=None, problem=NOT_A_LIST)]
+    invalid: list[InvalidLibraryEntry] = []
+    for entry in raw:
+        problem = entry_problem(entry)
+        if problem is None:
+            continue
+        name = entry_name(entry)
+        if name is not None and not re.fullmatch(NAME_PATTERN, name):
+            name = None
+        invalid.append(InvalidLibraryEntry(name=name, problem=problem))
+    return invalid
 
 
 def declared_libraries(model_dir: Path) -> list[ModelLibrary]:

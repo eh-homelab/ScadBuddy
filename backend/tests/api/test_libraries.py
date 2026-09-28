@@ -325,6 +325,62 @@ def test_a_bad_entry_in_model_json_is_a_409_for_that_model_only(
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
 
 
+def test_a_model_lists_its_invalid_library_entries_and_they_can_be_removed(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """#217: an entry that is not a pin is left out of `libraries` but listed in
+    `invalid_libraries`, with the render's 409 detail, and removed by its name."""
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    good = meta["libraries"][0]
+    meta["libraries"] = [
+        "threads",
+        good,
+        {"name": "gears", "url": good["url"], "ref": "v1"},
+        42,
+        {**good, "name": "bad name"},
+    ]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    model = lib_client.get(f"/api/v1/models/{SLUG}").json()
+    render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
+
+    assert [lib["name"] for lib in model["libraries"]] == ["BOSL2"]
+    invalid = model["invalid_libraries"]
+    # Only the names DELETE can take; the rest are named in the problem alone.
+    assert [entry["name"] for entry in invalid] == ["threads", "gears", None, None]
+    assert render.status_code == 409
+    assert invalid[0]["problem"] == render.json()["detail"]
+    assert "'gears' is not valid: commit:" in invalid[1]["problem"]
+    assert "an entry is not valid" in invalid[2]["problem"]
+    assert "'bad name' is not valid: name:" in invalid[3]["problem"]
+
+    for name in ("threads", "gears"):
+        removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/{name}")
+        assert removed.status_code == 200, removed.text
+    assert [entry["name"] for entry in removed.json()["invalid_libraries"]] == [None, None]
+    assert [lib["name"] for lib in removed.json()["libraries"]] == ["BOSL2"]
+
+
+def test_a_libraries_that_is_not_a_list_is_one_invalid_entry(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    create_model(lib_client)
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["libraries"] = {"BOSL2": "v1"}
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    model = lib_client.get(f"/api/v1/models/{SLUG}").json()
+
+    assert model["libraries"] == []
+    assert model["invalid_libraries"] == [
+        {"name": None, "problem": "`libraries` in model.json is not a list"}
+    ]
+
+
 def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: DataPaths) -> None:
     staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
     staging.mkdir(parents=True)
