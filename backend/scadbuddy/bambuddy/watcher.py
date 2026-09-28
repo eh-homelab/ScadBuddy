@@ -43,7 +43,7 @@ Lifecycle
   bus (``core/pg_events.py``), so a UI on another replica than the one following the
   print hears them too.
 - With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
-  (a ``render/pg_store.py`` migration) and a Postgres session advisory lock makes
+  (``migrations/20260928T0718Z_print_watches.sql``) and a Postgres session advisory lock makes
   sure one replica follows each print (:class:`WatchLock`). There is no other store
   (#401 makes the database required): without it, a print is followed from the send
   that started it, and a restart forgets it.

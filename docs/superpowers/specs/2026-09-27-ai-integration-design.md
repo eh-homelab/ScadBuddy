@@ -438,7 +438,7 @@ Print progress comes from **one server-side watcher per active print** (#268,
 `backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
 back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
 socket can't replace the read (§3.1). When each print started is kept in Postgres
-(`print_watches`, a backend migration; nothing on disk), so the watcher resumes recent
+(`print_watches`, `backend/scadbuddy/migrations/20260928T0718Z_print_watches.sql`; nothing on disk), so the watcher resumes recent
 prints after a restart; a settled print is forgotten. A session advisory lock per print
 means one replica follows each print. Reading a print's progress re-arms its watcher,
 and an open dialog reads at least every 30 s while the socket is up, so it never waits
