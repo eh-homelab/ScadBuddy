@@ -16,6 +16,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import psycopg
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
@@ -37,7 +38,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
-from scadbuddy.library.presets import TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
 from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -287,6 +288,7 @@ class Catalogue:
         outputs: OutputStore | None = None,
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
+        presets: PresetStore | None = None,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -295,6 +297,9 @@ class Catalogue:
         #: Where the default-render preview is read from; None turns it off.
         self.previews = previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: Whose saved presets a template that is gone, or whose slug is reused,
+        #: takes with it. None: nothing is saved beside the templates.
+        self.presets = presets
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -1152,9 +1157,7 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        # The saved presets are not derived, but they are keyed and orphaned the same
-        # way: a template that is gone takes its presets with it.
-        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
+        keyed_by_file = (self.paths.schema_cache,)
         roots = (
             self.paths.outputs,
             self.paths.model_revisions,
@@ -1195,6 +1198,17 @@ class Catalogue:
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        if self.presets is not None:
+            try:
+                forgotten = self.presets.sweep_orphans(
+                    lambda slug: self.paths.model_dir(slug).exists()
+                )
+            except (OSError, psycopg.Error):
+                logger.exception("could not sweep saved presets for orphans")
+            else:
+                removed.extend(f"saved presets of {slug}" for slug in forgotten)
         return removed
 
     def _claim(self, slug: str) -> Path:
@@ -1226,14 +1240,18 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
-            # Not derived, but the previous model's: its saved presets.
-            self.paths.model_presets(slug),
         ):
             _remove_tree(path)
         # Under the preview lock, with or without a store attached: a render of the
         # previous model finishing now must not interleave with this.
         drop_preview(self.paths, slug)
         self._forget_cover(slug)
+        # Not derived, but the previous model's: its saved presets.
+        if self.presets is not None:
+            try:
+                self.presets.forget(slug)
+            except psycopg.Error:
+                logger.exception("could not forget saved presets", extra={"slug": slug})
 
     def _forget_cover(self, slug: str) -> None:
         """Drop the output store's resolved fallback cover for ``slug``, whose

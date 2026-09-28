@@ -155,15 +155,13 @@ def test_every_reference_source_is_read(paths: DataPaths, store: AssetStore) -> 
     bare = paths.output_dir("builtin:demo", "b" * 32)
     bare.mkdir(parents=True)
     write_3mf(bare / "model.3mf", {"label": ids[1]})
-    paths.model_presets("demo").write_text(
-        json.dumps({"presets": [{"id": "p", "name": "P", "params": {"label": ids[2]}}]})
-    )
     paths.model_dir("demo").mkdir(parents=True)
     (paths.model_dir("demo") / "presets.json").write_text(json.dumps([{"label": ids[3]}]))
     paths.model_dir("builtin:demo").mkdir(parents=True)
     (paths.model_dir("builtin:demo") / "model.json").write_text(json.dumps({"x": ids[4]}))
 
-    found = referenced_asset_ids(paths, [{"label": ids[5]}])
+    # A saved preset's values (rows in Postgres) and a job's reach it as `params`.
+    found = referenced_asset_ids(paths, [{"label": ids[2]}, {"label": ids[5]}])
 
     assert found >= set(ids[:6])
     assert ids[6] not in found
@@ -234,15 +232,13 @@ def test_the_sweep_never_removes_a_referenced_asset(paths: DataPaths, store: Ass
     output = paths.output_dir("demo", "a" * 32)
     output.mkdir(parents=True)
     (output / "params.json").write_text(json.dumps({"label": kept[0].id}))
-    paths.model_presets("demo").write_text(
-        json.dumps({"presets": [{"id": "p", "name": "P", "params": {"label": kept[1].id}}]})
-    )
     bare = paths.output_dir("demo", "c" * 32)
     bare.mkdir(parents=True)
     write_3mf(bare / "model.3mf", {"label": kept[2].id})
-    jobs = [{"label": kept[3].id}]
+    # A saved preset's values and a job's.
+    params = [{"label": kept[1].id}, {"label": kept[3].id}]
 
-    removed = store.sweep(referenced_asset_ids(paths, jobs), grace=GRACE)
+    removed = store.sweep(referenced_asset_ids(paths, params), grace=GRACE)
 
     assert removed == [swept.id]
     assert all(exists(store, meta) for meta in kept)

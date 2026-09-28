@@ -170,12 +170,17 @@ def build_state(settings: Settings) -> AppState:
     preview_store = PreviewStore(paths)
     # Off, the catalogue serves no preview at all -- including ones rendered while it
     # was on, which stay on disk until their model goes (the sweeps work by path).
+    # Nothing connects here either: the lifespan opens it.
+    presets = PresetStore(
+        paths, settings.database_url, pool_size=min(4, settings.database_pool_size)
+    )
     catalogue = Catalogue(
         paths,
         history,
         outputs,
         preview_store if settings.preview_renders else None,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        presets=presets,
     )
     history.on_commit = announce_commits(events, catalogue)
     queue = RenderQueue(
@@ -215,7 +220,7 @@ def build_state(settings: Settings) -> AppState:
         history=history,
         catalogue=catalogue,
         outputs=outputs,
-        presets=PresetStore(paths),
+        presets=presets,
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
         fonts=FontService(
             paths.root,
