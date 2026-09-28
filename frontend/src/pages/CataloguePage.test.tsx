@@ -863,6 +863,9 @@ describe('CataloguePage list mode (#278)', () => {
     expect(link).toHaveAttribute('target', '_blank')
     expect(link.closest('p')).toHaveTextContent('From raw.githubusercontent.com')
     expect(within(rowOf('Gridfinity Bin')).queryByText(/^From/)).not.toBeInTheDocument()
+    // With no upstream either, the row leaves no empty line for the unlinked origin.
+    expect(within(rowOf('Crème Coaster')).getByTestId('row-provenance')).toBeInTheDocument()
+    expect(within(rowOf('Gridfinity Bin')).queryByTestId('row-provenance')).not.toBeInTheDocument()
   })
 
   it('adds a row tag to the filter', async () => {

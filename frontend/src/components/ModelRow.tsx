@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { modelPath } from '../lib/deeplink'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { timeAgo } from '../lib/format'
 import { DuplicatedFrom, DuplicateModelButton } from './DuplicateModelButton'
 import { namedSlides, type Slide } from './media/slides'
@@ -36,6 +37,8 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
   const cover = coverIndex >= 0 ? slides[coverIndex] : undefined
   const src = cover?.kind === 'image' ? cover.src : cover?.poster
   const tags = model.tags ?? []
+  // Only an http(s) origin is shown, so only one takes the provenance line.
+  const origin = safeHttpUrl(model.origin_url)
 
   return (
     <li
@@ -108,10 +111,10 @@ export function ModelRow({ model, upstreamName, onOpen, onTag }: Props) {
             {model.description}
           </p>
         )}
-        {(model.upstream || model.origin_url) && (
-          <div className="mt-0.5 flex min-w-0 items-baseline gap-3">
+        {(model.upstream || origin) && (
+          <div data-testid="row-provenance" className="mt-0.5 flex min-w-0 items-baseline gap-3">
             <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
-            <ModelOrigin url={model.origin_url} className="hidden min-w-0 sm:block" />
+            <ModelOrigin url={origin} className="hidden min-w-0 sm:block" />
           </div>
         )}
         {tags.length > 0 && (
