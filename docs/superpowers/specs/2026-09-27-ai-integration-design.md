@@ -36,7 +36,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | D1 | **Harness: Claude Agent SDK, TypeScript** | Loads Claude plugins natively; has sessions with resume/fork and a pluggable `SessionStore`, in-process custom tools, permission callbacks and hooks (§3.1) | Vercel AI SDK loop and Mastra: both multi-provider, neither loads Claude plugins |
 | D2 | **Claude only, to start** | The harness supports nothing else (§3.1). Credentials: an Anthropic API key, or a gateway base URL plus credential | claude.ai subscription login (not allowed, §3.1); non-Claude models through a gateway (not supported, §3.1) |
 | D3 | **One tool registry, two projections** | A tool is defined once and served in-process to the harness and over `/mcp` to external agents, so the surfaces cannot drift | Deriving tools mechanically from `openapi.json` (route-shaped rather than task-shaped; no risk tiers) |
-| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (three infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
+| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
 | D6 | **MCP auth modes `bearer` (default), `disabled`, later `oidc`** | Bearer now, OIDC per the MCP authorization spec later (#262), and an explicit off switch for trusted LANs | Hard-requiring auth; forking the code path per mode |
 | D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web | Leaving Claude Code's built-in tools available |
@@ -495,7 +495,12 @@ There are **no AI-*configuration* env vars**: providers, credentials, auth mode,
 tokens and plugins are all configured in Settings. Three **infrastructure bootstrap**
 variables still reach the agent container, because Settings itself needs them to exist:
 `SCADBUDDY_DATABASE_URL` (shared with #241), the backend URL (`SCADBUDDY_BACKEND_URL`,
-named in PR #319), and the key-encryption key file below.
+named in PR #319), and the key-encryption key file below. The post-merge hardening of
+#255 adds three more of the same kind, which Settings cannot hold because they decide
+who may write to Settings or open its secrets: `SCADBUDDY_PUBLIC_URL` (shared with the
+backend; the origin allowlist of §8.4), `SCADBUDDY_AGENT_TRUSTED_PROXIES` (the peers
+whose `X-Forwarded-*` are believed, §8.4), and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`
+(the old key during a rotation).
 
 **Encryption at rest (recommended):** envelope encryption.
 

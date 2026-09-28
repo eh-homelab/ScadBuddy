@@ -474,6 +474,7 @@ async def render_job(
         bbox_mm=box,
         colors=[part.colour for part in parts],
         warnings=warnings,
+        notes=list(output.notes),
     )
     return result, output.log_tail
 

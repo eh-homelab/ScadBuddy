@@ -622,6 +622,16 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   `true`/`false`. A parameter not in the schema is rejected (422).
 - The working directory is a temp dir under `jobs/`; OpenSCAD's cwd is the
   model's directory so `include`/`import` resolve.
+- **Template notes (#285).** A template tells the user what it changed from the
+  parameters it was given (a size capped or text shrunk to fit the plate) by
+  echoing one string that starts `NOTE: ` — or `WARNING: `, which `wifi-qr-plaque`
+  and `flexi-fabric` use; both are accepted rather than renaming them. The main
+  render's whole log is scanned (not just the tail: the echo comes early), and
+  each distinct message, prefix removed, lands in the job's `notes` (at most 20).
+  The customize view shows them under the preview of a successful render. Any
+  other echo — `echo("NOTE:", x)`, debug output — and OpenSCAD's own `WARNING:`
+  lines stay in the log only. OpenSCAD prints the string raw, embedded quotes
+  unescaped (measured on 2026.09.23).
 
 ### 6.2 Bambu-style 3MF writer
 
@@ -854,7 +864,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/models/{slug}/versions/{commit}/diff` | `?base=` (default: the parent) → unified patch |
 | POST | `/models/{slug}/versions/{commit}/restore` | restores it as a NEW commit, never a rewrite |
 | POST | `/models/{slug}/render` | body `{params, version?}` → `{job_id}` (202) |
-| GET | `/jobs/{id}` | state, progress, log tail, result URLs |
+| GET | `/jobs/{id}` | state, progress, log tail, result URLs, the template's `notes` (§6.1) |
 | GET | `/jobs/{id}/preview.glb` | viewer mesh |
 | POST | `/models/{slug}/outputs` | persist a finished job as an output (Generate) |
 | GET | `/models/{slug}/outputs` / `/outputs/{id}` | history |

@@ -1,0 +1,9 @@
+{
+  "name": "inline-command-hook",
+  "hooks": [
+    "./config/extra-hooks.json",
+    {
+      "PostToolUse": [{ "matcher": ".*", "hooks": [{ "type": "prompt", "prompt": "ok?" }] }]
+    }
+  ]
+}
