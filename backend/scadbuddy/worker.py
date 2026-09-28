@@ -98,7 +98,9 @@ async def _wait_drained(
     return True
 
 
-async def _poll(settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event) -> None:
+async def _poll(
+    settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event, *, drain: bool
+) -> None:
     config = deps.config
     build_id = settings.revision
     worker = render_worker(
@@ -130,6 +132,8 @@ async def _poll(settings: Settings, deps: WorkerDeps, client: Client, stop: asyn
         else:
             logger.info("made this build current", extra={"build_id": build_id})
         await stop.wait()
+        if not drain:
+            return
 
         # A workflow is PINNED to the build that started it: one waiting between two
         # activities is served by no other build, so keep polling until none is left.
@@ -191,7 +195,7 @@ async def run_worker(
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
-            await _poll(settings, deps, client, stop)
+            await _poll(settings, deps, client, stop, drain=True)
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
@@ -204,8 +208,10 @@ async def run_worker(
 async def run_inprocess_worker(
     settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event
 ) -> None:
-    """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the same worker on the API's own deps."""
-    await _poll(settings, deps, client, stop)
+    """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the same worker on the API's own deps. It
+    does not drain on stop: as the only worker it stays current, so new runs would hold
+    the API's shutdown to the drain's bound."""
+    await _poll(settings, deps, client, stop, drain=False)
 
 
 async def _main(settings: Settings) -> None:
