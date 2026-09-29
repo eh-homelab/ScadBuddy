@@ -120,6 +120,7 @@ async def test_a_submit_starts_the_workflow_its_row_names(
         service = make_service(client, queue)
         async with _worker(client, queue, ProjectingActivities(deps)):
             job = await service.submit(SLUG, {"width": 1})
+            assert job.inputs == {"params": {"width": 1}, "v": 0}
             # The workflow the row names runs to its end.
             await asyncio.wait_for(
                 client.get_workflow_handle(workflow_id_for(job.id)).result(), timeout=30

@@ -35,7 +35,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
-from scadbuddy.render.inputs import InputsError, normalize_inputs
+from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
     Job,
     JobNotFoundError,
@@ -147,7 +147,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         status=job.state,
         model_version=job.model_version,
         params=job.params,
-        inputs=job.inputs or {"params": job.params},
+        inputs=job.inputs or legacy_inputs(job.params),
         created_at=job.created_at,
         started_at=job.started_at,
         finished_at=job.finished_at,

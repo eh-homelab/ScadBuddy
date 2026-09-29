@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
+from scadbuddy.api.jobs import _job_status
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES, InputsError, legacy_inputs, normalize_inputs
+from scadbuddy.render.job_models import Job, now
 
 
 def test_bare_params_are_read_as_version_zero_inputs() -> None:
@@ -31,6 +35,32 @@ def test_params_that_agree_with_inputs_are_accepted() -> None:
 def test_params_that_disagree_with_inputs_are_refused() -> None:
     with pytest.raises(InputsError, match="disagree"):
         normalize_inputs({"params": {"width": 1}}, {"width": 2})
+
+
+def test_params_that_differ_only_in_type_disagree() -> None:
+    with pytest.raises(InputsError, match="disagree"):
+        normalize_inputs({"params": {"flag": True}}, {"flag": 1})
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        lambda n: {"params": {"width": n}},
+        lambda n: {"params": {}, "ui": {"zoom": [1, n]}},
+    ],
+    ids=["param", "nested"],
+)
+def test_non_finite_numbers_are_refused(
+    number: float, shape: Callable[[float], dict[str, object]]
+) -> None:
+    with pytest.raises(InputsError, match="no NaN or Infinity"):
+        normalize_inputs(shape(number), None)
+
+
+def test_a_job_from_before_inputs_reports_version_zero_inputs() -> None:
+    job = Job(id="j", slug="s", params={"width": 3}, created_at=now())
+    assert _job_status(job, None).inputs == {"params": {"width": 3}, "v": 0}
 
 
 @pytest.mark.parametrize(
