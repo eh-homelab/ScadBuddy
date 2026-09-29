@@ -851,6 +851,32 @@ def test_a_printer_bambuddy_does_not_know_is_a_422_before_anything_is_uploaded(
 
 
 @respx.mock
+def test_a_deactivated_printer_is_a_422_before_anything_is_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """#479: Bambuddy still lists a deactivated printer, and the dialog never offers
+    one, so a run naming it is refused before the upload rather than failing after."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 1, "name": "Workshop", "model": "H2C", "is_active": False}]
+        )
+    )
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Workshop is deactivated in Bambuddy. Activate it there, or pick another printer."
+    )
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
 def test_a_printer_that_is_not_an_h2c_is_a_422_before_anything_is_sliced(
     client: TestClient, model: str
 ) -> None:

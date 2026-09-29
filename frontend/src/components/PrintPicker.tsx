@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
+  AnalysisRequest,
   ChoicesView,
   FilamentOptions,
   NozzleChoice,
@@ -21,6 +22,7 @@ import { useAsync } from '../lib/useAsync'
 import { resolveOptions } from '../lib/printOptions'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { FilamentPicker, WarningList } from './FilamentPicker'
+import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { NozzleStep } from './print/NozzleStep'
 import { PlateStep } from './print/PlateStep'
 import { QualityStep } from './print/QualityStep'
@@ -417,8 +419,31 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     void api.putPrinterBedType(printerId, bedType).catch(() => undefined)
   }
 
+  const printChoices: PrintChoices | null =
+    bedType === null
+      ? null
+      : { nozzles, tier, process_name: processName, bed_type: bedType, filament_overrides: overrides }
+
+  /**
+   * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
+   * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
+   * "All plates" the filament checks read every plate; the mesh checks read plate 1.
+   */
+  const analysisRequest: AnalysisRequest | null =
+    choices && printChoices
+      ? {
+          printer_id: printerId,
+          filament_plan: { slots: plan, force_colour_match: false },
+          choices: printChoices,
+          plate_id: chosenPlate,
+          all_plates: allPlates,
+          copies: effectiveCopies,
+          options,
+        }
+      : null
+
   async function run() {
-    if (!outputId || !choices || bedType === null) return
+    if (!outputId || !choices || bedType === null || !printChoices) return
     const attempt = ++runAttempt.current
     setRunning(true)
     setRunError(null)
@@ -427,13 +452,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       const body: PrintRunRequest = {
         printer_id: printerId,
         filament_plan: { slots: plan, force_colour_match: false },
-        choices: {
-          nozzles,
-          tier,
-          process_name: processName,
-          bed_type: bedType,
-          filament_overrides: overrides,
-        },
+        choices: printChoices,
         ...(copies === null ? {} : { copies }),
         plate_id: chosenPlate,
         all_plates: plate === 'all',
@@ -787,6 +806,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                 )}
               </div>
 
+              <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates} />
             </div>
           )}
 
