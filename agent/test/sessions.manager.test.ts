@@ -68,8 +68,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
     }
 
     it('serves a principal’s list from the owner and creator indexes, not a table scan', async () => {
+      // Only this test's schema: test files run in parallel, each in a throwaway
+      // schema, and describing another one's index while it is dropped fails with
+      // "could not open relation with OID".
       const indexes = await db.sql<{ indexname: string; indexdef: string }[]>`
-        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ai_sessions'`
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = current_schema() AND tablename = 'ai_sessions'`
       const defs = Object.fromEntries(indexes.map((i) => [i.indexname, i.indexdef]))
       expect(defs.ai_sessions_owner).toMatch(/\(owner_kind, owner_id, updated_at DESC\)/)
       expect(defs.ai_sessions_creator).toMatch(/\(creator_kind, creator_id, updated_at DESC\)/)
