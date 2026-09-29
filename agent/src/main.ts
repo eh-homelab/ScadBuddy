@@ -316,7 +316,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     stopSweeper?.()
     stopRetention?.()
     stopSessionWake?.()
-    sessionEvents?.close()
     stopHeartbeat()
     // 1001 "going away": the panel reconnects to another replica or after the restart.
     for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
@@ -339,7 +338,16 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
         await pluginForwarder.close()
       },
-      closeDatabase: database ? () => database.close() : undefined,
+      // The session-event publisher closes only now, after the drain: turns
+      // aborted above append their final session.status/session.done while they
+      // wind down, and closing it first would swallow that NOTIFY, so another
+      // replica's followers would never wake (#715 review; busEvents.ts).
+      closeDatabase: database
+        ? async () => {
+            sessionEvents?.close()
+            await database.close()
+          }
+        : undefined,
       timeoutMs: 10_000,
     }).then((result) => {
       if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
