@@ -183,6 +183,7 @@ def test_a_breakdown_has_one_tile_per_colour_named_in_order(
 
     assert response.status_code == 200, response.text
     named = response.headers["x-scadbuddy-colours"].split(",")
+    assert response.headers["x-scadbuddy-colour-columns"] == "2"
     # The stub job's `colors` (extruder order) lists red, so it comes first.
     assert named[0] == "#FF0000"
     assert sorted(named) == ["#0000FF", "#00FF00", "#FF0000"]

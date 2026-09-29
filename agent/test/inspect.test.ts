@@ -89,7 +89,7 @@ describe('get_render_colours', () => {
     const { client, seen } = backend(
       () =>
         new Response(PNG, {
-          headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00,#0000FF,not-a-colour' },
+          headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00,#0000FF,not-a-colour', 'x-scadbuddy-colour-columns': '2' },
         }),
     )
     const result = await runTool(tool('get_render_colours'), { job_id: 'a'.repeat(32), size: 128 }, ctx(client))
@@ -110,7 +110,7 @@ describe('get_render_colours', () => {
 
   it('keeps the legend when the image is too large to inline and comes back as a link', async () => {
     const { client } = backend(
-      () => new Response(PNG, { headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00' } }),
+      () => new Response(PNG, { headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00', 'x-scadbuddy-colour-columns': '2' } }),
     )
     const result = await runTool(
       tool('get_render_colours'),
@@ -125,6 +125,22 @@ describe('get_render_colours', () => {
     })
     expect(result.content.some((c) => c.type === 'resource_link')).toBe(true)
     expect(result.content.some((c) => c.type === 'image')).toBe(false)
+  })
+
+  it("lays the legend out by the backend's grid width, and refuses without one (#750 review)", async () => {
+    const wide = backend(
+      () =>
+        new Response(PNG, {
+          headers: { 'x-scadbuddy-colours': '#FF0000,#00FF00,#0000FF', 'x-scadbuddy-colour-columns': '3' },
+        }),
+    )
+    const result = await runTool(tool('get_render_colours'), { job_id: 'd'.repeat(32) }, ctx(wide.client))
+    expect((firstText(result) as { tiles: { row: number }[] }).tiles.map((t) => t.row)).toEqual([1, 1, 1])
+
+    const bare = backend(() => new Response(PNG, { headers: { 'x-scadbuddy-colours': '#FF0000' } }))
+    const refused = await runTool(tool('get_render_colours'), { job_id: 'e'.repeat(32) }, ctx(bare.client))
+    expect(refused.isError).toBe(true)
+    expect(String(firstText(refused))).toContain('grid width')
   })
 
   it('passes a refusal through', async () => {

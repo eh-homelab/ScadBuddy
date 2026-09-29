@@ -355,6 +355,9 @@ async def get_job_view(
 
 #: The header naming a breakdown's tiles, row by row.
 COLOURS_HEADER = "X-ScadBuddy-Colours"
+#: The header giving the breakdown grid's width in tiles, so a caller reads the
+#: layout rather than working it out again (#750 review).
+COLUMNS_HEADER = "X-ScadBuddy-Colour-Columns"
 
 
 def _draw_breakdown(
@@ -374,7 +377,11 @@ def _draw_breakdown(
                 COLOURS_HEADER: {
                     "description": "The tiles' colours, comma-separated, row by row",
                     "schema": {"type": "string"},
-                }
+                },
+                COLUMNS_HEADER: {
+                    "description": "Tiles per row of the grid",
+                    "schema": {"type": "integer"},
+                },
             },
         }
     },
@@ -384,7 +391,7 @@ def _draw_breakdown(
         "on each tile that colour's parts are in their colour and every other part in "
         "light grey, so a vision model can check which colour goes where (#252). "
         f"`{COLOURS_HEADER}` names the tiles, row by row, in the job's `colors` "
-        "(extruder) order. At "
+        f"(extruder) order, and `{COLUMNS_HEADER}` how many are in a row. At "
         "most 16 colours (422 above)."
     ),
 )
@@ -425,5 +432,9 @@ async def get_job_colours(
     return Response(
         drawn.png,
         media_type=PNG_MEDIA_TYPE,
-        headers={"Cache-Control": "no-store", COLOURS_HEADER: ",".join(drawn.colours)},
+        headers={
+            "Cache-Control": "no-store",
+            COLOURS_HEADER: ",".join(drawn.colours),
+            COLUMNS_HEADER: str(drawn.columns),
+        },
     )

@@ -72,7 +72,11 @@ export const inspectTools: Tool[] = [
         parseAs: 'stream',
       })
       const colours = coloursOf(answered.response.headers.get('x-scadbuddy-colours'))
-      const columns = Math.ceil(Math.sqrt(colours.length)) || 1
+      // The backend's own layout (render/thumbnail.py), not worked out again here (#750 review).
+      const columns = Number(answered.response.headers.get('x-scadbuddy-colour-columns'))
+      if (answered.response.ok && !(Number.isInteger(columns) && columns > 0)) {
+        throw new ToolError(`the breakdown of ${job_id} came without its grid width`)
+      }
       const legend = {
         tiles: colours.map((colour, index) => ({
           colour,
@@ -95,7 +99,7 @@ export const inspectTools: Tool[] = [
       )
       // The legend is the only way to read the grid, so it comes first whether the
       // image is inline or, too large for that, a link (#750 review).
-      return drawn.isError ? drawn : { ...drawn, content: [...json(legend).content, ...drawn.content] }
+      return { ...drawn, content: [...json(legend).content, ...drawn.content] }
     },
   }),
 ]

@@ -33,7 +33,7 @@ from typing import Any, Literal
 import anyio
 from pydantic import BaseModel, Field
 
-from scadbuddy.library.lsp import frame, read_message
+from scadbuddy.library.lsp import KILL_WAIT, frame, read_message, reap_later
 
 #: How long the whole exchange may take. openscad-lsp answers in milliseconds; this
 #: only bounds a server that has wedged.
@@ -169,5 +169,7 @@ async def lsp_diagnostics(
         with anyio.CancelScope(shield=True):
             if process.returncode is None:
                 process.kill()
-            with anyio.move_on_after(5):
+            with anyio.move_on_after(KILL_WAIT) as waiting:
                 await process.wait()
+            if waiting.cancelled_caught:
+                reap_later(process)
