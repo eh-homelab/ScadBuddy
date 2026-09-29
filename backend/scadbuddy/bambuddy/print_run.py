@@ -283,10 +283,16 @@ async def _extruder_plan(
     )
 
 
+def _refusal(plan: ExtruderPlan) -> str:
+    """The one detail the run refuses ``plan``'s errors with, and the check repeats."""
+    return " ".join(plan.errors)
+
+
 class PrintCheck(BaseModel):
     """What the nozzles make of the dialog's choices before Print (#755): the run's own
-    :func:`plan_extruders` verdict. ``errors`` are what the run would refuse as a 422,
-    ``warnings`` what it would carry back as advisories."""
+    :func:`plan_extruders` verdict. ``errors`` holds the run's 422 detail word for word,
+    the reasons joined as the run joins them (#758 review); ``warnings`` what it would
+    carry back as advisories."""
 
     errors: list[str] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
@@ -308,7 +314,7 @@ async def check_print(
     if not plate_ids or printer_id is None:
         return PrintCheck()
     plan, _, _ = await _extruder_plan(client, source, request, printer_id, plate_ids)
-    return PrintCheck(errors=plan.errors, warnings=plan.warnings)
+    return PrintCheck(errors=[_refusal(plan)] if plan.errors else [], warnings=plan.warnings)
 
 
 async def check_for_output(
@@ -411,7 +417,7 @@ async def prepare_run(
         client, source, request, printer_id, plate_ids
     )
     if extruders.errors:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(extruders))
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,

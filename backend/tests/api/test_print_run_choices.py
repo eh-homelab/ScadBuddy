@@ -1369,6 +1369,36 @@ def test_the_check_gives_the_runs_nozzle_refusal_before_anything_is_uploaded(
 
 
 @respx.mock
+def test_the_check_gives_several_nozzle_refusals_as_the_runs_one_422(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#758 review: when the nozzles refuse for more than one reason, the run's 422 joins
+    the reasons into one detail. The check says exactly that detail, not the reasons one
+    by one, so the dialog's verdict and the run's refusal cannot read differently."""
+    from scadbuddy.bambuddy import print_run
+    from scadbuddy.bambuddy.extruders import ExtruderPlan
+
+    reasons = ["The right nozzle is 0.4 mm.", "The left nozzle is High Flow."]
+    monkeypatch.setattr(
+        print_run, "plan_extruders", lambda *args, **kwargs: ExtruderPlan(errors=list(reasons))
+    )
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**_both_04_one_spare_02())
+    slice_routes()
+    request = {**body(), "filament_plan": TWO_SPOOLS}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    run = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
+
+    assert check.status_code == 200, check.text
+    assert run.status_code == 422, run.text
+    assert not upload.called
+    assert check.json()["errors"] == [run.json()["detail"]] == [" ".join(reasons)]
+
+
+@respx.mock
 def test_the_check_refuses_nothing_when_both_nozzles_match(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
