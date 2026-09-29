@@ -40,11 +40,12 @@ Methods and their limits
     *Overhangs.* A face's overhang angle is how far its outward normal tips below
     horizontal: 0 deg for a vertical wall, 90 deg for a flat ceiling. Buckets are
     cumulative ("45 deg or more" includes the 60 and 75 deg faces). Faces lying on
-    the bed are bed contact, not overhang -- using a looser proximity bound than
-    bed contact's own, since CSG noise on the model's resting face is not itself
-    an overhang (#756). Nothing here knows whether an overhang is supported from
-    below (a bridge between two pillars looks like any other 90 deg ceiling), so
-    the areas are an upper bound on what needs support.
+    the bed are bed contact, not overhang, and a downward face resting directly on
+    another part's (or its own mesh's) material below it is support, not overhang
+    either (#756) -- a short downward ray from the face finds that material within
+    :data:`BED_TOLERANCE_MM`. Nothing here knows whether an overhang is supported
+    by something further away (a bridge between two pillars looks like any other
+    90 deg ceiling), so the areas are an upper bound on what needs support.
 
     *Bed contact.* Downward-facing faces (within 1 deg of straight down) whose
     three vertices all lie within :data:`BED_TOLERANCE_MM` of ``bed_z``. The
@@ -110,13 +111,6 @@ ANALYSIS_VERSION = 2
 OVERHANG_ANGLES = (45, 60, 75)
 #: How far above the lowest vertex a face may sit and still count as on the bed.
 BED_TOLERANCE_MM = 0.01
-#: A looser bound than BED_TOLERANCE_MM, used only to keep the model's own resting
-#: face out of the overhang buckets (#756). OpenSCAD's CSG booleans (offset, hull,
-#: difference for a hole) can leave that face a few hundredths of a millimetre out
-#: of plane -- past BED_TOLERANCE_MM's tight band but nowhere near needing
-#: support -- so a triangle sharing the mesh's lowest vertex was wrongly counted as
-#: overhang. One default 0.4 mm-nozzle layer height is a generous, still-safe bound.
-OVERHANG_BED_TOLERANCE_MM = 0.2
 #: A face counts as facing straight down when its normal is within 1 degree of -Z.
 _DOWN_COSINE = math.cos(math.radians(1.0))
 #: Faces per part the wall estimate casts a ray from.
@@ -130,6 +124,11 @@ WALL_PAIR_BUDGET = 1 << 27
 WALL_MIN_SAMPLES = 64
 #: Hits nearer than this are the ray's own face or a neighbour it touches.
 _RAY_EPSILON = 1e-5
+#: How far a support-test ray lifts off its own face before casting straight down,
+#: comfortably above `_RAY_EPSILON` so a face resting flush (zero gap) on another
+#: part still registers as a hit instead of being caught by the self-intersection
+#: guard that distance is there for.
+_SUPPORT_LIFT_MM = 1e-3
 #: Upper bound on ray x triangle pairs the bounding-sphere pass holds at once.
 _RAY_BATCH = 1 << 22
 #: Located edges returned; the counts are always complete.
@@ -461,6 +460,43 @@ def _nearest_hits(
     return best
 
 
+def _supported_from_below(
+    origins: FloatArray,
+    own_triangles: FloatArray,
+    own_skip: IntArray,
+    others: Sequence[FloatArray],
+) -> npt.NDArray[np.bool_]:
+    """Whether each origin rests on some other geometry directly beneath it (#756).
+
+    Casts a ray straight down from each origin, lifted :data:`_SUPPORT_LIFT_MM`
+    first so a face resting flush (zero gap) on another surface -- a keychain's
+    letters on its base, say -- still counts as a hit rather than the ray's own
+    self-intersection guard swallowing it. A hit within :data:`BED_TOLERANCE_MM`
+    of the original point counts as support.
+
+    Tested against ``own_triangles`` (skipping each ray's own face via
+    ``own_skip``, as the wall estimate does) and every mesh in ``others``. This
+    reuses :func:`_nearest_hits`'s own two-pass (bounding sphere, then exact) ray
+    test rather than new machinery, so it costs no more than that already-budgeted
+    approach: a mesh too large to test within :data:`WALL_PAIR_BUDGET` is skipped,
+    leaving those faces unsupported -- pushing them toward being reported as
+    overhang, the upper bound this module already promises, never the other way.
+    """
+    if len(origins) == 0:
+        return np.zeros(0, dtype=bool)
+    lifted = origins.copy()
+    lifted[:, 2] += _SUPPORT_LIFT_MM
+    down = np.zeros_like(lifted)
+    down[:, 2] = -1.0
+    no_skip = np.full(len(origins), -1, dtype=np.int64)
+    nearest = np.full(len(origins), np.inf)
+    for triangles, skip in ((own_triangles, own_skip), *((other, no_skip) for other in others)):
+        if len(triangles) == 0 or len(origins) * len(triangles) > WALL_PAIR_BUDGET:
+            continue
+        nearest = np.minimum(nearest, _nearest_hits(lifted, down, triangles, skip))
+    return nearest <= _SUPPORT_LIFT_MM + BED_TOLERANCE_MM
+
+
 def wall_samples(triangles: int) -> int:
     """How many rays the wall estimate casts on a part of ``triangles`` faces."""
     if triangles <= 0:
@@ -511,6 +547,12 @@ def analyze_geometry(
     everything = np.concatenate(populated)
     low, high = everything.min(axis=0), everything.max(axis=0)
     bed_z = float(low[2])
+    # Every part's own triangle corners, for the cross-part support test below --
+    # built once, up front, so a part can be tested against a part processed
+    # earlier or later in the main loop.
+    support_corners = [
+        vertices[faces] if len(faces) else np.zeros((0, 3, 3)) for vertices, faces in welded
+    ]
 
     part_results: list[PartGeometry] = []
     edges: list[MeshEdge] = []
@@ -528,7 +570,9 @@ def analyze_geometry(
     islands = 0
 
     numbers = list(extruders) if extruders is not None else range(1, len(parts) + 1)
-    for number, part, (vertices, faces) in zip(numbers, parts, welded, strict=True):
+    for part_index, (number, part, (vertices, faces)) in enumerate(
+        zip(numbers, parts, welded, strict=True)
+    ):
         source: PartSource = "split" if part.colour in split else "solid"
         if len(faces) == 0:
             # Still one entry per extruder, so `parts` lines up with the output's
@@ -597,11 +641,20 @@ def analyze_geometry(
             points = corners[contact].reshape(-1, 3)
             contact_low = np.minimum(contact_low, points.min(axis=0))
             contact_high = np.maximum(contact_high, points.max(axis=0))
-        # A looser bed-proximity test than `on_bed`: see OVERHANG_BED_TOLERANCE_MM.
-        near_bed = (corners[:, :, 2] <= bed_z + OVERHANG_BED_TOLERANCE_MM).all(axis=1)
         angle = np.degrees(np.arcsin(np.clip(-normals[:, 2], -1.0, 1.0)))
+        # A face resting on another part -- or its own mesh -- directly below it is
+        # supported, not overhang (#756): the keychain's letters sit on its base
+        # this way. Only test the faces the loosest bucket would otherwise pick
+        # up, since that set covers every bucket's candidates.
+        candidates = np.flatnonzero((angle >= OVERHANG_ANGLES[0] - 1e-9) & (areas > 0) & ~on_bed)
+        supported = np.zeros(len(corners), dtype=bool)
+        if len(candidates):
+            others = [support_corners[j] for j in range(len(parts)) if j != part_index]
+            supported[candidates] = _supported_from_below(
+                corners[candidates].mean(axis=1), corners, candidates, others
+            )
         for threshold in OVERHANG_ANGLES:
-            selected = (angle >= threshold - 1e-9) & ~near_bed & (areas > 0)
+            selected = (angle >= threshold - 1e-9) & ~on_bed & ~supported & (areas > 0)
             if selected.any():
                 bucket_area[threshold] += float(areas[selected].sum())
                 bucket_faces[threshold] += int(selected.sum())
