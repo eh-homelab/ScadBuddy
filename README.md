@@ -95,6 +95,10 @@ must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only
 and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
+Drain renders, and stop the worker Deployment, before flipping
+`SCADBUDDY_TEMPORAL_ADDRESS` either way: a restart across the flip fails the renders
+in flight, while a pending one carries over (a Temporal boot adopts the legacy
+queue's pending renders; a legacy boot adopts Temporal's).
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
@@ -324,7 +328,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
   the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
   same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
-  may mount it.
+  may mount it. A piece no job references any more is removed by the API's periodic
+  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention a
+  render has on the legacy queue.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
   the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,

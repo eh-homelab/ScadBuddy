@@ -29,9 +29,9 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
-from scadbuddy.render.jobs import RenderQueue, prune_revision_exports
+from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
-from scadbuddy.render.render_cache import prune_render_cache
+from scadbuddy.render.projection import LEGACY_INTERRUPTED_ERROR
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import sweep_blobs
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
@@ -190,7 +190,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         return
     try:
         removed = await asyncio.to_thread(
-            sweep_blobs, state.blobs, state.refs, grace=state.config.asset_sweep_grace
+            sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
         )
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
@@ -285,15 +285,39 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
     the projection again, as a failed `RenderQueue.start` releases its store."""
     projection = state.projection
     assert projection is not None
-    settings, config = state.settings, state.config
+    settings = state.settings
     await asyncio.to_thread(projection.open)
     try:
         await _prepare_catalogue(state)
-        state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+        # Lazy: Temporal being down must not take the catalogue down with it. Submits
+        # queue their rows, and the reconciler starts them once it is back. Not for
+        # the in-process worker (dev and tests), which needs a connected client.
+        state.temporal = await connect(
+            settings.temporal_address,
+            settings.temporal_namespace,
+            lazy=not settings.temporal_worker_inprocess,
+        )
         service.client = state.temporal
-        await asyncio.to_thread(projection.prune, config.job_ttl)
-        await asyncio.to_thread(prune_revision_exports, state.paths, config.job_ttl)
-        await asyncio.to_thread(prune_render_cache, state.paths, config.job_ttl)
+        # A flip from the legacy queue: what it was running, nothing will finish.
+        # Before the reconciler's first pass (`service.start`), which starts only rows
+        # that name a workflow: the legacy queue's pending ones become this path's.
+        # Disjoint from the running rows failed next, so the order between the two
+        # does not matter; pending first, as `PostgresJobStore.abandon_orphans` does.
+        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+        if adopted:
+            logger.info(
+                "adopted the renders the legacy queue left pending",
+                extra={"count": len(adopted), "job_ids": adopted},
+            )
+        interrupted = await asyncio.to_thread(
+            projection.fail_legacy_running, LEGACY_INTERRUPTED_ERROR
+        )
+        if interrupted:
+            logger.warning(
+                "failed the renders the legacy queue was running",
+                extra={"job_ids": [job.id for job in interrupted]},
+            )
+        await service.prune()
         await service.start()
     except BaseException:
         await asyncio.to_thread(projection.close)

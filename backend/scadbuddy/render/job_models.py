@@ -13,7 +13,7 @@ from scadbuddy.render.schema import ParamValue
 
 JobState = Literal["pending", "running", "done", "failed", "cancelled"]
 JobTableKind = Literal["render", "arrange"]
-StepState = Literal["pending", "running", "done", "failed"]
+StepState = Literal["pending", "running", "done", "failed", "cancelled"]
 
 
 class StepInfo(BaseModel):

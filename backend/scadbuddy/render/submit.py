@@ -17,25 +17,47 @@ import math
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
+from datetime import timedelta
 from typing import Any
 
+from fastapi import status
 from temporalio.client import Client
 from temporalio.common import WorkflowIDConflictPolicy
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.job_store import QueueFullError, render_key
-from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE
+from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
 from scadbuddy.render.projection import JobProjection, workflow_id_for
-from scadbuddy.render.render_cache import cached_render
+from scadbuddy.render.render_cache import cached_render, prune_render_cache
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
 logger = logging.getLogger(__name__)
+
+#: How long a request waits on one Temporal call before leaving it to the reconciler
+#: (a start) or giving up (a cancel): the SDK's own retry budget is ~10 s per call.
+RPC_TIMEOUT = timedelta(seconds=5)
+
+#: The largest `Job` a submit sends as a workflow input. Temporal refuses a payload
+#: over 2 MiB outright and warns past 512 KiB; a start it refuses would never succeed.
+MAX_WORKFLOW_INPUT_BYTES = 1024 * 1024
+#: Start errors that no retry can fix. INVALID_ARGUMENT is the input itself: a
+#: workflow argument over the payload limit gets it (verified with 3 MiB on the dev
+#: server). NOT_FOUND is a configuration error, a namespace or task queue that does
+#: not exist, which no retry fixes. Not FAILED_PRECONDITION: Temporal answers that for
+#: a namespace that is not active (yet), which passes, so the reconciler retries it.
+UNSTARTABLE = frozenset({RPCStatusCode.INVALID_ARGUMENT, RPCStatusCode.NOT_FOUND})
+
+
+def _unstartable(error: Exception) -> bool:
+    return isinstance(error, RPCError) and error.status in UNSTARTABLE
 
 
 class RenderService:
@@ -50,6 +72,7 @@ class RenderService:
         metrics: Metrics,
         reconcile_after: float = 5.0,
         reconcile_interval: float = 5.0,
+        prune_interval: float = 300.0,
     ) -> None:
         self.store = projection
         self.client = client
@@ -59,6 +82,9 @@ class RenderService:
         self.metrics = metrics
         self.reconcile_after = reconcile_after
         self.reconcile_interval = reconcile_interval
+        #: How often the reconciler also prunes: the legacy queue does it after every
+        #: job, and settled rows hold their blobs' refs until they go.
+        self.prune_interval = prune_interval
         self._reconciler: asyncio.Task[None] | None = None
         self._listened_before = False
         metrics.store_info.labels(projection.backend).set(1)
@@ -105,6 +131,13 @@ class RenderService:
             model_version=model_version,
             created_at=now(),
         )
+        size = len(pydantic_data_converter.payload_converter.to_payload(job).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these parameters make a render request of {size} bytes; the most a render"
+                f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
         key = render_key(slug, params, model_version)
         kept = (
             await asyncio.to_thread(cached_render, self.paths, slug, key)
@@ -142,13 +175,16 @@ class RenderService:
         self.metrics.render_submitted.inc()
         try:
             await self._start(submitted.job)
-        except Exception:
-            # The row is committed: the reconciler starts it.
-            logger.exception(
-                "could not start a render's workflow; the reconciler will",
-                extra={"job_id": submitted.job.id},
-            )
+        except Exception as error:
             self.metrics.store_errors.labels("start_workflow").inc()
+            if _unstartable(error):
+                await self._fail_unstartable(submitted.job, error)
+            else:
+                # The row is committed: the reconciler starts it.
+                logger.exception(
+                    "could not start a render's workflow; the reconciler will",
+                    extra={"job_id": submitted.job.id},
+                )
         return submitted.job
 
     async def cancel(self, job_id: str, *, slug: str) -> Job | None:
@@ -170,12 +206,15 @@ class RenderService:
                 await self._start(job, WorkflowIDConflictPolicy.FAIL)
             except WorkflowAlreadyStartedError:
                 continue
-            except Exception:
+            except Exception as error:
                 # One row that cannot start must not hold back the rows behind it.
-                logger.exception(
-                    "could not start a pending render's workflow", extra={"job_id": job.id}
-                )
                 self.metrics.store_errors.labels("start_workflow").inc()
+                if _unstartable(error):
+                    await self._fail_unstartable(job, error)
+                else:
+                    logger.exception(
+                        "could not start a pending render's workflow", extra={"job_id": job.id}
+                    )
                 continue
             started.append(job.id)
         if started:
@@ -184,6 +223,14 @@ class RenderService:
                 extra={"count": len(started), "job_ids": started},
             )
         return len(started)
+
+    async def prune(self) -> None:
+        """What `RenderQueue._prune` does: settled jobs past `job_ttl` (and their blob
+        refs), revision exports and kept renders."""
+        ttl = self.config.job_ttl
+        await asyncio.to_thread(self.store.prune, ttl)
+        await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
+        await asyncio.to_thread(prune_render_cache, self.paths, ttl)
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
@@ -201,6 +248,7 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
+            rpc_timeout=RPC_TIMEOUT,
         )
         png: bytes = await asyncio.wait_for(handle.result(), timeout)
         return png
@@ -238,12 +286,28 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=conflict,
             memo=self._memo(),
+            rpc_timeout=RPC_TIMEOUT,
         )
+
+    async def _fail_unstartable(self, job: Job, error: Exception) -> None:
+        """Settle a row whose workflow Temporal will never start, so it neither waits
+        forever nor holds its render key for every identical request."""
+        logger.error(
+            "Temporal refused a render's workflow for good; failing the job",
+            extra={"job_id": job.id, "error": str(error)},
+        )
+        job.state = "failed"
+        job.finished_at = now()
+        job.error = f"the render could not be started: {error}"
+        if await asyncio.to_thread(self.store.finish, job):
+            self._settled(job, "failed")
 
     async def _cancel_workflow(self, job: Job) -> None:
         assert self.client is not None
         try:
-            await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel()
+            await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel(
+                rpc_timeout=RPC_TIMEOUT
+            )
         except RPCError as error:
             if error.status == RPCStatusCode.NOT_FOUND:
                 # Never started (the reconciler had not got to it). A closed one
@@ -268,12 +332,20 @@ class RenderService:
             self.metrics.store_errors.labels("cancel_workflow").inc()
 
     async def _reconcile_forever(self) -> None:
+        loop = asyncio.get_running_loop()
+        pruned = loop.time()
         while True:
             await asyncio.sleep(self.reconcile_interval)
             try:
                 await self.reconcile_once()
             except Exception:
                 logger.exception("the render reconciler's pass failed")
+            if loop.time() - pruned >= self.prune_interval:
+                pruned = loop.time()
+                try:
+                    await self.prune()
+                except Exception:
+                    logger.exception("could not prune settled render jobs")
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
         self.metrics.render_finished.labels(outcome).inc()

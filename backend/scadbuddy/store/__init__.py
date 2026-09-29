@@ -5,17 +5,26 @@ Bambuddy backend and the byte-stream calls."""
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Protocol
 
 from scadbuddy.store.refs import BlobRefs
 
+logger = logging.getLogger(__name__)
+
 
 class BlobStore(Protocol):
     backend: str
 
-    def dir_for(self, key: str) -> Path: ...
+    def dir_for(self, key: str) -> Path:
+        """The blob's directory, created if missing. Every call, for a blob that
+        already exists too, refreshes its `touched_at`: a claimant calls this before
+        `BlobRefs.add`, and that is what keeps `sweep_blobs` from taking a blob
+        claimed between its `referenced()` snapshot and its pass over the keys."""
+        ...
+
     def exists(self, key: str) -> bool: ...
     def remove(self, key: str) -> None: ...
     def keys(self) -> list[str]: ...
@@ -35,9 +44,20 @@ def sweep_blobs(
     removed: list[str] = []
     blob_keys = store.keys()
     for key in blob_keys:
-        if key in kept or store.touched_at(key) > cutoff:
+        if key in kept:
             continue
-        store.remove(key)
+        try:
+            touched = store.touched_at(key)
+        except FileNotFoundError:
+            continue  # gone since `keys()`: another sweep took it
+        if touched > cutoff:
+            continue
+        try:
+            store.remove(key)
+        except OSError:
+            # One blob that cannot go (EACCES, EBUSY) must not keep every other one.
+            logger.exception("could not remove a blob", extra={"key": key})
+            continue
         removed.append(key)
     return removed
 

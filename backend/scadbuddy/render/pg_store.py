@@ -141,6 +141,8 @@ JOB_COLUMNS = (
 )
 
 TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identical render is queued"
+#: A render a Temporal deployment was running when the API restarted onto this queue.
+TEMPORAL_INTERRUPTED_ERROR = "interrupted: the API restarted onto the legacy queue"
 
 
 def _job(row: DictRow) -> Job:
@@ -340,7 +342,21 @@ class PostgresJobStore:
     def abandon_orphans(self) -> list[Job]:
         # Pending jobs are durable and still wanted; running ones are recovered by
         # `reap` once their lease runs out, whichever process held them.
-        return []
+        #
+        # Rows a Temporal deployment left (SCADBUDDY_TEMPORAL_ADDRESS cleared since):
+        # a pending one becomes this queue's to claim, and a running one, whose
+        # workflow no worker here will finish, is failed. The caller announces those.
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE render_jobs SET workflow_id = NULL"
+                " WHERE state = 'pending' AND workflow_id IS NOT NULL"
+            )
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE state = 'running' AND workflow_id IS NOT NULL RETURNING *",
+                (TEMPORAL_INTERRUPTED_ERROR,),
+            ).fetchall()
+        return [_job(row) for row in rows]
 
     def reap(self, *, lease: float, max_attempts: int) -> Reaped:
         """One short transaction per stale job, not one for the whole pass: each

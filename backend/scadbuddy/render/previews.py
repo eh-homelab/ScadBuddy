@@ -24,6 +24,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import Executor
 from contextlib import suppress
 
+from temporalio.exceptions import ApplicationError
+
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
@@ -61,6 +63,26 @@ PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 class PreviewFailedError(Exception):
     pass
+
+
+#: What a render activity's failure carries as its type when it raised one of these.
+_RENDER_ERROR_TYPES = frozenset({OpenSCADError.__name__, PreviewFailedError.__name__})
+
+
+def is_render_error(error: BaseException) -> bool:
+    """Whether ``error`` says this source does not render (so it is not worth trying
+    again until the source changes), rather than that the render could not be run:
+    OpenSCAD's own failure, here or on the worker (a workflow failure caused by one),
+    or a render past its timeout. An RPC error, a worker not polling yet, or any other
+    infrastructure failure is not."""
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, OpenSCADError | PreviewFailedError | TimeoutError):
+            return True
+        if isinstance(cause, ApplicationError) and cause.type in _RENDER_ERROR_TYPES:
+            return True
+        cause = cause.__cause__
+    return False
 
 
 async def render_preview(
@@ -216,6 +238,14 @@ class PreviewScheduler:
             raise
         except Exception as error:
             reason = str(error) or type(error).__name__
+            if not is_render_error(error):
+                # Not this source's fault: nothing is recorded, so the next request
+                # for it (an edit, the next boot's pass) tries again.
+                logger.warning(
+                    "could not run the default render for a preview; it is tried again later",
+                    extra={"slug": slug, "error": reason},
+                )
+                return True
             logger.warning(
                 "the default render for a preview failed; the model keeps no thumbnail",
                 extra={"slug": slug, "error": reason},
