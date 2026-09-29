@@ -6,6 +6,7 @@ import type {
   Asset,
   AssetUsage,
   AttachResult,
+  BambuddyStatus,
   BambuddyTargets,
   ChoicesView,
   ConnectionTest,
@@ -50,6 +51,7 @@ import type {
   ProjectFile,
   ProjectRequest,
   ProjectView,
+  RememberedChoices,
   RenderAccepted,
   SendRequest,
   SendResult,
@@ -842,6 +844,14 @@ export const api = {
   testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
 
   getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
+
+  /** #322 — Bambuddy's version and whether it captures a finish photo; read-only. */
+  getBambuddyStatus: () => request<BambuddyStatus>('/settings/bambuddy'),
+
+  /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
+  getRemembered: () => request<RememberedChoices>('/settings/remembered'),
+
+  forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
