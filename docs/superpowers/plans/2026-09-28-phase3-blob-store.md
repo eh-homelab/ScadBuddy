@@ -29,12 +29,14 @@
 
 ## Review Focus
 
-1. **A `Work/` file deleted or replaced by a person in Bambuddy's UI** must make the piece render again, never fail the job or feed altered bytes to a later step — Task 5, `test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again`.
+1. **A `Work/` file deleted or replaced by a person in Bambuddy's UI** must make the piece render again at `cached_piece`, and never feed altered bytes to a later step. If it goes missing between two stages of one piece, that piece fails by name (`PieceStateLost`, non-retryable), and the next submit renders it from the start. It must never be a stage that Temporal retries forever on a missing file. Pinned by Task 5, `test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again` and `test_a_stage_whose_piece_is_gone_fails_by_name`.
 2. **Two workers storing the first blob of a new template at once** must create exactly one `<Template>/Work` pair in Bambuddy — Task 4, `test_concurrent_first_uploads_create_one_folder_pair`.
 3. **A zombie attempt** (heartbeat timed out, still running) publishing after its retry has published must be refused, never overwrite the newer piece — Task 5, `test_a_stale_publisher_cannot_overwrite_a_newer_piece`.
 4. **A delete aimed at a file outside a ScadBuddy `Work/` folder** (a project folder, a folder the user made) must be refused without sending the DELETE — Task 4, `test_delete_outside_a_work_folder_is_refused_without_a_request`.
 5. **The render key rotated in Settings while workers run** must be used by the next store call without a restart — Task 4, `test_a_rotated_render_key_is_used_without_a_restart`.
 6. **A `render_main` retried on a worker whose cache has never seen the piece**, after an earlier attempt (or an earlier `RenderPiece` that failed later) already published it, must publish over it, never fail with `StaleBlobError` until the sweep — Task 5, `test_render_main_on_a_worker_without_the_piece_publishes_over_the_index`.
+7. **Two puts racing over one object:** a put reuses an existing object with the same sha while another put or delete frees that object's last row. The reused object must never be removed from under the new row. Either the release sees the new row and keeps the object, or the reuse sees it freed and uploads its own copy. Pinned by Task 2, `test_a_reuse_that_loses_to_a_release_uploads_its_own_copy`.
+8. **Deletes are scoped to the configured inbox:** a `Work/` folder ScadBuddy recorded under an inbox that Settings no longer names is not a folder it may delete from. Pinned by Task 4, `test_a_delete_in_a_work_folder_of_another_inbox_is_refused`.
 
 ---
 
@@ -408,7 +410,7 @@ git commit -m "feat(settings): store-backed render key and store backend (#426)"
   class BlobRef(BaseModel): sha256: str; kind: BlobKind; backend: str; backend_id: str; size: int
   class BlobStat(BaseModel): key: str; ref: BlobRef; slug: str | None; meta: dict[str, Any]; touched_at: datetime
   class StoreUsage(BaseModel): backend: str; count: int; bytes: int; max_count: int; max_total_bytes: int; by_kind: dict[str, int]
-  class StoreFullError(Exception); class BlobCorruptError(Exception); class BlobMissingError(KeyError)
+  class StoreFullError(Exception); class BlobCorruptError(Exception); class BlobMissingError(KeyError); class ReuseLostError(LookupError)
   class ContentBackend(Protocol): backend: str; async upload(kind, data: bytes, *, name: str, scope: BlobScope) -> str; download(backend_id: str) -> AsyncIterator[bytes]; async exists(backend_id) -> bool; async remove(backend_id) -> None
   class ContentStore:
       index: BlobIndex; backend: ContentBackend
@@ -515,7 +517,9 @@ import pytest
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobMissingError,
+    BlobRef,
     BlobScope,
+    ReuseLostError,
     StoreFullError,
     sweep_content,
 )
@@ -579,6 +583,27 @@ async def test_delete_keeps_an_object_another_key_still_names(tmp_path: Path, po
     assert await store.read(ref) == b"same"
     await store.delete("b")
     assert not (tmp_path / "remote" / ref.backend_id).exists()
+
+
+async def test_a_reuse_that_loses_to_a_release_uploads_its_own_copy(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = local_content(tmp_path / "remote", pool)
+    old = await store.put("snapshot", b"same", name="a", scope=SCOPE, key="a")
+    looked_up = store.index.by_sha
+
+    def stale_lookup(sha256: str, kind: str, backend: str) -> BlobRef | None:
+        found = looked_up(sha256, kind, backend)
+        # Between this lookup and the reusing put's row: "a" moves on, freeing `old`.
+        store.index.put("a", old.model_copy(update={"backend_id": "elsewhere"}), slug="demo", meta={})
+        return found
+
+    monkeypatch.setattr(store.index, "by_sha", stale_lookup)
+    ref = await store.put("snapshot", b"same", name="b", scope=SCOPE, key="b")
+    assert ref.backend_id != old.backend_id  # its own upload, not the freed object
+    assert await store.read(ref) == b"same"
+    with pytest.raises(ReuseLostError):
+        store.index.put("c", old, slug="demo", meta={}, reuse=True)
 
 
 async def test_sweep_takes_only_unreferenced_stale_pieces_and_snapshots(
@@ -662,7 +687,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.store.content_models import BlobRef, BlobStat
+from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 
 Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = "key, sha256, kind, backend, backend_id, size, slug, meta, touched_at"
@@ -702,23 +727,70 @@ class BlobIndex:
             ).fetchone()
         return _stat(row).ref if row is not None else None
 
-    def put(self, key: str, ref: BlobRef, *, slug: str | None, meta: dict[str, Any]) -> None:
+    @staticmethod
+    def _hold_shared(conn: Connection[DictRow], ref: BlobRef) -> None:
+        """For a reused object, in the caller's transaction: lock a row that names it.
+        A concurrent put or delete that would free that row now waits for this
+        transaction, and its `shares_backend_id` check afterwards sees the new row. If
+        the object was freed first, no row matches, and this raises so the caller
+        uploads its own copy. A false miss (the one matched row moved on under
+        READ COMMITTED) only costs an upload."""
+        row = conn.execute(
+            "SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s LIMIT 1 FOR SHARE",
+            (ref.backend, ref.backend_id),
+        ).fetchone()
+        if row is None:
+            raise ReuseLostError(f"{ref.backend}:{ref.backend_id} was freed while being reused")
+
+    def put(
+        self, key: str, ref: BlobRef, *, slug: str | None, meta: dict[str, Any], reuse: bool = False
+    ) -> BlobRef | None:
+        """Point ``key`` at ``ref`` and return what it named before. The old value is read
+        under the row's lock in the same transaction, so two racing puts each release
+        exactly the object the other replaced. A key that another put created meanwhile
+        is retried as an update, because a single upsert would not see that row's
+        object. With ``reuse``, ``ref`` names an existing object (`_hold_shared`)."""
+        values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size, slug, meta)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO UPDATE SET"
-                " sha256 = EXCLUDED.sha256, kind = EXCLUDED.kind, backend = EXCLUDED.backend,"
-                " backend_id = EXCLUDED.backend_id, size = EXCLUDED.size, slug = EXCLUDED.slug,"
-                " meta = EXCLUDED.meta, touched_at = now()",
-                (key, ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta)),
-            )
+            while True:
+                with conn.transaction():
+                    if reuse:
+                        self._hold_shared(conn, ref)
+                    row = conn.execute(
+                        f"SELECT {_COLUMNS} FROM store_blobs WHERE key = %s FOR UPDATE", (key,)
+                    ).fetchone()
+                    if row is not None:
+                        conn.execute(
+                            "UPDATE store_blobs SET sha256 = %s, kind = %s, backend = %s,"
+                            " backend_id = %s, size = %s, slug = %s, meta = %s,"
+                            " touched_at = now() WHERE key = %s",
+                            (*values, key),
+                        )
+                        return _stat(row).ref
+                    inserted = conn.execute(
+                        "INSERT INTO store_blobs"
+                        " (sha256, kind, backend, backend_id, size, slug, meta, key)"
+                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (key) DO NOTHING",
+                        (*values, key),
+                    )
+                    if inserted.rowcount == 1:
+                        return None
 
     def swap(
-        self, key: str, ref: BlobRef, *, expected: str | None, slug: str | None, meta: dict[str, Any]
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        expected: str | None,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
     ) -> bool:
         """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            if reuse:
+                self._hold_shared(conn, ref)
             if expected is None:
                 cursor = conn.execute(
                     "INSERT INTO store_blobs (sha256, kind, backend, backend_id, size, slug, meta, key)"
@@ -862,6 +934,12 @@ class BlobMissingError(KeyError):
 class RefusedDeleteError(RuntimeError):
     """A delete aimed at a file outside a ScadBuddy `Work/` folder (spec §6.3). Raised
     by the Bambuddy backend (Task 4); here so `sweep_content` can catch it per key."""
+
+
+class ReuseLostError(LookupError):
+    """A put meant to reuse an existing object, but by the time its row was written no
+    row named that object any more: a concurrent put or delete freed it (and may be
+    removing it). The caller uploads its own copy."""
 ```
 
 `content.py` re-exports every name.
@@ -902,6 +980,7 @@ from scadbuddy.store.content_models import (
     BlobScope,
     BlobStat,
     RefusedDeleteError,
+    ReuseLostError,
     StoreFullError,
     StoreUsage,
 )
@@ -980,11 +1059,16 @@ class ContentStore:
                 f" past SCADBUDDY_STORE_MAX_TOTAL_BYTES ({self.max_total_bytes})"
             )
 
-    async def _store(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> BlobRef:
+    async def _store(
+        self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope, reuse: bool = True
+    ) -> tuple[BlobRef, bool]:
+        """The object for ``data``, and whether it is an existing one (reused). A reused
+        object is only safe once its row is written under `BlobIndex._hold_shared`."""
         sha = hashlib.sha256(data).hexdigest()
-        existing = await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
-        if existing is not None and await self.backend.exists(existing.backend_id):
-            return existing  # a re-put: never refused, never uploaded twice
+        if reuse:
+            existing = await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+            if existing is not None and await self.backend.exists(existing.backend_id):
+                return existing, True  # a re-put: never refused, never uploaded twice
         try:
             await asyncio.to_thread(self._require_room, len(data))
         except StoreFullError:
@@ -992,10 +1076,14 @@ class ContentStore:
             raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
-        return BlobRef(sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data))
+        ref = BlobRef(sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data))
+        return ref, False
 
     async def _release(self, ref: BlobRef) -> None:
-        """Remove the object unless an index row still names it."""
+        """Remove the object unless an index row still names it. Refuses a ref on another
+        backend (a row left by a `store_backend` switch): its id means nothing here."""
+        if ref.backend != self.name:
+            raise ValueError(f"a {ref.backend} object is not this {self.name} store's to remove")
         if not await asyncio.to_thread(self.index.shares_backend_id, ref.backend, ref.backend_id):
             await self.backend.remove(ref.backend_id)
             self._count("delete", "ok")
@@ -1010,13 +1098,37 @@ class ContentStore:
         key: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> BlobRef:
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
-        previous = await asyncio.to_thread(self.index.get, key)
-        await asyncio.to_thread(self.index.put, key, ref, slug=scope.slug, meta=meta or {})
-        if previous is not None and previous.ref.backend_id != ref.backend_id:
-            await self._release(previous.ref)
+        try:
+            previous = await asyncio.to_thread(
+                self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
+            )
+        except ReuseLostError:
+            # Freed between the lookup and this row: store this put's own copy.
+            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            previous = await asyncio.to_thread(
+                self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+            )
+        if previous is not None and previous.backend_id != ref.backend_id:
+            await self._release_replaced(key, previous)
         return ref
+
+    async def _release_replaced(self, key: str, previous: BlobRef) -> None:
+        if previous.backend != self.name:
+            # The key now names this backend's object, so no row names the old one: it
+            # is left untracked on the other backend rather than deleted from here.
+            logger.warning(
+                "left a replaced blob on another backend",
+                extra={"key": key, "backend": previous.backend},
+            )
+            return
+        try:
+            await self._release(previous)
+        except RefusedDeleteError:
+            # The new object is stored and indexed; the old one was moved out of a Work/
+            # folder, so it stays, untracked, as the sweep leaves a refused one.
+            logger.exception("the backend refused to delete a replaced blob", extra={"key": key})
 
     async def replace(
         self,
@@ -1031,16 +1143,23 @@ class ContentStore:
     ) -> BlobRef | None:
         """`put` under ``key`` only if the key still names ``expected``; None if it
         moved on, and this call's own upload is removed again."""
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         previous = await asyncio.to_thread(self.index.get, key)
-        landed = await asyncio.to_thread(
-            self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            landed = await asyncio.to_thread(
+                self.index.swap, key, ref, expected=expected, slug=scope.slug,
+                meta=meta or {}, reuse=reused,
+            )
+        except ReuseLostError:
+            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            landed = await asyncio.to_thread(
+                self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
+            )
         if not landed:
-            await self._release(ref)
+            await self._release(ref)  # kept if a row names it (a reuse)
             return None
         if previous is not None and previous.ref.backend_id != ref.backend_id:
-            await self._release(previous.ref)
+            await self._release_replaced(key, previous.ref)
         return ref
 
     async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
@@ -1553,6 +1672,24 @@ async def test_delete_outside_a_work_folder_is_refused_without_a_request(pool: P
 
 
 @respx.mock
+async def test_a_delete_in_a_work_folder_of_another_inbox_is_refused(pool: Pool) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_folders (inbox_id, slug, role, folder_id) VALUES (%s, 'old', 'work', 42)",
+            (INBOX + 1,),
+        )
+    respx.get(f"{API}/library/files/78").mock(
+        return_value=httpx.Response(200, json=shaped("FileResponse", id=78, filename="p", folder_id=42))
+    )
+    delete = respx.delete(f"{API}/library/files/78")
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(RefusedDeleteError):
+        await backend.remove("78")
+    assert not delete.called
+    await backend.aclose()
+
+
+@respx.mock
 async def test_delete_in_work_is_sent_and_an_already_gone_file_is_fine(pool: Pool) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
     respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
@@ -1667,11 +1804,23 @@ from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow, dict_row
+
 from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
 from scadbuddy.store.index import Pool
 
 WORK = "Work"
+#: The longest a folder find waits behind another process's find of the same folder.
+FOLDER_LOCK_TIMEOUT = "30s"
+
+
+def folder_lock_key(inbox: int, slug: str, role: str) -> int:
+    """The advisory-lock key for finding one folder, the same in every process."""
+    parts = ("store-folder", inbox, slug, role)
+    return int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
+
 SHARED_TITLE = "Shared"
 _MEDIA_TYPES = {
     ".zip": "application/zip",
@@ -1753,6 +1902,8 @@ class BambuddyContentBackend:
         self._http = http or httpx.AsyncClient()
         self._owns_http = http is None
         self._folders: dict[tuple[int, str, str], int] = {}
+        #: One find per folder at a time in this process; others wait for its answer.
+        self._finding: dict[tuple[int, str, str], asyncio.Lock] = {}
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -1805,14 +1956,15 @@ class BambuddyContentBackend:
         return True
 
     async def remove(self, backend_id: str) -> None:
-        async with self._client() as (client, _):
+        async with self._client() as (client, inbox):
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
                 if error.status == 404:
                     return
                 raise
-            work = await asyncio.to_thread(self._work_folders)
+            # Only the Work folders of the inbox Settings names now (spec §6.3).
+            work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
                     f"library file {backend_id} is in folder {file.folder_id}, not a ScadBuddy"
@@ -1846,13 +1998,19 @@ class BambuddyContentBackend:
         found = self._folders.get(cache_key)
         if found is not None:
             return found
-        async with self._locked("store-folder", inbox, slug, role):
-            found = await asyncio.to_thread(self._recorded, inbox, slug, role)
-            if found is None:
-                found = await self._adopt_or_create(client, name, parent_id)
-                await asyncio.to_thread(self._record, inbox, slug, role, found)
-        self._folders[cache_key] = found
-        return found
+        async with self._finding.setdefault(cache_key, asyncio.Lock()):
+            found = self._folders.get(cache_key)
+            if found is not None:
+                return found
+            # Across processes: the lock's own connection is used for the lookup and the
+            # record too, so a find takes no pooled connection and no thread.
+            async with self._locked(folder_lock_key(inbox, slug, role)) as conn:
+                found = await self._recorded(conn, inbox, slug, role)
+                if found is None:
+                    found = await self._adopt_or_create(client, name, parent_id)
+                    await self._record(conn, inbox, slug, role, found)
+            self._folders[cache_key] = found
+            return found
 
     async def _adopt_or_create(self, client: BambuddyClient, name: str, parent_id: int) -> int:
         for root in await client.folders():
@@ -1862,34 +2020,48 @@ class BambuddyContentBackend:
         return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
 
     @asynccontextmanager
-    async def _locked(self, *parts: object) -> AsyncIterator[None]:
-        """A Postgres advisory lock, so two workers never both create a folder."""
-        key = int.from_bytes(hashlib.sha256(repr(parts).encode()).digest()[:8], "big", signed=True)
-        conn = await asyncio.to_thread(self._pool.getconn)
+    async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:
+        """A transaction-scoped advisory lock, so two workers never both create a folder.
+        It runs on a connection of its own: the wait is in the event loop, not a thread,
+        and a find never holds a pooled connection, so a slow Bambuddy cannot starve the
+        pool that the index and settings reads use. `lock_timeout` bounds the wait
+        behind another process's find. The Bambuddy calls under the lock are bounded
+        by the client's own timeout. A path that leaves without the COMMIT (a
+        cancellation) closes the connection, and the rollback releases the lock.
+        Yields the connection, for the work done under the lock."""
+        conninfo = self._pool.conninfo
+        conn = await AsyncConnection.connect(
+            conninfo() if callable(conninfo) else conninfo, autocommit=True, row_factory=dict_row
+        )
         try:
-            await asyncio.to_thread(conn.execute, "SELECT pg_advisory_lock(%s)", (key,))
-            try:
-                yield
-            finally:
-                await asyncio.to_thread(conn.execute, "SELECT pg_advisory_unlock(%s)", (key,))
+            await conn.execute("BEGIN")
+            await conn.execute(f"SET LOCAL lock_timeout = '{FOLDER_LOCK_TIMEOUT}'")
+            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+            yield conn
+            await conn.execute("COMMIT")
         finally:
-            await asyncio.to_thread(self._pool.putconn, conn)
+            await conn.close()
 
-    def _recorded(self, inbox: int, slug: str, role: str) -> int | None:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT folder_id FROM store_folders WHERE inbox_id = %s AND slug = %s AND role = %s",
-                (inbox, slug, role),
-            ).fetchone()
+    @staticmethod
+    async def _recorded(
+        conn: AsyncConnection[DictRow], inbox: int, slug: str, role: str
+    ) -> int | None:
+        cursor = await conn.execute(
+            "SELECT folder_id FROM store_folders WHERE inbox_id = %s AND slug = %s AND role = %s",
+            (inbox, slug, role),
+        )
+        row = await cursor.fetchone()
         return int(row["folder_id"]) if row is not None else None
 
-    def _record(self, inbox: int, slug: str, role: str, folder_id: int) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO store_folders (inbox_id, slug, role, folder_id) VALUES (%s, %s, %s, %s)"
-                " ON CONFLICT DO NOTHING",
-                (inbox, slug, role, folder_id),
-            )
+    @staticmethod
+    async def _record(
+        conn: AsyncConnection[DictRow], inbox: int, slug: str, role: str, folder_id: int
+    ) -> None:
+        await conn.execute(
+            "INSERT INTO store_folders (inbox_id, slug, role, folder_id) VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (inbox, slug, role, folder_id),
+        )
 
     def _forget(self, inbox: int, slug: str) -> None:
         with self._pool.connection() as conn:
@@ -1897,9 +2069,11 @@ class BambuddyContentBackend:
         for role in ("template", "work"):
             self._folders.pop((inbox, slug, role), None)
 
-    def _work_folders(self) -> set[int]:
+    def _work_folders(self, inbox: int) -> set[int]:
         with self._pool.connection() as conn:
-            rows = conn.execute("SELECT folder_id FROM store_folders WHERE role = 'work'").fetchall()
+            rows = conn.execute(
+                "SELECT folder_id FROM store_folders WHERE role = 'work' AND inbox_id = %s", (inbox,)
+            ).fetchall()
         return {int(row["folder_id"]) for row in rows}
 ```
 
@@ -2068,6 +2242,8 @@ git commit -m "feat(store): Bambuddy backend — inbox/Template/Work layout, del
   async def publish(self, key: str, *, scope: BlobScope) -> None    # the dir, as it is, is the blob now (CAS on its marker)
   async def indexed_sha(self, key: str) -> str | None               # the sha the store holds for key now
   async def publish_fresh(self, key: str, *, scope: BlobScope, expected: str | None) -> None   # CAS on `expected`
+  async def checkout(self, key: str) -> str | None                  # fetch for a stage that writes: its sha (the baseline); PieceStateLostError when gone
+  class PieceStateLostError(LookupError)                            # store/__init__.py
   # store/cache.py
   class StaleBlobError(RuntimeError)
   class CachedBlobStore:                                             # a BlobStore
@@ -2103,13 +2279,17 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobResult, PartInfo
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.store.archive import MARKER, pack_dir, unpack_dir
+from temporalio.exceptions import ApplicationError
+from temporalio.testing import ActivityEnvironment
+
+from scadbuddy.store import PieceStateLostError
+from scadbuddy.store.archive import MARKER, pack_dir, read_marker, unpack_dir
 from scadbuddy.store.cache import CachedBlobStore, StaleBlobError
 from scadbuddy.store.content import BlobScope, ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _write_piece
+from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities, WorkerDeps, _checkout, _write_piece
 from scadbuddy.workflows.models import PieceRequest, PieceResult
 from tests.support.store import local_content
 
@@ -2194,6 +2374,20 @@ async def test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again(
         assert content.index.get(key) is None  # forgotten: the next render stores it again
 
 
+async def test_a_stage_whose_piece_is_gone_fails_by_name(tmp_path: Path, content: ContentStore) -> None:
+    a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
+    (a.dir_for("k") / "model.3mf").write_bytes(b"main")
+    await a.publish("k", scope=SCOPE)
+    assert await b.checkout("k") is not None
+    assert read_marker(b.dir_for("k")) is None  # mid-stage: no longer a hit
+    await content.forget("k")  # deleted in the backend between two stages
+    with pytest.raises(PieceStateLostError):
+        await b.checkout("k")
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(_checkout, b, "k")
+    assert raised.value.type == "PieceStateLost" and raised.value.non_retryable
+
+
 def test_an_archive_entry_outside_its_directory_is_refused(tmp_path: Path) -> None:
     evil = io.BytesIO()
     with zipfile.ZipFile(evil, "w") as z:
@@ -2215,16 +2409,22 @@ def test_packing_is_deterministic_and_leaves_out_dotfiles(tmp_path: Path) -> Non
     assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ["a.txt"]
 
 
-async def test_eviction_keeps_unpublished_and_recent_pieces(tmp_path: Path, content: ContentStore) -> None:
+async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
+    tmp_path: Path, content: ContentStore
+) -> None:
     a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
     for key in ("old", "recent"):
         (a.dir_for(key) / "m").write_bytes(b"x" * 10)
         await a.publish(key, scope=SCOPE)
-    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published, in flight
+    (a.dir_for("crashed") / "m").write_bytes(b"x" * 10)  # never published, abandoned
+    staging = a.local.root / ".staging-1"
+    staging.mkdir()
+    (staging / "m").write_bytes(b"x" * 10)  # an `unpack_dir` a crash left
     past = time.time() - 3600
-    os.utime(a.local.root / "old", (past, past))
-    os.utime(a.local.root / "rendering", (past, past))
-    assert a.evict() == ["old"]
+    for name in ("old", "crashed", ".staging-1"):
+        os.utime(a.local.root / name, (past, past))
+    assert sorted(a.evict()) == [".staging-1", "crashed", "old"]
     assert a.local.exists("recent") and a.local.exists("rendering")
 
 
@@ -2426,13 +2626,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scadbuddy.render.job_models import JobResult
-from scadbuddy.store import BlobStore
-from scadbuddy.store.archive import pack_dir, read_marker, unpack_dir, write_marker
+from scadbuddy.store import BlobStore, PieceStateLostError
+from scadbuddy.store.archive import MARKER, pack_dir, read_marker, unpack_dir, write_marker
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
 from scadbuddy.store.local import LocalBlobStore
 
@@ -2521,6 +2722,19 @@ class CachedBlobStore:
         directory = self.local.dir_for(key)
         await self._publish(key, scope, expected=read_marker(directory))
 
+    async def checkout(self, key: str) -> str | None:
+        """`fetch` for a stage about to write into the directory. Returns the sha it
+        fetched, which is the stage's `publish_fresh` baseline, and clears the marker,
+        so a stage that dies half-way leaves no directory that looks published.
+        Raises `PieceStateLostError` when the store no longer holds the piece: a later
+        stage cannot continue from nothing, and a retry would find nothing either."""
+        if not await self.fetch(key):
+            raise PieceStateLostError(key)
+        directory = self.local.dir_for(key)
+        sha = read_marker(directory)
+        await asyncio.to_thread((directory / MARKER).unlink, missing_ok=True)
+        return sha
+
     async def indexed_sha(self, key: str) -> str | None:
         stat = await asyncio.to_thread(self.content.index.get, key)
         return stat.ref.sha256 if stat is not None else None
@@ -2542,29 +2756,30 @@ class CachedBlobStore:
         return sum(_size(self.local.root / key) for key in self.local.keys())
 
     def evict(self, *, now: float | None = None) -> list[str]:
-        """Least recently used first, down to `max_bytes`; only published directories
-        (a marker) not touched within `min_age`."""
+        """Least recently used first, down to `max_bytes`, of every directory not touched
+        within `min_age`. That includes one with no marker and a dot-named staging
+        directory: nothing that old belongs to a running attempt (`min_age` is the
+        longest one can live), so it was left by a crash or a failed render, and it
+        would otherwise hold the cache over its cap for good."""
         cutoff = (time.time() if now is None else now) - self.min_age
         entries = []
-        for key in self.local.keys():
-            if key.startswith("."):
-                continue  # an `unpack_dir` staging directory, gone in a moment
-            directory = self.local.root / key  # not dir_for: that would touch it
+        for directory in self.local.root.iterdir() if self.local.root.is_dir() else ():
             try:
-                mtime = directory.stat().st_mtime
+                mtime = directory.stat().st_mtime  # not dir_for: that would touch it
             except FileNotFoundError:
                 continue
-            entries.append((mtime, key, _size(directory), read_marker(directory)))
-        total = sum(size for _, _, size, _ in entries)
+            if directory.is_dir():
+                entries.append((mtime, directory.name, _size(directory)))
+        total = sum(size for _, _, size in entries)
         removed: list[str] = []
-        for mtime, key, size, marker in sorted(entries):
+        for mtime, name, size in sorted(entries):
             if total <= self.max_bytes:
                 break
-            if marker is None or mtime > cutoff:
+            if mtime > cutoff:
                 continue
-            self.local.remove(key)
+            shutil.rmtree(self.local.root / name, ignore_errors=True)
             total -= size
-            removed.append(key)
+            removed.append(name)
         return removed
 
 
@@ -2595,6 +2810,7 @@ In `backend/scadbuddy/core/metrics.py`, beside `store_ops`:
 In `backend/scadbuddy/workflows/activities.py`:
 
 ```python
+from scadbuddy.store import PieceStateLostError
 from scadbuddy.store.content import BlobScope, template_title
 
 
@@ -2633,7 +2849,43 @@ and after `output = await _heartbeating(work)` and its `except`, before `return 
         )
 ```
 
-In `render_solids`, first line after `d = self.deps`: `await d.blobs.fetch(req.piece_key)` (the main 3MF may have been rendered on another worker); after its `_heartbeating(work)` block, `await _heartbeating(asyncio.create_task(d.blobs.publish(req.piece_key, scope=_scope(req, prepared))))`: `publish`, not `publish_fresh`, because this stage fetched, so its marker is the right baseline and a zombie is refused (Review Focus 3). In `finish_piece`, first line after `d = self.deps`: `await d.blobs.fetch(req.piece_key)`; after `await asyncio.to_thread(_write_piece, work, piece)`, the same `publish` call. A `StaleBlobError` propagates as a retryable activity failure. With the `local` backend `fetch` is `exists` and `publish` does nothing, so phase 1's behaviour is unchanged.
+`PieceStateLostError` goes in `store/__init__.py` beside the protocol (`LocalBlobStore.checkout` raises it when `not self.exists(key)` and otherwise returns None):
+
+```python
+class PieceStateLostError(LookupError):
+    """A stage found nothing to continue from: the store no longer holds the piece an
+    earlier stage published (deleted in the backend between two stages)."""
+```
+
+In `workflows/activities.py`, beside `_scope`:
+
+```python
+async def _checkout(blobs: BlobStore, key: str) -> str | None:
+    """The piece an earlier stage published, for this stage to continue; its sha is the
+    publish baseline. Non-retryable when the store lost it: a retry would find nothing
+    either, and the next submit renders the piece from the start."""
+    try:
+        return await _heartbeating(asyncio.create_task(blobs.checkout(key)))
+    except PieceStateLostError:
+        raise ApplicationError(
+            f"piece {key} is no longer in the store; an earlier stage's output was lost",
+            type="PieceStateLost",
+            non_retryable=True,
+        ) from None
+```
+
+In `render_solids` and in `finish_piece`, the first line after `d = self.deps` is `baseline = await _checkout(d.blobs, req.piece_key)`. The main 3MF may have been rendered on another worker, and a result of `False` is never ignored. At the end of `render_solids`'s `_heartbeating(work)` block, and in `finish_piece` after `await asyncio.to_thread(_write_piece, work, piece)`, add:
+
+```python
+        # Against the sha this stage checked out, so a zombie attempt is refused.
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+            )
+        )
+```
+
+A `StaleBlobError` propagates as a retryable activity failure (Review Focus 3). With the `local` backend, `fetch` is `exists`, `checkout` only checks that the piece is there, and `publish` does nothing, so phase 1's behaviour is unchanged.
 
 - [ ] **Step 7: Run the tests**
 
@@ -3825,7 +4077,7 @@ In `frontend/src/pages/SettingsPage.tsx`:
             </div>
 ```
 
-(`folderId` is the page's existing library-folder state; use its name as it is in the file. If `border-warn` is not a token in the Tailwind config, use the class the page's existing error banner uses.)
+(`folderId` is the page's existing library-folder state, `const [folderId, setFolderId] = useState('')` in `frontend/src/pages/SettingsPage.tsx`, seeded from `settings.library_folder_id`. If `border-warn` is not a token in the Tailwind config, use the class the page's existing error banner uses.)
 
 - replace `api.getAssetUsage()` with `api.getStoreUsage()`, the heading "Uploaded files" with "Store", `data-testid="asset-usage"` with `"store-usage"`, and add a first row `<dt className="text-muted">Where</dt><dd>{usage.backend === 'bambuddy' ? 'Bambuddy library' : 'This server’s volume'}</dd>`; the explanatory paragraph becomes: "Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded fonts. What no job, output or preset uses is removed once unused for the sweep's grace period (a week by default). Past either limit, new files are refused."
 
@@ -3918,9 +4170,9 @@ git commit -m "docs: blob store measured against Bambuddy; deploying multiple re
 ## Self-review notes
 
 - **Spec coverage.** §6.1 table: `// file` assets → Task 7; template source → Task 6 (`SnapshotStore`); pinned libraries → phase 1's `CheckoutFetcher` already clones from the pin on a worker's own volume, unchanged; Google Fonts → Task 6 (`FontMirror`, "optionally mirrored" taken, because a silent DejaVu fallback changes geometry); per-piece Parts → Task 5; final outputs → the `output` scope and folder rule exist in Task 4, the writer is phase 4's `ctx.output`. §6.2 interface → Task 2 (`ContentStore`), refs/sweep/caps → Task 2 (`sweep_content`, `StoreFullError`), worker LRU cache → Task 5, `SCADBUDDY_STORE_BACKEND` → Task 1 (seeds the stored setting) and Task 8. §6.3 layout and delete rule → Task 4; verifications → Task 4 Step 5 (script) and Task 10 Step 1 (run, plus the two human checks). §3.1 scaling → Task 8 (`multi_worker`) and Task 10 (clusters). §8.4 "store refs of every Part" → the `store_blobs` key/sha of each piece exists for phase 4's record; no output record changes here. §9 render key → Tasks 1, 4 (`RenderSettingsSource`), 8 (health, metric), 9 (warning). §10 Settings → Tasks 1, 8, 9. §11 item 3 → all. §12 #316/#317 → Task 4.
-- **Placeholders.** None intended. Task 8 Steps 5–6 and Task 9 Step 4 name existing build sites and state by their names on the `wt-service` stack at 69306836.
+- **Placeholders.** None intended. Task 8 Steps 5–6 and Task 9 Step 4 name existing build sites and state by their names on the `wt-service` stack at 69306836 (Task 9's `folderId` checked in `SettingsPage.tsx`, Revision 2).
 - **Type consistency.** `BlobScope`/`BlobRef`/`BlobStat`/`StoreUsage` live in `store/content_models.py` and are re-exported by `store/content.py`; every later task imports them from `content`. `ContentStore.replace(..., expected=)` (Task 2) is what `CachedBlobStore.publish` (Task 5) calls. `RenderSettingsSource.target` (Task 4) is the `target` callable `BambuddyContentBackend` takes and `build_store` passes (Task 8). `WorkerDeps.snapshots`/`fonts_mirror`/`remote_assets` (Tasks 6, 7) are filled from `StoreBundle.snapshots`/`fonts`/`remote_assets` (Task 8). `materialize_result` (Task 5) is called in Task 8.
-- **Review Focus** — all six pinned: (6) Task 5 `test_render_main_on_a_worker_without_the_piece_publishes_over_the_index`; (1) Task 5 `test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again`; (2) Task 4 `test_concurrent_first_uploads_create_one_folder_pair`; (3) Task 5 `test_a_stale_publisher_cannot_overwrite_a_newer_piece`; (4) Task 4 `test_delete_outside_a_work_folder_is_refused_without_a_request`; (5) Task 4 `test_a_rotated_render_key_is_used_without_a_restart`. Also covered, not in the five: eviction never takes an in-flight or unpublished piece (Task 5), a store at its cap still accepts a re-put (Task 2), a zip entry escaping its directory (Task 5).
+- **Review Focus** — all eight pinned (7 and 8 in Revision 2): (6) Task 5 `test_render_main_on_a_worker_without_the_piece_publishes_over_the_index`; (1) Task 5 `test_a_piece_deleted_or_altered_in_the_backend_is_rendered_again`; (2) Task 4 `test_concurrent_first_uploads_create_one_folder_pair`; (3) Task 5 `test_a_stale_publisher_cannot_overwrite_a_newer_piece`; (4) Task 4 `test_delete_outside_a_work_folder_is_refused_without_a_request`; (5) Task 4 `test_a_rotated_render_key_is_used_without_a_restart`. Also covered, not in the list: eviction never takes an in-flight piece and reclaims an abandoned one (Task 5), a store at its cap still accepts a re-put (Task 2), a zip entry escaping its directory (Task 5).
 - **Deviations from the spec, stated where they apply.** `ContentStore` is §6.2's `BlobStore` (the name is phase 1's); `put` takes bytes; a piece's blob is a zip of its directory, not a `.3mf`; `SCADBUDDY_WORKER_CACHE_DIR` is the worker's data dir; the store sweep reuses `SCADBUDDY_ASSET_SWEEP_GRACE`; "same encryption" is plaintext, as for `bambuddy_api_key` (Global Constraints; follow-up issue: encrypt stored keys).
 - **Deferred.** §10's read-only Temporal address and namespace on the Settings page are not in this plan (nor phase 1's); they go to a follow-up.
 
@@ -3949,3 +4201,32 @@ Against `.superpowers/sdd/2026-09-28-phase1-render-on-temporal/plan-phase3-revie
 - M9 fixed: `RefusedDeleteError` moves to `content_models.py` (re-exported by `bambuddy.py` and `content.py`); `sweep_content` logs it per key and continues.
 - M10 fixed as a deferral line under the deviations.
 - N1/N2 (re-review) fixed: `cast` import in the stdlib group; `_close_quietly` closes the store on a boot failure.
+
+## Revision 2 (PR #590 review)
+
+This revision answers the bot review on PR #590. Each finding was checked against the phase 3 code as implemented (a0ad9ab3).
+
+- **1. Dedupe-reuse racing a release (TOCTOU).** The code has the same gap. `ContentStore._store` reuses an object by sha without a lock, and `_release` decides on `shares_backend_id` without one. Fixed in the plan, Task 2:
+  - `BlobIndex._hold_shared` locks, `FOR SHARE` and in the writing transaction, a row that names the reused object.
+  - `put`/`swap` take `reuse=`, and raise `ReuseLostError` when no row names it any more.
+  - `ContentStore.put`/`replace` then upload their own copy.
+  - A put or delete that would free that row waits for the reuse to commit, so its `shares_backend_id` sees the new row.
+  - `index.put` returning the previous ref under its row lock, and `_release_replaced`, are now listed as implemented.
+  - New test `test_a_reuse_that_loses_to_a_release_uploads_its_own_copy`, Review Focus 7.
+- **2. `render_solids`/`finish_piece` ignored `fetch()`'s result.** The code already handles it ("a lost snapshot fails the piece clearly" and the stage checkout). The plan now lists the implemented design:
+  - `BlobStore.checkout` returns the fetched sha, which is the `publish_fresh` baseline, and clears the marker; it raises `PieceStateLostError`.
+  - `_checkout` turns that into a non-retryable `PieceStateLost`.
+  - Both stages publish with `publish_fresh(expected=baseline)`.
+  - Review Focus 1 now states that behaviour. New test `test_a_stage_whose_piece_is_gone_fails_by_name`.
+  - The piece fails, and is not re-driven from `render_main`: the next submit renders it from the start.
+- **3. `evict` never reclaimed unpublished directories.** The code has the same gap (phase 3 follow-up #8). Fixed in the plan:
+  - `evict` removes any directory, marked, marker-less or dot-named, that has not been touched within `min_age`, least recently used first.
+  - The eviction test now proves an in-flight directory stays and an abandoned one and a crash-left staging directory go.
+- **4. Advisory lock held across Bambuddy HTTP.** The code already handles it ("the folder lock lives on its own async connection, transaction-scoped"). The plan now lists it:
+  - `_locked(key)` opens its own `AsyncConnection`, not a pooled one, and takes `pg_advisory_xact_lock` under `SET LOCAL lock_timeout`.
+  - `_recorded`/`_record` run on that connection.
+  - `_ensure` also coalesces finds within a process on an `asyncio.Lock`.
+  - A slow Bambuddy can no longer starve the pool.
+- **5. `remove()`'s Work-folder check was not inbox-scoped.** The code has the same gap. Fixed in the plan: `remove` takes the inbox from `_client()`, and `_work_folders(inbox)` filters on `inbox_id`. New test `test_a_delete_in_a_work_folder_of_another_inbox_is_refused`, Review Focus 8.
+- **Note: Task 9's `folderId`.** Confirmed as the real state variable in `frontend/src/pages/SettingsPage.tsx`. Named in Task 9 Step 4.
+
