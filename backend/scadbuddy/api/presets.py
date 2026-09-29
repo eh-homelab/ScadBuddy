@@ -184,7 +184,7 @@ async def duplicate_preset(
         assets=assets,
         fetcher=fetcher,
     )
-    copy = ParamPresetCreate(name=body.name, params=source.params)
+    copy = ParamPresetCreate(name=body.name, inputs=source.inputs or None)
     try:
         return await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError:

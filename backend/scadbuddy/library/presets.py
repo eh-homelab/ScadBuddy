@@ -40,10 +40,12 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH, SLUG_PATTERN, InvalidSlugError, slugify
+from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
 
@@ -102,11 +104,23 @@ class _PresetBody(BaseModel):
 
     name: str = Field(min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: Template inputs (spec 2026-09-27 §4.3). Given, they win and ``params`` is read
+    #: from them; left out, ``params`` is read as ``{"params": …, "v": 0}``.
+    inputs: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
     def _name(cls, name: str) -> str:
         return _clean_name(name)
+
+    @model_validator(mode="after")
+    def _one_state(self) -> _PresetBody:
+        try:
+            self.inputs = normalize_inputs(self.inputs, self.params)
+        except InputsError as error:
+            raise ValueError(str(error)) from None
+        self.params = self.inputs["params"]
+        return self
 
 
 class ParamPresetCreate(_PresetBody):
@@ -114,15 +128,27 @@ class ParamPresetCreate(_PresetBody):
 
 
 class ParamPresetUpdate(BaseModel):
-    """A rename, a new set of values, or both. ``params`` replaces the old ones whole."""
+    """A rename, a new set of values, or both. ``params`` or ``inputs`` replaces the
+    old ones whole; ``params`` alone keeps the preset's other inputs keys."""
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_PRESET_NAME)
     params: dict[str, ParamValue] | None = None
+    inputs: dict[str, Any] | None = None
 
     @field_validator("name")
     @classmethod
     def _name(cls, name: str | None) -> str | None:
         return None if name is None else _clean_name(name)
+
+    @model_validator(mode="after")
+    def _one_state(self) -> ParamPresetUpdate:
+        if self.inputs is not None:
+            try:
+                self.inputs = normalize_inputs(self.inputs, self.params)
+            except InputsError as error:
+                raise ValueError(str(error)) from None
+            self.params = self.inputs["params"]
+        return self
 
 
 class ParamPresetDuplicate(BaseModel):
@@ -223,6 +249,8 @@ class ParamPreset(BaseModel):
     id: str
     name: str
     params: dict[str, ParamValue]
+    #: The preset's template inputs (spec §4.3); ``params`` is their ``params``.
+    inputs: dict[str, Any] = Field(default_factory=dict)
     origin: PresetOrigin = Field(
         description="`template`: defined by the template in its model.json, read-only. "
         "`mine`: saved here, editable -- on built-ins too."
@@ -330,6 +358,7 @@ class PresetStore:
                 id=f"{TEMPLATE_ID_PREFIX}{key}",
                 name=preset.name,
                 params=preset.params,
+                inputs=preset.inputs or legacy_inputs(preset.params),
                 origin="template",
             )
             for preset, key in zip(defined, template_preset_keys(defined), strict=True)
@@ -355,6 +384,7 @@ class PresetStore:
             id=row["id"],
             name=row["name"],
             params=row["params"],
+            inputs=row["inputs"] or legacy_inputs(row["params"]),
             origin="mine",
             updated_at=row["updated_at"],
         )
@@ -421,9 +451,18 @@ class PresetStore:
             self._require_free(model_id, saved, body.name, own="")
             now = datetime.now(UTC)
             row = conn.execute(
-                "INSERT INTO saved_presets (model_id, id, name, params, created_at, updated_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-                (model_id, uuid.uuid4().hex, body.name, Jsonb(body.params), now, now),
+                "INSERT INTO saved_presets"
+                " (model_id, id, name, params, inputs, created_at, updated_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                (
+                    model_id,
+                    uuid.uuid4().hex,
+                    body.name,
+                    Jsonb(body.params),
+                    Jsonb(body.inputs),
+                    now,
+                    now,
+                ),
             ).fetchone()
         assert row is not None
         return self._view(row)
@@ -436,12 +475,20 @@ class PresetStore:
                 raise PresetNotFoundError(preset_id)
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
+            current_inputs = current["inputs"] or legacy_inputs(current["params"])
+            if patch.inputs is not None:
+                inputs = patch.inputs
+            elif patch.params is not None:
+                inputs = {**current_inputs, "params": patch.params}
+            else:
+                inputs = current_inputs
             row = conn.execute(
-                "UPDATE saved_presets SET name = %s, params = %s, updated_at = %s"
+                "UPDATE saved_presets SET name = %s, params = %s, inputs = %s, updated_at = %s"
                 " WHERE model_id = %s AND id = %s RETURNING *",
                 (
                     patch.name if patch.name is not None else current["name"],
-                    Jsonb(patch.params if patch.params is not None else current["params"]),
+                    Jsonb(inputs["params"]),
+                    Jsonb(inputs),
                     datetime.now(UTC),
                     model_id,
                     preset_id,
@@ -472,13 +519,14 @@ class PresetStore:
             for row in self._saved(conn, source_id):
                 conn.execute(
                     "INSERT INTO saved_presets"
-                    " (model_id, id, name, params, created_at, updated_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s)",
+                    " (model_id, id, name, params, inputs, created_at, updated_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
                     (
                         target_id,
                         uuid.uuid4().hex,
                         row["name"],
                         Jsonb(row["params"]),
+                        Jsonb(row["inputs"]),
                         row["created_at"],
                         row["updated_at"],
                     ),
