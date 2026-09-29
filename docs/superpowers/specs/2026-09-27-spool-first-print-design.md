@@ -219,8 +219,8 @@ the left, and `status.nozzles` is indexed the same way.
   0.4 and one 0.2 in the rack (the 2026-09-27 rack), a one-color 0.2 print runs and a
   two-color one is refused naming the rack; with a 0.2 mounted on the right and another
   in the rack, a two-color 0.2 print runs. The filament step carries the spares as
-  `rack`, so the dialog mirrors it. Not measured: that the swap happens at print start
-  rather than the printer pausing; if it pauses, drop the rack from `plan_extruders`.
+  `rack`, so the dialog mirrors it. Measured 2026-09-29 (§5, queue item 150): the printer
+  swaps the spare on at print start and prints, rather than pausing.
 - **One side fitted with it** (the nozzles differ, or one spare serves one side): more than one filament is a 422,
   since the slicer spreads them across both. One filament prints, with a warning that
   the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
@@ -331,9 +331,9 @@ Rerun against the deployed builds `sha-74f634f` and later, which include #538's 
 | Two colors at 0.2 are refused before upload | **Pass** | 422, nothing uploaded: "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm hotend in the rack… Fit a 0.2 mm nozzle on both sides, or print in one color." |
 | One color at 0.2 uses the rack's spare | **Pass** | Queue item 150: sliced at 0.2, `0.08mm High Quality`. At start the printer reported 0.2 on the right and 0.4 on the left, swapped in from the rack, and completed 03:55 to 04:43 UTC with no HMS. |
 | One color at 0.4 prints | **Pass** | Queue item 151: sliced at 0.4, `0.12mm High Quality`, completed 03:24 to 03:49 UTC. |
-| Two colors at 0.4 print | **Fail** | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Started 13:15 UTC and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." Both sides were 0.4 mm, but the right was standard (`HS01`) and the left High Flow (`HH01`), and both were sliced as standard. #538's refusal compares size only; tracked in #723. |
+| Two colors at 0.4 print | **Fail** | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Queued 02:13 UTC; as a manual start it waited until the user started it, at 13:15 UTC, and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." Both sides were 0.4 mm, but the right was standard (`HS01`) and the left High Flow (`HH01`), and both were sliced as standard. #538's refusal compares size only; tracked in #723. |
 
-This closes #469 for sides that differ in size: that case (queue items 108 and 114) is now refused before upload, and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
+This closes #469 for sides that differ in size: that case (queue item 108) is now refused before upload, and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
 
 Also found:
 - Each run POST still outlives the 60 s ingress timeout, giving a 504 while the item queues (#470). Every run above was checked on Bambuddy's queue rather than retried.
