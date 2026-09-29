@@ -3,12 +3,22 @@ import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
-import { DownloadBlockedError, downloadBlob } from '../lib/embed'
+import type {
+  Job,
+  Output,
+  PlateFit,
+  PrintRunResult,
+  ProjectFile,
+  ProjectView,
+  SendResult,
+} from '../api/types'
+import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
+import { useProjectList } from '../lib/projects'
+import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
@@ -59,6 +69,39 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * #317 — the project Generate files the editable 3MF into, shared with the print
+   * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
+   * either picker becomes the new `last_project_id`.
+   */
+  const [projectId, setProjectId] = useState<number | null>(null)
+  const [project, setProject] = useState<ProjectView | null>(null)
+  /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
+  const projects = useProjectList(setProjectId)
+  const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
+    null,
+  )
+  const [fileError, setFileError] = useState<string | null>(null)
+
+  function chooseProject(next: number | null) {
+    setProjectId(next)
+    // Only a preference: the picker still shows the choice if it is not remembered.
+    void api.rememberProject(next).catch(() => undefined)
+  }
+
+  /** Best effort: the output is saved whether or not Bambuddy takes the file. */
+  async function fileIntoProject(created: Output) {
+    if (projectId === null) return
+    const name = project?.name ?? `project ${projectId}`
+    try {
+      const file = await api.fileIntoProject(created.id, projectId)
+      setFiled({ outputId: created.id, name, file })
+    } catch (cause) {
+      setFileError(
+        `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
+      )
+    }
+  }
 
   const ready = job?.status === 'done' && !rendering
   const stale = Boolean(output) && output?.id !== undefined && !ready
@@ -69,6 +112,8 @@ export function ActionBar({
     if (!job) return null
     setGenerating(true)
     setError(null)
+    setFiled(null)
+    setFileError(null)
     try {
       const created = await api.createOutput(slug, job.id)
       const png = await capture()
@@ -77,6 +122,8 @@ export function ActionBar({
         await api.putThumbnail(created.id, png).catch(() => undefined)
       }
       onGenerated(created)
+      // After the thumbnail, so the file Bambuddy lists carries the plate image.
+      await fileIntoProject(created)
       return created
     } catch (cause) {
       const message = cause instanceof ApiError ? cause.detail : 'Could not save this output.'
@@ -109,6 +156,9 @@ export function ActionBar({
           'invalid_args',
           'There is no generated output for these values yet; call generate first.',
         )
+      }
+      if (kind !== 'send' && live.current.generating) {
+        throw new AgentToolError('invalid_args', 'Generate is still filing the project file.')
       }
       if (kind === 'send') setSendOpen(true)
       else setPrintOpen(true)
@@ -162,9 +212,36 @@ export function ActionBar({
               Saved {output.name ?? output.id.slice(0, 8)}
             </span>
           )}
+          {!error && output && !stale && filed?.outputId === output.id && (
+            <span className="flex min-w-0 items-center gap-1.5 text-[12px]" data-testid="project-filed">
+              <span className="truncate text-ok">Saved to {filed.name}</span>
+              <button
+                type="button"
+                onClick={() => openExternal(filed.file.bambuddy_url)}
+                className="shrink-0 text-accent underline"
+              >
+                Open in Bambuddy
+              </button>
+            </span>
+          )}
+          {!error && output && !stale && fileError && (
+            <span role="alert" className="truncate text-[12px] text-warn">
+              {fileError}
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* #317 — Generate files the editable 3MF in this project's Bambuddy folder. */}
+          <ProjectPicker
+            id="customize-project"
+            testId="customize-project-select"
+            inline
+            value={projectId}
+            onChange={chooseProject}
+            list={projects}
+            onProject={setProject}
+          />
           <Button
             variant="primary"
             onClick={() => void generate().catch(() => undefined)}
@@ -184,7 +261,8 @@ export function ActionBar({
           <Button
             variant={misfit ? 'danger' : 'default'}
             onClick={() => setPrintOpen(true)}
-            disabled={!output}
+            // #317 — Generate is still filing the project file, which the print reuses.
+            disabled={!output || generating}
             data-testid="print"
             title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >
@@ -208,6 +286,7 @@ export function ActionBar({
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
+        project={{ value: projectId, onChange: chooseProject, list: projects }}
       />
     </>
   )

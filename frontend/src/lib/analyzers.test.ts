@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest'
+import type { AnalyzerDiagnostic } from '../api/types'
+import { describeLocation, partition, scopeLabel } from './analyzers'
+
+function diagnostic(over: Partial<AnalyzerDiagnostic>): AnalyzerDiagnostic {
+  return {
+    id: 'SB1003',
+    key: 'SB1003',
+    title: 'Overhangs past the support threshold',
+    severity: 'info',
+    category: 'geometry',
+    message: 'm',
+    sources: [],
+    status: 'open',
+    ...over,
+  }
+}
+
+describe('describeLocation', () => {
+  it('names the part, its colour, the region and the located edges of a mesh finding', () => {
+    expect(
+      describeLocation({
+        kind: 'mesh',
+        part: 2,
+        colour: 'Red',
+        bbox: { min: [0, 0, 0], max: [10, 4, 2], size: [10, 4, 2] },
+        edges: [
+          { part: 2, colour: 'Red', kind: 'open', faces: 1, start: [0, 0, 0], end: [1, 0, 0] },
+        ],
+        edges_truncated: true,
+      }),
+    ).toBe('Part 2 (Red) · a 10.0 × 4.0 × 2.0 mm region · 1+ located edges')
+  })
+
+  it('names a slot, a setting and the analyzer itself', () => {
+    expect(describeLocation({ kind: 'filament_slot', slot_id: 3, edges_truncated: false })).toBe(
+      'Filament slot 3',
+    )
+    expect(
+      describeLocation({ kind: 'choices', setting: 'bed_type', edges_truncated: false }),
+    ).toBe('Print choice bed_type')
+    expect(describeLocation({ kind: 'analyzer', edges_truncated: false })).toBe(
+      'The analyzer itself',
+    )
+    expect(describeLocation({ kind: 'plate', edges_truncated: false })).toBe('The plate')
+  })
+})
+
+describe('scopeLabel', () => {
+  it('says what each scope covers, broadest to narrowest', () => {
+    expect(scopeLabel({ kind: 'global', key: '' })).toBe('Every print')
+    expect(scopeLabel({ kind: 'material', key: 'pla/silk' })).toBe('Every pla/silk print')
+    expect(scopeLabel({ kind: 'printer', key: 'model:h2c' })).toBe('Every h2c printer')
+    expect(scopeLabel({ kind: 'printer', key: 'id:1' })).toBe('This printer (#1)')
+    expect(scopeLabel({ kind: 'template', key: 'name-keychain' })).toBe('This template')
+    expect(scopeLabel({ kind: 'template_version', key: 'k@abc' })).toBe('This template version')
+    expect(scopeLabel({ kind: 'configuration', key: 'k#0123' })).toBe('These parameters')
+    expect(scopeLabel({ kind: 'print', key: 'a'.repeat(32) })).toBe('This print')
+  })
+})
+
+describe('partition', () => {
+  it('shows open and accepted findings, and sets aside hidden, suppressed and ignored ones', () => {
+    const open = diagnostic({ key: 'SB1003' })
+    const accepted = diagnostic({ key: 'SB2001', status: 'accepted' })
+    const hidden = diagnostic({ key: 'SB9999', severity: 'hidden' })
+    const suppressed = diagnostic({ key: 'SB1002:part-1', status: 'suppressed' })
+    const ignored = diagnostic({ key: 'SB1002:part-2', status: 'ignored' })
+    const crashed = diagnostic({ id: 'SB0001', key: 'SB0001:SB1003', severity: 'warning' })
+    expect(partition([open, accepted, hidden, suppressed, ignored, crashed])).toEqual({
+      shown: [open, accepted, crashed],
+      setAside: [hidden, suppressed, ignored],
+    })
+  })
+})
