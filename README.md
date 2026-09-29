@@ -232,8 +232,9 @@ for its own origin check (below).
 
 ScadBuddy runs on the homelab cluster from
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters)
-(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD). That manifest
-pins the image **by digest**; this repo's workflows are what move the pin.
+(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, and the render
+worker's `applications/scadbuddy/scadbuddy-render.yaml`). Those manifests pin the
+image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
 The backend needs its database (#401): the manifest must set
@@ -279,7 +280,11 @@ Both call `deploy.reusable.yml`, which:
    (contents + pull requests) — never `GITHUB_TOKEN`, which cannot write to
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
-   annotations (`version`, `revision`, `source`) in the manifest;
+   annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
+   `scadbuddy-render.yaml` when that file exists in clusters (#547; until
+   clusters#1454 adds it, the run notes its absence and pins the API alone). Each
+   file must have exactly one such image line and one of each annotation, before
+   and after the rewrite, or the deploy stops;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -558,8 +563,10 @@ deploy PR link into the release notes. There is no human step after
   reports `revision` (commit) and `version` — the same label the manifest
   pins (`X.Y.Z` for a release, `sha-<short>` for a main build), so the two
   should match the Deployment's annotations exactly.
-- **What is pinned:** the annotations on the Deployment in
-  `applications/scadbuddy/scadbuddy.yaml`.
+- **What is pinned:** the annotations on the Deployments in
+  `applications/scadbuddy/scadbuddy.yaml` and
+  `applications/scadbuddy/scadbuddy-render.yaml`; one deploy pins both to the
+  same digest.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -569,7 +576,8 @@ deploy PR link into the release notes. There is no human step after
 ### Manual fallback
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
-image line and annotations in the clusters manifest by hand and merging does
+image line and annotations in the clusters manifests (both, once the render
+worker's exists) by hand and merging does
 exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
 what makes the running image knowable.
 
