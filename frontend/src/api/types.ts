@@ -142,12 +142,30 @@ export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
 export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
+export type ProjectFile = Schemas['ProjectFile']
+export type LastProject = Schemas['LastProject']
 export type AttachResult = Schemas['AttachResult']
 
 /** #81 — the build volume the preview draws and checks the model against. */
 export type Plate = Schemas['PlateView']
 export type PlateCatalogue = Schemas['PlateCatalogue']
 export type PlateFit = Schemas['PlateFit']
+
+/**
+ * #284 — the print analyzers (#461, `backend/scadbuddy/api/analyzers.py`): a run over
+ * the request the print dialog would send, and the report it answers with.
+ */
+export type AnalysisRun = Schemas['AnalysisRun']
+export type AnalysisRequest = Schemas['AnalysisRequest']
+export type AnalysisReport = Schemas['AnalysisReport']
+export type AnalyzerDiagnostic = Schemas['AnalyzerDiagnostic']
+export type AnalyzerSeverity = AnalyzerDiagnostic['severity']
+export type AnalyzerSource = Schemas['Source']
+export type DiagnosticLocation = Schemas['DiagnosticLocation']
+export type ScopeRef = Schemas['ScopeRef']
+/** A decision about a finding at a scope; `DecisionCreate` records an ignore or a suppression. */
+export type AnalyzerDecision = Schemas['Decision']
+export type DecisionCreate = Schemas['DecisionCreate']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

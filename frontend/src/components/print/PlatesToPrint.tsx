@@ -1,0 +1,63 @@
+import { api } from '../../api/client'
+import type { OutputPlate } from '../../api/types'
+
+type Props = {
+  outputId: string
+  plates: OutputPlate[]
+  value: number | 'all'
+  onChange: (next: number | 'all') => void
+}
+
+/** #83 — which plate of a multi-plate 3MF to print, or all of them. */
+export function PlatesToPrint({ outputId, plates, value, onChange }: Props) {
+  return (
+    <fieldset data-testid="plate-choice">
+      <legend className="text-[13px]">Plates to print</legend>
+      <div className="mt-1.5 flex flex-wrap gap-2">
+        {plates.map((entry) => (
+          <label
+            key={entry.index}
+            className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+              value === entry.index
+                ? 'border-accent bg-accent/8'
+                : 'border-line bg-surface-2'
+            }`}
+          >
+            <input
+              type="radio"
+              name="print-plate"
+              checked={value === entry.index}
+              onChange={() => onChange(entry.index)}
+              className="accent-[var(--sb-accent)]"
+            />
+            {entry.has_thumbnail && (
+              <img
+                src={api.outputPlateThumbnailUrl(outputId, entry.index)}
+                alt={`Plate ${entry.index}`}
+                className="h-12 w-12 rounded-[4px] object-contain"
+              />
+            )}
+            Plate <span className="sb-num">{entry.index}</span>
+          </label>
+        ))}
+        <label
+          className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+            value === 'all' ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
+          }`}
+        >
+          <input
+            type="radio"
+            name="print-plate"
+            checked={value === 'all'}
+            onChange={() => onChange('all')}
+            className="accent-[var(--sb-accent)]"
+          />
+          All plates
+        </label>
+      </div>
+      {value === 'all' && (
+        <p className="mt-1.5 text-[12px] text-faint">One queue item per plate.</p>
+      )}
+    </fieldset>
+  )
+}
