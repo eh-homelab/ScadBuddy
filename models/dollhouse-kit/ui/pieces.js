@@ -71,10 +71,15 @@ export function housePieces(input) {
   return [...counts.values()]
 }
 
+// The model's default course. A piece the model renders the same in either course still
+// writes one: `inputs.set` is a merge patch, so leaving `course` out would keep the last
+// piece's, and the same piece would get two render keys.
+const DEFAULT_COURSE = 'upper'
+
 export function pieceParams(entry) {
   return {
     piece: entry.piece,
-    ...(entry.course ? { course: entry.course } : {}),
+    course: entry.course ?? DEFAULT_COURSE,
     width_units: 1,
     depth_units: 1,
   }

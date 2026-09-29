@@ -77,34 +77,95 @@ describe('housePieces', () => {
 })
 
 describe('the designer', () => {
-  it('lists the pieces and shows the one picked', async () => {
-    const { mount } = (await uiModule('index.js')) as { mount: Mount }
-    const schema = {
-      parameters: [
-        { name: 'piece', type: 'select', group: 'Piece', initial: 'wall_window', caption: '' },
-        { name: 'course', type: 'select', group: 'Piece', initial: 'upper', caption: '' },
-        { name: 'exterior', type: 'select', group: 'Exterior', initial: 'plain', caption: '' },
-      ],
-    } as unknown as CustomizerSchema
-    let inputs: JsonObject = { params: {} }
+  const schema = {
+    parameters: [
+      { name: 'piece', type: 'select', group: 'Piece', initial: 'wall_window', caption: '' },
+      { name: 'course', type: 'select', group: 'Piece', initial: 'upper', caption: '' },
+      { name: 'exterior', type: 'select', group: 'Exterior', initial: 'plain', caption: '' },
+    ],
+  } as unknown as CustomizerSchema
+
+  /** A host whose `set` merges one level deep and tells its subscribers, as the page does. */
+  function fakeHost(initial: JsonObject) {
+    let inputs = initial
+    const listeners = new Set<(inputs: JsonObject) => void>()
     const set = vi.fn((patch: JsonObject) => {
-      inputs = { ...inputs, ...patch }
+      const next: JsonObject = { ...inputs }
+      for (const [key, value] of Object.entries(patch)) {
+        const old = next[key]
+        next[key] =
+          value && typeof value === 'object' && !Array.isArray(value) && old && typeof old === 'object' && !Array.isArray(old)
+            ? { ...old, ...value }
+            : value
+      }
+      inputs = next
+      for (const listener of listeners) listener(inputs)
     })
     const host = {
       api: 1,
-      inputs: { get: () => inputs, set, subscribe: () => () => undefined },
+      inputs: {
+        get: () => inputs,
+        set,
+        subscribe: (fn: (inputs: JsonObject) => void) => {
+          listeners.add(fn)
+          return () => listeners.delete(fn)
+        },
+      },
       schema: async () => schema,
       describe: () => undefined,
     } as unknown as Host
-    const root = document.createElement('div').attachShadow({ mode: 'open' })
-    await mount(root, host, { slot: 'page', version: null, theme: 'light', api: 1 })
+    return { host, set, get: () => inputs }
+  }
+
+  async function mounted(initial: JsonObject) {
+    const { mount } = (await uiModule('index.js')) as { mount: Mount }
+    const fake = fakeHost(initial)
+    const holder = document.createElement('div')
+    document.body.append(holder)
+    const root = holder.attachShadow({ mode: 'open' })
+    await mount(root, fake.host, { slot: 'page', version: null, theme: 'light', api: 1 })
+    const button = (entry: string) => root.querySelector(`button[data-entry="${entry}"]`) as HTMLButtonElement
+    return { ...fake, root, button }
+  }
+
+  it('lists the pieces and shows the one picked', async () => {
+    const { root, set, button } = await mounted({ params: {} })
     expect(root.querySelector('sb-preview')).not.toBeNull()
     expect(root.querySelector('sb-generate')).not.toBeNull()
     expect(root.querySelector('sb-param[name="exterior"]')).not.toBeNull()
     expect(root.querySelector('sb-param[name="piece"]')).toBeNull()
-    expect(set).toHaveBeenCalledWith({ house: { cols: 2, rows: 1, storeys: 1, windows: 2 } })
-    const floor = root.querySelector('button[data-piece="floor_tile"]') as HTMLButtonElement
+    button('floor_tile').click()
+    expect(set).toHaveBeenLastCalledWith({
+      params: { piece: 'floor_tile', course: 'upper', width_units: 1, depth_units: 1 },
+    })
+  })
+
+  it('never writes inputs just by opening, and reads a missing house as the default', async () => {
+    const { set, root } = await mounted({ params: { piece: 'wall' } })
+    expect(set).not.toHaveBeenCalled()
+    // DEFAULT_HOUSE is 2 x 1, 1 storey: P = 6, so 5 lower walls beside the door.
+    expect(root.textContent).toContain('5 × Wall, lower course')
+  })
+
+  it('addresses each course of a coursed piece by its entry', async () => {
+    const { root, button, get } = await mounted({ params: {} })
+    expect(root.querySelectorAll('button[data-piece="wall"]')).toHaveLength(2)
+    button('wall:lower').click()
+    expect(get()['params']).toMatchObject({ piece: 'wall', course: 'lower' })
+    // A floor tile after a lower wall does not keep the wall's course.
+    button('floor_tile').click()
+    expect(get()['params']).toMatchObject({ piece: 'floor_tile', course: 'upper' })
+  })
+
+  it('keeps the button just pressed, and its focus, when the list redraws', async () => {
+    const { button, root } = await mounted({ params: {} })
+    const floor = button('floor_tile')
+    floor.focus()
     floor.click()
-    expect(set).toHaveBeenLastCalledWith({ params: { piece: 'floor_tile', width_units: 1, depth_units: 1 } })
+    expect(button('floor_tile')).toBe(floor)
+    expect(root.contains(floor)).toBe(true)
+    expect(root.activeElement).toBe(floor)
+    expect(floor.textContent).toBe('Showing')
+    expect(floor.getAttribute('aria-pressed')).toBe('true')
   })
 })

@@ -38,7 +38,8 @@ function element(tag, props = {}, ...children) {
 
 export async function mount(root, host) {
   const schema = await host.schema()
-  if (!host.inputs.get().house) host.inputs.set({ house: { ...DEFAULT_HOUSE } })
+  // No `house` yet (a fresh template, an output saved before the designer) reads as the
+  // default house; opening the designer never writes inputs nobody chose.
 
   const form = element('div', { className: 'form' })
   const numbers = {}
@@ -80,23 +81,46 @@ export async function mount(root, host) {
     ),
   )
 
+  // One row per entry, kept across draws: rebuilding the list would destroy the button
+  // just pressed and drop keyboard focus to the page.
+  const rows = new Map()
+  function row(entry) {
+    let found = rows.get(entry.id)
+    if (!found) {
+      const text = element('span')
+      const show = element('button', { type: 'button' })
+      show.dataset.piece = entry.piece
+      show.dataset.entry = entry.id
+      show.addEventListener('click', () => host.inputs.set({ params: pieceParams(entry) }))
+      found = { li: element('li', {}, text, show), text, show }
+      rows.set(entry.id, found)
+    }
+    return found
+  }
+
   function draw(inputs) {
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
     for (const [key, input] of Object.entries(numbers)) input.value = String(house[key])
     const pieces = housePieces(house)
     total.textContent = `${pieces.reduce((sum, entry) => sum + entry.count, 0)} pieces; Generate keeps the one shown.`
-    list.replaceChildren(
-      ...pieces.map((entry) => {
-        const current =
-          inputs.params?.piece === entry.piece &&
-          (entry.course === null || inputs.params?.course === entry.course)
-        const show = element('button', { type: 'button', textContent: current ? 'Showing' : 'Show' })
-        show.dataset.piece = entry.piece
-        show.disabled = current
-        show.addEventListener('click', () => host.inputs.set({ params: pieceParams(entry) }))
-        return element('li', {}, `${entry.count} × ${entry.label}`, show)
-      }),
-    )
+    const wanted = new Set(pieces.map((entry) => entry.id))
+    for (const [id, { li }] of rows) {
+      if (!wanted.has(id)) {
+        li.remove()
+        rows.delete(id)
+      }
+    }
+    pieces.forEach((entry, index) => {
+      const { li, text, show } = row(entry)
+      const current =
+        inputs.params?.piece === entry.piece &&
+        (entry.course === null || inputs.params?.course === entry.course)
+      text.textContent = `${entry.count} × ${entry.label}`
+      // Pressed, not disabled: a disabled button would lose the focus it has.
+      show.textContent = current ? 'Showing' : 'Show'
+      show.setAttribute('aria-pressed', String(current))
+      if (list.children[index] !== li) list.insertBefore(li, list.children[index] ?? null)
+    })
   }
 
   draw(host.inputs.get())
