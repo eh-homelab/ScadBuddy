@@ -71,6 +71,21 @@ describe('LibraryUpgrade', () => {
     expect(within(invalid).queryByRole('button', { name: 'Check' })).toBeNull()
   })
 
+  it('offers an installed library the catalogue does not list, and lists the models that pin it', async () => {
+    const pin = { name: 'threads', url: 'https://github.com/rcolyer/threads-scad.git', ref: 'v2.1', commit: 'c0ffee00'.repeat(5) }
+    setMockLibraryPin('gridfinity-bin', pin)
+    const { user } = renderPage(<LibraryUpgrade />)
+    const select = await screen.findByLabelText('Library')
+    expect(within(select).getByRole('option', { name: 'threads' })).toBeInTheDocument()
+    await user.selectOptions(select, 'threads')
+    // Not in the catalogue, so no ref is suggested.
+    expect(screen.getByLabelText('Candidate ref')).toHaveValue('')
+    const list = await screen.findByRole('list', { name: 'Models that pin threads' })
+    const gridfinity = await within(list).findByRole('listitem', { name: 'Gridfinity Bin' })
+    expect(gridfinity).toHaveTextContent('Pinned to v2.1 at c0ffee0')
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1)
+  })
+
   it('says so when no model pins the library', async () => {
     const { user } = renderPage(<LibraryUpgrade />)
     await user.selectOptions(await screen.findByLabelText('Library'), 'dotSCAD')
@@ -85,7 +100,7 @@ describe('LibraryUpgrade', () => {
     expect(within(row('Gridfinity Bin')).getByRole('button', { name: 'Check' })).toBeDisabled()
 
     const result = await within(row('Name Keychain')).findByTestId('library-check')
-    expect(result).toHaveTextContent(/Parses at v2\.0\.761 \([0-9a-f]{7}\)/)
+    expect(result).toHaveTextContent(/^Parses at v2\.0\.761 \([0-9a-f]{7}\) — 4 parameters\.$/)
     expect(within(row('Gridfinity Bin')).queryByTestId('library-check')).toBeNull()
     expect(within(row('Gridfinity Bin')).getByRole('button', { name: 'Check' })).toBeEnabled()
     expect(calls).toEqual([

@@ -133,8 +133,10 @@ function LibraryUsers({ library, candidate }: { library: string; candidate: stri
   async function move(rows: readonly LibraryUser[]) {
     if (busy || !candidate) return
     setMoving(true)
+    // The ticks as of this click; the checkboxes are disabled until the move is done.
+    const chosen = rows.filter((row) => ticked.has(row.slug))
     // One at a time, in list order: each re-pin clones under the same gate a check holds.
-    for (const { slug } of rows.filter((row) => ticked.has(row.slug))) {
+    for (const { slug } of chosen) {
       setMoves((all) => ({ ...all, [slug]: { running: true } }))
       try {
         const model = await api.repinModelLibrary(slug, library, { ref: candidate })
@@ -336,7 +338,10 @@ function CheckResult({ check }: { check: { result?: LibraryCheck; error?: string
       {!result.checked ? (
         <p className="text-muted">Not checked at {at}: no OpenSCAD was available to ask.</p>
       ) : result.ok ? (
-        <p className="text-ok">Parses at {at}.</p>
+        <p className="text-ok">
+          Parses at {at}
+          {result.parameters == null ? '' : ` — ${result.parameters} parameters`}.
+        </p>
       ) : (
         <p className="text-warn">
           {result.timed_out ? 'Timed out' : 'Does not parse'} at {at}.
