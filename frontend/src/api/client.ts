@@ -20,6 +20,7 @@ import type {
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  LibraryListing,
   LibraryPinRequest,
   MediaView,
   ModelPatch,
@@ -867,6 +868,57 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
+  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+    const search = new URLSearchParams()
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.all) search.set('all', 'true')
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<LibraryListing>(`/print/library${suffix}`)
+  },
+
+  libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+
+  libraryPlateThumbnailUrl: (fileId: number, index: number) =>
+    `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
+
+  getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
+
+  getLibraryChoices: (fileId: number, printerId?: number | null) => {
+    const search = new URLSearchParams()
+    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<ChoicesView>(`/print/library/${fileId}/choices${suffix}`)
+  },
+
+  getLibraryFilaments: (
+    fileId: number,
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+  ) => {
+    const search = new URLSearchParams()
+    if (query.printerId !== null && query.printerId !== undefined) {
+      search.set('printer_id', String(query.printerId))
+    }
+    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+    if (query.allPlates) search.set('all_plates', 'true')
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
+  },
+
+  /** Still answered in one request (#470 moved only an output's run to a 202). */
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
+    request<PrintRunResult>(`/print/library/${fileId}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    }),
+
+  putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
+    request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

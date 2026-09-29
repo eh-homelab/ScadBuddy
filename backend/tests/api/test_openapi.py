@@ -94,6 +94,13 @@ EXPECTED_PATHS = {
     "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
     "/api/v1/prints/{archive_id}/files/sliced",
     "/api/v1/prints/{archive_id}/files/source",
+    "/api/v1/print/library",
+    "/api/v1/print/library/{file_id}/plates",
+    "/api/v1/print/library/{file_id}/thumbnail",
+    "/api/v1/print/library/{file_id}/plates/{index}/thumbnail",
+    "/api/v1/print/library/{file_id}/choices",
+    "/api/v1/print/library/{file_id}/filaments",
+    "/api/v1/print/library/{file_id}/run",
 }
 
 

@@ -311,8 +311,7 @@ export function ActionBar({
 
       <PrintPicker
         open={printOpen}
-        slug={slug}
-        output={output}
+        source={output ? { kind: 'output', output } : undefined}
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}

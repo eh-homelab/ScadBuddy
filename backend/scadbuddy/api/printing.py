@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.print_run import (
     filament_options_for_output,
     prepare_run,
 )
+from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -180,9 +181,10 @@ async def post_run(
         if chosen_project(body, settings) is not None
         else None
     )
+    source = OutputSource(outputs, uploads, meta, settings, stem=stem)
     try:
         async with client_for(settings) as client:
-            prepared = await prepare_run(client, outputs, meta, settings, body)
+            prepared = await prepare_run(client, source, settings, body)
     except ApiError:
         # A racer with the same key may have claimed its run while this one was
         # checking; its caller gets that run, not a refusal from a separate read.
@@ -199,9 +201,7 @@ async def post_run(
 
     async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:
-            result = await execute_run(
-                client, outputs, uploads, meta, settings, body, prepared, before_enqueue, stem=stem
-            )
+            result = await execute_run(client, source, settings, body, prepared, before_enqueue)
         observer.started(meta)
         await watcher.started(meta.id)
         return result

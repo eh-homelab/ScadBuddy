@@ -66,7 +66,7 @@ import * as fixtures from './fixtures'
 const base = '/api/v1'
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
-const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
   filament_plan: [],
   nozzles: [],
@@ -75,7 +75,7 @@ const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
-function isNoModelChoices(choices: ModelPrintChoices): boolean {
+export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   return (
     choices.printer_id == null &&
     !choices.filament_plan?.length &&
@@ -106,6 +106,8 @@ const state = {
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
+  /** #313 — per library-file choices, the store's `library_print_choices`. */
+  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
@@ -227,6 +229,7 @@ export function resetMockState(): void {
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
@@ -510,7 +513,7 @@ export function nextHexId(): string {
   return state.seq.toString(16).padStart(32, '0')
 }
 
-function nextNumber(): number {
+export function nextNumber(): number {
   state.seq += 1
   return 8800 + state.seq
 }
@@ -642,10 +645,27 @@ export function mockRemembered() {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
+}
+
+/**
+ * #313 — what the print dialog remembers for one Bambuddy library file. The routes are in
+ * `features/library.ts`; the state is here with the other remembered choices, so "Forget
+ * all" (`forgetMockRemembered`) drops it too.
+ */
+export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
+  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+}
+
+/** Remembers one library file's choices; the empty choice forgets them, as the store does. */
+export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
+  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
+  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  return mockLibraryChoices(fileId)
 }
 
 /**
@@ -666,7 +686,6 @@ export function problem(status: number, title: string, detail?: string, extensio
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 }
-
 
 /**
  * A body FastAPI refused while parsing it, before any route ran: `_validation_error`

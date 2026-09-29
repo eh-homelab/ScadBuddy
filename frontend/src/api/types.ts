@@ -132,6 +132,11 @@ export type ModelPrintChoices = Schemas['ModelPrintChoices']
 export type PrinterBedType = Schemas['PrinterBedType']
 export type OutputPlate = Schemas['OutputPlate']
 
+/** #313 — the Library page's listing, and one row of it. */
+export type LibraryListing = Schemas['LibraryListing']
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFolderView = Schemas['LibraryFolderView']
+
 /**
  * #89 — run tracking.
  *

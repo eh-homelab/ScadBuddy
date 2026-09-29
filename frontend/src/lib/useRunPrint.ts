@@ -8,11 +8,12 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { printChoicesOf } from './printChoices'
+import { sourceApi, type PrintSource } from './printSource'
 import type { PrintSelection } from './usePrintChoices'
 
 interface RunInput {
-  outputId: string | undefined
-  slug: string
+  /** #313 — an output or a library file. */
+  source: PrintSource | undefined
   choices: ChoicesView | null
   printerId: number | null
   selection: PrintSelection
@@ -29,14 +30,14 @@ interface RunInput {
 }
 
 /**
- * The print dialog's one write, `POST /print/outputs/{id}/run`. A 422 is the resolver
+ * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
+ * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
  * refusing a combination; its `detail` is `runError`, and `refused` keeps Print disabled
  * until one of the choices changes. A run whose answer never arrived is `unanswered`
  * instead (#470). `reset` clears the run for the dialog's next open.
  */
 export function useRunPrint({
-  outputId,
-  slug,
+  source,
   choices,
   printerId,
   selection,
@@ -96,7 +97,7 @@ export function useRunPrint({
       process_name: last?.process_name ?? null,
     }
     if (JSON.stringify(next) === JSON.stringify(before)) return
-    void api.putModelChoices(slug, next).catch(() => undefined)
+    if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
   /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
@@ -107,7 +108,7 @@ export function useRunPrint({
 
   async function run() {
     const printChoices = printChoicesOf(selection)
-    if (!outputId || !choices || !printChoices) return
+    if (!source || !choices || !printChoices) return
     const attempt = ++runAttempt.current
     following.current?.abort()
     const controller = new AbortController()
@@ -129,7 +130,7 @@ export function useRunPrint({
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),
       }
-      const ran = await api.runPrint(outputId, body, controller.signal)
+      const ran = await sourceApi(source).run(body, controller.signal)
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
