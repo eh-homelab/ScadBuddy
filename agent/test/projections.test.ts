@@ -12,8 +12,9 @@ import { createBackendClient } from '../src/api/backend.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // Spec §5.1: "A test asserts both lists are identical, apart from browser-only
-// tools." There are no browser-only tools yet (#254), so the lists must be
-// equal outright: names, descriptions, input schemas and annotations.
+// tools." The browser_* tools (#254, src/tools/browser.ts) are in both lists,
+// so the lists must be equal outright: names, descriptions, input schemas and
+// annotations.
 //
 // One normalisation: the two servers turn the same zod union of primitives
 // into JSON Schema differently. The Agent SDK's bundled server writes
