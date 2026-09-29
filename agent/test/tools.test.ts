@@ -637,6 +637,16 @@ describe('invalid arguments', () => {
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('invalid arguments')
   })
+
+  it('refuse a send that still asks to queue, instead of quietly uploading (#312)', async () => {
+    const result = await runTool(
+      { ...tool('send_to_bambuddy'), gated: false },
+      { output_id: '0123456789abcdef0123456789abcdef', mode: 'queue', copies: 2 },
+      ctx(),
+    )
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('invalid arguments')
+  })
 })
 
 describe('print media (#307)', () => {
@@ -747,6 +757,48 @@ describe('prints (#308)', () => {
   it('reads only', () => {
     expect(tool('list_prints').risk).toBe('read')
     expect(tool('get_print').risk).toBe('read')
+  })
+})
+
+describe('print_again and pull_print_timelapse (#311)', () => {
+  it('queues the archive again', async () => {
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => {
+        posted = true
+        return HttpResponse.json({ queue_item_id: 51, printer_id: 1, bambuddy_url: 'https://b/queue' }, { status: 201 })
+      }),
+    )
+    const pending = await runTool(tool('print_again'), { archive_id: 35 }, { ...ctx(), pending: new PendingActionStore() })
+    expect(firstText(pending)).toMatchObject({ status: 'pending_approval' })
+    expect(posted).toBe(false)
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('pulls a named timelapse off the printer', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/timelapse/pull`, async ({ request }) => {
+        body = await request.json()
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('pull_print_timelapse'), gated: false }, { archive_id: 35, filename: 'video_1.mp4' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ filename: 'video_1.mp4' })
+  })
+
+  it('are outward, behind the approval gate', () => {
+    expect(tool('print_again').risk).toBe('outward')
+    expect(tool('pull_print_timelapse').risk).toBe('outward')
+  })
+
+  it('declare every Bambuddy scope their route needs: the archive read, then the write', () => {
+    expect(tool('print_again').bambuddyScope).toEqual(['Read Status', 'Manage Queue'])
+    expect(tool('pull_print_timelapse').bambuddyScope).toEqual(['Read Status', 'Manage Archives'])
   })
 })
 

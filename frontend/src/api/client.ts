@@ -33,6 +33,7 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrintAgain,
   PrintDetail,
   PrintPage,
   PrintProgress,
@@ -609,6 +610,23 @@ export const api = {
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
 
+  /**
+   * #311 — one print. `printerMedia` also lists what the printer still holds, which
+   * asks the printer, so the page does it only when told to.
+   */
+  getPrint: (archiveId: number, { printerMedia = false } = {}) =>
+    request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+
+  /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
+  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+
+  /** #311 — attaches a timelapse still on the printer to the print. */
+  pullTimelapse: (archiveId: number, filename: string) =>
+    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
+
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
@@ -708,9 +726,9 @@ export const api = {
   createProject: (body: ProjectRequest) =>
     request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** Filed after the run, never during it: a pipeline run's `jobs[].queue_entry_id` is
-   * null when Bambuddy answers 202, and an archive only exists once a print has finished,
-   * so the ids come from the progress read (#89). */
+  /** Filed after the run, never during it: a plate's queue item only exists once it has
+   * sliced, and an archive only once a print has finished, so the ids come from the
+   * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
     request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
@@ -737,8 +755,6 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<PrintPage>(`/prints${suffix}`)
   },
-
-  getPrint: (archiveId: number) => request<PrintDetail>(`/prints/${archiveId}`),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

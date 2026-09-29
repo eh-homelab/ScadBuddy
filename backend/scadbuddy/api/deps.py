@@ -189,8 +189,10 @@ def build_state(settings: Settings) -> AppState:
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     # The render queue's: a route builds its own over its `LibrariesDep`.
     fetcher = CheckoutFetcher(libraries, installs, checkouts)
+    # The bytes on the volume, the rest on the render queue's pool (#591).
     assets = AssetStore(
         paths.assets,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )

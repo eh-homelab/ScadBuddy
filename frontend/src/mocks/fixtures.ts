@@ -614,12 +614,7 @@ export const settings: Settings = {
   has_api_key: true,
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
-  pipeline_id: 1,
   printer_id: 1,
-  printer_preset: null,
-  process_preset: null,
-  filament_presets: [],
-  bed_type: null,
   default_plate: null,
   display_unit: 'mm',
   media_upload_max_bytes: 1024 * 1024 * 1024,
@@ -693,33 +688,6 @@ export const targets: BambuddyTargets = {
     { id: 2, name: 'ScadBuddy', is_external: false },
     { id: 3, name: 'Keychains', is_external: false },
   ],
-  // Settings' "Slicer pipeline" list (the send bar's pipeline route), not the print dialog.
-  pipelines: [
-    {
-      id: 1,
-      name: 'Textured PEI · 0.20 mm · AMS',
-      bed_type: 'Textured PEI Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP252' },
-      filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
-    },
-    {
-      id: 2,
-      name: 'Draft · 0.28 mm',
-      bed_type: 'Cool Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP260' },
-      filament_presets: [{ source: 'cloud', id: 'GFSB00_22' }],
-    },
-  ],
   printers: [
     { id: 1, name: '3DP-31B-598', model: 'H2C', is_active: true, nozzle_count: 2 },
     { id: 2, name: '3DP-77A-114', model: 'H2C', is_active: true, nozzle_count: 2 },
@@ -733,78 +701,27 @@ export const targets: BambuddyTargets = {
  */
 const QUEUE_URL = `${settings.bambuddy_url}/queue`
 
-/** A pipeline run mid-flight: both copies have reached the queue, neither has printed. */
-export const pipelineProgress: PrintProgress = {
-  route: 'pipeline',
-  stage: 'queued',
-  settled: false,
-  pipeline_run_id: 12,
-  slice_job_id: 21,
-  copies: 2,
-  copies_completed: 0,
-  copies_failed: 0,
-  copies_cancelled: 0,
-  copies_in_progress: 2,
-  error_message: null,
-  fix: null,
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: '3DP-31B-598',
-      queue_entry_id: 4472,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-    // A fan-out Bambuddy has not assigned yet: `assigned_printer_name` is null until it
-    // picks, which is a normal state and not a missing value to hide.
-    {
-      copy_index: 1,
-      printer_name: null,
-      queue_entry_id: 4473,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
-  bambuddy_url: QUEUE_URL,
-}
-
 /**
- * The real failed run, transcribed from `backend/tests/bambuddy/recordings/pipeline-run.json`
- * as `progress.from_run` normalises it. Its point is that Bambuddy's own fields all say
- * the run is fine — `status: "in_progress"`, `copies_in_progress: 1`, the one job still
- * `pending` — while `completed_at` and `error_message` say it is over. `settled` is the
- * backend's resolution of that contradiction, and the only reason the poll ever stops.
- * `fix` is chosen from `slice_job_id` set with `sliced_library_file_id` still null, not
- * from the wording of the message.
+ * A slice that failed, so no queue item was ever created. `fix` is chosen by the
+ * backend from *where* it failed (the slice), not from the wording of the message.
  */
-export const failedRunProgress: PrintProgress = {
-  route: 'pipeline',
+export const failedSliceProgress: PrintProgress = {
+  route: 'slice_queue',
   stage: 'failed',
   settled: true,
-  pipeline_run_id: 1,
   slice_job_id: 7,
+  queue_item_id: null,
   copies: 1,
   copies_completed: 0,
-  copies_failed: 0,
+  copies_failed: 1,
   copies_cancelled: 0,
-  copies_in_progress: 1,
+  copies_in_progress: 0,
   error_message:
     'Slice failed: The selected printer is not compatible with the process preset in the 3mf.',
   fix:
-    'Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix ' +
-    'the model, and print again.',
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: null,
-      queue_entry_id: null,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
+    'Bambuddy could not slice this plate. Change the plate or print settings, or fix the ' +
+    'model, and print again.',
+  copies_detail: [],
   bambuddy_url: QUEUE_URL,
 }
 
@@ -1215,6 +1132,63 @@ export const prints: PrintDetail[] = [
     },
   }),
 ]
+
+/**
+ * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
+ * print 36 left a timelapse and a camera recording on the printer; the others nothing.
+ */
+export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
+  36: [
+    {
+      name: 'video_2026-09-26_20-01-00.mp4',
+      path: '/timelapse/video_2026-09-26_20-01-00.mp4',
+      size: 1843200,
+      mtime: '2026-09-26T20:44:00',
+      kind: 'timelapse',
+    },
+    {
+      name: 'ipcam-record.2026-09-26_20-01-10.101.mp4',
+      path: '/ipcam/ipcam-record.2026-09-26_20-01-10.101.mp4',
+      size: 251931635,
+      mtime: '2026-09-26T20:30:00',
+      kind: 'ipcam',
+    },
+  ],
+}
+
+// #311 — print 35 printed twice: the first run was cancelled, the second completed.
+const reprinted = prints.find((print) => print.archive_id === 35)
+if (reprinted) {
+  reprinted.provenance.model_version = versionIds.edited
+  reprinted.outcome.runs = [
+    {
+      id: 71,
+      archive_id: 35,
+      status: 'cancelled',
+      started_at: '2026-09-27T03:40:00',
+      completed_at: '2026-09-27T03:52:00',
+      duration_seconds: 720,
+      filament_used_grams: 1.9,
+      cost: 0.05,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+    {
+      id: 72,
+      archive_id: 35,
+      status: 'completed',
+      started_at: '2026-09-27T04:09:36.529201',
+      completed_at: '2026-09-27T05:56:53.660315',
+      duration_seconds: 6437,
+      filament_used_grams: 16.36,
+      cost: 0.43,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+  ]
+}
 
 /**
  * What the backend's list filters read that a print does not carry (#609 review):

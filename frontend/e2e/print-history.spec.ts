@@ -62,7 +62,7 @@ test.describe('print history (#310)', () => {
     // Settled on the print, not bounced back to the catalogue by the catch-all route.
     await expect(page.getByRole('heading', { name: 'Reagan', level: 1 })).toBeVisible()
     await expect(page).toHaveURL(/\/prints\/36$/)
-    await page.getByRole('link', { name: 'Print history' }).click()
+    await page.getByRole('main').getByRole('link', { name: 'Prints', exact: true }).click()
     await expect(page).toHaveURL(/\/prints$/)
   })
 

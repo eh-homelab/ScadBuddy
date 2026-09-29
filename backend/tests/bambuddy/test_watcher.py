@@ -23,7 +23,6 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.pg_store import migrate
-from tests.bambuddy.conftest import recording
 
 OUTPUT = "c" * 32
 NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
@@ -37,8 +36,8 @@ def write_output(paths: DataPaths, output_id: str = OUTPUT, **extra: Any) -> Out
         job_id="d" * 32,
         created_at=NOW - timedelta(hours=1),
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
-        print_route="pipeline",
-        pipeline_run_id=12,
+        print_route="slice_queue",
+        queue_item_id=51,
         **extra,
     )
     directory = paths.outputs / "demo" / output_id
@@ -49,10 +48,10 @@ def write_output(paths: DataPaths, output_id: str = OUTPUT, **extra: Any) -> Out
 
 def progress(stage: str = "running", *, settled: bool = False, done: int = 0) -> PrintProgress:
     return PrintProgress(
-        route="pipeline",
+        route="slice_queue",
         stage=stage,  # type: ignore[arg-type]
         settled=settled,
-        pipeline_run_id=12,
+        queue_item_id=51,
         copies_completed=done,
         bambuddy_url="http://bambuddy.test/queue",
     )
@@ -217,7 +216,7 @@ def test_a_failure_is_announced_once_and_the_watch_carries_on(paths: DataPaths) 
 def test_a_print_bambuddy_no_longer_has_ends_the_watch(paths: DataPaths) -> None:
     async def scenario() -> tuple[Script, list[Event]]:
         write_output(paths)
-        read = Script(ApiError(404, "no pipeline run 12"))
+        read = Script(ApiError(404, "no queue item 51"))
         watcher, seen = watcher_for(paths, read)
         watcher.watch(OUTPUT)
         await until_idle(watcher)
@@ -497,12 +496,14 @@ def test_a_print_another_process_holds_is_left_to_it(paths: DataPaths) -> None:
 
 
 @respx.mock
-def test_the_real_read_follows_a_recorded_failed_slice_to_settled(paths: DataPaths) -> None:
-    """Through ``progress_for`` and the client, as production reads: the recorded run
-    whose slice failed is settled on the first read, so the watch ends there."""
+def test_the_real_read_follows_a_failed_print_to_settled(paths: DataPaths) -> None:
+    """Through ``progress_for`` and the client, as production reads: a queue item that
+    failed is settled on the first read, so the watch ends there."""
     config = BambuddyConfig(base_url="http://bambuddy.test", api_key="bb_test")
-    respx.get("http://bambuddy.test/api/v1/pipeline-runs/12").mock(
-        return_value=httpx.Response(200, json=recording("pipeline-run.json"))
+    respx.get("http://bambuddy.test/api/v1/queue/51").mock(
+        return_value=httpx.Response(
+            200, json={"id": 51, "status": "failed", "error_message": "AMS slot empty"}
+        )
     )
 
     async def read(meta: OutputMeta) -> PrintProgress | None:
