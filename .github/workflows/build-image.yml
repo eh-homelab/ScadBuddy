@@ -12,9 +12,13 @@ name: Build Image
 # Change visibility); it cannot be set from a workflow. If a node ever reports
 # `denied` / `unauthorized` pulling this image, check visibility FIRST.
 #
-# Not run on pull_request: a PR has no GHCR write token, and ci.yml already
-# builds the same Dockerfile (both targets) on every PR, so nothing about the
-# build is untested at merge time.
+# The publish jobs do not run on pull_request: a PR has no GHCR write token,
+# and ci.yml already builds the same Dockerfile (both targets) on every PR. But
+# ci.yml builds amd64 only, so the one PR-time job here, `openscad-lsp-arm64`,
+# builds the arm64 leg of the `openscad-lsp` stage under QEMU and runs the
+# binary (#199). It is not a required check (the required one is ci.yml's
+# "CI Summary", which cannot `needs:` a job in another workflow), so a red run
+# is visible on the PR but does not block the merge by itself.
 #
 # This workflow only PUBLISHES. Deploying is a separate step so it can be
 # switched off without touching the build: deploy-main.yml (workflow_run on
@@ -26,14 +30,21 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Only the `openscad-lsp-arm64` job runs for a PR. The stage copies nothing
+  # from the build context, so the Dockerfile and this file are all it reads.
+  pull_request:
+    paths:
+      - Dockerfile
+      - .github/workflows/build-image.yml
   workflow_dispatch:
 
 # Never cancel a publish. Two concurrent pushes to main would otherwise race on
 # the `main` tag and the shared buildcache, and a cancelled push leaves a
-# half-written manifest list behind.
+# half-written manifest list behind. A PR run publishes nothing, so a newer
+# push to the PR cancels it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -41,6 +52,7 @@ permissions:
 jobs:
   build:
     name: Build and push (amd64 + arm64)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -207,6 +219,7 @@ jobs:
   # change that pins this image in eh-homelab/clusters.
   agent:
     name: Build and push agent (amd64 + arm64)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -281,3 +294,60 @@ jobs:
             printf '%s\n' "$TAGS"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The arm64 leg of the Dockerfile's `openscad-lsp` stage (#199): its
+  # `TARGETARCH` case picks the aarch64 release and checksum, which the amd64
+  # PR build in ci.yml never exercises. Only that stage (and `base` under it)
+  # is built, not the image. `base` is OpenSCAD's arm64 image plus an apt
+  # install, which QEMU manages in minutes; the stage itself already runs
+  # `openscad-lsp --version` at build time, and the step below runs it again
+  # from the loaded image so the check does not depend on that RUN line.
+  #
+  # Runs on pushes to main too, so the cache below is warm for PRs.
+  openscad-lsp-arm64:
+    name: Build and run openscad-lsp (arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      # `type=gha` on a hosted runner only, as above. Its own scope, so it
+      # never overwrites the backend's (default) or the agent's index. It also
+      # reads the default scope, where the `build` job's mode=max cache holds
+      # main's arm64 `base` layers.
+      - name: Build the openscad-lsp stage for arm64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: openscad-lsp
+          platforms: linux/arm64
+          load: true
+          tags: scadbuddy-openscad-lsp:arm64
+          provenance: false
+          cache-from: |
+            type=gha,scope=openscad-lsp-arm64
+            type=gha
+          cache-to: type=gha,scope=openscad-lsp-arm64,mode=max
+
+      # `uname -m` proves the container really is arm64 (binfmt runs it under
+      # QEMU); a silently amd64 image would print x86_64 and fail here.
+      - name: Run openscad-lsp --version on arm64
+        run: |
+          set -euo pipefail
+          arch=$(docker run --rm --platform linux/arm64 --entrypoint uname scadbuddy-openscad-lsp:arm64 -m)
+          echo "container arch: $arch"
+          [[ "$arch" == aarch64 ]] || { echo "::error::expected aarch64, got $arch"; exit 1; }
+          version=$(docker run --rm --platform linux/arm64 --entrypoint /usr/local/bin/openscad-lsp scadbuddy-openscad-lsp:arm64 --version)
+          echo "$version"
+          echo "### openscad-lsp (arm64): \`$version\`" >> "$GITHUB_STEP_SUMMARY"
