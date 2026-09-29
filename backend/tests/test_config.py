@@ -284,3 +284,23 @@ def test_load_config_defaults_the_temporal_settings() -> None:
     assert config.temporal_address == ""
     assert config.temporal_namespace == "scadbuddy"
     assert config.temporal_task_queue_render == "render"
+
+
+def test_the_temporal_ui_url_is_empty_by_default_and_seeded_by_its_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings().temporal_ui_url is None
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", "")
+    assert Settings().temporal_ui_url is None
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", "https://temporal.lan")
+    assert Settings().temporal_ui_url == "https://temporal.lan"
+
+
+@pytest.mark.parametrize("value", ["javascript:alert(1)", "temporal.lan", "ftp://temporal.lan"])
+def test_a_temporal_ui_url_that_is_not_http_is_refused_by_name(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It becomes a link on the Settings page, so only an http(s) URL is one."""
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_UI_URL", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_TEMPORAL_UI_URL"):
+        Settings()

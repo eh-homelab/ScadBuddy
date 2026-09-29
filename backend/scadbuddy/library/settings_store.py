@@ -219,6 +219,7 @@ class SettingsPatch(BaseModel):
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     log_level: str | None = None
+    temporal_ui_url: str | None = None
 
     #: Env-seeded fields to put back on the deployment's value.
     reset: list[str] = Field(default_factory=list)

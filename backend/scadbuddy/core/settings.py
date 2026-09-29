@@ -150,6 +150,19 @@ class Settings(BaseSettings):
     # process (one replica, dev and tests). Production runs `python -m
     # scadbuddy.worker` as its own Deployment and leaves this off.
     temporal_worker_inprocess: bool = False
+    # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
+    # links to (#668). Empty (the default) shows no link.
+    temporal_ui_url: str | None = None
+
+    @field_validator("temporal_ui_url")
+    @classmethod
+    def _temporal_ui_url_is_http(cls, value: str | None) -> str | None:
+        # It becomes a link on the Settings page, so only an http(s) URL is one.
+        if value is None or not value.strip():
+            return None
+        if not value.startswith(("http://", "https://")):
+            raise ValueError(f"SCADBUDDY_TEMPORAL_UI_URL must be an http(s) URL, not {value!r}")
+        return value
 
     @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
     @classmethod
@@ -325,6 +338,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "bambuddy_url": "live",
         "bambuddy_api_key": "live",
         "public_url": "live",
+        # Read from the store by every GET /settings.
+        "temporal_ui_url": "live",
         "default_plate": "live",
         # The upload gate asks for the value in effect on every request.
         "media_upload_max_bytes": "live",
