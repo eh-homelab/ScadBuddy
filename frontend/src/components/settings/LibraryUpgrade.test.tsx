@@ -86,6 +86,36 @@ describe('LibraryUpgrade', () => {
     expect(within(list).getAllByRole('listitem')).toHaveLength(1)
   })
 
+  it('reads the models once, not again on every switch of library', async () => {
+    setMockLibraryPin('name-keychain', { name: 'threads', url: 'https://github.com/rcolyer/threads-scad.git', ref: 'v2.1', commit: 'c0ffee00'.repeat(5) })
+    let reads = 0
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/models') reads += 1
+    })
+    const { user } = await open()
+    // The mount's read, and the live-update resync's: neither depends on the library.
+    const mounted = reads
+    expect(mounted).toBeGreaterThan(0)
+    await user.selectOptions(screen.getByLabelText('Library'), 'threads')
+    // Named at once from the list already read: no slug while a fetch is in flight.
+    const list = await screen.findByRole('list', { name: 'Models that pin threads' })
+    expect(within(list).getByRole('listitem', { name: 'Name Keychain' })).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    await screen.findByRole('list', { name: 'Models that pin BOSL2' })
+    expect(row('Name Keychain')).toBeInTheDocument()
+    expect(reads).toBe(mounted)
+  })
+
+  it('says so when the models cannot be read, and still lists the pins by slug', async () => {
+    server.use(http.get('/api/v1/models', () => problem(503, 'Service Unavailable', 'the catalogue is offline')))
+    const { user } = renderPage(<LibraryUpgrade />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Could not read the models, so rows show slugs: the catalogue is offline',
+    )
+    await user.selectOptions(screen.getByLabelText('Library'), 'BOSL2')
+    expect(await screen.findByRole('listitem', { name: 'name-keychain' })).toHaveTextContent('Pinned to v2.0.700')
+  })
+
   it('says so when no model pins the library', async () => {
     const { user } = renderPage(<LibraryUpgrade />)
     await user.selectOptions(await screen.findByLabelText('Library'), 'dotSCAD')

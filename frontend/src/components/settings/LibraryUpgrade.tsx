@@ -36,6 +36,11 @@ export function LibraryUpgrade() {
     [],
     ['libraries'],
   )
+  // Once per mount, not per library: the names and built-in flags every row shows.
+  const models = useAsync(() => api.listModels(), [], ['models'])
+  const bySlug: ReadonlyMap<string, ModelSummary> = new Map(
+    (models.data ?? []).map((model) => [model.slug, model]),
+  )
   const [library, setLibrary] = useState('')
   const [ref, setRef] = useState('')
   const selectId = useId()
@@ -101,15 +106,27 @@ export function LibraryUpgrade() {
           />
         </div>
       </div>
+      {models.error && (
+        <p role="alert" className="text-[13px] text-warn">
+          Could not read the models, so rows show slugs: {models.error.message}
+        </p>
+      )}
       {/* Keyed by library: another library's checks and ticks never carry over. */}
-      {library && <LibraryUsers key={library} library={library} candidate={ref.trim()} />}
+      {library && <LibraryUsers key={library} library={library} candidate={ref.trim()} models={bySlug} />}
     </div>
   )
 }
 
-function LibraryUsers({ library, candidate }: { library: string; candidate: string }) {
+function LibraryUsers({
+  library,
+  candidate,
+  models,
+}: {
+  library: string
+  candidate: string
+  models: ReadonlyMap<string, ModelSummary>
+}) {
   const users = useAsync(() => api.listLibraryUsers(library), [library], ['libraries'])
-  const models = useAsync(() => api.listModels(), [], ['models'])
   const [checks, setChecks] = useState<Record<string, CheckState>>({})
   const [moves, setMoves] = useState<Record<string, MoveState>>({})
   const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set())
@@ -117,7 +134,6 @@ function LibraryUsers({ library, candidate }: { library: string; candidate: stri
 
   const checking = Object.values(checks).some((state) => state.running)
   const busy = checking || moving
-  const bySlug = new Map((models.data ?? []).map((model) => [model.slug, model]))
 
   async function check(slug: string) {
     if (busy || !candidate) return
@@ -193,7 +209,7 @@ function LibraryUsers({ library, candidate }: { library: string; candidate: stri
           <UserRow
             key={user.slug}
             user={user}
-            model={bySlug.get(user.slug)}
+            model={models.get(user.slug)}
             candidate={candidate}
             check={checks[user.slug]}
             move={moves[user.slug]}
