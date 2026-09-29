@@ -102,6 +102,7 @@ export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
+export type PrintRun = Schemas['PrintRun']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']

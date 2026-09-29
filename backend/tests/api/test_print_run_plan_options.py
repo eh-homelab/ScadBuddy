@@ -1,6 +1,6 @@
 """Issue #141: a filament-plan run carries the remembered print options.
 
-``run_for_output`` resolves the remembered options and hands them to ``slice_and_queue``
+``execute_run`` resolves the remembered options and hands them to ``slice_and_queue``
 alongside the plan's filament mapping. Both must land on the one queue item: the options
 must not displace the plan's ``filament_overrides``, nor the plan the options.
 """
@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_options_picker import remember
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
 
 pytestmark = pytest.mark.requires_postgres
@@ -38,7 +38,7 @@ def test_a_plan_run_queues_the_remembered_options_and_the_plans_overrides(
 
     # The plan pins spool 9 to slot 1 and spool 5 to slot 2; `copies` is left out so
     # the remembered quantity applies.
-    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request(copies=None))
+    response = run_print(client, output_id, json=run_request(copies=None))
     assert response.status_code == 200, response.text
 
     sent: dict[str, Any] = json.loads(queued.calls.last.request.content)

@@ -24,7 +24,7 @@ from scadbuddy.library.outputs import META_NAME
 from scadbuddy.render.schema import ParamValue
 from tests.api.conftest import set_fake_env
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import _uploaded_colours, run_request, run_routes
+from tests.api.test_print_run_choices import _uploaded_colours, run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 
 pytestmark = pytest.mark.requires_postgres
@@ -184,9 +184,7 @@ def test_a_later_print_on_the_same_printer_in_the_models_colours_reuses_the_proj
     filed = file_into_project(client, output_id).json()
     assert filed["library_file_id"] == 41
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert (ran.json()["library_file_id"], ran.json()["folder_id"]) == (41, FOLDER)
     assert uploaded.call_count == 1
@@ -211,9 +209,7 @@ def test_a_print_into_the_project_in_other_spools_colours_uploads_a_copy_in_thei
     assert file_into_project(client, output_id).json()["library_file_id"] == 41
     assert _uploaded_colours(uploaded) == ["#FF0000"]
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert (ran.json()["library_file_id"], ran.json()["folder_id"]) == (42, FOLDER)
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
@@ -238,9 +234,7 @@ def test_naming_the_file_never_fails_the_print(
         raise RuntimeError("the library checkout is gone")
 
     monkeypatch.setattr(outputs_api, "_output_stem", broken)
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert uploaded_name(uploaded) == f"{project_stem(model, {}, {}, name='Elan')}.3mf"
 
@@ -257,9 +251,7 @@ def test_a_folder_listing_that_fails_never_fails_the_print(client: TestClient, m
     slice_routes()
     queue_route()
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert uploaded_name(uploaded) == "Demo — 12.3mf"
 
@@ -280,9 +272,7 @@ def test_filing_after_a_print_in_the_models_colours_reuses_the_prints_copy(
     slice_routes()
     queue_route()
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.status_code == 200, ran.text
     assert ran.json()["library_file_id"] == 41
 
@@ -373,9 +363,7 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     run_routes()
     slice_routes()
     queue_route()
-    first = client.post(
-        f"/api/v1/print/outputs/{printed}/run", json=run_request(project_id=PROJECT)
-    )
+    first = run_print(client, printed, json=run_request(project_id=PROJECT))
     assert first.status_code == 200, first.text
 
     fresh = make_output(client, model, name="Second")
@@ -384,7 +372,7 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
     assert [copy["target_key"] for copy in detail["library_files"]] == ["Bambu Lab H2C@0.2"]
 
-    again = client.post(f"/api/v1/print/outputs/{fresh}/run", json=run_request(project_id=PROJECT))
+    again = run_print(client, fresh, json=run_request(project_id=PROJECT))
     assert again.json()["library_file_id"] == 42
     assert uploaded.call_count == 2
 
@@ -407,9 +395,7 @@ def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
     queue_route()
 
     file_into_project(client, output_id)  # no printer known: the fallback plate
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
-    )
+    ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
     assert ran.json()["library_file_id"] == 42
     assert uploaded_name(uploaded) == "Demo — 12 (H2C).3mf"
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
@@ -517,9 +503,7 @@ def test_an_explicit_no_project_on_the_run_wins_over_the_remembered_one(
     slice_routes()
     queue_route()
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json={**run_request(), "project_id": None}
-    )
+    ran = run_print(client, output_id, json={**run_request(), "project_id": None})
 
     assert ran.status_code == 200, ran.text
     assert ran.json()["project_id"] is None
@@ -541,7 +525,7 @@ def test_a_run_that_names_no_project_uses_the_remembered_one(
     slice_routes()
     queue_route()
 
-    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+    ran = run_print(client, output_id, json=run_request())
 
     assert ran.status_code == 200, ran.text
     assert (ran.json()["project_id"], ran.json()["folder_id"]) == (PROJECT, FOLDER)

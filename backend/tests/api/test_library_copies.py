@@ -23,7 +23,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.plate import DEFAULT_PLATE
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import body, run_routes
+from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
@@ -89,7 +89,7 @@ def run(
     request = body(**choices)
     if project_id is not None:
         request["project_id"] = project_id
-    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
+    response = run_print(client, output_id, json=request)
     assert response.status_code == 200, response.text
     result: dict[str, Any] = response.json()
     return result
@@ -115,6 +115,7 @@ def set_up(client: TestClient, model: str) -> str:
     project_routes()
     slice_routes()
     queue_route()
+    allow_reprints(client)
     return make_output(client, model)
 
 
