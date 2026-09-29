@@ -409,12 +409,16 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
+      description: 'A small tag for a **zip pull**, without the keyring hole.',
+      tags: ['small', 'zip pull'],
     },
     {
       id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
       name: 'Mum',
       origin: 'mine',
       params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      description: '',
+      tags: ['gift'],
       updated_at: '2026-09-20T10:00:00Z',
     },
     {
@@ -422,11 +426,20 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Old engraving',
       origin: 'mine',
       params: { name: 'Ada', engrave_depth: 2 },
+      description: '',
+      tags: [],
       updated_at: '2026-09-19T10:00:00Z',
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    {
+      id: 'template-tiny',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10 },
+      description: '',
+      tags: [],
+    },
   ],
 }
 

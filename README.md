@@ -27,8 +27,9 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own. Saved presets are kept in the
-  database.
+  saved preset, to an editable preset of your own. Any preset can carry a short
+  Markdown `description` and `tags`, shown under the picker; **Edit details** renames a
+  saved one and sets them. Saved presets are kept in the database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
