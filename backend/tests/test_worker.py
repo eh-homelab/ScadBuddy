@@ -37,9 +37,9 @@ from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.worker import (
-    _make_current_until_polled,
     _poll,
     _wait_drained,
+    make_current_until_polled,
     run_inprocess_worker,
     run_worker,
 )
@@ -231,7 +231,7 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
         ),
     ):
         # As the worker does: Temporal 1.28 takes the build only once it polls.
-        assert await _make_current_until_polled(
+        assert await make_current_until_polled(
             lambda: make_current(client, namespace=client.namespace, build_id=build_id),
             build_id=build_id,
             backoff=(0.1,),
@@ -417,7 +417,7 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
 
     with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
         made = await asyncio.wait_for(
-            _make_current_until_polled(
+            make_current_until_polled(
                 set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, deadline=5
             ),
             5,
@@ -475,6 +475,7 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
     [error] = errors()
     assert error.getMessage() == "could not make this build current; polling anyway"
     assert error.__dict__["attempts"] == attempts
+    assert "workflow not found" in error.__dict__["error"]
 
 
 @pytest.mark.requires_temporal

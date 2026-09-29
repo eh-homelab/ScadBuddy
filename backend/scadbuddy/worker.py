@@ -129,7 +129,7 @@ async def _wait_drained(
     return True
 
 
-async def _make_current_until_polled(
+async def make_current_until_polled(
     set_current: Callable[[], Awaitable[None]],
     *,
     build_id: str,
@@ -155,7 +155,7 @@ async def _make_current_until_polled(
             if loop.time() + delay > give_up:
                 logger.error(
                     "could not make this build current; polling anyway",
-                    extra={"build_id": build_id, "attempts": attempt},
+                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
                 )
                 return False
             await asyncio.sleep(delay)
@@ -191,7 +191,7 @@ async def _poll(
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
         current = asyncio.create_task(
-            _make_current_until_polled(
+            make_current_until_polled(
                 lambda: make_current(client, namespace=client.namespace, build_id=build_id),
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
