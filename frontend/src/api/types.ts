@@ -164,6 +164,9 @@ export type AnalyzerSeverity = AnalyzerDiagnostic['severity']
 export type AnalyzerSource = Schemas['Source']
 export type DiagnosticLocation = Schemas['DiagnosticLocation']
 export type ScopeRef = Schemas['ScopeRef']
+/** A decision about a finding at a scope; `DecisionCreate` records an ignore or a suppression. */
+export type AnalyzerDecision = Schemas['Decision']
+export type DecisionCreate = Schemas['DecisionCreate']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
