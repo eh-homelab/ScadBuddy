@@ -11,6 +11,7 @@
  * marketplace `https://git.example/market.git` with entry `greeter`.
  */
 import { HttpResponse, delay, http } from 'msw'
+import { packageFetch } from '../api/aiPlugins'
 import type {
   PackageReview,
   PluginPackage,
@@ -26,6 +27,8 @@ export const GREETER_V1 = {
   commit: '3f1c9a2b7d4e5f60718293a4b5c6d7e8f9012345',
   hash: 'sha256:9b2e6c1f0a3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b',
 }
+export const MOVED_URL = 'https://git.example/greeter-moved.git'
+
 export const GREETER_V2 = {
   commit: '7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f607',
   hash: 'sha256:1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d',
@@ -88,13 +91,14 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
   const known = url === 'https://git.example/greeter.git' || (kind === 'marketplace' && url === 'https://git.example/market.git' && entry === 'greeter')
   if (url === 'https://git.example/shell.git') return SHELL_PROBLEMS
   if (!known) return undefined
-  const v = ref === 'v2' ? GREETER_V2 : GREETER_V1
+  // A marketplace re-pin to `moved` finds the entry in another repository.
+  const v = ref === 'v2' || ref === 'moved' ? GREETER_V2 : GREETER_V1
   return {
     name: 'greeter',
     source:
       kind === 'git'
         ? { kind: 'git', url, ref, path: '' }
-        : { kind: 'marketplace', url, ref, entry: entry ?? '', plugin_url: url, plugin_path: 'plugins/greeter' },
+        : { kind: 'marketplace', url, ref, entry: entry ?? '', plugin_url: ref === 'moved' ? MOVED_URL : url, plugin_path: ref === 'moved' ? '' : 'plugins/greeter' },
     commit_sha: v.commit,
     content_hash: v.hash,
     review: ref === 'v2' ? REVIEW_V2 : REVIEW_V1,
@@ -213,9 +217,15 @@ export const aiPluginHandlers = [
     if (!pkg) return detail(404, 'no such plugin package')
     const body = (await request.json()) as { commit_sha: string; content_hash: string }
     if (pkg.pending && body.commit_sha === pkg.pending.commit_sha && body.content_hash === pkg.pending.content_hash) {
+      const { url, path } = packageFetch(pkg)
+      const moved = pkg.pending.plugin_url !== url || pkg.pending.plugin_path !== path
       const next: PluginPackage = {
         ...pkg,
-        source: { ...pkg.source, ref: pkg.pending.ref },
+        source:
+          pkg.source.kind === 'marketplace'
+            ? { ...pkg.source, ref: pkg.pending.ref, plugin_url: pkg.pending.plugin_url, plugin_path: pkg.pending.plugin_path }
+            : { ...pkg.source, ref: pkg.pending.ref, path: pkg.pending.plugin_path },
+        enabled: pkg.enabled && !moved,
         commit_sha: pkg.pending.commit_sha,
         content_hash: pkg.pending.content_hash,
         review: pkg.pending.review,
@@ -258,6 +268,8 @@ export const aiPluginHandlers = [
       ...pkg,
       pending: {
         ref: found.source.ref,
+        plugin_url: packageFetch(found).url,
+        plugin_path: packageFetch(found).path,
         commit_sha: found.commit_sha,
         content_hash: found.content_hash,
         review: found.review,

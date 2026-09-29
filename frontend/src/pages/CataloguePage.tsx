@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
@@ -10,7 +10,9 @@ import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
 import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
-import { toSlides, type Slide } from '../components/media/slides'
+import { namedSlides, type Slide } from '../components/media/slides'
+import { ModelOrigin } from '../components/ModelOrigin'
+import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
@@ -27,7 +29,6 @@ import {
 } from '../lib/catalogueQuery'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
-import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
@@ -40,6 +41,11 @@ export function CataloguePage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
+  // #278 — the view is always in the URL: one with no (or an unknown) `view` shows
+  // Cards and is rewritten to say so, replacing the entry.
+  useEffect(() => {
+    if (params.get('view') !== query.view) setParams(toParams(query), { replace: true })
+  }, [params, query, setParams])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
@@ -136,8 +142,22 @@ export function CataloguePage() {
           <NoResults onClear={() => setQuery(clearFilters(query))} />
         )}
 
-        {shown.length > 0 && (
-          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {shown.length > 0 && query.view === 'list' && (
+          <ul aria-label="Models" className="flex flex-col gap-2">
+            {shown.map((model) => (
+              <ModelRow
+                key={model.slug}
+                model={model}
+                upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
+                onOpen={(slides, index) => setLightbox({ slides, index })}
+                onTag={addTag}
+              />
+            ))}
+          </ul>
+        )}
+
+        {shown.length > 0 && query.view === 'cards' && (
+          <ul aria-label="Models" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {shown.map((model) => (
               <ModelCard
                 key={model.slug}
@@ -187,17 +207,7 @@ function ModelCard({
   onTag: (tag: string) => void
   onOpenMedia: (slides: Slide[], index: number) => void
 }) {
-  const origin = safeHttpUrl(model.origin_url)
-  // A slide with no caption is named after the template, not just "Image 1 of 1".
-  const slides = useMemo(() => {
-    const all = toSlides(model.slug, model.media ?? [])
-    return all.map((slide, index) => ({
-      ...slide,
-      alt:
-        slide.caption ??
-        (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),
-    }))
-  }, [model.slug, model.name, model.media])
+  const slides = useMemo(() => namedSlides(model), [model])
   // The title is the card's one link, and its ::after stretches over the card. What
   // must not follow it (the carousel, the tag chips, the origin link, the action row)
   // sits above that on `relative z-10`: a carousel's buttons cannot nest in an anchor.
@@ -265,20 +275,7 @@ function ModelCard({
           Updated {timeAgo(model.updated_at)}
         </p>
       </div>
-      {/* Only an http(s) origin is linked at all; anything else is not shown (#179). */}
-      {origin && (
-        <p className={`${raised} truncate px-3 pb-2.5 text-[12px] text-faint`}>
-          From{' '}
-          <a
-            href={origin}
-            target="_blank"
-            rel="noreferrer"
-            className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
-          >
-            {hostOf(origin)}
-          </a>
-        </p>
-      )}
+      <ModelOrigin url={model.origin_url} className={`${raised} px-3 pb-2.5`} />
       <div className={`${raised} flex items-center justify-between gap-2 px-3 pb-2`}>
         <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
         <span className="ml-auto">
@@ -304,14 +301,6 @@ function summarise(model: ModelSummary) {
     description: model.description ?? null,
     tags: model.tags ?? [],
     origin: model.origin,
-  }
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return url
   }
 }
 

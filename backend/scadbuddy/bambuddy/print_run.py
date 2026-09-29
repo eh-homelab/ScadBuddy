@@ -18,6 +18,12 @@ from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
+from scadbuddy.bambuddy.extruders import (
+    SlotSide,
+    plan_extruders,
+    slot_sides,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -25,7 +31,7 @@ from scadbuddy.bambuddy.filaments import (
     across_plates,
     check,
     every_plate,
-    gather_options,
+    gather_plate_options,
     normalise_colour,
     queue_filaments,
 )
@@ -35,6 +41,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
+from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.resolver import (
@@ -55,7 +62,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import plate_filaments, plates_of
 
 logger = logging.getLogger(__name__)
 
@@ -166,26 +173,26 @@ async def filament_options_for_output(
         if all_plates
         else [plate_id]
     )
-    read = [
-        await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate,
-            fallback_colours=list(meta.colors),
-            own_colours=list(meta.colors) if copy.recolored else None,
-        )
-        for plate in plate_ids
-    ]
+    read = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+        own_colours=list(meta.colors) if copy.recolored else None,
+    )
     options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
     try:
-        options.nozzles = (await client.printer_status(printer_id)).nozzles
+        printer_status = await client.printer_status(printer_id)
     except (ApiError, ValueError):
         logger.info("printer status unreadable; the filament step opens with no nozzles known")
         options.nozzles = []
-    return options
+        return options
+    options.nozzles = printer_status.nozzles
+    # Each loaded spool's side, so the picker can mark one whose nozzle differs (#469).
+    return with_sides(options, printer_status)
 
 
 async def _spool_colours(
@@ -201,6 +208,46 @@ async def _spool_colours(
         rgba.get(plan.spool_for(index + 1) or 0) or colour
         for index, colour in enumerate(meta.colors)
     ]
+
+
+async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
+    """The printer's live status, read once per run (#469); unreadable is ``None``."""
+    try:
+        return await client.printer_status(printer_id)
+    except (ApiError, ValueError):
+        logger.info("printer status unreadable; no nozzle or extruder is known")
+        return None
+
+
+def _used_slots(store: OutputStore, meta: OutputMeta, plate_ids: list[int]) -> set[int]:
+    """The filaments the printed plates use (#469), read from the local 3MF so the
+    check still runs before the upload. A plate the file doesn't say about counts as
+    using every filament of the model."""
+    every = set(range(1, len(meta.colors) + 1))
+    by_plate = plate_filaments(store.directory(meta.id) / MODEL_NAME)
+    return set().union(*(by_plate.get(plate, every) for plate in plate_ids)) & every
+
+
+async def _spool_sides(
+    client: BambuddyClient,
+    plan: FilamentPlan,
+    used: set[int],
+    printer_id: int,
+    printer_status: PrinterStatus | None,
+) -> list[SlotSide]:
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
+
+    With no printer status no side can be told, so the assignments aren't read; and an
+    unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
+    status does, rather than failing a run that used to succeed."""
+    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
+    assignments: list[SpoolAssignment] = []
+    if printer_status is not None:
+        try:
+            assignments = await client.spool_assignments()
+        except (ApiError, ValueError):
+            logger.info("spool assignments unreadable; no spool's side is known")
+    return slot_sides(own, assignments, printer_status, printer_id=printer_id)
 
 
 async def run_for_output(
@@ -253,6 +300,14 @@ async def run_for_output(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
+    # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
+    # another size pauses the printer at the first layer, so such a run is refused.
+    printer_status = await _read_status(client, printer_id)
+    used = _used_slots(store, meta, plate_ids)
+    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
+    if extruders.errors:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
         client,
@@ -287,14 +342,14 @@ async def run_for_output(
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
     planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     errors: list[str] = []
-    for plate_id in plate_ids:
-        options = await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate_id,
-            fallback_colours=list(meta.colors),
-        )
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+    )
+    for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
         for error in resolved.errors:
             message = (
@@ -326,7 +381,7 @@ async def run_for_output(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
 
     hardware = await _hardware_warnings(
-        client, printer_id, choices, printer_name=planned[0][1].printer_name
+        client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
@@ -367,7 +422,7 @@ async def run_for_output(
         project_id,
         folder_id,
         copies=copies,
-        warnings=warnings + hardware,
+        warnings=warnings + hardware + extruders.warnings,
     )
 
 
@@ -393,6 +448,7 @@ async def _hardware_warnings(
     client: BambuddyClient,
     printer_id: int,
     choices: PrintChoices,
+    printer_status: PrinterStatus | None,
     *,
     printer_name: str | None,
 ) -> list[FilamentWarning]:
@@ -401,11 +457,7 @@ async def _hardware_warnings(
     Advisory only: an offline printer's status and an unreadable archive list mean
     "unknown", which says nothing rather than failing the print.
     """
-    try:
-        installed = installed_nozzles(await client.printer_status(printer_id))
-    except (ApiError, ValueError):
-        logger.info("printer status unreadable; no nozzle is warned about")
-        installed = []
+    installed = installed_nozzles(printer_status)
     try:
         last = last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
     except (ApiError, ValueError):
