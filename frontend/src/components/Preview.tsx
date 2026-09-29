@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
+import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { Spinner } from './ui/Spinner'
 import type { RenderStage } from '../lib/useRenderJob'
@@ -52,6 +53,10 @@ function useViewerTheme(): ViewerTheme {
 
 export interface PreviewCapture {
   capturePng: () => Promise<Blob | null>
+  /** A shareable image of the current view, drawn larger and without the viewer's aids. */
+  captureImage: (options: SnapshotOptions) => Promise<Blob | null>
+  /** The view's size in CSS pixels, which `captureImage` scales. */
+  viewSize: () => { width: number; height: number }
 }
 
 interface Props {
@@ -132,13 +137,22 @@ export function Preview({
         data-testid="preview-canvas"
         gl={{ preserveDrawingBuffer: true, antialias: true }}
         camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
-        onCreated={({ gl }) => {
+        onCreated={({ gl, get }) => {
           if (captureRef) {
             captureRef.current = {
               capturePng: () =>
                 new Promise((resolve) => {
                   gl.domElement.toBlob((blob) => resolve(blob), 'image/png')
                 }),
+              // Read at capture time: the camera and scene are the ones on screen then.
+              captureImage: (options) => {
+                const { scene, camera } = get()
+                return captureSnapshot(gl, scene, camera, options)
+              },
+              viewSize: () => ({
+                width: gl.domElement.clientWidth,
+                height: gl.domElement.clientHeight,
+              }),
             }
           }
         }}
@@ -338,7 +352,7 @@ function BuildPlate({ theme, size }: { theme: ViewerTheme; size: [number, number
   const outline = useMemo(() => new THREE.BoxGeometry(width, 0.001, depth), [width, depth])
   useEffect(() => () => outline.dispose(), [outline])
   return (
-    <group>
+    <group name={PLATE_OBJECT}>
       <Grid
         args={[width, depth]}
         cellSize={10}
@@ -411,7 +425,7 @@ function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
     <group ref={group}>
       <primitive object={scene} />
       {edges && (
-        <lineSegments position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
+        <lineSegments name={BBOX_OBJECT} position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
           <edgesGeometry args={[edges]} attach="geometry" />
           <lineBasicMaterial
             color="#f2a93b"

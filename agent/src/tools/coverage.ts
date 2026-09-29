@@ -14,8 +14,17 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'PUT /api/v1/settings',
     reason:
-      'Writes the Bambuddy URL and API key. Credentials are entered in the Settings UI only and never pass ' +
-      'through an agent (spec §8.6, credential leakage).',
+      'The one write path for every stored setting (#322): the Bambuddy URL and API key and the Google Fonts ' +
+      'key, which are entered in the Settings UI only and never pass through an agent (spec §8.6, credential ' +
+      'leakage), and the runtime settings (render concurrency and timeouts, queue caps, upload and library ' +
+      'limits, retention, log level), which decide how the server runs for everyone and are an operator ' +
+      'decision made in Settings. Reading them all, with their sources, is get_settings.',
+  },
+  {
+    operation: 'DELETE /api/v1/settings/remembered',
+    reason:
+      "Forget all drops every model's and printer's remembered choices at once; a bulk reset of shared " +
+      'preferences, confirmed in the Settings UI only. An agent forgets one entry through its own tool.',
   },
   {
     operation: 'POST /api/v1/settings/register-sidebar',
@@ -83,6 +92,15 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'DELETE /api/v1/analyzers/decisions/{decision_id}',
     reason: ANALYZERS_LATER,
   },
+  // #169: the library upgrade flow's building blocks land API-first; its design is pending.
+  ...(['GET /api/v1/libraries/{name}/users', 'POST /api/v1/models/{slug}/libraries/{name}/check'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        'Building blocks of the library upgrade flow (#169), whose product design is not decided; its tools ' +
+        "come with it. The check clones from the model's pinned URL, so its tier follows repin_library's.",
+    }),
+  ),
 ]
 
 /**

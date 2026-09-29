@@ -1,9 +1,12 @@
 import type {
   AnalysisReport,
   AnalysisRun,
+  AnalyzerDecision,
+  DecisionCreate,
   Asset,
   AssetUsage,
   AttachResult,
+  BambuddyStatus,
   BambuddyTargets,
   ChoicesView,
   ConnectionTest,
@@ -48,6 +51,7 @@ import type {
   ProjectFile,
   ProjectRequest,
   ProjectView,
+  RememberedChoices,
   RenderAccepted,
   SendRequest,
   SendResult,
@@ -701,6 +705,21 @@ export const api = {
     request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
+   * #284 — ignore or suppress a finding at a scope; a suppression needs a reason. It
+   * replaces an earlier decision about the same rule and instance at that scope
+   * (`post_decision`, backend/scadbuddy/api/analyzers.py).
+   */
+  createDecision: (body: DecisionCreate) =>
+    request<AnalyzerDecision>('/analyzers/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
+  deleteDecision: (id: string) =>
+    request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
+
+  /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
    * the one the last send went to so the picker opens where it was left. ScadBuddy
    * models no relationship between a model and a project: which prints belong to a
@@ -804,8 +823,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  unpinModelLibrary: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
+  /** With `index` (#217), only the invalid entry at that position of `libraries`. */
+  unpinModelLibrary: (slug: string, name: string, index?: number) =>
+    request<ModelSummary>(
+      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
+      { method: 'DELETE' },
+    ),
 
   getSettings: () => request<Settings>('/settings'),
 
@@ -825,6 +848,14 @@ export const api = {
   testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
 
   getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
+
+  /** #322 — Bambuddy's version and whether it captures a finish photo; read-only. */
+  getBambuddyStatus: () => request<BambuddyStatus>('/settings/bambuddy'),
+
+  /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
+  getRemembered: () => request<RememberedChoices>('/settings/remembered'),
+
+  forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
