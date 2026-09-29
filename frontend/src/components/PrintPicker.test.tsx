@@ -779,7 +779,7 @@ describe('PrintPicker · Projects', () => {
     const { user } = renderPage(<Harness />)
     await loaded()
 
-    const picker = screen.getByTestId('project-select')
+    const picker = screen.getByTestId<HTMLSelectElement>('project-select')
     await user.selectOptions(picker, 'new')
     await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
 
@@ -789,8 +789,9 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(picker).toBeDisabled())
 
     // Closing (Cancel here; Escape and the backdrop go through the same `close()`) would
-    // unmount the picker and drop its guard before the abandoned request lands.
-    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    // unmount the picker and drop its guard before the abandoned request lands. The new-project
+    // form has its own Cancel; the dialog's is the footer's, rendered last.
+    await user.click(screen.getAllByRole('button', { name: 'Cancel' }).at(-1)!)
     expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
     expect(picker).toBeDisabled()
 
