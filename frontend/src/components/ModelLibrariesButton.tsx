@@ -203,7 +203,9 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
                 >
                   {invalid.map((entry, index) => (
                     <InvalidRow
-                      key={`invalid-${index}`}
+                      // Not the position alone: after a removal the next entry takes it,
+                      // and would inherit this row's error or busy state.
+                      key={`${entry.index}\u0000${entry.name}\u0000${entry.problem}`}
                       slug={slug}
                       entry={entry}
                       position={index + 1}

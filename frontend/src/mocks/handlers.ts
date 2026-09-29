@@ -2520,7 +2520,7 @@ export const handlers = [
       // #217 — that invalid entry alone, as the backend's `unpin_library(index=)`.
       const index = Number(at)
       if (!invalid.some((entry) => entry.index === index && entry.name === name)) {
-        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'`)
+        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'; nothing was removed`)
       }
       await delay(50)
       const updated = {

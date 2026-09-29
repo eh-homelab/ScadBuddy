@@ -399,6 +399,39 @@ describe('ModelLibrariesButton, invalid entries (#217)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Done' }))
     expect(onSaved).not.toHaveBeenCalled()
   })
+  it("keeps a failed remove's error on its own row when the list shifts under it", async () => {
+    // Another tab removed the first entry already: the 409 arrives, the model is read
+    // again, and the second entry moves up into the first one's position.
+    const GONE = "'name-keychain''s entry 0 is no longer an invalid 'threads'; nothing was removed"
+    server.use(
+      http.delete(
+        '/api/v1/models/:slug/libraries/:name',
+        () => {
+          setMockInvalidLibraries('name-keychain', [{ name: null, index: 0, problem: NAMELESS }])
+          return HttpResponse.json(
+            { title: 'Conflict', status: 409, detail: GONE },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        },
+        { once: true },
+      ),
+    )
+    setMockInvalidLibraries('name-keychain', [
+      { name: 'threads', index: 0, problem: BARE },
+      { name: null, index: 1, problem: NAMELESS },
+    ])
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user, 'Libraries\\s*2')
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+    const bare = within(pinned).getByRole('listitem', { name: 'Invalid entry 1: threads' })
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    const moved = await within(pinned).findByRole('listitem', { name: 'Invalid entry 1: unnamed' })
+    expect(within(pinned).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(moved).queryByRole('alert')).not.toBeInTheDocument()
+    expect(moved).not.toHaveTextContent(GONE)
+  })
 })
 
 describe('ModelLibrariesButton, live (#269)', () => {
