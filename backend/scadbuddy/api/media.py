@@ -5,6 +5,11 @@ to the system temp directory and only then call the route. A video runs to a
 gigabyte, so its bytes go straight to ``cache/`` on the data volume, from where the
 catalogue renames them into ``media/``. `api.limits.BodySizeGate` caps the body at
 ``media_upload_max_bytes`` before any of it is read.
+
+A built-in takes media too (#722), as an overlay: what it ships is listed first and
+``readonly`` (a write to it is a 403), what is added to it is kept outside the models
+repository and changes like a template of mine's, without a revision. Its cover is
+chosen with ``PUT .../media/cover``, since its shipped items keep their place.
 """
 
 from __future__ import annotations
@@ -17,18 +22,19 @@ from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
 from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
-from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
     MediaNotFoundError,
     MediaOrderError,
+    MediaReadOnlyError,
     ModelNotFoundError,
     ModelRecord,
     TooManyMediaError,
@@ -49,6 +55,7 @@ from scadbuddy.library.media import (
 router = APIRouter(tags=["media"])
 
 MediaIdPath = Annotated[str, Path(pattern=MEDIA_ID_PATTERN)]
+MediaId = Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]
 
 #: A stored item's id names its contents for good: a replaced cover gets a new id.
 IMMUTABLE_CACHE_CONTROL = "private, max-age=31536000, immutable"
@@ -78,9 +85,21 @@ class MediaCaption(BaseModel):
 
 
 class MediaOrder(BaseModel):
-    """Every item's id, once each, in the new order."""
+    """Every item's id, once each, in the new order. On a built-in, every added
+    item's: a shipped item keeps its place, and its id may be left out."""
 
-    ids: list[str] = Field(max_length=MAX_MEDIA_ITEMS)
+    ids: list[MediaId] = Field(max_length=MAX_MEDIA_ITEMS)
+
+
+class MediaCover(BaseModel):
+    """The item to make the cover."""
+
+    id: MediaId | None = Field(
+        description=(
+            "The item's id. None goes back to a built-in's shipped cover; a template "
+            "of mine's cover is always one of its items."
+        ),
+    )
 
 
 # ── the streamed multipart body ──────────────────────────────────────────────
@@ -280,6 +299,19 @@ NO_DATABASE_RESPONSE: dict[int | str, dict[str, Any]] = {
     503: {"description": "No database: SCADBUDDY_DATABASE_URL is unset"}
 }
 
+#: A write to an item a built-in ships.
+READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
+    403: {"description": "The item is one a built-in template ships, and is read-only"}
+}
+
+
+def _read_only(slug: str, item_id: str) -> ApiError:
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
+        "only the media added to it can change",
+    )
+
 
 def _require_media_store(catalogue: Catalogue) -> None:
     """503 before anything is read or written, so an upload is refused on its
@@ -370,13 +402,13 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
         "`SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (reported by `GET /settings` as "
         "`media_upload_max_bytes`); an image is at most 10 MB, since it is committed to "
         "the template's history, while a video is not. The first write turns a legacy "
-        "`thumbnail.png` into an ordinary item."
+        "`thumbnail.png` into an ordinary item. On a built-in the item is added after "
+        "what it ships, kept outside its history: the built-in's revision does not move."
     ),
 )
 async def upload_media(
     slug: SlugPath, request: Request, catalogue: CatalogueDep, events: EventsDep
 ) -> ModelRecord:
-    require_mine(slug)
     require_model_exists(catalogue, slug)
     _require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
@@ -399,7 +431,7 @@ async def upload_media(
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
     summary="Caption a media item",
 )
 def patch_media(
@@ -409,7 +441,6 @@ def patch_media(
     catalogue: CatalogueDep,
     events: EventsDep,
 ) -> ModelRecord:
-    require_mine(slug)
     require_model_exists(catalogue, slug)
     _require_media_store(catalogue)
     try:
@@ -418,6 +449,8 @@ def patch_media(
         raise _no_model(slug) from None
     except MediaNotFoundError:
         raise _no_item(slug, item_id) from None
+    except MediaReadOnlyError:
+        raise _read_only(slug, item_id) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
@@ -429,13 +462,14 @@ def patch_media(
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
-        "(422 otherwise). The first is the cover."
+        "(422 otherwise). The first is the cover. A built-in's shipped items keep "
+        "their place: the order names every item added to it, a shipped id in it is "
+        "passed over, and its cover is set with `PUT .../media/cover`."
     ),
 )
 def reorder_media(
     slug: SlugPath, body: MediaOrder, catalogue: CatalogueDep, events: EventsDep
 ) -> ModelRecord:
-    require_mine(slug)
     require_model_exists(catalogue, slug)
     _require_media_store(catalogue)
     try:
@@ -448,20 +482,51 @@ def reorder_media(
     return record
 
 
+@router.put(
+    "/models/{slug}/media/cover",
+    response_model=ModelRecord,
+    responses=NO_DATABASE_RESPONSE,
+    summary="Choose the cover",
+    description=(
+        "Makes one item the cover. A template of mine's cover is its first item, so "
+        "the item is moved to the front, as one revision (an `id` of null is a 422). "
+        "A built-in lists what it ships first, and that order stays: its cover is a "
+        "choice of its own (`media_cover` on the record), any shipped or added item, "
+        "listed first; null goes back to the shipped cover. 404 for an id the "
+        "template does not list."
+    ),
+)
+def put_media_cover(
+    slug: SlugPath, body: MediaCover, catalogue: CatalogueDep, events: EventsDep
+) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    _require_media_store(catalogue)
+    try:
+        record = catalogue.set_cover(slug, body.id)
+    except ModelNotFoundError:
+        raise _no_model(slug) from None
+    except MediaNotFoundError:
+        raise _no_item(slug, body.id or "") from None
+    except MediaOrderError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
+
+
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses=NO_DATABASE_RESPONSE,
+    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "
-        "missing is removed all the same."
+        "missing is removed all the same. What a built-in ships is not removed (403); "
+        "what was added to it is."
     ),
 )
 def delete_media(
     slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueDep, events: EventsDep
 ) -> ModelRecord:
-    require_mine(slug)
     require_model_exists(catalogue, slug)
     _require_media_store(catalogue)
     try:
@@ -470,5 +535,7 @@ def delete_media(
         raise _no_model(slug) from None
     except MediaNotFoundError:
         raise _no_item(slug, item_id) from None
+    except MediaReadOnlyError:
+        raise _read_only(slug, item_id) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record

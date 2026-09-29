@@ -45,7 +45,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -317,6 +317,12 @@ class ModelHistory:
                     fcntl.flock(handle, fcntl.LOCK_UN)
         finally:
             self._lock.release()
+
+    def write_lock(self) -> AbstractContextManager[None]:
+        """The write lock every commit takes, held for a change that commits nothing:
+        a built-in's added media (#722) is outside the repository, but its
+        read-modify-write must not interleave with another replica's."""
+        return self._exclusive()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 

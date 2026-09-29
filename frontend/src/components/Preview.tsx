@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
+import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { Spinner } from './ui/Spinner'
@@ -57,6 +58,8 @@ export interface PreviewCapture {
   captureImage: (options: SnapshotOptions) => Promise<Blob | null>
   /** The view's size in CSS pixels, which `captureImage` scales. */
   viewSize: () => { width: number; height: number }
+  /** #722 — the camera's pose now, as a copy an image can be framed from. */
+  cameraView: () => CameraView
 }
 
 interface Props {
@@ -153,6 +156,16 @@ export function Preview({
                 width: gl.domElement.clientWidth,
                 height: gl.domElement.clientHeight,
               }),
+              cameraView: () => {
+                const { camera, controls } = get()
+                const target =
+                  (controls as { target?: THREE.Vector3 } | null)?.target ?? new THREE.Vector3(0, 20, 0)
+                return {
+                  position: camera.position.toArray(),
+                  target: target.toArray(),
+                  fov: (camera as THREE.PerspectiveCamera).fov ?? 35,
+                }
+              },
             }
           }
         }}
