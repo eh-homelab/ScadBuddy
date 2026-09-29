@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { keychainReadme } from '../mocks/fixtures'
+import { GALLERY_SLUG, keychainReadme } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -233,67 +233,97 @@ describe('EditDetailsButton', () => {
     )
   })
 
-  it('sets a new thumbnail from a chosen PNG', async () => {
-    // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
-    const setThumbnail = vi
-      .spyOn(api, 'setThumbnail')
-      .mockImplementation(async (slug) => ({ ...(await api.getModel(slug)), version: 'next' }))
-    const { dialog, user, onSaved } = await open('gridfinity-bin')
-    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
-      'None set. A render of the default settings stands in once it is ready; a generated plate takes precedence.',
-    )
+  it("makes a chosen image of the template's media its cover on save", async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open(GALLERY_SLUG)
 
-    const png = new File(['png'], 'cover.png', { type: 'image/png' })
-    await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), png)
-    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('cover.png')
+    await user.click(within(dialog).getByRole('button', { name: 'Change…' }))
+    const picker = screen.getByRole('dialog', { name: 'Choose the thumbnail' })
+    const images = within(picker).getByRole('region', { name: "Template's images" })
+    // The video is offered by its poster; the first item is marked as the cover.
+    expect(within(images).getAllByRole('button')).toHaveLength(4)
+    expect(within(images).getByRole('button', { name: 'Choose Printed in blue and orange' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await user.click(within(images).getByRole('button', { name: 'Choose The raised rim' }))
+
+    expect(screen.queryByRole('dialog', { name: 'Choose the thumbnail' })).not.toBeInTheDocument()
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+      'The raised rim becomes the cover on save.',
+    )
+    expect(sent).toEqual([])
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
-    expect(setThumbnail).toHaveBeenCalledWith('gridfinity-bin', png)
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      `PUT /api/v1/models/${GALLERY_SLUG}/media/order`,
+    ])
+    expect(sent[0]?.body).toEqual({
+      ids: ['b2c3d4e5f6a1', 'a1b2c3d4e5f6', 'c3d4e5f6a1b2', 'd4e5f6a1b2c3'],
+    })
   })
 
-  it('shows the server\'s 422 when a file named .png is not a PNG by its bytes', async () => {
-    // The client checks a name or type; the server reads the signature. Node's own
-    // `File` and `FormData` stand in for jsdom's, so the real multipart PUT crosses
-    // into Node's fetch and reaches the mock's `_require_png`, not a spy.
-    const builtin = 'node:buffer'
-    const { File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File }
-    const NodeFormData = (
-      await new Response('a=b', {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      }).formData()
-    ).constructor as typeof FormData
-    vi.stubGlobal('File', NodeFile)
-    vi.stubGlobal('FormData', NodeFormData)
-    try {
-      const setThumbnail = vi.spyOn(api, 'setThumbnail')
-      const { dialog, user, onSaved } = await open()
+  it("uploads a new image from the picker into the media and makes it the cover", async () => {
+    // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
+    const uploadMedia = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      const model = await api.getModel(slug)
+      const added = {
+        id: 'e5f6a1b2c3d4',
+        file: 'e5f6a1b2c3d4.png',
+        kind: 'image' as const,
+        caption: '',
+        poster: null,
+        missing: false,
+        content_type: 'image/png',
+        size: file.size,
+      }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
+    const reorder = vi
+      .spyOn(api, 'reorderMedia')
+      .mockImplementation(async (slug) => await api.getModel(slug))
+    const { dialog, user, onSaved } = await open()
 
-      const renamed = new NodeFile(['GIF89a'], 'cover.png', { type: 'image/png' })
-      await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), renamed)
-      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
-      await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Change…' }))
+    const picker = screen.getByRole('dialog', { name: 'Choose the thumbnail' })
+    const png = new File(['png'], 'cover.png', { type: 'image/png' })
+    await user.upload(within(picker).getByLabelText('Upload a file'), png)
 
-      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-        'the thumbnail is not a PNG',
-      )
-      expect(setThumbnail).toHaveBeenCalledWith('name-keychain', renamed)
-      expect(onSaved).not.toHaveBeenCalled()
-      expect((await api.getModel('name-keychain')).thumbnail_source).toBe('model')
-    } finally {
-      vi.unstubAllGlobals()
-    }
+    await waitFor(() =>
+      expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+        'cover.png becomes the cover on save.',
+      ),
+    )
+    expect(uploadMedia).toHaveBeenCalledWith('name-keychain', png)
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(reorder).toHaveBeenCalledWith('name-keychain', ['e5f6a1b2c3d4', 'thumbnail'])
   })
 
-  it('refuses a thumbnail that is not a PNG', async () => {
+  it('refuses an upload the media cannot take, before anything is sent', async () => {
+    const uploadMedia = vi.spyOn(api, 'uploadMedia')
     const { dialog, user } = await open()
 
+    await user.click(within(dialog).getByRole('button', { name: 'Change…' }))
+    const picker = screen.getByRole('dialog', { name: 'Choose the thumbnail' })
     await user.upload(
-      within(dialog).getByLabelText('Thumbnail (PNG)'),
+      within(picker).getByLabelText('Upload a file'),
       new File(['gif'], 'cover.gif', { type: 'image/gif' }),
     )
+    expect(await within(picker).findByRole('alert')).toHaveTextContent(
+      'cover.gif is not a PNG, JPEG or WebP image',
+    )
 
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('must be a PNG')
+    const big = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' })
+    await user.upload(within(picker).getByLabelText('Upload a file'), big)
+    expect(await within(picker).findByRole('alert')).toHaveTextContent(
+      'huge.png is larger than the 10 MB limit for images.',
+    )
+
+    expect(uploadMedia).not.toHaveBeenCalled()
+    await user.click(within(picker).getByRole('button', { name: 'Cancel' }))
     expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
   })
 
@@ -316,19 +346,6 @@ describe('EditDetailsButton', () => {
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
     expect(sent).toEqual([])
-  })
-
-  it('refuses a thumbnail over 10 MiB before anything is sent', async () => {
-    const setThumbnail = vi.spyOn(api, 'setThumbnail')
-    const { dialog, user } = await open()
-    expect(within(dialog).getByText('PNG, up to 10 MiB')).toBeInTheDocument()
-
-    const big = new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' })
-    await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), big)
-
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('10 MiB or smaller')
-    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
-    expect(setThumbnail).not.toHaveBeenCalled()
   })
 
   it('removes the thumbnail set on the model', async () => {

@@ -60,6 +60,11 @@ class DataPaths:
         return self.root / "jobs"
 
     @property
+    def blobs(self) -> Path:
+        """Rendered pieces, keyed by `piece_key` (spec §6.2's `local` backend)."""
+        return self.root / "blobs"
+
+    @property
     def cache(self) -> Path:
         return self.root / "cache"
 
@@ -144,6 +149,7 @@ class DataPaths:
             self.models,
             self.outputs,
             self.jobs,
+            self.blobs,
             self.cache,
             self.fonts,
             self.libraries,

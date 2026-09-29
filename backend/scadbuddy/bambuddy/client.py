@@ -500,6 +500,18 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        """``GET /library/files?folder_id=`` — the files directly in one folder (#317)."""
+        what = f"list the files in library folder {folder_id}"
+        response = await self._send(
+            "GET",
+            "/library/files",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id},
+        )
+        return [LibraryFile.model_validate(row) for row in self._rows(response, what=what)]
+
     async def library_file(self, file_id: int) -> LibraryFile:
         """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
         response = await self._send(
@@ -606,6 +618,29 @@ class BambuddyClient:
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())
+
+    # --- the connection test (#322) -------------------------------------------
+
+    async def version(self) -> str:
+        """``GET /api/v1/updates/version``, which Bambuddy serves without a key."""
+        response = await self._send(
+            "GET", "/updates/version", scope=Scope.READ_STATUS, what="read Bambuddy's version"
+        )
+        return str(response.json().get("version") or "unknown")
+
+    async def capture_finish_photo(self) -> bool:
+        """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which
+        needs ``SETTINGS_READ``: Read Status for a key)."""
+        what = "read Bambuddy's settings"
+        response = await self._send("GET", "/settings/", scope=Scope.READ_STATUS, what=what)
+        value = response.json().get("capture_finish_photo")
+        if not isinstance(value, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "Bambuddy's settings carry no capture_finish_photo, so this Bambuddy may be"
+                " older than the setting",
+            )
+        return value
 
     # --- projects ------------------------------------------------------------
 

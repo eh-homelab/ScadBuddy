@@ -1,7 +1,12 @@
 import type {
+  AnalysisReport,
+  AnalysisRun,
+  AnalyzerDecision,
+  DecisionCreate,
   Asset,
   AssetUsage,
   AttachResult,
+  BambuddyStatus,
   BambuddyTargets,
   ChoicesView,
   ConnectionTest,
@@ -18,6 +23,7 @@ import type {
   LibraryPinRequest,
   MediaView,
   ModelPatch,
+  LastProject,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -42,8 +48,10 @@ import type {
   Problem,
   ProjectAttach,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
+  RememberedChoices,
   RenderAccepted,
   SendRequest,
   SendResult,
@@ -690,6 +698,28 @@ export const api = {
     }),
 
   /**
+   * #284 — judge an output against the request the print dialog would send. Reads only:
+   * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
+   */
+  runAnalyzers: (body: AnalysisRun) =>
+    request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
+
+  /**
+   * #284 — ignore or suppress a finding at a scope; a suppression needs a reason. It
+   * replaces an earlier decision about the same rule and instance at that scope
+   * (`post_decision`, backend/scadbuddy/api/analyzers.py).
+   */
+  createDecision: (body: DecisionCreate) =>
+    request<AnalyzerDecision>('/analyzers/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
+  deleteDecision: (id: string) =>
+    request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
+
+  /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
    * the one the last send went to so the picker opens where it was left. ScadBuddy
    * models no relationship between a model and a project: which prints belong to a
@@ -704,6 +734,23 @@ export const api = {
    */
   createProject: (body: ProjectRequest) =>
     request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #317 — the project both pickers open on; `null` is "No project". */
+  rememberProject: (projectId: number | null) =>
+    request<LastProject>('/print/projects/last', {
+      method: 'PUT',
+      body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /**
+   * #317 — put a generated output's editable 3MF in the project's Bambuddy folder.
+   * Idempotent: the same project again answers with the file already there.
+   */
+  fileIntoProject: (outputId: string, projectId: number) =>
+    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId }),
+    }),
 
   /** Filed after the run, never during it: a plate's queue item only exists once it has
    * sliced, and an archive only once a print has finished, so the ids come from the
@@ -776,8 +823,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  unpinModelLibrary: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
+  /** With `index` (#217), only the invalid entry at that position of `libraries`. */
+  unpinModelLibrary: (slug: string, name: string, index?: number) =>
+    request<ModelSummary>(
+      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
+      { method: 'DELETE' },
+    ),
 
   getSettings: () => request<Settings>('/settings'),
 
@@ -797,6 +848,14 @@ export const api = {
   testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
 
   getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
+
+  /** #322 — Bambuddy's version and whether it captures a finish photo; read-only. */
+  getBambuddyStatus: () => request<BambuddyStatus>('/settings/bambuddy'),
+
+  /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
+  getRemembered: () => request<RememberedChoices>('/settings/remembered'),
+
+  forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),

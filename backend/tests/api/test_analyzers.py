@@ -7,6 +7,8 @@ the print routes' tests do. Nothing here posts to Bambuddy: the analyzers only r
 from __future__ import annotations
 
 import asyncio
+import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,15 +18,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers.component import DECISIONS
 from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import LibraryCopy
+from scadbuddy.core.paths import DataPaths
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
 SILK_SPOOL = 5  # "Tri Color" subtype, preset "Bambu PLA Silk" (inventory-spools.json)
@@ -277,15 +282,123 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
     assert all(call.request.method == "GET" for call in respx.calls)
 
 
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.parametrize(("all_plates", "short"), [(True, True), (False, False)])
+def test_an_all_plates_print_is_judged_on_every_plates_filament(
+    client: TestClient, model: str, app: FastAPI, paths: DataPaths, all_plates: bool, short: bool
+) -> None:
+    """The silk spool has ~965 g left: plate 1's 600 g fits, both plates' 1200 g do not,
+    as the print dialog's filament step sums them for "All plates" (#198)."""
+    configure(client)
+    routes = bambuddy_routes()
+    output_id = make_output(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
+    plates: list[int] = []
+
+    def requirements(request: httpx.Request) -> httpx.Response:
+        plate = int(request.url.params["plate_id"])
+        plates.append(plate)
+        return httpx.Response(
+            200,
+            json={
+                "file_id": 41,
+                "plate_id": plate,
+                "filaments": [{"slot_id": 1, "type": "PLA", "color": "#FFFFFF", "used_grams": 600}],
+            },
+        )
+
+    respx.get(f"{API}/library/files/41/filament-requirements").mock(side_effect=requirements)
+    shared = {
+        "spools": routes["spools"],
+        "assignments": respx.get(f"{API}/inventory/assignments").mock(
+            return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+        ),
+        "printer": respx.get(f"{API}/printers/1").mock(
+            return_value=httpx.Response(200, json=recording("printer.json"))
+        ),
+        "remain": respx.get(f"{API}/printers/1/inventory-remain").mock(
+            return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+        ),
+    }
+
+    report = _run(
+        client, output_id, request={**SILK_REQUEST, "all_plates": all_plates}, detail="advanced"
+    )
+    found = {row["key"]: row for row in report["diagnostics"]}
+    assert sorted(plates) == ([1, 2] if all_plates else [1])
+    # Only the slots are a plate's own: the inventory is read once for every plate
+    # (the spools twice, once more for the filaments input's own read of the plan).
+    assert {name: route.call_count for name, route in shared.items()} == {
+        "spools": 2,
+        "assignments": 1,
+        "printer": 1,
+        "remain": 1,
+    }
+    assert ("SB3002:slot-1" in found) is short
+    if short:
+        evidence = {e["label"]: e["value"] for e in found["SB3002:slot-1"]["evidence"]}
+        assert evidence["needed per copy"] == 1200
+
+
+def _strip_plater_id(path: Path, index: int) -> None:
+    """Plate ``index`` loses its ``plater_id``, which ``plates_of`` refuses (bambu3mf.py)."""
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    line = f'  <metadata key="plater_id" value="{index}"/>\n'
+    assert line in config
+    entries["Metadata/model_settings.config"] = config.replace(line, "").encode("utf-8")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_an_all_plates_print_whose_plates_cannot_be_listed_says_so(
+    client: TestClient, model: str, app: FastAPI, paths: DataPaths
+) -> None:
+    """A 3MF ``plates_of`` refuses leaves the inventory unavailable with the reason, as
+    every other unreadable input does, rather than failing the whole run."""
+    configure(client)
+    bambuddy_routes()
+    output_id = make_output(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    _strip_plater_id(path, 2)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
+    requirements = respx.get(f"{API}/library/files/41/filament-requirements").mock(
+        return_value=httpx.Response(200, json={"file_id": 41, "plate_id": 1, "filaments": []})
+    )
+
+    request = {**SILK_REQUEST, "all_plates": True}
+    report = _run(client, output_id, request=request, detail="advanced")
+    inputs = {row["name"]: row for row in report["inputs"]}
+    assert inputs["inventory"] == {
+        "name": "inventory",
+        "available": False,
+        "reason": "the 3MF's plates cannot be read: a <plate> in the 3MF's model settings "
+        "has no plater_id",
+    }
+    assert not requirements.called
+    skipped = {row["id"]: row for row in report["skipped"]}
+    assert [row["name"] for row in skipped["SB3002"]["missing"]] == ["inventory"]
+
+
 def test_a_database_that_cannot_be_reached_degrades_to_a_503(
     client: TestClient, model: str, app: FastAPI, events: Recorded
 ) -> None:
     # Nothing listens on port 1: every connect is refused, and the store gives up
     # within its connect timeout instead of hanging the request.
-    state = getattr(app.state, STATE_ATTR)
-    state.decisions = PostgresDecisionStore(
-        "postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0
-    )
+    components = getattr(app.state, STATE_ATTR).components
+    built = components.get(DECISIONS)
+    unreachable = PostgresDecisionStore("postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0)
+    components.override(DECISIONS, unreachable)
     try:
         output_id = make_output(client, model)
         report = _run(client, output_id)
@@ -302,8 +415,24 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
         events.settle()
         assert [event for event in events if event.kind == "analyzer.decision"] == []
     finally:
-        state.decisions.close()
-        state.decisions = None
+        unreachable.close()
+        components.override(DECISIONS, built)
+
+
+def test_recording_a_decision_without_a_database_is_a_503(client: TestClient, app: FastAPI) -> None:
+    # Settings requires a database (#401), so only an override leaves no store.
+    components = getattr(app.state, STATE_ATTR).components
+    built = components.get(DECISIONS)
+    components.override(DECISIONS, None)
+    try:
+        decision = {"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}}
+        problem = _ok(client.post("/api/v1/analyzers/decisions", json=decision), 503)
+        assert problem["type"].endswith("/database-required")
+        assert problem["detail"] == (
+            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set"
+        )
+    finally:
+        components.override(DECISIONS, built)
 
 
 @respx.mock
