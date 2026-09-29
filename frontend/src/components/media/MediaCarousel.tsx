@@ -1,6 +1,6 @@
 import useEmblaCarousel from 'embla-carousel-react'
 import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
-import { useNavigate } from 'react-router'
+import { useHref, useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
 
@@ -294,16 +294,25 @@ function SlideMedia({
 /**
  * The picture where a click on it follows a link: a card's template. Not a link of its
  * own, since the card's title already is that link (and its keyboard route); the
- * expand button beside it opens the lightbox.
+ * expand button beside it opens the lightbox. A modified click (Ctrl, Cmd or Shift) or
+ * a middle click opens it in a new tab, as it would on the title.
  */
 function LinkedPicture({ to, className, picture }: { to: string; className: string; picture: ReactNode }) {
   const navigate = useNavigate()
+  const href = useHref(to)
+  const newTab = () => window.open(href, '_blank', 'noopener')
   return (
     <span
-      data-media-link={to}
+      data-media-link={href}
       onClick={(event) => {
         contained(event)
-        void navigate(to)
+        if (event.metaKey || event.ctrlKey || event.shiftKey) newTab()
+        else void navigate(to)
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return
+        contained(event)
+        newTab()
       }}
       className={`${className} cursor-pointer`}
     >
