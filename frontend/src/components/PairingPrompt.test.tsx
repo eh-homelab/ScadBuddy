@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../agent/dom'
+import { takeSnapshot } from '../agent/snapshot'
 import type { TabLinkState } from '../agent/link'
 import { PairingPrompt } from './PairingPrompt'
 
@@ -55,6 +56,15 @@ describe('PairingPrompt (#254, AI spec §8.5)', () => {
     expect(screen.getByRole('status')).toHaveTextContent('MCP token “laptop” can use this tab until')
     await user.click(screen.getByRole('button', { name: 'Disconnect' }))
     expect(onEnd).toHaveBeenCalledWith('p1')
+  })
+
+  it('never hands the code being typed to an agent reading the page (#746)', async () => {
+    const user = userEvent.setup()
+    setup({ pending: [REQUEST] })
+    await user.type(screen.getByRole('textbox', { name: 'Pairing code' }), 'abcd-efgh')
+    const snapshot = JSON.stringify(takeSnapshot({ route: '/', page: {}, tools: [] }))
+    expect(snapshot).not.toContain('abcd-efgh')
+    expect(snapshot).toContain('(typed, hidden)')
   })
 
   it("is the user's alone: every control in it is user-only, so an agent's click and fill refuse it", () => {
