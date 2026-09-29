@@ -260,20 +260,22 @@ async def _spool_sides(
     used: set[int],
     printer_id: int,
     printer_status: PrinterStatus | None,
-) -> list[SlotSide]:
-    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
+) -> tuple[list[SlotSide], list[SpoolAssignment] | None]:
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469), and
+    the assignments read for it, so the plates' read reuses them (#480).
 
     With no printer status no side can be told, so the assignments aren't read; and an
     unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
-    status does, rather than failing a run that used to succeed."""
+    status does, rather than failing a run that used to succeed. Either way the
+    assignments are ``None``, and the plates' read tries them itself."""
     own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
-    assignments: list[SpoolAssignment] = []
+    assignments: list[SpoolAssignment] | None = None
     if printer_status is not None:
         try:
             assignments = await client.spool_assignments()
         except (ApiError, ValueError):
             logger.info("spool assignments unreadable; no spool's side is known")
-    return slot_sides(own, assignments, printer_status, printer_id=printer_id)
+    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
 
 
 @dataclass(frozen=True)
@@ -289,6 +291,9 @@ class PreparedRun:
     printer_status: PrinterStatus | None
     #: The extruder plan the nozzle checks made; its warnings go on the result.
     extruders: ExtruderPlan
+    #: The spool assignments the nozzle checks read, reused by the plates' read (#480);
+    #: ``None`` when they were not read or were unreadable, and the plates' read tries.
+    assignments: list[SpoolAssignment] | None
 
 
 async def prepare_run(
@@ -343,7 +348,9 @@ async def prepare_run(
     # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
     used = _used_slots(store, meta, plate_ids)
-    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
     extruders = plan_extruders(
         sides, printer_status, size=request.choices.nozzles[0].size, used_slots=used
     )
@@ -355,6 +362,7 @@ async def prepare_run(
         catalogue=catalogue,
         printer_status=printer_status,
         extruders=extruders,
+        assignments=assignments,
     )
 
 
@@ -431,6 +439,7 @@ async def execute_run(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(meta.colors),
+        assignments=prepared.assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
