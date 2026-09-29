@@ -32,7 +32,7 @@ from scadbuddy.store.bambuddy import (
 from scadbuddy.store.content import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
 API = f"{BASE_URL}/api/v1"
@@ -225,7 +225,13 @@ async def test_a_rotated_render_key_is_used_without_a_restart(pool: Pool, tmp_pa
     put("library_folder_id", INBOX)
     put("bambuddy_render_api_key", "old")
     source = RenderSettingsSource(
-        pool, Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL), ttl=0
+        pool,
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
+        ttl=0,
     )
     route = respx.get(f"{API}/library/files/5").mock(
         return_value=httpx.Response(200, json=shaped("FileResponse", id=5, filename="a.zip"))
@@ -359,7 +365,11 @@ async def test_render_settings_are_cached_for_the_ttl_and_invalidate_rereads(
     now = [100.0]
     source = RenderSettingsSource(
         pool,
-        Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL),
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
         ttl=30,
         clock=lambda: now[0],
     )
