@@ -322,6 +322,23 @@ Also found:
 - #470: the run POST can outlive the 60 s ingress timeout. The client gets a 504 while the item is still queued, so a retry double-queues.
 - #476: the sliced plate thumbnail shows the model's authored colors, not the chosen spools'. The sliced `filament_colour` is correct.
 
+### Acceptance after #538 (2026-09-29)
+
+Rerun against the deployed builds `sha-74f634f` and later, which include #538's refusals and hotend-rack handling. The printer was fitted with a 0.4 mm nozzle on each side and held one spare 0.2 mm hotend in its rack. Each run used a `name-keychain` output, Fine, and manual start, and the user started each print on the printer.
+
+| Check | Result | Measured value |
+|---|---|---|
+| Two colors at 0.2 are refused before upload | **Pass** | 422, nothing uploaded: "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm hotend in the rack… Fit a 0.2 mm nozzle on both sides, or print in one color." |
+| One color at 0.2 uses the rack's spare | **Pass** | Queue item 150: sliced at 0.2, `0.08mm High Quality`. At start the printer reported 0.2 on the right and 0.4 on the left, swapped in from the rack, and printed past layer 3 with no HMS. |
+| One color at 0.4 prints | **Pass** | Queue item 151: sliced at 0.4, `0.12mm High Quality`, completed 03:24 to 03:49 UTC. |
+| Two colors at 0.4 queue with both colors | **Pass** (queue side) | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Not started at the time of writing. |
+
+This closes #469 at the printer: the case that paused at layer 0 (queue items 108 and 114) is now refused before upload, and the rack swap that #538 assumed is confirmed.
+
+Also found:
+- Each run POST still outlives the 60 s ingress timeout, giving a 504 while the item queues (#470). Every run above was checked on Bambuddy's queue rather than retried.
+- A one-color print needs a one-color output. Two plate slots are two filaments to the slicer even on the same spool, so the multi-color refusal applies (by design).
+
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
 - **Which AMS tray and which extruder each spool feeds.** Bambuddy's scheduler computes
