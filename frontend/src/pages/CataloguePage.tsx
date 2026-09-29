@@ -37,7 +37,11 @@ export function CataloguePage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   // One lightbox for the page: whichever card's media was clicked, at that item.
-  const [lightbox, setLightbox] = useState<{ slides: Slide[]; index: number } | null>(null)
+  const [lightbox, setLightbox] = useState<{
+    slug: string
+    slides: Slide[]
+    index: number
+  } | null>(null)
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
@@ -149,7 +153,7 @@ export function CataloguePage() {
                 key={model.slug}
                 model={model}
                 upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
-                onOpen={(slides, index) => setLightbox({ slides, index })}
+                onOpen={(slides, index) => setLightbox({ slug: model.slug, slides, index })}
                 onTag={addTag}
               />
             ))}
@@ -164,7 +168,7 @@ export function CataloguePage() {
                 model={model}
                 upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
                 onTag={addTag}
-                onOpenMedia={(slides, index) => setLightbox({ slides, index })}
+                onOpenMedia={(slides, index) => setLightbox({ slug: model.slug, slides, index })}
               />
             ))}
           </ul>
@@ -175,6 +179,7 @@ export function CataloguePage() {
         slides={lightbox?.slides ?? []}
         index={lightbox?.index ?? null}
         onClose={() => setLightbox(null)}
+        link={lightbox ? { to: modelPath(lightbox.slug), label: 'Open template' } : undefined}
       />
       <UploadDialog
         open={uploadOpen}
@@ -211,6 +216,7 @@ function ModelCard({
   // The title is the card's one link, and its ::after stretches over the card. What
   // must not follow it (the carousel, the tag chips, the origin link, the action row)
   // sits above that on `relative z-10`: a carousel's buttons cannot nest in an anchor.
+  // The media links to the template itself; its expand button opens the lightbox.
   const raised = 'relative z-10'
   return (
     <li
@@ -220,6 +226,7 @@ function ModelCard({
         <MediaCarousel
           slides={slides}
           onOpen={(index) => onOpenMedia(slides, index)}
+          to={modelPath(model.slug)}
           label={model.name}
           className={raised}
           fallback={
