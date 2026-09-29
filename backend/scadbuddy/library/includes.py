@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.library.fonts import font_families, normalise_family
-from scadbuddy.library.libraries import CatalogueLibrary, ModelLibrary
+from scadbuddy.library.libraries import CatalogueLibrary, ModelLibrary, same_repository
 
 #: Files of the model's own directory followed, at most. A model reads a handful; a
 #: cap keeps a pathological tree from turning a read into a walk of the volume.
@@ -490,7 +490,9 @@ def _suggest(
             (
                 pin
                 for _, pin in pins
-                if pin.ref == curated.ref and pin.url == curated.url and pin.commit in on_volume
+                if pin.ref == curated.ref
+                and same_repository(pin.url, curated.url)
+                and pin.commit in on_volume
             ),
             None,
         )

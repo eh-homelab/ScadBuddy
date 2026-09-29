@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import get_fonts
-from scadbuddy.api.params import require_installed_fonts
+from scadbuddy.api.params import InstalledFamilies, require_installed_fonts
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.fonts import (
     MANIFEST_NAME,
@@ -311,6 +311,16 @@ async def test_a_bare_dash_is_explained() -> None:
         await require_installed_fonts(FONT_SCHEMA, {"font": "Unifont-JP"}, Resolving(set()))
     assert "'Unifont'" in raised.value.detail
     assert "\\-" in raised.value.detail
+
+
+async def test_one_ask_of_fontconfig_serves_every_value_judged_against_it() -> None:
+    """require_valid_presets checks a template's presets with one InstalledFamilies,
+    so fc-list runs once per request, not once per preset (#740 review)."""
+    fonts = Resolving({"DejaVu Sans"})
+    installed = InstalledFamilies(fonts)
+    for _ in range(3):
+        await require_installed_fonts(FONT_SCHEMA, {"font": "DejaVu Sans"}, installed)
+    assert fonts.asked == 1
 
 
 async def test_the_dash_hint_is_only_for_the_family_the_dash_cut() -> None:

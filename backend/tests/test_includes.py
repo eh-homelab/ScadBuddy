@@ -170,6 +170,22 @@ def test_a_catalogue_suggestion_says_whether_a_checkout_on_the_volume_has_the_fi
     assert missing.suggestion is not None and missing.suggestion.has_file is False
 
 
+def test_a_pin_of_the_catalogue_repository_by_another_spelling_of_its_url_counts(
+    tmp_path: Path,
+) -> None:
+    """`.../BOSL2` and `.../BOSL2.git` are one repository (libraries.py
+    `same_repository`), so that checkout answers too (#740 review)."""
+    checkout(tmp_path / "libraries", "BOSL2", COMMIT, "std.scad")
+    spelled = BOSL2.url.removesuffix(".git") + "/"
+    others = {"BOSL2": [("gadget", pin("BOSL2", url=spelled))]}
+
+    result = report(tmp_path, "use <BOSL2/std.scad>\n", candidates=no_candidates(others))
+
+    [entry] = result.includes
+    assert entry.suggestion is not None and entry.suggestion.has_file is True
+    assert entry.suggestion.commit == COMMIT
+
+
 def test_a_library_another_model_pins_from_its_own_url_is_suggested(tmp_path: Path) -> None:
     fork = "https://example.com/me/gridfinity.git"
     checkout(tmp_path / "libraries", "gridfinity", OTHER, "base.scad")

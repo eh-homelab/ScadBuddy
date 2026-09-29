@@ -82,8 +82,28 @@ def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamVal
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
+class InstalledFamilies:
+    """The families fontconfig resolves, asked for once however many values are
+    judged against them: a template's presets are checked in one request, and each
+    ask shells out to fc-list (#740 review)."""
+
+    def __init__(self, fonts: FontService) -> None:
+        self._fonts = fonts
+        self._asked = False
+        self._known: set[str] | None = None
+
+    async def get(self) -> set[str] | None:
+        if not self._asked:
+            # fc-list shells out; off the loop.
+            self._known = await asyncio.to_thread(self._fonts.resolvable)
+            self._asked = True
+        return self._known
+
+
 async def require_installed_fonts(
-    schema: CustomizerSchema, params: Mapping[str, ParamValue], fonts: FontService
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    fonts: FontService | InstalledFamilies,
 ) -> None:
     """422 unless every family a `// font` value names resolves in this image (#253).
 
@@ -108,8 +128,8 @@ async def require_installed_fonts(
             wanted[name] = (value, families)
     if not wanted:
         return
-    # fc-list shells out; off the loop.
-    known = await asyncio.to_thread(fonts.resolvable)
+    families_of = fonts if isinstance(fonts, InstalledFamilies) else InstalledFamilies(fonts)
+    known = await families_of.get()
     if known is None:
         return
     problems: list[str] = []
@@ -188,10 +208,11 @@ async def require_valid_presets(
         slug, None, paths=paths, history=history, config=config, fetcher=fetcher
     )
     has_files = any(parameter.type == "file" for parameter in schema.parameters)
+    installed = InstalledFamilies(fonts) if fonts is not None else None
     for params in presets:
         require_valid_preset_params(schema, params)
-        if fonts is not None:
-            await require_installed_fonts(schema, params, fonts)
+        if installed is not None:
+            await require_installed_fonts(schema, params, installed)
         if has_files:
             try:
                 await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
