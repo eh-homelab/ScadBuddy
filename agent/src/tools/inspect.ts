@@ -82,7 +82,7 @@ export const inspectTools: Tool[] = [
         })),
         view,
       }
-      return binary(
+      const drawn = await binary(
         Promise.resolve(answered),
         `draw colours of ${job_id}`,
         ctx,
@@ -91,8 +91,11 @@ export const inspectTools: Tool[] = [
           name: `${job_id}-colours.png`,
           fallbackType: 'image/png',
         },
-        (bytes, mimeType) => ({ content: [...json(legend).content, ...image(bytes, mimeType).content] }),
+        (bytes, mimeType) => image(bytes, mimeType),
       )
+      // The legend is the only way to read the grid, so it comes first whether the
+      // image is inline or, too large for that, a link (#750 review).
+      return drawn.isError ? drawn : { ...drawn, content: [...json(legend).content, ...drawn.content] }
     },
   }),
 ]

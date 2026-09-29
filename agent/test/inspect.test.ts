@@ -108,6 +108,25 @@ describe('get_render_colours', () => {
     expect(Buffer.from(picture.data, 'base64')).toEqual(Buffer.from(PNG))
   })
 
+  it('keeps the legend when the image is too large to inline and comes back as a link', async () => {
+    const { client } = backend(
+      () => new Response(PNG, { headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00' } }),
+    )
+    const result = await runTool(
+      tool('get_render_colours'),
+      { job_id: 'c'.repeat(32) },
+      { ...ctx(client), maxInlineBytes: PNG.length - 1 },
+    )
+    expect(firstText(result)).toMatchObject({
+      tiles: [
+        { colour: '#FF0000', row: 1, column: 1 },
+        { colour: '#00FF00', row: 1, column: 2 },
+      ],
+    })
+    expect(result.content.some((c) => c.type === 'resource_link')).toBe(true)
+    expect(result.content.some((c) => c.type === 'image')).toBe(false)
+  })
+
   it('passes a refusal through', async () => {
     const { client } = backend(() => Response.json({ detail: '17 colours is more than a breakdown draws (16)' }, { status: 422 }))
     const result = await runTool(tool('get_render_colours'), { job_id: 'b'.repeat(32) }, ctx(client))

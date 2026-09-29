@@ -25,12 +25,12 @@ well as lines, not a replacement for the check.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 from pydantic import BaseModel, Field
 
 from scadbuddy.library.lsp import frame, read_message
@@ -163,7 +163,11 @@ async def lsp_diagnostics(
         # ValueError covers a bad Content-Length and a body that is not JSON.
         raise LspDiagnosticsError(f"openscad-lsp failed: {error}") from None
     finally:
-        if process.returncode is None:
-            process.kill()
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=5)
+        # Shielded, as lsp.py `_serve` is: a request cancelled while this runs (a
+        # client gone, a server shutting down) would otherwise leave the process
+        # unreaped (#750 review).
+        with anyio.CancelScope(shield=True):
+            if process.returncode is None:
+                process.kill()
+            with anyio.move_on_after(5):
+                await process.wait()
