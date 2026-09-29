@@ -210,6 +210,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { agent, sessions, publisher } = await setup()
       const a = await agent('write')
       const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'needs approval' }))
+      const sentBeforeCreate = publisher.sent
       const approval = await sessions.approvals.create({
         sessionId: session.id,
         turnId: null,
@@ -219,6 +220,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         tier: 'outward',
         requestedBy: a.owner,
       })
+      // Its approval.required, appended inside the insert's transaction, is announced once it commits (#715 review).
+      await until(() => publisher.sent > sentBeforeCreate, 'the new approval on the bus')
 
       // Below outward: refused by tier before anything else.
       expect(errorText(await a.call('sessions_approve', { approval_id: approval.id }))).toMatch(/needs the "outward" tier/)

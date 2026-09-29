@@ -558,6 +558,7 @@ export class ApprovalService {
     // The row and its `approval.required` commit together: a decision can only
     // see the row once it has committed, so its `approval.resolved` cannot be
     // logged before the event that asked for it.
+    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     const approval = await this.deps.sql.begin(async (tx) => {
       const row = await this.insert(tx, request, summary)
       if (!row) throw new Error('approval vanished after insert')
@@ -582,14 +583,12 @@ export class ApprovalService {
           tail.push(event({ type: 'session.status', sessionId: created.sessionId, status: 'waiting_approval' }))
         }
       }
-      await this.deps.events.append(
-        created.sessionId,
-        tail.map((e) => scrubForLog(e, secrets)),
-        tx,
-      )
+      const events = tail.map((e) => scrubForLog(e, secrets))
+      logged = { sessionId: created.sessionId, events, seqs: await this.deps.events.append(created.sessionId, events, tx) }
       return created
     })
-    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
+    // Committed: wake followers, and announce it on the bus (#300).
+    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
     return approval
   }
 
