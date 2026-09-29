@@ -37,12 +37,14 @@ class PrepareResult(BaseModel):
 
 
 class RenderMainResult(BaseModel):
-    plates: int = 1
+    plates: int | None = 1
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
     notes: list[str] = Field(default_factory=list)
     missing_files: list[str] = Field(default_factory=list)
+    returncode: int = 0
+    duration_s: float = 0.0
 
 
 class PieceResult(BaseModel):
@@ -56,6 +58,14 @@ class Failure(BaseModel):
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
     warnings: list[str] = Field(default_factory=list)
+
+
+class PieceOutcome(BaseModel):
+    """What a piece signals to a job that found it already running (§3.6: a child
+    start has no id-conflict policy, so only the first job owns the child)."""
+
+    result: PieceResult | None = None
+    failure: Failure | None = None
 
 
 class Projection(BaseModel):
