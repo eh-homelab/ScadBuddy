@@ -9,6 +9,8 @@ import { printMediaTools } from './prints.js'
 import type { Tier } from '../auth/principal.js'
 import type { Tool } from './registry.js'
 import { settingsTools } from './settings.js'
+import { sourceFileTools } from './sourceFiles.js'
+import { templateTools } from './templates.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
 // Not here yet: browser_* tools (#254, #266), which are browser-only and so
@@ -20,6 +22,8 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...customizerTools,
   ...outputTools,
   ...historyTools,
+  ...sourceFileTools,
+  ...templateTools,
   ...libraryTools,
   ...settingsTools,
   ...printTools,

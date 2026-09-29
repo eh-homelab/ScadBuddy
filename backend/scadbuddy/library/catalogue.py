@@ -1354,6 +1354,49 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
+    # ── the other source files of a multi-file model (#252) ───────────────────
+
+    def source_files(self, slug: str) -> list[Path]:
+        """Every ``.scad`` file at the top of the model's directory, ``model.scad``
+        included, by name. What ``include``/``use`` of a sibling reads, and what a
+        render's source version hashes (``render/provenance.py``)."""
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+        return sorted(
+            (path for path in directory.glob("*.scad") if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.name,
+        )
+
+    def write_file(
+        self, slug: str, name: str, content: str | None, *, message: str | None = None
+    ) -> ModelRecord:
+        """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
+        as one revision. ``name`` is a bare ``.scad`` file name other than the model's
+        own source, which only :meth:`write_source` writes; the route checks that.
+
+        The schema derived from ``model.scad`` is dropped too: an ``include`` can
+        bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
+        removal of a file that is not there, with nothing committed.
+        """
+        self._require(slug)
+        path = self.paths.model_dir(slug) / name
+
+        def change() -> None:
+            if content is None:
+                if not path.is_file():
+                    raise SidecarNotFoundError(name)
+                path.unlink()
+            else:
+                try:
+                    write_atomic(path, content.encode())
+                except FileNotFoundError:
+                    raise ModelNotFoundError(slug) from None
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+        verb = "Remove" if content is None else "Edit"
+        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        return self.record(slug)
+
     # ── upstream (#157) ───────────────────────────────────────────────────────
 
     def _upstream(self, slug: str) -> Upstream:

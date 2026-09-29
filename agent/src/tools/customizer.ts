@@ -4,6 +4,7 @@ import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
 
 // Customizer (issue #251): the schema (with the `// color` and `// font`
@@ -126,16 +127,23 @@ export const customizerTools: Tool[] = [
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      const accepted = await ok(
-        ctx.backend.POST('/api/v1/models/{slug}/render', {
-          params: { path: { slug } },
-          body: { params, version: version ?? null },
-          signal: ctx.signal,
-        }),
-        `render ${slug}`,
-      )
-      await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
-      const job = await waitForJob(ctx, accepted.job_id)
+      // Per-principal render bounds (renderLimits.ts, #252), held while this call waits.
+      const release = (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).acquire(ctx.principal.id)
+      let job: JobStatus
+      try {
+        const accepted = await ok(
+          ctx.backend.POST('/api/v1/models/{slug}/render', {
+            params: { path: { slug } },
+            body: { params, version: version ?? null },
+            signal: ctx.signal,
+          }),
+          `render ${slug}`,
+        )
+        await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
+        job = await waitForJob(ctx, accepted.job_id)
+      } finally {
+        release()
+      }
       const summary = jobSummary(job)
       if (job.status === 'failed' || job.status === 'cancelled') {
         return { ...json(summary), isError: true }

@@ -783,6 +783,27 @@ so the marking is defence in depth and the approval gate is the boundary.
   stop a model from reading text inside the image, which is why the approval gate,
   not the marking, is the boundary.
 
+## Render limits (#252)
+
+Issue [#252](https://github.com/eh-homelab/ScadBuddy/issues/252) ("Guardrails": "A
+render timeout and resource limits"). Each render is already bounded by the backend:
+the render timeout, the queue's workers and the body-size gates in
+[`backend/scadbuddy/api/limits.py`](../../backend/scadbuddy/api/limits.py). The backend
+cannot tell a person dragging a slider from an agent rendering in a loop, so the
+agent bounds its own callers before a render reaches the queue
+([`agent/src/tools/renderLimits.ts`](../../agent/src/tools/renderLimits.ts), used by
+`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts)):
+
+- per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
+  or the browser user, whose harness sessions share one count);
+- at most **2** of its renders in flight at once, counted while `render_model` waits
+  for each to settle (a render handed back still running no longer counts);
+- at most **30** started in any **10 minutes**.
+
+A refusal is an error result that names the limit and when to try again, and nothing is
+sent to the backend. The counts are in memory. They bound a burst, not a total, so a
+restart clears them, and there is no new state or setting.
+
 ## Known limitations
 
 From the merged code and PR bodies:

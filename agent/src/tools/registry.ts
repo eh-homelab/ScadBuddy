@@ -5,6 +5,7 @@ import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
+import type { RenderLimiter } from './renderLimits.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -46,6 +47,8 @@ export type ToolServices = {
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
+  /** Bounds the renders each principal starts (renderLimits.ts, #252); the process default when unset. */
+  renderLimiter?: RenderLimiter
 }
 
 export type ToolContext = ToolServices & {

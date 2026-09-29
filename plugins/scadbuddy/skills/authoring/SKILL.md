@@ -37,6 +37,20 @@ in `models/name-keychain/`:
 On a running instance the same layout lives in the data volume's `models/` git
 repository, and every save is a commit (main spec §4.2 and §4.3).
 
+Through ScadBuddy's tools (issue #252; AI spec
+`docs/superpowers/specs/2026-09-27-ai-integration-design.md` §8.6, "As built for
+#252's guardrails"):
+
+- Start a model with `create_from_template`: `blank` gives a two-colour template that
+  already follows sections 2, 3, 5 and 6, and a bundled example's slug
+  (`builtin:<name>`) duplicates that example.
+- Other `.scad` files sit beside `model.scad`, and it can `include` or `use` them.
+  `list_source_files`, `get_source_file`, `write_source_file` and
+  `delete_source_file` manage them, one revision per write. They are not
+  parse-checked alone, so run `check_source` with the model's `slug` afterwards.
+- `render_model` is rate-limited per caller. If it refuses, don't retry in a loop.
+  Tell the user what is not converging.
+
 ## 2. The header comment
 
 Every bundled template starts with a comment that says what it makes, that it is
