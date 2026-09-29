@@ -475,7 +475,7 @@ describe('CataloguePage cards (#277)', () => {
     const card = await coasterCard()
 
     await user.click(
-      within(card).getByRole('img', { name: 'Printed in blue and orange', hidden: true }),
+      within(card).getByRole('img', { name: 'Printed in blue and orange' }),
     )
 
     expect(await screen.findByText('Customizer')).toBeInTheDocument()

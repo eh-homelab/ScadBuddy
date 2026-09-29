@@ -1,6 +1,6 @@
 import useEmblaCarousel from 'embla-carousel-react'
 import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
-import { Link } from 'react-router'
+import { useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
 
@@ -226,9 +226,8 @@ function ArrowButton({
 
 /**
  * One slide's picture: an image, a video's poster, or a neutral tile for a video with
- * none, the video ones with a play badge. A link when it has somewhere to go, out of
- * the tab order and hidden from assistive technology (the card's title is the same
- * link, and the expand button opens the lightbox); otherwise a button when it opens
+ * none, the video ones with a play badge. With somewhere to go, a click goes there;
+ * otherwise a button when it opens
  * the lightbox, and then only the visible slide's is in the tab order.
  */
 function SlideMedia({
@@ -274,13 +273,7 @@ function SlideMedia({
       )}
     </>
   )
-  if (to) {
-    return (
-      <Link to={to} tabIndex={-1} aria-hidden="true" draggable={false} className={frame}>
-        {picture}
-      </Link>
-    )
-  }
+  if (to) return <LinkedPicture to={to} className={frame} picture={picture} />
   if (!onOpen) return <span className={frame}>{picture}</span>
   return (
     <button
@@ -295,5 +288,26 @@ function SlideMedia({
     >
       {picture}
     </button>
+  )
+}
+
+/**
+ * The picture where a click on it follows a link: a card's template. Not a link of its
+ * own, since the card's title already is that link (and its keyboard route); the
+ * expand button beside it opens the lightbox.
+ */
+function LinkedPicture({ to, className, picture }: { to: string; className: string; picture: ReactNode }) {
+  const navigate = useNavigate()
+  return (
+    <span
+      data-media-link={to}
+      onClick={(event) => {
+        contained(event)
+        void navigate(to)
+      }}
+      className={`${className} cursor-pointer`}
+    >
+      {picture}
+    </span>
   )
 }

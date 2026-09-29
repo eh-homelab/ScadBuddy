@@ -57,7 +57,7 @@ test.describe('catalogue card mode (#277)', () => {
   test('a click on the image opens the template', async ({ page }) => {
     const card = coaster(page)
     await card.getByRole('button', { name: 'Next slide' }).click()
-    await card.getByRole('img', { name: 'The raised rim', includeHidden: true }).click()
+    await card.getByRole('img', { name: 'The raised rim' }).click()
     await expect(page).toHaveURL(/\/m\/creme-coaster$/)
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
