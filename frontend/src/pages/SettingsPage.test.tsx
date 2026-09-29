@@ -1,12 +1,17 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
+import { resetAiAvailability } from '../agent/chat/availability'
 import { api } from '../api/client'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+
+/** Bambuddy's "Test connection", as against a plugin endpoint's (RemotePluginsPanel). */
+const bambuddyTest = () =>
+  within(screen.getByRole('region', { name: 'Connection' })).getByRole('button', { name: 'Test connection' })
 
 /** The form seeds itself from the server, so wait for the URL to arrive. */
 async function seeded() {
@@ -50,7 +55,7 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     expect(await screen.findByRole('status')).toHaveTextContent('3DP-31B-598')
   })
 
@@ -67,7 +72,7 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
   })
 
@@ -232,7 +237,7 @@ describe('SettingsPage, live (#269)', () => {
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
     await user.type(field, 'https://tested.test')
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     await screen.findByRole('status')
 
     // The test saved the form; this is that save's own event.
@@ -242,20 +247,32 @@ describe('SettingsPage, live (#269)', () => {
     expect(field).toHaveValue('https://tested.test')
   })
 
-  it('shows the assistant plugin sections only while AI is available', async () => {
+  it('shows the assistant plugin sections only while the agent says AI is available', async () => {
+    // Availability is the agent's own answer at /api/v1/ai/status (useAiAvailability).
+    server.use(
+      http.get('/api/v1/ai/status', () =>
+        HttpResponse.json({
+          available: false,
+          state: 'disabled',
+          ai: 'disabled (no Claude credential)',
+          reason: 'No Claude credential is configured yet.',
+        }),
+      ),
+    )
+    resetAiAvailability()
     const hidden = renderPage(<SettingsPage />)
     await seeded()
+    await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Plugin endpoints' })).not.toBeInTheDocument()
     hidden.unmount()
 
-    vi.stubEnv('VITE_MOCK_API', '1')
-    try {
-      renderPage(<SettingsPage />)
-      expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
-      expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
-      expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    // The default handler answers as available.
+    server.resetHandlers()
+    resetAiAvailability()
+    renderPage(<SettingsPage />)
+    expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+    expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
   })
 })

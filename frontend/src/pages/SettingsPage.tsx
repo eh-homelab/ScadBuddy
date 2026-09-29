@@ -8,6 +8,7 @@ import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
 import type { McpAuthMode } from '../api/mcpTokens'
+import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
@@ -17,6 +18,7 @@ import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
+import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -922,6 +924,7 @@ export function SettingsPage() {
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
+            <AiStatusSection />
             {/* Per browser and applied at once. Only the user may flip it: an agent must
                 not grant itself access (#254). */}
             <div>
@@ -941,8 +944,9 @@ export function SettingsPage() {
               </p>
             </div>
             <HeadlessBrowserSetting />
-            {/* The agent service serves these routes, so the section shows only where the
-                assistant would (#251). */}
+            {/* The agent service serves these routes, so they show only where the assistant
+                would (#251): when the agent answers /api/v1/ai/status as available
+                (useAiAvailability). */}
             {ai.available && (
               <>
                 <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
@@ -967,6 +971,8 @@ export function SettingsPage() {
                 <RemotePluginsPanel />
               </div>
             )}
+            {/* Saves on its own (#258); shown only when the assistant is available. */}
+            <AiAuditSection />
           </Section>
 
           {saved('diagnostics', runtimeRows('diagnostics'))}

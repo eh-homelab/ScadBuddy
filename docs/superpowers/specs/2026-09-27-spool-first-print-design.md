@@ -199,6 +199,57 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
+**Extruder per filament (#469).** Left at the 3MF's default `filament_map_mode: "Auto
+For Flush"` the slicer spread filaments over both extruders and sliced both for the
+chosen size, which paused queue item 108 with HMS 05FE8053 ("the left nozzle is not
+matched"). ScadBuddy can't pin a filament to an extruder: measured through Bambuddy's
+slicer on 2026-09-28, a Manual `filament_map` in `project_settings.config` is ignored
+(`slice_info` still reads `2 1`), and one at plate level in `model_settings.config`
+crashes the slicer (SIGSEGV) whatever its values. So the run refuses, before upload, the
+prints the mounted nozzles would pause. Extruders are physical: 0 is the right (main), 1
+the left, and `status.nozzles` is indexed the same way.
+
+- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …"). A
+  single-nozzle printer whose one nozzle is another size is refused the same way ("The
+  nozzle is 0.4 mm, not 0.2 mm. …"): nothing about it is unknown.
+- **A side counts as fitted with the size when the rack holds a spare of it** (§6: the
+  printer swaps the rack hotend matching the sliced size onto the extruder; queue item
+  108's rack held no spare 0.2). Rack ids 0 and 1 are the mounted pair, mirroring
+  `nozzles`, so the spares are the other ids; each serves one side. So with both sides
+  0.4 and one 0.2 in the rack (the 2026-09-27 rack), a one-color 0.2 print runs and a
+  two-color one is refused naming the rack; with a 0.2 mounted on the right and another
+  in the rack, a two-color 0.2 print runs. The filament step carries the spares as
+  `rack`, so the dialog mirrors it. Not measured: that the swap happens at print start
+  rather than the printer pausing; if it pauses, drop the rack from `plan_extruders`.
+- **One side fitted with it** (the nozzles differ, or one spare serves one side): more than one filament is a 422,
+  since the slicer spreads them across both. One filament prints, with a warning that
+  the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
+  plates being printed (the parts' extruders in the local 3MF's `model_settings.config`),
+  not the whole model.
+- **One side fitted with it, the other unreported:** a single-nozzle printer (X1C, P1S,
+  A1: an empty second `nozzles` entry, no AMS wired left, no switch) prints any number of
+  filaments. On a printer with a left side, that side is unknown: a warning, not a 422.
+- **Both fitted with it:** any filament prints on either.
+- **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
+  switch routes any AMS to either nozzle (user ruling, 2026-09-28). A spool's side, from
+  `ams_switch_inlet` (inlet A left, B right, as upstream `fts_routing.py`), is shown
+  only as "rests on L/R".
+- **Without the switch**, each AMS is wired to one side: the external holder's tray
+  (assignment `ams_id` 255, tray 0 left, tray 1 right), else `ams_extruder_map`, where
+  anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
+  a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
+  0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
+  never pre-selects it — unless the rack holds a spare of the size, which the printer
+  can swap onto that side.
+- Nozzles the printer doesn't report refuse nothing and warn. Nor does an unreadable
+  `/inventory/assignments`: every spool's side is then unknown. With no status it isn't
+  read.
+- `extruders.plan_extruders` decides all of it, from one status read per run, right
+  after #472's `choice_errors` in `run_for_output`. Only the nozzle **diameter** is
+  compared, not its flow type (HS vs HH).
+- A per-color extruder choice is possible only once Bambuddy's slicer honors a filament
+  map; the upstream report is drafted, not filed.
+
 ### 4.4 Plate
 
 Preselect order (amendment 4): the printer's last print's `bed_type` (§3) → ScadBuddy's

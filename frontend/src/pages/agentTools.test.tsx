@@ -79,7 +79,7 @@ describe('catalogue filters through navigate (#276)', () => {
 
     expect(await bridge.call('navigate', { route: '/?tag=keychain&sort=name' })).toEqual({
       ok: true,
-      result: { route: '/?tag=keychain&sort=name' },
+      result: { route: '/?tag=keychain&sort=name&view=cards' },
     })
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Gridfinity Bin' })).toBeNull())
     expect(

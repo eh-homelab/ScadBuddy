@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { shutdown } from '../src/shutdown.js'
 import { appFetch, BACKEND, connect, MCP_URL, testApp } from './helpers/mcp.js'
 
@@ -180,6 +181,6 @@ describe('Last-Event-ID resumption on the mounted /mcp', () => {
     const result = replay.find((e) => (e.data as { id?: number } | undefined)?.id === 2)
     expect(result).toBeDefined()
     const text = (result!.data as { result: { content: { text: string }[] } }).result.content[0]!.text
-    expect(JSON.parse(text)).toMatchObject({ job_id: 'j1', status: 'done' })
+    expect(JSON.parse(unwrapUntrusted(text))).toMatchObject({ job_id: 'j1', status: 'done' })
   })
 })
