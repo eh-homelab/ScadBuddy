@@ -111,21 +111,30 @@ class ContentStore:
             )
 
     async def _store(
-        self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope, reuse: bool = True
+        self,
+        kind: BlobKind,
+        data: bytes,
+        *,
+        name: str,
+        scope: BlobScope,
+        lost_reuse: bool = False,
     ) -> tuple[BlobRef, bool]:
         """The stored object, and whether it is an existing one reused. Its row must then
-        be written with ``reuse=True``, which fails if a release freed it meanwhile."""
+        be written with ``reuse=True``, which fails if a release freed it meanwhile.
+        ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
+        like the re-put it replaces, no room check."""
         sha = hashlib.sha256(data).hexdigest()
         existing = (
-            await asyncio.to_thread(self.index.by_sha, sha, kind, self.name) if reuse else None
+            None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
         )
         if existing is not None and await self.backend.exists(existing.backend_id):
             return existing, True  # a re-put: never refused, never uploaded twice
-        try:
-            await asyncio.to_thread(self._require_room, len(data))
-        except StoreFullError:
-            self._count("put", "full")
-            raise
+        if not lost_reuse:
+            try:
+                await asyncio.to_thread(self._require_room, len(data))
+            except StoreFullError:
+                self._count("put", "full")
+                raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
         ref = BlobRef(
@@ -160,7 +169,7 @@ class ContentStore:
             )
         except ReuseLostError:
             # Freed between the lookup and this row: store this put's own copy.
-            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            ref, _ = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
             previous = await asyncio.to_thread(
                 self.index.put, key, ref, slug=scope.slug, meta=meta or {}
             )
@@ -210,7 +219,7 @@ class ContentStore:
                 reuse=reused,
             )
         except ReuseLostError:
-            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            ref, _ = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
             landed = await asyncio.to_thread(
                 self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
             )
