@@ -121,7 +121,9 @@ Follow `GET /api/v1/print/runs/{run_id}` until `status` is `succeeded` (its
 names one deliberate print: send a new one per print and the same one on a
 retry of it. The same request (same `request_id`) for the same output again
 answers **200** with that run (`repeated: true`) while it is in flight, or for
-ten minutes after it succeeded, and queues nothing more; a new `request_id` with
+ten minutes after it succeeded or failed with `may_have_queued: true`, and queues
+nothing more; a failed run that never tried to queue holds nothing, so repeating
+it tries again. A new `request_id` with
 the same choices is a new print (`backend/openapi.json`; #470). `print_output`
 makes a new one per call, and re-sends that call's POST with the same id when no
 answer from ScadBuddy arrived. If it still reports no answer, or names a run it
