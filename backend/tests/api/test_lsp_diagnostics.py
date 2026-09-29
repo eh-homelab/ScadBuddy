@@ -1,9 +1,11 @@
 """`POST /api/v1/lsp/diagnostics` (#252), against a stand-in that behaves as the pinned
-openscad-lsp 2.0.1 was measured to: nothing on didOpen, diagnostics on didChange."""
+openscad-lsp 2.0.1 was measured to: nothing on didOpen, diagnostics on didChange. One
+test (`requires_openscad_lsp`) checks those measurements against the real binary."""
 
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -161,3 +163,33 @@ def test_a_full_budget_is_a_503_with_retry_after(settings: Settings) -> None:
         response = client.post("/api/v1/lsp/diagnostics", json={"source": "x"})
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "2"
+
+
+@pytest.fixture
+def real_client(settings: Settings) -> Iterator[TestClient]:
+    # The real openscad-lsp, not this module's fake.
+    app = create_app(
+        settings.model_copy(update={"openscad_lsp": Settings.model_fields["openscad_lsp"].default})
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+@pytest.mark.requires_openscad_lsp
+def test_the_real_server_reports_a_syntax_error_and_a_missing_include(
+    real_client: TestClient, model: str
+) -> None:
+    """The measurements the module docstring rests on, against the pinned binary: it
+    publishes on didChange, a parse error is `syntax error` with a range, and a leading
+    `include` of a missing file is `file not found!`. A bump that changes any of them
+    fails here, not only in the fake."""
+    assert post(real_client, "cube(1);\n", slug=model) == {"available": True, "diagnostics": []}
+
+    broken = post(real_client, "cube(1);\ncube([1, 2;\n", slug=model)["diagnostics"]
+    assert isinstance(broken, list) and broken
+    assert all(d["severity"] == "error" for d in broken)
+    assert any(d["line"] == 2 for d in broken), broken
+
+    missing = post(real_client, "include <missing.scad>\ncube(1);\n", slug=model)["diagnostics"]
+    assert isinstance(missing, list)
+    assert any(d["message"] == "file not found!" and d["line"] == 1 for d in missing), missing
