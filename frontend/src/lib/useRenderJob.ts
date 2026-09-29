@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { Job } from '../api/types'
+import { joinInputs, NO_EXTRA, type InputsExtra } from './inputs'
 import type { ParamValues } from './params'
 import { getRealtime } from './realtime'
+import { useLatest } from './useLatest'
 
 export const RENDER_DEBOUNCE_MS = 400
 /** Only while the realtime socket is unavailable (#267): otherwise events drive the reads. */
@@ -66,6 +68,8 @@ export function useRenderJob(
   params: ParamValues | undefined,
   /** #90 — render this revision rather than the one the model is currently at. */
   version?: string,
+  /** A template UI's state (spec 2026-09-27 §4.3), sent with the params; alone it never re-renders. */
+  extra: InputsExtra = NO_EXTRA,
 ): RenderState {
   const [job, setJob] = useState<Job | undefined>(undefined)
   const [rendering, setRendering] = useState(false)
@@ -75,6 +79,7 @@ export function useRenderJob(
   const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
+  const extraRef = useLatest(extra)
 
   useEffect(() => {
     if (!slug || !params || Object.keys(params).length === 0) return
@@ -176,7 +181,7 @@ export function useRenderJob(
       // the same `supersedes` still applies.
       for (;;) {
         try {
-          const { job_id } = await api.render(slug, params, version, supersedes)
+          const { job_id } = await api.render(slug, joinInputs(params, extraRef.current), version, supersedes)
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
@@ -211,7 +216,7 @@ export function useRenderJob(
       // preview must not name it through the debounce before the next submit.
       setStage(undefined)
     }
-  }, [slug, params, version])
+  }, [slug, params, version, extraRef])
 
   return { job, rendering, error, busy, settledFor, stage }
 }

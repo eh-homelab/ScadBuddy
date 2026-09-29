@@ -336,3 +336,39 @@ describe('failures the server did not describe (#470)', () => {
     })
   })
 })
+
+describe('render and createOutput (spec 2026-09-27 §4.3)', () => {
+  it('send inputs, not params', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post('/api/v1/models/:slug/render', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(
+          { job_id: 'a'.repeat(32), status_url: '/api/v1/jobs/' + 'a'.repeat(32) },
+          { status: 202 },
+        )
+      }),
+      http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    await api.render('name-keychain', { params: { name: 'Hi' }, tab: 'lid' })
+    await api.createOutput('name-keychain', 'a'.repeat(32), undefined, { params: {}, tab: 'lid' })
+    await api.createOutput('name-keychain', 'a'.repeat(32))
+    expect(bodies).toEqual([
+      { inputs: { params: { name: 'Hi' }, tab: 'lid' }, version: null },
+      { job_id: 'a'.repeat(32), name: null, inputs: { params: {}, tab: 'lid' } },
+      { job_id: 'a'.repeat(32), name: null },
+    ])
+  })
+
+  it('addresses a template UI file, pinned by revision when there is one', () => {
+    expect(api.uiFileUrl(BUILTIN_SLUG, undefined, 'app/index.html')).toBe(
+      '/api/v1/models/builtin%3Akeychain-template/ui/app/index.html',
+    )
+    expect(api.uiFileUrl('name-keychain', 'abc', 'a b.js')).toBe(
+      '/api/v1/models/name-keychain/versions/abc/ui/a%20b.js',
+    )
+  })
+})

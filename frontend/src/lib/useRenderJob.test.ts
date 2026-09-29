@@ -65,14 +65,27 @@ describe('useRenderJob', () => {
     vi.restoreAllMocks()
   })
 
+  it('submits inputs: the params plus the UI state', async () => {
+    const params = { name: 'Hi' }
+    const extra = { tab: 'lid' }
+    renderHook(() => useRenderJob('name-keychain', params, undefined, extra))
+    await settle()
+    expect(submit).toHaveBeenCalledWith(
+      'name-keychain',
+      { params: { name: 'Hi' }, tab: 'lid' },
+      undefined,
+      undefined,
+    )
+  })
+
   it('tells the server which render a new one replaces', async () => {
     const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
     await settle()
     rerender({ slug: 'demo', params: { n: 2 } })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { n: 1 }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { params: { n: 1 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
   })
 
   it('supersedes a render whose answer arrives after the next one was asked for', async () => {
@@ -88,7 +101,7 @@ describe('useRenderJob', () => {
     first.resolve(accepted(JOB_A))
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, JOB_A)
   })
 
   it('retries a render the full queue refused, after the delay it names', async () => {
@@ -112,7 +125,7 @@ describe('useRenderJob', () => {
     })
 
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 1 }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 1 } }, undefined, undefined)
     expect(result.current.busy).toBeUndefined()
     expect(result.current.error).toBeUndefined()
   })
@@ -143,7 +156,7 @@ describe('useRenderJob', () => {
     // The newer render went out within a stale-check, not after the 30 s wait,
     // and the refused one was never retried.
     expect(submit).toHaveBeenCalledTimes(2)
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: { n: 2 } }, undefined, undefined)
   })
 
   it('reports a settle only for the newest render, never a superseded one (#254)', async () => {
@@ -158,7 +171,7 @@ describe('useRenderJob', () => {
     await settle()
     rerender({ slug: 'demo', params: second })
     await settle()
-    expect(submit).toHaveBeenNthCalledWith(2, 'demo', second, undefined, JOB_A)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { params: second }, undefined, JOB_A)
 
     // A says "done" now, but it was superseded: neither its job nor its params count.
     lateA.resolve(job(JOB_A, 'done'))
@@ -183,8 +196,8 @@ describe('useRenderJob', () => {
     rerender({ slug: 'other', params: { n: 1 }, version: 'f'.repeat(40) })
     await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(2, 'other', { n: 1 }, undefined, undefined)
-    expect(submit).toHaveBeenNthCalledWith(3, 'other', { n: 1 }, 'f'.repeat(40), undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'other', { params: { n: 1 } }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(3, 'other', { params: { n: 1 } }, 'f'.repeat(40), undefined)
   })
 
   describe('following a job (#267)', () => {

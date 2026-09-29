@@ -28,7 +28,7 @@ function watchRenders(): Record<string, unknown>[] {
   const bodies: Record<string, unknown>[] = []
   server.events.on('request:start', async ({ request }) => {
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
-      bodies.push(((await request.clone().json()) as { params: Record<string, unknown> }).params)
+      bodies.push(((await request.clone().json()) as { inputs: { params: Record<string, unknown> } }).inputs.params)
     }
   })
   return bodies
@@ -92,10 +92,10 @@ describe('customizer tools', () => {
   })
 
   it('render waits for the values on screen when a newer change supersedes a render', async () => {
-    const bodies: { params: Record<string, unknown>; supersedes?: string }[] = []
+    const bodies: { inputs: { params: Record<string, unknown> }; supersedes?: string }[] = []
     server.events.on('request:start', async ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
-        bodies.push((await request.clone().json()) as { params: Record<string, unknown>; supersedes?: string })
+        bodies.push((await request.clone().json()) as { inputs: { params: Record<string, unknown> }; supersedes?: string })
       }
     })
     await open()
@@ -107,7 +107,7 @@ describe('customizer tools', () => {
     await waitFor(() => expect(bodies).toHaveLength(2))
     await call('set_param', { name: 'name', value: 'Nova' })
     await waitFor(() => expect(bodies).toHaveLength(3))
-    expect(bodies[2]).toMatchObject({ params: { name: 'Nova' }, supersedes: expect.any(String) })
+    expect(bodies[2]).toMatchObject({ inputs: { params: { name: 'Nova' } }, supersedes: expect.any(String) })
 
     // The answer is Nova's render, never the superseded Workshop one (81.4 mm wide).
     const rendered = await call('render', { timeout_ms: 5000 })

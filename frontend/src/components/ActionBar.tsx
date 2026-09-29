@@ -5,7 +5,9 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
+import type { InputsExtra } from '../lib/inputs'
 import { fitLabel, fitMessages } from '../lib/plate'
+import { saveOutput } from '../lib/saveOutput'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
@@ -25,6 +27,8 @@ interface Props {
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
+  /** The UI state recorded with the output (spec 2026-09-27 §4.3). */
+  extra: InputsExtra
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
   /**
@@ -47,6 +51,7 @@ export function ActionBar({
   upToDate = true,
   output,
   capture,
+  extra,
   fit,
   fitProblems,
   onPrinterModel,
@@ -70,12 +75,7 @@ export function ActionBar({
     setGenerating(true)
     setError(null)
     try {
-      const created = await api.createOutput(slug, job.id)
-      const png = await capture()
-      if (png) {
-        // A missing thumbnail is cosmetic — never fail the generate over it.
-        await api.putThumbnail(created.id, png).catch(() => undefined)
-      }
+      const created = await saveOutput({ slug, job, extra, capture })
       onGenerated(created)
       return created
     } catch (cause) {

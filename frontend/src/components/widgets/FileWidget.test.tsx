@@ -249,19 +249,19 @@ describe('file parameter samples', () => {
 describe('mock API: file parameters (#204)', () => {
   it('refuses a render whose file value is not an upload', async () => {
     const error: unknown = await api
-      .render(SLUG, { label_art: '../../etc/passwd' })
+      .render(SLUG, { params: { label_art: '../../etc/passwd' } })
       .catch((caught: unknown) => caught)
     expect(error).toMatchObject({ status: 422 })
   })
 
   it('takes a render whose file value is a listed sample', async () => {
-    const accepted = await api.render(SLUG, { label_art: 'sample-star.png' })
+    const accepted = await api.render(SLUG, { params: { label_art: 'sample-star.png' } })
     expect(accepted.job_id).toBeTruthy()
   })
 
   it('refuses a sample name the template does not ship', async () => {
     const error: unknown = await api
-      .render(SLUG, { label_art: 'sample-gone.svg' })
+      .render(SLUG, { params: { label_art: 'sample-gone.svg' } })
       .catch((caught: unknown) => caught)
     expect(error).toMatchObject({ status: 422 })
   })
