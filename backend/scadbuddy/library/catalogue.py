@@ -766,8 +766,11 @@ class Catalogue:
             raise ModelExistsError(slug)
         # The upstream's list, copied as rows once the files are in place (#274). A
         # built-in's as it is listed, with what was added to it (#722).
-        listing = self._media_listing(upstream_id)[0] if is_builtin(upstream_id) else []
-        media = [] if is_builtin(upstream_id) else self._stored_media(upstream_id)
+        # A template of mine's rows are read now; a built-in's are the copies
+        # `_carry_overlay` makes once its files are staged.
+        builtin = is_builtin(upstream_id)
+        listing = self._media_listing(upstream_id)[0] if builtin else []
+        media = self._stored_media(upstream_id) if not builtin else []
         # Not `self.version`, which logs a git failure and answers None: here that
         # would record no base and copy the working tree instead of the revision.
         # A failure reading it fails the duplicate, as a failed export does.
@@ -809,7 +812,7 @@ class Catalogue:
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
-            if is_builtin(upstream_id):
+            if builtin:
                 media = self._carry_overlay(upstream_id, listing, staged)
             meta_path = staged / MODEL_META_NAME
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
@@ -1409,15 +1412,17 @@ class Catalogue:
         commit: nothing it touches is in the models repository, so the built-in's
         revision never moves."""
         self._require_media_store()
-        lock: AbstractContextManager[Any] = (
-            self.history.write_lock()
-            if self.history is not None and self.history.available
-            else self._overlay_lock
-        )
-        with lock:
+        with self._overlay_write_lock():
             change()
         self.notify_change(slug)
         return self.record(slug)
+
+    def _overlay_write_lock(self) -> AbstractContextManager[Any]:
+        """The lock every write to a built-in's added media takes: the history's
+        cross-process one when there is a history, else this process's own."""
+        if self.history is not None and self.history.available:
+            return self.history.write_lock()
+        return self._overlay_lock
 
     def _added_for_write(self, slug: str, item_id: str | None = None) -> list[MediaItem]:
         """The rows of what was added to a built-in, to change; with ``item_id``,
@@ -2116,9 +2121,12 @@ class Catalogue:
                 continue
             model_id = f"{BUILTIN_PREFIX}{stale.name}"
             try:
-                if self.media_store is not None:
-                    self.media_store.delete(model_id)
-                _remove_tree(stale)
+                # Under the lock the overlay's other writes take, so another
+                # replica's write to this built-in cannot interleave with the drop.
+                with self._overlay_write_lock():
+                    if self.media_store is not None:
+                        self.media_store.delete(model_id)
+                    _remove_tree(stale)
             except Exception:
                 logger.exception(
                     "could not remove a removed built-in's media", extra={"slug": model_id}

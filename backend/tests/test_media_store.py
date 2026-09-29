@@ -9,6 +9,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -608,3 +609,30 @@ def test_a_removed_built_ins_added_media_goes_with_it(
     assert catalogue.list_media(gone) == []
     assert len(store.items(kept)) == 1
     assert data.builtin_media_dir(kept).is_dir()
+
+
+@pytest.mark.requires_postgres
+def test_dropping_a_removed_built_ins_media_takes_the_overlay_lock(
+    catalogue: Catalogue, data: DataPaths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundled = tmp_path / "bundled"
+    (bundled / "keychain").mkdir(parents=True)
+    (bundled / "keychain" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    catalogue.sync_builtins(bundled)
+    catalogue.add_media("builtin:keychain", _stage(catalogue, PNG, "image", "png"))
+    held: list[bool] = []
+    real = catalogue._overlay_write_lock
+
+    @contextmanager
+    def recording() -> Iterator[None]:
+        with real():
+            held.append(True)
+            yield
+
+    monkeypatch.setattr(catalogue, "_overlay_write_lock", recording)
+    shutil.rmtree(bundled / "keychain")
+
+    catalogue.sync_builtins(bundled)
+
+    assert held == [True]
+    assert not data.builtin_media_dir("builtin:keychain").exists()
