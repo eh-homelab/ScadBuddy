@@ -37,9 +37,9 @@ def getter_for[T](key: Key[T]) -> Callable[..., T]:
 
 
 def component_dep(key: Key[Any], required: str | None = None) -> Any:
-    """``Depends`` on ``key``'s getter. With ``required``, a ``None`` value answers the
-    503 ``deps.require_decisions`` does, with ``required`` as its detail; it reads the
-    same getter, so an override of that reaches this too.
+    """``Depends`` on ``key``'s getter. With ``required``, a ``None`` value answers a
+    503 ``deps.DATABASE_REQUIRED_PROBLEM`` with ``required`` as its detail; it reads
+    the same getter, so an override of that reaches this too.
 
     Not type-checked against ``key``: ``Annotated[int, component_dep(WORD)]`` passes
     mypy, since ``Annotated`` metadata is opaque to it. Name the key's own type in the
