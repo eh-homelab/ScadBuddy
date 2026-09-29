@@ -56,7 +56,13 @@ import type {
   UrlImport,
   VersionDiff,
 } from './types'
-import type { McpTokenCreate, McpTokenList, MintedMcpToken } from './mcpTokens'
+import type {
+  McpAuthSetting,
+  McpAuthUpdate,
+  McpTokenCreate,
+  McpTokenList,
+  MintedMcpToken,
+} from './mcpTokens'
 
 export const API_BASE = '/api/v1'
 
@@ -699,9 +705,9 @@ export const api = {
   createProject: (body: ProjectRequest) =>
     request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** Filed after the run, never during it: a pipeline run's `jobs[].queue_entry_id` is
-   * null when Bambuddy answers 202, and an archive only exists once a print has finished,
-   * so the ids come from the progress read (#89). */
+  /** Filed after the run, never during it: a plate's queue item only exists once it has
+   * sliced, and an archive only once a print has finished, so the ids come from the
+   * progress read (#89). */
   attachToProject: (outputId: string, body: ProjectAttach) =>
     request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
@@ -821,4 +827,10 @@ export const api = {
 
   revokeMcpToken: (id: string) =>
     request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+
+  /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
+  getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
+
+  setMcpAuth: (body: McpAuthUpdate) =>
+    request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 }
