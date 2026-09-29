@@ -149,6 +149,24 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(resumed).toMatch(/^data: .*"status":"idle".*\nid: 8\n\n$/s)
   })
 
+  it("ends an open event stream on the app's close(), so shutdown does not wait on it", async () => {
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
+    await turn!.done
+    const res = await app.request(`/api/v1/ai/sessions/${session.id}/events`, { headers: UI_READ })
+    const reader = res.body!.getReader()
+    let text = ''
+    while (!/^id: 8$/m.test(text)) {
+      const { value, done } = await reader.read()
+      if (done) throw new Error('the stream ended before the replay')
+      text += new TextDecoder().decode(value)
+    }
+    await app.close()
+    for (;;) {
+      const { done } = await reader.read()
+      if (done) break
+    }
+  })
+
   it('refuses a resume point that is not a seq with 400, rather than replaying from the start', async () => {
     const { session } = await m.start(browser, { origin: 'chat', title: 'x' })
     for (const after of ['abc', '-1', '1.5', '']) {

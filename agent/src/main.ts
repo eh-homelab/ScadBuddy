@@ -303,11 +303,16 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     stopHeartbeat()
     // 1001 "going away": the panel reconnects to another replica or after the restart.
     for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
+    // A peer that never answers the close frame would hold server.close() for
+    // ws's 30 s close timeout, past the 10 s deadline.
+    setTimeout(() => {
+      for (const socket of wss.clients) socket.terminate()
+    }, 2_000).unref()
     // Running turns stop; their pending approvals stay pending (approvals/service.ts).
     sessions?.abortAll()
     void shutdown({
-      // End the /mcp sessions first: their standing SSE streams would
-      // otherwise hold server.close() until the deadline.
+      // End the /mcp sessions and the session event streams first: their
+      // standing SSE responses would otherwise hold server.close() until the deadline.
       closeSessions: async () => {
         await app.close()
         resources.close()

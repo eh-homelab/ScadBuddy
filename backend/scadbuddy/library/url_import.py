@@ -33,9 +33,10 @@ is globally routable (`is_public`). That is checked in two places, for two reaso
 
 A refused address, a name that does not resolve, a refused connection and a
 timeout all read the same (`unreachable`), so the endpoint cannot tell an internal
-name that exists from one that does not. What a server answered -- its status, a
-web page instead of a file, too large, not text -- is still reported as it is,
-because only a vetted public address can have produced it.
+name that exists from one that does not. After a redirect it names the hop that
+failed and the pasted host it came from, in that same one text. What a server
+answered -- its status, a web page instead of a file, too large, not text -- is
+still reported as it is, because only a vetted public address can have produced it.
 """
 
 from __future__ import annotations
@@ -77,10 +78,30 @@ class ResolverUnavailableError(Exception):
     `RESOLVE_TIMEOUT` -- so it says nothing about the host either way."""
 
 
-def unreachable(host: str) -> ImportRefusedError:
-    """The one answer for every destination that did not answer as a public server."""
-    return ImportRefusedError(
-        f"could not fetch from {host}: it did not answer, or it is not a public internet address"
+class ResolverBusyError(ResolverUnavailableError):
+    """Every resolver thread on this replica was busy, so the lookup never started.
+
+    Decided before the host is looked up, so unlike a timeout it cannot depend on
+    the host: an import may say it (a retryable 503) instead of the refusal. Library
+    installs vet their clone URLs on the same threads, so they can cause it too.
+    """
+
+
+class UnreachableError(ImportRefusedError):
+    """What :func:`unreachable` raises, so `fetch_model` can name the hop it was on."""
+
+
+def unreachable(host: str, *, redirected_from: str | None = None) -> UnreachableError:
+    """The one answer for every destination that did not answer as a public server.
+
+    ``redirected_from`` is the pasted URL's host when a redirect led to ``host``, so
+    the error names the hop that failed rather than the one that was pasted (#178).
+    The text is the same whether that hop was refused or did not answer.
+    """
+    via = f" (redirected from {redirected_from})" if redirected_from not in (None, host) else ""
+    return UnreachableError(
+        f"could not fetch from {host}{via}: it did not answer, or it is not a public "
+        "internet address"
     )
 
 
@@ -134,7 +155,7 @@ def _getaddrinfo(host: str, port: int) -> list[str]:
 
 async def resolve_host(host: str, port: int) -> list[str]:
     if not _RESOLVER_SLOTS.acquire(blocking=False):
-        raise ResolverUnavailableError(f"could not resolve {host}: every resolver thread is busy")
+        raise ResolverBusyError(f"could not resolve {host}: every resolver thread is busy")
     return await asyncio.get_running_loop().run_in_executor(_RESOLVER, _getaddrinfo, host, port)
 
 
@@ -145,7 +166,9 @@ async def public_addresses(host: str, port: int, *, tell_unavailable: bool = Fal
     They pass ``tell_unavailable``: a lookup that did not finish (the threads busy,
     or a timeout) is then :class:`ResolverUnavailableError` rather than the refusal,
     so an install can say "try again" instead of calling the host private (#205).
-    An import keeps the one answer for both.
+    An import keeps the refusal for a timeout, which could depend on the host. Busy
+    threads (:class:`ResolverBusyError`) are raised as they are for both: the lookup
+    never started, so an import can answer that with its retryable 503 too.
     """
     try:
         addresses = await asyncio.wait_for(resolve_host(host, port), RESOLVE_TIMEOUT)
@@ -153,10 +176,8 @@ async def public_addresses(host: str, port: int, *, tell_unavailable: bool = Fal
         if tell_unavailable:
             raise ResolverUnavailableError(f"could not resolve {host} in time") from None
         raise unreachable(host) from None
-    except ResolverUnavailableError:
-        if tell_unavailable:
-            raise
-        raise unreachable(host) from None
+    except ResolverBusyError:
+        raise
     except OSError:
         raise unreachable(host) from None
     if not addresses or not all(is_public(address) for address in addresses):
@@ -345,6 +366,15 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
     resolver = next(candidate for candidate in RESOLVERS if candidate.handles(url))
+    # The hop in flight, so whatever stops it -- a refused address, no answer, the
+    # deadline -- names the host that failed, not only the one that was pasted.
+    hop = url
+
+    async def vet_hop(request: httpx.Request) -> None:
+        nonlocal hop
+        hop = request.url
+        await _vet_hop(request)
+
     try:
         async with (
             asyncio.timeout(IMPORT_TIMEOUT),
@@ -352,7 +382,7 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
                 timeout=IMPORT_TIMEOUT,
                 # `_fetch` follows them itself; see why there.
                 follow_redirects=False,
-                event_hooks={"request": [_vet_hop]},
+                event_hooks={"request": [vet_hop]},
                 headers={"Accept-Encoding": "identity"},
                 # Its own transport, which also means no proxy from the environment:
                 # a proxy would make the connection, and the vetting with it.
@@ -361,5 +391,5 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
             ) as client,
         ):
             return await resolver.resolve(url, client, limit=limit)
-    except (TimeoutError, httpx.HTTPError):
-        raise unreachable(url.host) from None
+    except (UnreachableError, TimeoutError, httpx.HTTPError):
+        raise unreachable(hop.host, redirected_from=url.host) from None

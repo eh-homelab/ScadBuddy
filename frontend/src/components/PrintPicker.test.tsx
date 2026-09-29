@@ -1030,6 +1030,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
+  it('never GETs /filaments for plate 1 without all plates', async () => {
+    // #525 finding 3: the msw mock's per-plate filtering in `handlers.ts` is only
+    // safe because plate 1 without `all_plates` is seeded from the bulk
+    // `choices.filaments` payload and never hits this route. Pin that directly.
+    const reads = watch('GET', '/filaments')
+    renderPicker()
+    await loaded()
+    expect(reads.urls).toHaveLength(0)
+  })
+
   it('offers each plate of a multi-plate output, reading that plate’s slots', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>
@@ -1077,6 +1087,31 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
+  })
+
+  it('reads every plate for all plates, not plate 1 alone', async () => {
+    // #480: the default mock gives plate N only slot N and `all_plates` the union, so a
+    // read that dropped `all_plates` would come back with slot 1 alone.
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument())
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+
+    expect(await screen.findByTestId('filament-slot-1')).toBeInTheDocument()
+    expect(screen.getByTestId('filament-slot-2')).toBeInTheDocument()
+    expect(reads.urls.at(-1)).toContain('all_plates=true')
   })
 
   it('offers a row for a slot only a later plate uses when printing all plates', async () => {
