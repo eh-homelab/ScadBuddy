@@ -137,6 +137,20 @@ describe('useAgentChat', () => {
     expect(result.current.state.activeId).toBe('s1')
   })
 
+  it('attaches a session picked while disconnected once, on the reconnect', () => {
+    const t = scripted(() => 'queued')
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'chat', owner, status: 'idle' }] }))
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.select('s1'))
+    expect(t.sent).toEqual([])
+    act(() => t.h().onOpen?.())
+    expect(t.sent).toEqual([{ v: 1, type: 'session.attach', sessionId: 's1' }])
+  })
+
   it('keeps waiting for a queued first turn through failed reconnect attempts', () => {
     let answer: SendResult = 'queued'
     const t = scripted(() => answer)

@@ -27,6 +27,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   const latest = useRef(state)
   /** A first turn is held by the transport for the reconnect, so its `awaitingStart` survives a failed attempt. */
   const startQueued = useRef(false)
+  /** The transport has a connection open now (between onOpen and onClose). */
+  const live = useRef(false)
   useEffect(() => {
     latest.current = state
   }, [state])
@@ -34,19 +36,20 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   useEffect(() => {
     const t = factory()
     let open = true
-    let opened = false
     transport.current = t
     t.connect({
       onOpen: () => {
         if (!open) return
-        // A reconnect: the new connection follows nothing yet, so re-attach the
-        // session on screen (attach replays it, and `select` clears it first).
+        // The new connection follows nothing yet, so attach the session on screen
+        // (attach replays it, and `select` clears it first). `select` sends no attach
+        // while disconnected, so this is the only one: a second would replay again
+        // onto the feed and double every reply.
+        live.current = true
         const active = latest.current.activeId
-        if (opened && active) {
+        if (active) {
           dispatch({ type: 'select', sessionId: active })
           t.send(clientMessage({ type: 'session.attach', sessionId: active }))
         }
-        opened = true
         // What was queued goes out right after this, so from here a drop loses it again.
         startQueued.current = false
         dispatch({ type: 'connected' })
@@ -58,6 +61,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         else dispatch({ type: 'protocol-error', message: parsed.error })
       },
       onClose: (reason) => {
+        live.current = false
         if (open) dispatch({ type: 'disconnected', reason, keepStart: startQueued.current })
       },
     })
@@ -65,6 +69,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // handshake completes, and may close first.
     return () => {
       open = false
+      live.current = false
       transport.current = null
       t.close()
     }
@@ -121,7 +126,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
 
   const select = useCallback((sessionId: string | null) => {
     dispatch({ type: 'select', sessionId })
-    if (sessionId) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
+    // Offline, the reconnect's onOpen attaches whatever is on screen then.
+    if (sessionId && live.current) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
   }, [])
 
   return { state, send, decide, interrupt, takeOver, select }
