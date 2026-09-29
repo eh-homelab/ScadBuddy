@@ -37,6 +37,7 @@ from scadbuddy.library.presets import (
     TooManyPresetsError,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
+from scadbuddy.render.inputs import InputsError, legacy_inputs
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
@@ -184,7 +185,7 @@ async def duplicate_preset(
         assets=assets,
         fetcher=fetcher,
     )
-    copy = ParamPresetCreate(name=body.name, inputs=source.inputs or None)
+    copy = ParamPresetCreate(name=body.name, inputs=source.inputs or legacy_inputs(source.params))
     try:
         return await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError:
@@ -228,6 +229,8 @@ async def update_preset(
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
     except PresetExistsError:

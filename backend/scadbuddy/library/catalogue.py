@@ -53,7 +53,12 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
-from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import (
+    PresetStore,
+    TemplatePreset,
+    TemplatePresets,
+    for_model_json,
+)
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -542,6 +547,11 @@ class Catalogue:
         # Dropping it here retires the key from volumes written before that was
         # true, rather than leaving a cache blob in the versioned tree forever.
         meta.pop("schema", None)
+        presets = meta.get("presets")
+        if isinstance(presets, list):
+            meta["presets"] = [
+                for_model_json(preset) if isinstance(preset, dict) else preset for preset in presets
+            ]
         # No `mkdir`: the model directory must already exist (`create` makes it).
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
