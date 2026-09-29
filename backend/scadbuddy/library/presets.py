@@ -39,6 +39,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -179,15 +180,18 @@ class TemplatePreset(_PresetBody):
     )
 
     @model_validator(mode="after")
-    def _one_state(self) -> TemplatePreset:
-        # Read from model.json, where `params` wins over the `inputs` beside it: a hand
-        # edit, or an older release, changes `params` only, and a disagreement must
-        # never cost the template its whole list.
+    def _one_state(self, info: ValidationInfo) -> TemplatePreset:
+        # Read from a stored file (`STORED`), `params` wins over the `inputs` beside
+        # them: a hand edit, or an older release, changes `params` only, and a
+        # disagreement must never cost the template its whole list. A request body is
+        # strict, as a saved preset's is: a client that disagrees with itself is a 422.
         inputs = self.inputs
-        if inputs is not None and "params" in self.model_fields_set:
-            inputs = {**inputs, "params": self.params}
+        params: dict[str, ParamValue] | None = self.params
+        stored = bool(info.context and info.context.get(STORED))
+        if stored and inputs is not None and "params" in self.model_fields_set:
+            inputs, params = {**inputs, "params": params}, None
         try:
-            self.inputs = normalize_inputs(inputs, None if inputs is not None else self.params)
+            self.inputs = normalize_inputs(inputs, params)
         except InputsError as error:
             raise ValueError(str(error)) from None
         self.params = self.inputs["params"]
@@ -196,10 +200,10 @@ class TemplatePreset(_PresetBody):
 
 def for_model_json(preset: dict[str, Any]) -> dict[str, Any]:
     """A template preset as ``model.json`` keeps it: ``params``, and ``inputs`` beside
-    them only when they carry UI state (keys besides ``params`` and ``v``), so a file
-    without UI state has one place to edit the values."""
-    inputs = preset.get("inputs")
-    if isinstance(inputs, dict) and set(inputs) <= {"params", "v"}:
+    them unless they are only the plain ``{"params": …, "v": 0}``, so a file without UI
+    state or a version has one place to edit the values, and a version is never lost."""
+    inputs, params = preset.get("inputs"), preset.get("params")
+    if isinstance(params, dict) and inputs == legacy_inputs(params):
         return {key: value for key, value in preset.items() if key != "inputs"}
     return preset
 
@@ -236,6 +240,8 @@ class TemplatePresets(BaseModel):
 
 
 _PRESET_LIST: TypeAdapter[list[TemplatePreset]] = TypeAdapter(list[TemplatePreset])
+#: The validation context key for a preset read from a stored file (`TemplatePreset`).
+STORED = "stored"
 
 
 def template_preset_keys(presets: Sequence[TemplatePreset]) -> list[str]:
@@ -336,7 +342,7 @@ class PresetStore:
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
         try:
-            return _checked(_PRESET_LIST.validate_python(raw))
+            return _checked(_PRESET_LIST.validate_python(raw, context={STORED: True}))
         except (ValidationError, ValueError, RecursionError) as error:
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
