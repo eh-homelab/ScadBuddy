@@ -1,5 +1,6 @@
 import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import type { Tier } from '../auth/principal.js'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import type { Kek } from '../secrets.js'
@@ -42,7 +43,8 @@ import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } fr
 //     same input hash, once, before `usable_until`). If the session cannot
 //     start that turn, the approval is voided at once and the session gets an
 //     `error` event saying so. This is the "deny-then-resume" fallback of spec
-//     §3.2, needed only for orphans;
+//     §3.2, needed only for orphans. The resumed turn runs with the tiers the
+//     asking turn had (`requested_tiers`, #300), never more;
 //   - deny → recorded; the session goes back to `idle`.
 //   Resuming claims the session, and a new turn cancels the session's other
 //   pending approvals (below): approving one of several orphans of the same
@@ -133,6 +135,12 @@ export type ApprovalRecord = {
   inputHash: string
   tier: RiskTier
   requestedBy: Owner
+  /**
+   * The tiers the asking turn ran with, when its sender's were passed in
+   * (sessions/manager.ts SendOptions.tiers); a resumed turn gets no more.
+   * Null: the owner's default applied.
+   */
+  requestedTiers: Tier[] | null
   createdAt: string
   expiresAt: string
   decision: Decision | null
@@ -217,6 +225,8 @@ export type GateContext = {
   turnId: string
   /** The principal the turn runs for; recorded as `requested_by`. */
   requestedBy: Owner
+  /** The turn's tiers, when not the owner's default; recorded as `requested_tiers`. */
+  requestedTiers?: readonly Tier[]
   /** Redacted from the stored summary and the events (the turn's credential). */
   secrets: () => readonly string[]
   /** The turn's own abort signal (interrupt, shutdown). */
@@ -235,6 +245,7 @@ type Row = {
   requested_by_kind: Owner['kind']
   requested_by_id: string
   requested_by_label: string
+  requested_tiers: Tier[] | null
   created_at: Date
   expires_at: Date
   decision: Decision | null
@@ -251,7 +262,7 @@ type Row = {
 }
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-  requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at, decision,
+  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
   decided_by_kind, decided_by_id, decided_by_label, decided_at, reason, usable_until, resume_turn_id,
   consumed_at, revoked_at, (decision IS NULL AND expires_at <= now()) AS due`
 
@@ -269,6 +280,7 @@ function record(row: Row): ApprovalRecord {
     inputHash: row.input_hash,
     tier: row.tier,
     requestedBy: { kind: row.requested_by_kind, id: row.requested_by_id, label: row.requested_by_label },
+    requestedTiers: row.requested_tiers,
     createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     decision: row.decision,
@@ -354,6 +366,8 @@ export type CreateApproval = {
   input: Record<string, unknown>
   tier: RiskTier
   requestedBy: Owner
+  /** See GateContext.requestedTiers. */
+  requestedTiers?: readonly Tier[]
   secrets?: readonly string[]
 }
 
@@ -530,8 +544,8 @@ export class ApprovalService {
     const { requestedBy: by } = request
     const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                 requested_by_kind, requested_by_id, requested_by_label, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + ($12 * interval '1 second'))
+                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'))
        RETURNING ${COLUMNS}`,
       [
         randomUUID(),
@@ -545,6 +559,7 @@ export class ApprovalService {
         by.kind,
         by.id,
         by.label,
+        request.requestedTiers ? [...request.requestedTiers] : null,
         ttl,
       ],
     )
@@ -1039,6 +1054,7 @@ export class ApprovalService {
         input,
         tier: request.tier,
         requestedBy: context.requestedBy,
+        ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
         secrets: context.secrets(),
       })
       // An abort (interrupt, shutdown) ends the wait and leaves the row

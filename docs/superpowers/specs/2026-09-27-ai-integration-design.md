@@ -586,7 +586,15 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
 - **Principal.** Every call acts as its caller (`ownerOf`), under the manager's rules
   above. A turn a token sends runs its in-process tools with that token's tiers
   (`SendOptions.tiers`, `tools/harness.ts` `turnPrincipal`); without them a
-  non-browser owner's turns are `read` only.
+  non-browser owner's turns are `read` only. An approval a turn asks for records
+  those tiers (`ai_approvals.requested_tiers`,
+  `agent/src/db/migrations/20260929T2258Z_approval_requested_tiers.sql`), so the turn
+  that resumes an orphan approved after a restart (§8.2) is offered the approved tool
+  again. It gets them only while the requester still owns the session, and no more
+  than a bearer token holds at resume time (`auth/tokens.ts` `liveTokenTiers`: a
+  revoked or expired token leaves `read`). An OIDC subject's tiers come with each
+  access token and are not stored, so its resumed turn gets the recorded ones (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715)).
 - **Watching.** `sessions_get` returns status, owner, pending approvals and the
   transcript after a seq, with streamed text joined per message; `sessions_attach`
   long-polls the event log (at most 300 s) and returns once events pause. Start and
@@ -620,8 +628,7 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
   `approvalGrantCheck` reads it on every decision, for bearer tokens only; §8.2's
   rules (`approvals/service.ts` `authorize`) do the rest.
 - **Not built:** a skill on `sessions_start` (session queries have no Skill tool,
-  `tools: []`); tiers for a resumed orphan approval of a token-owned session (it runs
-  `read` only); the grant's checkbox in Settings.
+  `tools: []`); the grant's checkbox in Settings.
 
 ## 7. Events
 

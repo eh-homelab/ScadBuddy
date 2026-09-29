@@ -141,6 +141,7 @@ export function auditedTokenStore(store: TokenStore, audit: AuditSink, context: 
     verify: (token, now) => store.verify(token, now),
     list: () => store.list(),
     approvalGrant: (id, now) => store.approvalGrant(id, now),
+    liveTier: (id, now) => store.liveTier(id, now),
     async mint(request: MintRequest) {
       const startedAt = new Date()
       const describe =

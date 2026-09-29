@@ -206,6 +206,16 @@ function approvalSeenBy(
   }
 }
 
+/**
+ * What `sessions_handoff` may name: the browser user, a bearer token's
+ * principal (`token:<uuid>`, auth/tokens.ts `principalFor`) or an OIDC
+ * subject's (`oidc:<issuer>#<sub>`, auth/oidc.ts `oidcPrincipalId`: an http(s)
+ * issuer, which has no fragment, and a `sub` of at most 255 ASCII characters,
+ * OIDC Core §2). Anything else could never accept the offer (PR #715 review).
+ */
+export const HANDOFF_TARGET =
+  /^(browser|token:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|oidc:https?:\/\/[^\s#]+#[\x20-\x7e]{1,255})$/
+
 /** The owner `to` names: the browser user, or an MCP principal by its id. */
 function ownerNamed(to: string): Owner {
   if (to === 'browser') return BROWSER_USER
@@ -479,7 +489,7 @@ export const sessionTools: Tool[] = [
       session_id: sessionId,
       to: z
         .string()
-        .regex(/^(browser|token:[0-9a-f-]{36}|oidc:.+)$/, '"browser", "token:<id>" or "oidc:<issuer>#<sub>"')
+        .regex(HANDOFF_TARGET, '"browser", "token:<id>" or "oidc:<issuer>#<sub>"')
         .describe('Who takes the session over, or is offered it.'),
     }),
     risk: 'write',

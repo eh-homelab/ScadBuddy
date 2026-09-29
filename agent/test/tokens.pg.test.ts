@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { hashToken, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
+import { hashToken, liveTokenTiers, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { migrate } from '../src/db/migrations.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -121,6 +121,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
       expect(await store.revoke(granted.record.id)).toBe(true)
       expect(await store.approvalGrant(granted.record.id)).toBe(false)
+
+      // What a resumed approval's turn is cut down to (#300): the live tier, none once revoked or expired.
+      expect(await store.liveTier(plain.record.id)).toBe(plain.record.tier)
+      expect(await store.liveTier(granted.record.id)).toBeNull()
+      expect(await store.liveTier(expiring.record.id, new Date('2025-12-31T23:59:59Z'))).toBe('outward')
+      expect(await store.liveTier(expiring.record.id, new Date('2026-01-01T00:00:00Z'))).toBeNull()
+      expect(await store.liveTier('not-a-uuid')).toBeNull()
+      const tiers = liveTokenTiers(store)
+      expect(await tiers({ kind: 'bearer', id: `token:${expiring.record.id}` })).toEqual([])
+      expect(await tiers({ kind: 'oidc', id: 'oidc:https://idp.example/#alice' })).toBeUndefined()
     })
 
     it('records last use, and never moves it backwards', async () => {

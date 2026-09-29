@@ -76,7 +76,8 @@ import { PostgresSessionStore } from './store.js'
 //     approval grant as `approvalGrants` (auth/tokens.ts `approvalGrantCheck`).
 //     The caller's principal is mapped to an `Owner` by approvals/mcp.ts
 //     `ownerOf`, and a start or send passes its tiers (`tiers` below), which
-//     the turn's in-process tools run with.
+//     the turn's in-process tools run with. An approval a turn asks for
+//     records them, so resuming it restores them (`resumeApproved`).
 //   - The registry supplies `tierOf` and the in-process MCP servers
 //     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
 //     Tool payloads: tool.call inputs and tool.result summaries go into the
@@ -288,6 +289,13 @@ export type SessionManagerDeps = {
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
+  /**
+   * The tiers a principal holds now, when that can be known without its
+   * credential (a bearer token's row; auth/tokens.ts `liveTokenTiers`), or
+   * undefined when it cannot. A resumed approval's turn gets no more than
+   * these (`resumeApproved`).
+   */
+  currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
   /**
@@ -660,12 +668,28 @@ export class SessionManager {
         `${publicLabel(by)} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
         'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
         'and is used once. If you no longer need it, say so instead.'
-      await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId })
+      const tiers = await this.resumeTiers(approval, record(claimed))
+      await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId, ...(tiers ? { tiers } : {}) })
       return { resumed: true }
     } catch (err) {
       await this.releaseClaim(approval.sessionId, turnId)
       return { resumed: false, reason: describe(err) }
     }
+  }
+
+  /**
+   * The tiers a resumed turn runs with: those of the turn that asked
+   * (`requestedTiers`), so the approved tool is offered again, but only while
+   * that principal still owns the session, and cut down to what it holds now
+   * (`currentTiers`: a revoked token holds nothing). Undefined leaves the
+   * owner's default (auth/principal.ts `harnessPrincipal`).
+   */
+  private async resumeTiers(approval: ApprovalRecord, session: SessionRecord): Promise<readonly Tier[] | undefined> {
+    const requested = approval.requestedTiers
+    if (!requested || !sameOwner(approval.requestedBy, session.owner)) return undefined
+    const now = this.deps.currentTiers ? await this.deps.currentTiers(session.owner) : undefined
+    const tiers = now ? requested.filter((t) => now.includes(t)) : requested
+    return tiers.length > 0 ? tiers : undefined
   }
 
   /** Gives back a claim no turn ran on (a resume that could not start). */
@@ -849,6 +873,7 @@ export class SessionManager {
         sessionId: id,
         turnId,
         requestedBy: session.owner,
+        ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
         secrets: () => secrets,
         signal: controller.signal,
       })

@@ -7,7 +7,7 @@ import { event } from '../src/sessions/protocol.js'
 import { turnPrincipal } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool } from '../src/tools/registry.js'
-import { condense, sessionTools } from '../src/tools/sessions.js'
+import { condense, HANDOFF_TARGET, sessionTools } from '../src/tools/sessions.js'
 import { firstText, services } from './helpers/mcp.js'
 import { agentA, browser } from './support/sessions.js'
 
@@ -50,6 +50,39 @@ describe('the sessions_* tools', () => {
     })
     expect(result.isError).toBe(true)
     expect(firstText(result)).toMatch(/need the database/)
+  })
+
+  it('hand off only to principal ids that can exist (PR #715 review)', () => {
+    for (const to of [
+      'browser',
+      'token:0e5a3c1e-1111-4222-8333-944455556666',
+      'oidc:https://idp.example/#alice',
+      'oidc:http://127.0.0.1:8080/realms/sb#f81d4fae-7dec-11d0-a765-00a0c91e6bf6',
+    ]) {
+      expect(to, to).toMatch(HANDOFF_TARGET)
+    }
+    for (const to of [
+      '',
+      'Browser',
+      // Not a UUID: 36 dashes, 36 hex digits, the wrong grouping, upper case (ids are lower case).
+      `token:${'-'.repeat(36)}`,
+      `token:${'a'.repeat(36)}`,
+      'token:0e5a3c1e1-111-4222-8333-944455556666',
+      'token:0E5A3C1E-1111-4222-8333-944455556666',
+      'token:0e5a3c1e-1111-4222-8333-944455556666 ',
+      // Not `oidc:<issuer>#<sub>`: no issuer URL, no `#`, an empty or too long `sub`, whitespace in the issuer.
+      'oidc:alice',
+      'oidc:https://idp.example/',
+      'oidc:https://idp.example/#',
+      `oidc:https://idp.example/#${'s'.repeat(256)}`,
+      'oidc:idp.example#alice',
+      'oidc:https://idp example/#alice',
+      'oidc:https://idp.example/#al\nice',
+    ]) {
+      expect(to, JSON.stringify(to)).not.toMatch(HANDOFF_TARGET)
+    }
+    const handoff = sessionTools.find((t) => t.name === 'sessions_handoff')!
+    expect(() => handoff.parse({ session_id: S, to: 'oidc:alice' })).toThrow(/oidc:<issuer>#<sub>/)
   })
 
   it('condense streamed text into one entry per message, dropping the envelope', () => {

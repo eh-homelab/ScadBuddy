@@ -5,7 +5,7 @@ import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
-import { approvalGrantCheck, FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
+import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
@@ -211,6 +211,8 @@ const sessions =
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
         // Other agents decide approvals only with their token's grant (spec §6, #300).
         approvalGrants: approvalGrantCheck(tokens),
+        // A resumed approval's turn gets no more than its token holds now (#300).
+        currentTiers: liveTokenTiers(tokens),
         ...(sessionEvents ? { onAppend: sessionEvents.onAppend } : {}),
         // Every tool call a turn makes, and every approval decision (#258).
         ...(audit ? { audit } : {}),

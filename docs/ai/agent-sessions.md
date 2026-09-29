@@ -61,7 +61,11 @@ request), and the manager's rules apply unchanged (spec §6):
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Without them a
   non-browser owner's session would be `read` only (`harnessPrincipal()`). Outward calls
-  still park for a human approval in the UI.
+  still park for a human approval in the UI. The approval records the turn's tiers
+  (`ai_approvals.requested_tiers`), so if it is approved after a restart the turn that
+  resumes it (`resumeApproved()` in `manager.ts`) is offered the approved tool again:
+  only while the requester still owns the session, and cut down to what a bearer token
+  holds then (`liveTokenTiers()` in `auth/tokens.ts`; a revoked token leaves `read`).
 - **Inside a session** the same tools run as the session's owner, but a model may not
   decide approvals, or hand a session off, accept or decline one (`notInHarness()` in
   `sessions.ts`): those are the owner's decisions, and a model running as the browser
@@ -180,9 +184,6 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
   (`/scadbuddy:…`). Session queries run with `tools: []` and without ScadBuddy's plugin
   (`agent/src/main.ts`, `test/harnessWiring.test.ts`), so there is no Skill tool to run
   one.
-- **A resumed orphan approval** in a token-owned session runs with the default `read`
-  tiers: the resume (`resumeApproved()` in `manager.ts`) has no sender to take tiers
-  from.
 - **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
   access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).

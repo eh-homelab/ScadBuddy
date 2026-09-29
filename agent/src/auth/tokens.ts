@@ -55,6 +55,11 @@ export interface TokenStore {
    * withdraws the grant at once.
    */
   approvalGrant(id: string, now?: Date): Promise<boolean>
+  /**
+   * The tier of the live (unrevoked, unexpired) token with this id, or null.
+   * What a resumed approval's turn is cut down to (#300, `liveTokenTiers`).
+   */
+  liveTier(id: string, now?: Date): Promise<Tier | null>
 }
 
 /** Recognisable in logs and secret scanners; the rest is 256 random bits. */
@@ -167,6 +172,14 @@ export class PostgresTokenStore implements TokenStore {
          AND (expires_at IS NULL OR expires_at > ${now})`
     return rows.length > 0
   }
+
+  async liveTier(id: string, now: Date = new Date()): Promise<Tier | null> {
+    if (!UUID.test(id)) return null
+    const rows = await this.#sql<{ tier: Tier }[]>`
+      SELECT tier FROM ai_mcp_tokens
+       WHERE id = ${id} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ${now})`
+    return rows[0]?.tier ?? null
+  }
 }
 
 /**
@@ -190,6 +203,9 @@ export class FailClosedTokenStore implements TokenStore {
   async approvalGrant(): Promise<boolean> {
     return false
   }
+  async liveTier(): Promise<Tier | null> {
+    return null
+  }
 }
 
 /**
@@ -203,4 +219,18 @@ export function approvalGrantCheck(tokens: Pick<TokenStore, 'approvalGrant'>) {
     principal.kind === 'bearer' && principal.id.startsWith('token:')
       ? tokens.approvalGrant(principal.id.slice('token:'.length))
       : false
+}
+
+/**
+ * What a session owner holds now (sessions/manager.ts `currentTiers`): a
+ * bearer token's (`token:<id>`) live tier, nothing once it is revoked or
+ * expired. Undefined for any other kind, whose tiers are not stored anywhere
+ * (an OIDC subject's come with each access token).
+ */
+export function liveTokenTiers(tokens: Pick<TokenStore, 'liveTier'>) {
+  return async (owner: { kind: string; id: string }): Promise<readonly Tier[] | undefined> => {
+    if (owner.kind !== 'bearer' || !owner.id.startsWith('token:')) return undefined
+    const tier = await tokens.liveTier(owner.id.slice('token:'.length))
+    return tier ? tiersUpTo(tier) : []
+  }
 }
