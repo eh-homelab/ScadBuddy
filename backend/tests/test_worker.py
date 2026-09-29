@@ -8,7 +8,8 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import psycopg
@@ -38,6 +39,9 @@ from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import UNUSED_DATABASE_URL, fake_3mf_openscad
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
 from tests.support.temporal import temporal_client
 
 
@@ -134,7 +138,17 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
             )
         }
     assert {"job.running", "job.done"} <= kinds
-    assert "scadbuddy_render_duration_seconds" in metrics
+    # Observed, not merely declared: the HELP line is there from the first scrape.
+    samples = {
+        line.rsplit(" ", 1)[0]: float(line.rsplit(" ", 1)[1])
+        for line in metrics.splitlines()
+        if line and not line.startswith("#")
+    }
+    assert samples['scadbuddy_render_duration_seconds_count{outcome="done"}'] == 1
+    assert samples['scadbuddy_render_job_latency_seconds_count{outcome="done"}'] == 1
+    assert samples['scadbuddy_render_jobs_finished_total{outcome="done"}'] == 1
+    for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
+        assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
     assert f'revision="{build_id}"' in metrics
 
 
@@ -311,3 +325,9 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
             await handle.terminate()
             if not worker.done():
                 worker.cancel()
+
+
+def test_the_in_process_worker_names_the_state_it_is_missing() -> None:
+    state = cast("AppState", SimpleNamespace(projection=None, blobs=object(), refs=None))
+    with pytest.raises(RuntimeError, match=r"AppState\.projection, AppState\.refs"):
+        worker_module.worker_deps_from_state(state)

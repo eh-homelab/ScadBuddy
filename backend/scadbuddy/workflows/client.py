@@ -12,16 +12,18 @@ from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker, WorkerDeploymentConfig, WorkerDeploymentVersion
 
 from scadbuddy.workflows.activities import RenderActivities
-from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
+from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 
-async def connect(address: str, namespace: str) -> Client:
+async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
+    """``lazy`` connects on the first call instead of here (the API, which must boot
+    with Temporal down); the worker connects eagerly and fails fast."""
     return await Client.connect(
-        address, namespace=namespace, data_converter=pydantic_data_converter
+        address, namespace=namespace, data_converter=pydantic_data_converter, lazy=lazy
     )
 
 
@@ -39,7 +41,7 @@ def render_worker(
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[TemplatePipeline, RenderPiece],
+        workflows=[TemplatePipeline, RenderPiece, RenderPreview],
         activities=activities.all(),
         max_concurrent_activities=max_concurrent_activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,

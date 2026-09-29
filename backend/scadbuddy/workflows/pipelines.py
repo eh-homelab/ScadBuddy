@@ -3,8 +3,6 @@ built-in default pipeline: one piece, one plate layout, one output."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from datetime import timedelta
 
 from temporalio import workflow
@@ -28,12 +26,16 @@ with workflow.unsafe.imports_passed_through():
         PrepareResult,
         Projection,
         RenderMainResult,
+        input_problem,
         piece_key,
     )
 
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
 )
+#: What signalling a workflow that is gone raises: one that never ran and one that has
+#: closed alike (measured against temporalio 1.33.0's dev server).
+EXTERNAL_NOT_FOUND = "ExternalWorkflowExecutionNotFound"
 #: `project` is the job row's only writer: a Postgres blip must not fail the job.
 PROJECT_RETRY = RetryPolicy(
     maximum_attempts=0,
@@ -51,10 +53,30 @@ def _openscad_timeout() -> timedelta:
     return timedelta(seconds=memo)
 
 
+def _retried(start_to_close: timedelta) -> timedelta:
+    """One activity's worst case under `RETRY`: every attempt timing out, plus the
+    backoff between them."""
+    attempts = RETRY.maximum_attempts
+    backoff = sum(
+        (RETRY.initial_interval * RETRY.backoff_coefficient**n for n in range(attempts - 1)),
+        timedelta(),
+    )
+    return attempts * start_to_close + backoff
+
+
 def _waiter_recheck() -> timedelta:
-    # Three attempts of a piece's worst case (two openscad activities plus two short
-    # ones): a live piece is rarely re-checked, and harmlessly (the re-signal is idempotent).
-    return 3 * (2 * _openscad_timeout() + 2 * SHORT)
+    """How long a waiting job trusts a running piece before looking again: the piece's
+    worst case with every retry (`cached_piece`, `prepare` and `finish_piece` at
+    `SHORT`, the two openscad activities at their timeout), plus one `SHORT` of slack.
+    A live piece is then never re-checked, however many retries it needs, so a waiter
+    never restarts a render another job is still paying for. Not covered: time a task
+    sits queued for a busy worker, which no activity timeout bounds; a re-check then is
+    harmless (the re-signal is idempotent)."""
+    return 3 * _retried(SHORT) + 2 * _retried(_openscad_timeout()) + SHORT
+
+
+def _target_gone(error: FailureError) -> bool:
+    return isinstance(error, ApplicationError) and error.type == EXTERNAL_NOT_FOUND
 
 
 def _failure_of(error: BaseException) -> Failure:
@@ -136,9 +158,34 @@ class RenderPiece:
             job = workflow.get_external_workflow_handle_for(
                 TemplatePipeline.run, self._waiting.pop(0)
             )
-            # A job that has closed (cancelled) since it asked fails the signal.
-            with contextlib.suppress(FailureError):
+            try:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
+            except FailureError as error:
+                # A job that has closed (cancelled) since it asked. Anything else is
+                # not expected here, and surfaces.
+                if not _target_gone(error):
+                    raise
+
+
+@workflow.defn(name="RenderPreview")
+class RenderPreview:
+    """A template's default-render preview (`render.previews`), on the worker that has
+    the openscad budget. Id ``preview-<slug>``: a second request joins the first."""
+
+    @workflow.run
+    async def run(self, slug: str) -> bytes:
+        # Schema, render and plate image, each bounded by `render_timeout`, plus the
+        # margin: `RenderService.render_preview` sets it.
+        timeout = workflow.memo_value("preview_timeout", default=3 * 120.0 + 60.0, type_hint=float)
+        png: bytes = await workflow.execute_activity(
+            "render_preview_png",
+            slug,
+            result_type=bytes,
+            start_to_close_timeout=timedelta(seconds=timeout),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return png
 
 
 @workflow.defn(name="TemplatePipeline")
@@ -160,13 +207,25 @@ class TemplatePipeline:
                 retry_policy=PROJECT_RETRY,
             )
 
+        problem = input_problem(job.slug, job.model_version)
+        if problem is not None:
+            await project(state="failed", failure=Failure(error=problem))
+            return
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
             await project(state="running")
             params = job.inputs.get("params", job.params)
-            key = piece_key(job.slug, job.model_version, "model.scad", params)
+            # Without a revision the source is live and may change before the next job,
+            # so the piece is this job's own: its blob directory and workflow (#642).
+            scope = f"job:{job.id}" if job.model_version is None else None
+            version = job.model_version if job.model_version is not None else scope
+            key = piece_key(job.slug, version, "model.scad", params)
             req = PieceRequest(
-                slug=job.slug, revision=job.model_version, params=dict(params), piece_key=key
+                slug=job.slug,
+                revision=job.model_version,
+                scope=scope,
+                params=dict(params),
+                piece_key=key,
             )
             await project(steps=steps)
             outcome = await self._piece(req)
@@ -182,13 +241,29 @@ class TemplatePipeline:
                 steps=steps,
                 blob_key=key,
             )
-        except (asyncio.CancelledError, ActivityError, ChildWorkflowError) as error:
-            if not (is_cancelled_exception(error) and workflow.cancellation_reason() is not None):
+        except BaseException as error:
+            if is_cancelled_exception(error) and workflow.cancellation_reason() is not None:
+                # A superseded/withdrawn job. The API may already have moved the row to
+                # cancelled; the projection is idempotent for the case it did not.
+                steps[0].state = "cancelled"
+                await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
                 raise
-            # A superseded/withdrawn job. The API may already have moved the row to
-            # cancelled; the projection is idempotent for the case it did not.
-            await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
-            raise
+            if not isinstance(error, Exception):
+                raise  # the SDK's own (an eviction), or another cancel: not a job outcome
+            # Anything else ends in a terminal row too, never one left at `running`.
+            steps[0].state = "failed"
+            await project(
+                state="failed",
+                failure=Failure(error=f"{type(error).__name__}: {error}"),
+                steps=steps,
+            )
+            if isinstance(error, FailureError):
+                raise
+            # A plain exception would fail only the workflow task, which Temporal
+            # retries forever with the run open (and its build never drained).
+            raise ApplicationError(
+                f"{type(error).__name__}: {error}", type=type(error).__name__, non_retryable=True
+            ) from error
 
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
@@ -210,7 +285,9 @@ class TemplatePipeline:
                 piece = workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
                 try:
                     await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
-                except FailureError:
+                except FailureError as error:
+                    if not _target_gone(error):
+                        raise
                     continue  # it closed in between; start it again
                 try:
                     await workflow.wait_condition(

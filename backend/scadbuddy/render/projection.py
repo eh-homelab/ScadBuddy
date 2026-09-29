@@ -16,6 +16,7 @@ flag); the legacy claim and reap skip rows that carry a ``workflow_id``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.events import JobEvent, JobKind
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.job_models import Job, StepInfo, now
 from scadbuddy.render.job_store import (
     SUPERSEDED_ERROR,
@@ -38,6 +40,8 @@ from scadbuddy.render.pg_store import JOB_COLUMNS, TransactionalEvents, migrate
 logger = logging.getLogger(__name__)
 
 CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
+#: A render the legacy queue was running when the API restarted onto Temporal.
+LEGACY_INTERRUPTED_ERROR = "interrupted: the API restarted onto Temporal"
 
 PROJECTION_COLUMNS = (
     *JOB_COLUMNS,
@@ -78,6 +82,8 @@ class JobProjection:
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
         self.events = events
+        #: This process's LISTEN connection, which the event bus shares.
+        self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             conninfo,
             min_size=1,
@@ -101,6 +107,14 @@ class JobProjection:
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
+
+    def listener(self, *, on_state: Callable[[bool], None], check_interval: float) -> PgListener:
+        """The LISTEN connection, told whose state to report; the bus runs it. No
+        channel of its own: no worker here waits for a NOTIFY to claim a job."""
+        listener = self.pg_listener
+        listener.check_interval = check_interval
+        listener.on_state(on_state)
+        return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
         if self.events is not None:
@@ -215,14 +229,50 @@ class JobProjection:
                 return None
             return self._release(conn, row, error=CANCELLED_ERROR)
 
+    def adopt_legacy_pending(self) -> list[str]:
+        """At boot on Temporal: give each row the legacy queue left pending the workflow
+        id the reconciler starts it under, so it is this path's to run. Returns their ids."""
+        with self._pool.connection() as conn, conn.transaction():
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM render_jobs WHERE state = 'pending' AND workflow_id IS NULL"
+                    " ORDER BY created_at, id FOR UPDATE"
+                ).fetchall()
+            ]
+            for job_id in ids:
+                conn.execute(
+                    "UPDATE render_jobs SET workflow_id = %s WHERE id = %s",
+                    (workflow_id_for(job_id), job_id),
+                )
+        return ids
+
+    def fail_legacy_running(self, error: str) -> list[Job]:
+        """At boot on Temporal: fail the rows the legacy queue was running (no
+        workflow), which its reaper will never come back for. Its pending rows need
+        nothing: the reconciler starts them."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE state = 'running' AND workflow_id IS NULL RETURNING *",
+                (error,),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
+
     # -- the workflow's writes (each guarded by the state it expects) -----------
 
     def mark_started(self, job_id: str) -> Job | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
+                # A legacy pending row the reconciler adopted has no workflow_id; it
+                # gets one here, so `fail_legacy_running` never takes it for the
+                # legacy queue's.
                 "UPDATE render_jobs SET state = 'running', started_at = now(),"
-                " attempts = attempts + 1 WHERE id = %s AND state = 'pending' RETURNING *",
-                (job_id,),
+                " attempts = attempts + 1, workflow_id = coalesce(workflow_id, %s)"
+                " WHERE id = %s AND state = 'pending' RETURNING *",
+                (workflow_id_for(job_id), job_id),
             ).fetchone()
             if row is not None:
                 self._announce(conn, row["id"], row["slug"], "job.running")

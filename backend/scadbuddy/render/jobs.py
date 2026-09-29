@@ -693,6 +693,12 @@ def no_stage(name: RenderStage) -> AbstractContextManager[None]:
     return nullcontext()
 
 
+def timed_stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextManager[None]]:
+    """A stage timed into `stage_duration`, as `render_job`'s are; untimed without
+    metrics."""
+    return metrics.stage if metrics is not None else no_stage
+
+
 @dataclass(frozen=True)
 class Prepared:
     """The source a piece renders, as `resolve_source` settled it: plain values, so
@@ -789,13 +795,17 @@ async def render_main(
     assets: AssetStore,
     checkouts: CheckoutGate | None,
     holder: str,
+    stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
 ) -> ProcessOutput:
     """The customizer schema, then the raw multi-material 3MF, `RAW_RENDER_NAME` in
     ``work``."""
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         work.mkdir(parents=True, exist_ok=True)
-        with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+        with (
+            staged_assets(schema, params, prepared.scad.parent, assets) as staged,
+            stage("render"),
+        ):
             return await _render_main(prepared, schema, staged, params, work, config=config)
 
 
@@ -809,6 +819,7 @@ async def render_solids_stage(
     assets: AssetStore,
     checkouts: CheckoutGate | None,
     holder: str,
+    stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
 ) -> PlateLayout:
     """The preview parts and `PREVIEW_NAME`, then one closed solid per colour per
     plate, from `RAW_RENDER_NAME` in ``work``. The layout is saved as `LAYOUT_NAME`
@@ -817,7 +828,7 @@ async def render_solids_stage(
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
             return await _render_solids(
-                prepared, schema, staged, params, work, output, config=config, stage=no_stage
+                prepared, schema, staged, params, work, output, config=config, stage=stage
             )
 
 

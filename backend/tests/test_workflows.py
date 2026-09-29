@@ -29,6 +29,9 @@ from tests.support.temporal import temporal_client
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.asyncio]
 
+#: Jobs share a piece only at a revision: a live source is each job's own (#642).
+REVISION = "abc1234"
+
 
 class FakeActivities:
     """Same activity names as `RenderActivities`; records calls; `fail_main` makes the
@@ -110,12 +113,13 @@ class FakeActivities:
         self.projections.append(projection)
 
 
-def _job(**params: int) -> Job:
+def _job(revision: str | None = REVISION, **params: int) -> Job:
     return Job(
         id=uuid.uuid4().hex,
         slug="demo",
         params=dict(params),
         inputs={"params": dict(params)},
+        model_version=revision,
         created_at=datetime.now(UTC),
     )
 
@@ -139,7 +143,7 @@ def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
 async def _until_the_piece_is_waited_on(client: Client, width: int) -> None:
     """Until a second job's `wait_for_me` has reached the piece."""
     piece = client.get_workflow_handle(
-        f"piece-{piece_key('demo', None, 'model.scad', {'width': width})}"
+        f"piece-{piece_key('demo', REVISION, 'model.scad', {'width': width})}"
     )
     while not [
         e
@@ -162,7 +166,9 @@ async def test_a_default_render_runs_the_four_stages_and_projects_done() -> None
         states = [p.state for p in acts.projections if p.state]
         assert states == ["running", "done"]
         assert acts.projections[-1].result is not None
-        assert acts.projections[-1].blob_key == piece_key("demo", None, "model.scad", {"width": 1})
+        assert acts.projections[-1].blob_key == piece_key(
+            "demo", REVISION, "model.scad", {"width": 1}
+        )
 
 
 async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:
@@ -202,6 +208,28 @@ async def test_identical_pieces_render_once_across_two_jobs() -> None:
         assert [p.state for p in acts.projections if p.state == "done"] == ["done", "done"]
 
 
+async def test_two_revision_less_jobs_never_share_a_piece() -> None:
+    """#642: a live source can change between them, so each renders its own."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            a, b = _job(revision=None, width=6), _job(revision=None, width=6)
+            await asyncio.gather(
+                client.execute_workflow(
+                    TemplatePipeline.run, a, id=f"render-{a.id}", task_queue=queue
+                ),
+                client.execute_workflow(
+                    TemplatePipeline.run, b, id=f"render-{b.id}", task_queue=queue
+                ),
+            )
+        assert acts.calls.count("render_main") == 2
+        keys = {p.job_id: p.blob_key for p in acts.projections if p.state == "done"}
+        assert keys == {
+            job.id: piece_key("demo", f"job:{job.id}", "model.scad", {"width": 6}) for job in (a, b)
+        }
+
+
 async def test_cancelling_one_parent_leaves_a_shared_piece_running() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -227,9 +255,10 @@ async def test_cancelling_one_parent_leaves_a_shared_piece_running() -> None:
             await hb.result()
         assert acts.calls.count("render_main") == 1
         assert acts.calls.count("finish_piece") == 1
-        assert [p.state for p in acts.projections if p.job_id == a.id and p.state][
-            -1
-        ] == "cancelled"
+        cancelled = [p for p in acts.projections if p.job_id == a.id and p.state][-1]
+        assert cancelled.state == "cancelled"
+        # The job's own step says so too, not the "running" it was projected with.
+        assert cancelled.steps is not None and cancelled.steps[0].state == "cancelled"
         assert [p.state for p in acts.projections if p.job_id == b.id and p.state][-1] == "done"
 
 
@@ -247,7 +276,7 @@ async def test_a_piece_cancelled_by_hand_fails_the_job_that_owns_it() -> None:
                 while "render_solids" not in acts.calls:
                     await asyncio.sleep(0.05)
                 # An operator cancels the piece itself, not the job that owns it.
-                piece_id = f"piece-{piece_key('demo', None, 'model.scad', {'width': 21})}"
+                piece_id = f"piece-{piece_key('demo', REVISION, 'model.scad', {'width': 21})}"
                 await client.get_workflow_handle(piece_id).cancel()
                 # The job was not cancelled: it settles and completes, it does not re-raise.
                 await asyncio.wait_for(handle.result(), timeout=30)
@@ -334,3 +363,39 @@ async def test_a_piece_resumes_from_the_activity_it_was_on() -> None:
             await handle.result()
         assert "render_main" not in second.calls
         assert second.calls == ["render_solids", "finish_piece"]
+
+
+async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_the_run() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=31)
+            # Hand-authored inputs (spec §4.3): `params` present but not a mapping.
+            job.inputs = {"params": None}
+            handle = await client.start_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+            # Closed, not retried as a workflow task forever with the row at `running`.
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), timeout=30)
+        last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
+        assert last.state == "failed"
+        assert last.failure is not None and last.failure.error.startswith("TypeError: ")
+        assert last.steps is not None and last.steps[0].state == "failed"
+        assert acts.calls == []
+
+
+async def test_a_job_with_a_slug_the_api_would_refuse_projects_failed_unrendered() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=1).model_copy(update={"slug": "../../etc"})
+            await client.execute_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+        assert acts.calls == []
+        last = acts.projections[-1]
+        assert last.state == "failed" and last.failure is not None
+        assert "../../etc" in last.failure.error
