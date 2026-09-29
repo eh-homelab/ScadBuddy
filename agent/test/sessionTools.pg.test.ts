@@ -205,7 +205,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it('lets only a token with the approval grant decide, and never its own', async () => {
-      const { agent, sessions } = await setup()
+      const { agent, sessions, publisher } = await setup()
       const a = await agent('write')
       const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'needs approval' }))
       const approval = await sessions.approvals.create({
@@ -232,10 +232,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(
         errorText(await reviewer.call('sessions_deny', { approval_id: approval.id, input_hash: '0'.repeat(64) })),
       ).toMatch(/different input/)
+      const sentBefore = publisher.sent
       const decided = ok<{ decision: string; decided_by: { kind: string } }>(
         await reviewer.call('sessions_deny', { approval_id: approval.id, input_hash: pending[0]!.input_hash }),
       )
       expect(decided).toMatchObject({ decision: 'denied', decided_by: { kind: 'bearer' } })
+      // The decision's approval.resolved, appended inside its transaction, is announced once it commits.
+      await until(() => publisher.sent > sentBefore, 'the decision on the bus')
 
       // A grant never covers the holder's own sessions.
       const own = ok<{ session: { id: string } }>(await reviewer.call('sessions_start', { title: 'mine' }))
