@@ -21,6 +21,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/thumbnail",
     "/api/v1/models/{slug}/media",
     "/api/v1/models/{slug}/media/order",
+    "/api/v1/models/{slug}/media/cover",
     "/api/v1/models/{slug}/media/{item_id}",
     "/api/v1/models/{slug}/media/{item_id}/poster",
     "/api/v1/models/{slug}/readme",
