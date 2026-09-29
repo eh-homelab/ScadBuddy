@@ -23,7 +23,7 @@ import { registerPluginRoutes } from './routes/plugins.js'
 import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
 import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import { registerSessionRoutes } from './routes/sessions.js'
-import type { RemoteAddress } from './routes/guard.js'
+import { type RemoteAddress, uiReadProblem } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
 
@@ -100,6 +100,8 @@ export type AppDeps = {
   sessions?: SessionManager | undefined
   /** The runtime's WebSocket upgrade; without it there is no chat socket (and status says so). */
   upgradeWebSocket?: UpgradeWebSocket | undefined
+  /** How often the chat socket re-reads the session list (routes/chat.ts SNAPSHOT_MS when omitted). */
+  chatSnapshotMs?: number
   /**
    * The OIDC settings routes for /mcp (#262, routes/mcpAuth.ts). Left out,
    * there are none. `repo` is undefined exactly when `database` is.
@@ -188,14 +190,21 @@ async function aiStatus(deps: AppDeps, dbOk: boolean | undefined): Promise<Pick<
 /**
  * GET /api/v1/ai/status: whether the assistant can be offered, for the UI's
  * gate (frontend src/agent/chat/availability.ts). `state` is the AiStatus
- * prefix; `available` also needs the chat socket to exist; `reason` says why
- * not, in words for Settings. It carries nothing /healthz does not.
+ * prefix; `available` also needs the chat socket to exist, and this request
+ * to be one the socket's gate would let in; `reason` says why not, in words
+ * for Settings. `chat` is that last verdict for the calling request (the
+ * transport and origin half of routes/chat.ts's gate, as guard.ts
+ * `uiReadProblem` judges a GET), so a page opened by LAN IP or over plain HTTP
+ * is told so instead of offering a panel whose socket is refused. It carries
+ * nothing /healthz does not, beyond what the caller sent.
  */
 export type AiStatusView = {
   available: boolean
   state: 'enabled' | 'disabled' | 'unavailable'
   ai: AiStatus
   reason?: string
+  /** Set when this request would be refused by the chat socket's gate. */
+  chat?: 'refused'
 }
 
 /** The words the UI shows for an AiStatus other than `enabled`. */
@@ -252,9 +261,18 @@ export function createApp(deps: AppDeps): AgentApp {
     const { ai } = await aiStatus(deps, dbOk)
     const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
     const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
+    const refused = uiReadProblem(c, deps.origins, deps.remoteAddress, 'The assistant')
     const reason =
-      statusReason(ai) ?? (chat ? undefined : 'The agent service was started without its chat socket.')
-    const body: AiStatusView = { available: ai === 'enabled' && chat, state, ai, ...(reason ? { reason } : {}) }
+      statusReason(ai) ??
+      (chat ? undefined : 'The agent service was started without its chat socket.') ??
+      (refused ? `${refused}. Open ScadBuddy at its public HTTPS address to use it.` : undefined)
+    const body: AiStatusView = {
+      available: ai === 'enabled' && chat && !refused,
+      state,
+      ai,
+      ...(reason ? { reason } : {}),
+      ...(refused ? { chat: 'refused' as const } : {}),
+    }
     c.header('Cache-Control', 'no-store')
     return c.json(body)
   })
@@ -354,6 +372,7 @@ export function createApp(deps: AppDeps): AgentApp {
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
     upgradeWebSocket: deps.upgradeWebSocket,
+    ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
   })
 
   if (deps.mcp) {
