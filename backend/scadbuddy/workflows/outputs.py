@@ -42,6 +42,16 @@ def _refuse(message: str) -> ApplicationError:
     return ApplicationError(message, type="OutputError", non_retryable=True)
 
 
+def _unknown_piece(key: str) -> ApplicationError:
+    """A layout that names a piece the output was not given: the pipeline's packing is
+    wrong, whichever piece it is."""
+    return ApplicationError(
+        f"the layout places piece {key}, which is not one of the output's parts",
+        type="PackError",
+        non_retryable=True,
+    )
+
+
 async def _fetch(deps: WorkerDeps, key: str) -> bool:
     return await _heartbeating(asyncio.create_task(deps.blobs.fetch(key)))
 
@@ -63,6 +73,15 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
             raise _refuse(f"output file name {name!r}: use letters, digits, '.', '_' or '-'")
         if name in _RESERVED:
             raise _refuse(f"output file name {name!r} is reserved for the output's own files")
+    known = {p.piece_key for p in req.parts}
+    named = (
+        [req.layout.own]
+        if req.layout.own is not None
+        else [item.piece_key for plate in req.layout.plates for item in plate.items]
+    )
+    for name in named:
+        if name not in known:
+            raise _unknown_piece(name)
     key = output_key(req.job_id, req.index)
     writes = req.layout.own is None or bool(req.files)
     baseline = (
@@ -120,7 +139,8 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
 def _joined(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
     """One colour's copies on a plate, as the one mesh the writer takes per colour."""
     joined = trimesh.util.concatenate(meshes)
-    assert isinstance(joined, trimesh.Trimesh)  # meshes in, one mesh out
+    if not isinstance(joined, trimesh.Trimesh):
+        raise _refuse(f"could not join {len(meshes)} meshes into one ({type(joined).__name__})")
     return joined
 
 
@@ -135,7 +155,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         names: dict[str, str] = {}
         for placed in plate.items:
             if placed.piece_key not in parts:
-                raise _refuse(f"the layout places piece {placed.piece_key}, which is not a part")
+                raise _unknown_piece(placed.piece_key)
             if placed.piece_key not in layouts:
                 if not await _fetch(deps, placed.piece_key):
                     raise _refuse(f"piece {placed.piece_key} is not in the store")

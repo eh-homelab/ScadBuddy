@@ -94,6 +94,13 @@ def _solids_timeout() -> timedelta:
     return _openscad_timeout() + 3 * TRANSFER
 
 
+def _prepare_timeout() -> timedelta:
+    """`prepare`: the transfers in `PREPARE_TIMEOUT`, then the schema export that checks
+    the piece's parameters, one openscad run (`cached_schema`, under the render's own
+    timeout), so the budget adds that run rather than folding it into the transfers."""
+    return PREPARE_TIMEOUT + _openscad_timeout()
+
+
 #: `cached_piece`: an index read and, on a miss, one download.
 CACHED_TIMEOUT = SHORT + TRANSFER
 #: `finish_piece`: the piece fetched, the short stage, the piece published.
@@ -110,7 +117,7 @@ def _waiter_recheck() -> timedelta:
     harmless (the re-signal is idempotent)."""
     return (
         _retried(CACHED_TIMEOUT)
-        + _retried(PREPARE_TIMEOUT)
+        + _retried(_prepare_timeout())
         + _retried(_main_timeout())
         + _retried(_solids_timeout())
         + _retried(FINISH_TIMEOUT)
@@ -180,7 +187,7 @@ class RenderPiece:
             "prepare",
             req,
             result_type=PrepareResult,
-            start_to_close_timeout=PREPARE_TIMEOUT,
+            start_to_close_timeout=_prepare_timeout(),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )

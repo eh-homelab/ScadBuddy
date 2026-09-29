@@ -45,7 +45,7 @@ class PipelineActivities:
     async def model_dir(self, slug: str, revision: str | None) -> Path:
         """The template's directory at ``revision``: the live one, or its export."""
         d = self.deps
-        await self._render._materialize(slug, revision)
+        await self._render.materialize(slug, revision)
         source = await resolve_source(
             slug, revision, paths=d.paths, history=d.history, fetcher=d.fetcher
         )

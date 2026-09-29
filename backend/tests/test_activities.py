@@ -296,6 +296,26 @@ async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
+async def test_an_openscad_failure_in_render_main_carries_its_failure(tmp_path: Path) -> None:
+    """The source parsed at `prepare`, then stopped parsing: `render_main` maps the
+    render's OpenSCADError to a non-retryable failure with its log tail."""
+    paths = _paths(tmp_path)
+    acts = RenderActivities(_deps(tmp_path, paths))
+    env = ActivityEnvironment()
+    req = _request()
+    prepared = await env.run(acts.prepare, req)
+    paths.model_source("demo").write_text("%%FAIL%%\n", encoding="utf-8")
+
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(acts.render_main, req, prepared)
+
+    assert raised.value.type == "OpenSCADError" and raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
+    assert failure.error == raised.value.message
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
 async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     started = asyncio.Event()
 

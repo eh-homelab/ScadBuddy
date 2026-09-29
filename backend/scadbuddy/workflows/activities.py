@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from temporalio import activity
@@ -175,6 +175,16 @@ def _parameter_error(message: str) -> ApplicationError:
 def _render_file(prepared: Prepared, file: str) -> Prepared:
     """``prepared`` for the template's file ``file`` rather than `model.scad`: a
     `.scad` file inside the template's directory, with a schema cache of its own."""
+    # Canonical only: the template root is later derived from this string
+    # (`model_dir`), so `parts/../model.scad`, `./model.scad` or an absolute path would
+    # root the fonts scan and the store folder elsewhere even though they resolve inside.
+    path = PurePosixPath(file)
+    if (
+        path.is_absolute()
+        or any(part in (".", "..") for part in file.split("/"))
+        or path.as_posix() != file
+    ):
+        raise _parameter_error(f"{file} is not a file of the template")
     if file == "model.scad":
         return prepared
     root = prepared.scad.parent.resolve()
@@ -282,7 +292,7 @@ class RenderActivities:
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
-    async def _materialize(self, slug: str, revision: str | None) -> None:
+    async def materialize(self, slug: str, revision: str | None) -> None:
         """The revision's snapshot, from the store onto this worker's volume."""
         d = self.deps
         if d.snapshots is None or revision is None:
@@ -300,7 +310,7 @@ class RenderActivities:
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
-        await self._materialize(req.slug, req.revision)
+        await self.materialize(req.slug, req.revision)
         try:
             with timed_stage(d.metrics)("source"):
                 prepared, _ = await _heartbeating(
@@ -462,7 +472,7 @@ class RenderActivities:
         snapshot and its fonts come from the store (final review C1). The defaults
         name no upload (`file_assets` skips a file parameter's own default)."""
         d = self.deps
-        await self._materialize(slug, revision)
+        await self.materialize(slug, revision)
         if d.fonts_mirror is not None:
             source = (
                 d.paths.model_revision_dir(slug, revision)

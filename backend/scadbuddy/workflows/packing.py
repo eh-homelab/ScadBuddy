@@ -21,6 +21,8 @@ class PackError(ValueError):
 
 
 def shelf_pack(items: Sequence[PackItem], plate: PlateSize) -> Layout:
+    if not items:
+        raise PackError("nothing to pack: pass at least one part")
     if len(items) == 1 and items[0].count == 1:
         return Layout(own=items[0].part.piece_key)
     for item in items:
@@ -55,13 +57,22 @@ def shelf_pack(items: Sequence[PackItem], plate: PlateSize) -> Layout:
     return Layout(plates=plates)
 
 
-def explicit_plate(parts: Sequence[Part], at: Sequence[tuple[float, float, float]]) -> LayoutPlate:
-    """`plate_of(items, at=…)`: the pipeline's own placement. Rotation arrives with
-    Arrange (phase 5)."""
+def explicit_plate(
+    parts: Sequence[Part], at: Sequence[tuple[float, float, float]], *, plate: PlateSize
+) -> LayoutPlate:
+    """`plate_of(items, at=…)`: the pipeline's own placement, each part's box on
+    ``plate``. Rotation arrives with Arrange (phase 5)."""
     if len(parts) != len(at):
         raise PackError(f"{len(parts)} parts but {len(at)} positions")
     if any(rot for _, _, rot in at):
         raise PackError("rotation in plate_of arrives with Arrange (phase 5); pass 0")
+    for part, (x, y, _) in zip(parts, at, strict=True):
+        w, d = part.bbox.size[0], part.bbox.size[1]
+        if x < 0 or y < 0 or x + w > plate.width or y + d > plate.depth:
+            raise PackError(
+                f"{part.file} at ({x:.0f}, {y:.0f}) is off the plate "
+                f"({plate.width:.0f} x {plate.depth:.0f} mm)"
+            )
     return LayoutPlate(
         items=[
             Placed(piece_key=p.piece_key, x=x, y=y) for p, (x, y, _) in zip(parts, at, strict=True)

@@ -72,10 +72,21 @@ def test_a_multi_plate_part_cannot_share() -> None:
 
 
 def test_an_explicit_plate_places_where_told() -> None:
-    plate = explicit_plate([_part("a", 10, 10)], [(20.0, 30.0, 0.0)])
+    plate = explicit_plate([_part("a", 10, 10)], [(20.0, 30.0, 0.0)], plate=PLATE)
     assert plate.items[0].x == 20.0 and plate.items[0].y == 30.0
     with pytest.raises(PackError, match="rotation"):
-        explicit_plate([_part("a", 10, 10)], [(0.0, 0.0, 90.0)])
+        explicit_plate([_part("a", 10, 10)], [(0.0, 0.0, 90.0)], plate=PLATE)
+
+
+@pytest.mark.parametrize("at", [(250.0, 0.0, 0.0), (0.0, 250.0, 0.0), (-1.0, 0.0, 0.0)])
+def test_an_explicit_position_off_the_plate_is_refused(at: tuple[float, float, float]) -> None:
+    with pytest.raises(PackError, match="off the plate"):
+        explicit_plate([_part("a", 10, 10)], [at], plate=PLATE)
+
+
+def test_nothing_to_pack_is_refused_at_once() -> None:
+    with pytest.raises(PackError, match="nothing to pack"):
+        shelf_pack([], PLATE)
 
 
 class _Refs:
@@ -154,6 +165,12 @@ async def test_a_piece_renders_another_file_of_the_template(tmp_path: Path) -> N
     ("file", "params", "message"),
     [
         ("../escape.scad", {}, "not a file of the template"),
+        # Inside the template, but not canonical: the template root is derived from the
+        # string, so each would root the fonts scan and the store folder elsewhere.
+        ("parts/../model.scad", {}, "not a file of the template"),
+        ("./model.scad", {}, "not a file of the template"),
+        ("parts//roof.scad", {}, "not a file of the template"),
+        ("ABSOLUTE", {}, "not a file of the template"),
         ("model.scad", {"nope": 1}, "unknown parameters: nope"),
         ("model.scad", {"width": "wide"}, "expects a number"),
     ],
@@ -161,7 +178,9 @@ async def test_a_piece_renders_another_file_of_the_template(tmp_path: Path) -> N
 async def test_a_bad_file_or_parameter_fails_the_piece(
     tmp_path: Path, file: str, params: dict[str, ParamValue], message: str
 ) -> None:
-    deps, _ = _deps(tmp_path)
+    deps, paths = _deps(tmp_path)
+    if file == "ABSOLUTE":  # an absolute path to the template's own model.scad
+        file = str(paths.model_source("demo"))
     with pytest.raises(ApplicationError) as raised:
         await ActivityEnvironment().run(RenderActivities(deps).prepare, _request(file, params))
     assert raised.value.type == "ParameterError" and raised.value.non_retryable
@@ -263,3 +282,24 @@ async def test_an_output_file_name_the_output_itself_uses_is_refused(
     them, and a template file must never be mistaken for (or shadow) one."""
     error = await _write_file_named(tmp_path, name)
     assert "is reserved" in error.message
+
+
+async def test_an_own_layout_must_name_one_of_the_parts(tmp_path: Path) -> None:
+    deps, _ = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    stranger = piece_key("demo", None, "model.scad", {"width": 99})
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=Layout(own=stranger),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+    )
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert raised.value.type == "PackError" and raised.value.non_retryable
+    assert _refs(deps) == []
