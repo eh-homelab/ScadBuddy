@@ -158,6 +158,27 @@ async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     assert a.local.exists("recent") and a.local.exists("rendering")
 
 
+async def test_eviction_skips_a_directory_touched_after_the_scan(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scadbuddy.store import cache as cache_module
+
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("claimed") / "m").write_bytes(b"x" * 10)
+    past = time.time() - 3600
+    os.utime(a.local.root / "claimed", (past, past))
+    size = cache_module._size
+
+    def size_then_claim(directory: Path) -> int:
+        counted = size(directory)
+        a.dir_for(directory.name)  # a claim lands between the scan and the removal
+        return counted
+
+    monkeypatch.setattr(cache_module, "_size", size_then_claim)
+    assert a.evict() == []
+    assert a.local.exists("claimed")
+
+
 async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_index(
     tmp_path: Path, content: ContentStore
 ) -> None:
