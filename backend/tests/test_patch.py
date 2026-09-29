@@ -52,6 +52,56 @@ def test_no_trailing_newline_is_kept_as_the_source_had_it() -> None:
     assert apply_unified_diff("a\nb", diff) == "a\nB"
 
 
+# "\ No newline at end of file" names the side of the line before it
+# (https://www.gnu.org/software/diffutils/manual/html_node/Incomplete-Lines.html);
+# review of #741: a change to the file's ending is applied, not dropped.
+NO_NEWLINE = "\\ No newline at end of file\n"
+
+
+def test_a_diff_that_drops_the_trailing_newline_drops_it() -> None:
+    diff = "@@ -1,2 +1,2 @@\n a\n-b\n+B\n" + NO_NEWLINE
+    assert apply_unified_diff("a\nb\n", diff) == "a\nB"
+
+
+def test_a_diff_that_adds_the_trailing_newline_adds_it() -> None:
+    diff = "@@ -1,2 +1,2 @@\n a\n-b\n" + NO_NEWLINE + "+B\n"
+    assert apply_unified_diff("a\nb", diff) == "a\nB\n"
+
+
+def test_only_the_trailing_newline_changes() -> None:
+    assert apply_unified_diff("a\nb\n", "@@ -2 +2 @@\n-b\n+b\n" + NO_NEWLINE) == "a\nb"
+    assert apply_unified_diff("a\nb", "@@ -2 +2 @@\n-b\n" + NO_NEWLINE + "+b\n") == "a\nb\n"
+
+
+def test_a_marker_after_context_is_both_sides() -> None:
+    diff = "@@ -1,2 +1,2 @@\n-a\n+A\n b\n" + NO_NEWLINE
+    assert apply_unified_diff("a\nb", diff) == "A\nb"
+    with pytest.raises(PatchError, match="source ends without a newline"):
+        apply_unified_diff("a\nb\n", diff)
+
+
+def test_an_old_side_marker_against_a_newline_is_a_conflict() -> None:
+    diff = "@@ -2 +2 @@\n-b\n" + NO_NEWLINE + "+B\n"
+    with pytest.raises(PatchError, match=r"hunk 1: .*source ends without a newline"):
+        apply_unified_diff("a\nb\n", diff)
+
+
+def test_a_marker_short_of_the_end_is_refused() -> None:
+    diff = "@@ -1 +1 @@\n-a\n+A\n" + NO_NEWLINE
+    with pytest.raises(PatchError, match="does not reach the end of the file"):
+        apply_unified_diff("a\nb\n", diff)
+    two = "@@ -1 +1 @@\n-a\n+A\n" + NO_NEWLINE + "@@ -2 +2 @@\n-b\n+B\n"
+    with pytest.raises(PatchError, match="does not reach the end of the file"):
+        apply_unified_diff("a\nb\n", two)
+
+
+def test_a_misplaced_marker_is_refused() -> None:
+    with pytest.raises(PatchError, match="follows no line"):
+        apply_unified_diff("a\n", "@@ -1 +1 @@\n" + NO_NEWLINE + "-a\n+A\n")
+    with pytest.raises(PatchError, match="comes after that side's"):
+        apply_unified_diff("a\nb", "@@ -1,2 +1,2 @@\n-a\n" + NO_NEWLINE + "-b\n+A\n+B\n")
+
+
 def test_context_that_is_not_there_is_a_conflict_naming_the_hunk() -> None:
     with pytest.raises(PatchError, match=r"hunk 1 .*not in the source"):
         apply_unified_diff(SOURCE, "@@ -2,2 +2,2 @@\n b\n-q\n+Q\n")

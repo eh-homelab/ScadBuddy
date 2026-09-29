@@ -16,6 +16,15 @@ model writing a diff by hand often gets the numbers wrong, at the one other plac
 below the previous hunk where its old-side lines occur. Two or more such places is
 ambiguous and refused. No fuzz: a context line that differs is a conflict, not
 something to guess past.
+
+``\\ No newline at end of file`` follows the line it is about, on that line's side: after
+a ``-`` line the old file ended there without a newline, after a ``+`` line the new one
+does, after a context line both do
+(https://www.gnu.org/software/diffutils/manual/html_node/Incomplete-Lines.html). So a
+hunk carrying the marker must reach the end of the file, and it decides the result's
+ending: a newline unless its new side has the marker. An old-side marker against a
+source that does end in a newline is a conflict. A diff with no marker at all, as one
+written by hand often has, keeps the source's own ending (review of #741).
 """
 
 from __future__ import annotations
@@ -47,6 +56,9 @@ class _Hunk:
     old_start: int
     old: list[str] = field(default_factory=list)
     new: list[str] = field(default_factory=list)
+    # "\ No newline at end of file" after that side's last line.
+    old_unterminated: bool = False
+    new_unterminated: bool = False
 
 
 def apply_edits(source: str, edits: list[SearchReplace]) -> str:
@@ -95,9 +107,22 @@ def _parse(diff: str) -> list[_Hunk]:
                 raise PatchError(f"not a unified diff: {line[:80]!r} comes before any @@ hunk")
             continue
         if line.startswith("\\"):
-            # "\ No newline at end of file": the source's own last line decides.
+            # "\ No newline at end of file", about the line before it.
+            before = lines[index - 1]
+            side = before[:1] or " "
+            if _HUNK.match(before) or side not in " -+":
+                raise PatchError(f"hunk {current.number}: {line[:80]!r} follows no line")
+            current.old_unterminated |= side in " -"
+            current.new_unterminated |= side in " +"
             continue
         marker, body = (line[:1], line[1:]) if line else (" ", "")
+        if (marker in " -" and current.old_unterminated) or (
+            marker in " +" and current.new_unterminated
+        ):
+            raise PatchError(
+                f"hunk {current.number}: {line[:80]!r} comes after that side's "
+                '"No newline at end of file"'
+            )
         if marker == " ":
             current.old.append(body)
             current.new.append(body)
@@ -125,7 +150,8 @@ def apply_unified_diff(source: str, diff: str) -> str:
     # hunks applied so far; and the first line the next hunk may touch.
     offset = 0
     floor = 0
-    for hunk in _parse(diff):
+    hunks = _parse(diff)
+    for hunk in hunks:
         # `-N,0` is a pure insertion AFTER line N; otherwise the old side starts at N.
         stated = hunk.old_start if not hunk.old else hunk.old_start - 1
         at = stated + offset
@@ -146,6 +172,18 @@ def apply_unified_diff(source: str, diff: str) -> str:
             raise PatchError(
                 f"hunk {hunk.number}: line {hunk.old_start} is out of order or past the end"
             )
+        if hunk.old_unterminated or hunk.new_unterminated:
+            if hunk is not hunks[-1] or at + len(hunk.old) != len(lines):
+                raise PatchError(
+                    f"hunk {hunk.number}: it says the file ends without a newline "
+                    "but does not reach the end of the file"
+                )
+            if hunk.old_unterminated and trailing_newline:
+                raise PatchError(
+                    f"hunk {hunk.number}: it says the source ends without a newline, "
+                    "but it ends with one; read it again and rebuild the patch"
+                )
+            trailing_newline = not hunk.new_unterminated
         lines[at : at + len(hunk.old)] = hunk.new
         floor = at + len(hunk.new)
         offset = at - stated + len(hunk.new) - len(hunk.old)

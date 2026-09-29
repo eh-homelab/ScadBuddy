@@ -39,6 +39,11 @@ or search/replace `edits`. The backend applies it to the source as it stands
 - A hunk is tried at the line its header names, then at the one other place below the
   previous hunk where its old lines occur. Two such places is ambiguous and refused.
   There is no fuzz: a context line that differs is a conflict.
+- `\ No newline at end of file` applies to the line before it, on that line's side
+  ([GNU diffutils, "Incomplete Lines"](https://www.gnu.org/software/diffutils/manual/html_node/Incomplete-Lines.html)),
+  so a diff can add or drop the file's trailing newline. The hunk carrying it must reach
+  the end of the file, and an old-side marker against a source that ends in a newline
+  is a conflict. A diff with no marker keeps the source's own ending.
 - Each search must occur exactly once in the source the earlier edits left.
 - Either the whole patch applies or nothing is written, and a refusal (422) names the
   hunk or edit.
