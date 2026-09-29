@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 import threading
 import uuid
@@ -14,8 +15,12 @@ import httpx
 import psycopg
 import pytest
 from temporalio import workflow
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     UnsandboxedWorkflowRunner,
     Worker,
@@ -31,7 +36,13 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from scadbuddy.worker import _poll, _wait_drained, run_inprocess_worker, run_worker
+from scadbuddy.worker import (
+    _make_current_until_polled,
+    _poll,
+    _wait_drained,
+    run_inprocess_worker,
+    run_worker,
+)
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
 from scadbuddy.workflows.models import piece_key
@@ -219,7 +230,14 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
             ),
         ),
     ):
-        await make_current(client, namespace=client.namespace, build_id=build_id)
+        # As the worker does: Temporal 1.28 takes the build only once it polls.
+        assert await _make_current_until_polled(
+            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+            build_id=build_id,
+            backoff=(0.1,),
+            every=0.2,
+            deadline=30,
+        )
         handle = await client.start_workflow(
             _BlocksUntilReleased.run, id=f"blocks-{uuid.uuid4().hex}", task_queue=queue
         )
@@ -341,3 +359,146 @@ async def test_a_lazy_client_connects_on_its_first_call() -> None:
     async with temporal_client() as server:
         client = connect_lazily(current_address(server), server.namespace)
         assert (await client.count_workflows("WorkflowId = 'nothing-here'")).count == 0
+
+
+# ── making the build current (Temporal 1.28 needs a poller first) ─────────────
+
+
+def _not_found() -> RPCError:
+    """What Temporal 1.28 answers until the build's first poll: it ignores
+    `allow_no_pollers`."""
+    return RPCError(
+        f"workflow not found for ID: temporal-sys-worker-deployment:{DEPLOYMENT_NAME}",
+        RPCStatusCode.NOT_FOUND,
+        b"",
+    )
+
+
+async def _pollers(client: Client, queue: str) -> int:
+    described = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=queue),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+        )
+    )
+    return len(described.pollers)
+
+
+def _in_process_settings(tmp_path: Path) -> tuple[Settings, WorkerDeps]:
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad="openscad", data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+    )
+    return settings, deps
+
+
+async def test_making_the_build_current_retries_until_the_server_takes_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise _not_found()
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        made = await asyncio.wait_for(
+            _make_current_until_polled(
+                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, deadline=5
+            ),
+            5,
+        )
+
+    assert made
+    assert calls == 3
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.__dict__["attempt"] for r in warnings] == [1, 2]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
+        "made this build current"
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.requires_temporal
+async def test_a_build_never_made_current_keeps_the_worker_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    attempts = 0
+
+    async def refuses(*_: object, **__: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _not_found()
+
+    monkeypatch.setattr(worker_module, "make_current", refuses)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_DEADLINE", 0.3)
+    settings, deps = _in_process_settings(tmp_path)
+    stop = asyncio.Event()
+
+    def errors() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    async with temporal_client() as client:
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.worker"):
+            polling = asyncio.create_task(_poll(settings, deps, client, stop, drain=False))
+            try:
+                async with asyncio.timeout(30):
+                    while not errors():
+                        assert not polling.done(), polling.result()
+                        await asyncio.sleep(0.02)
+                # Gave up, and the worker polls on: Temporal sees its poller.
+                async with asyncio.timeout(10):
+                    while not await _pollers(client, settings.temporal_task_queue_render):
+                        await asyncio.sleep(0.1)
+                assert not polling.done()
+            finally:
+                stop.set()
+                await asyncio.wait_for(polling, 30)
+
+    assert attempts >= 3
+    [error] = errors()
+    assert error.getMessage() == "could not make this build current; polling anyway"
+    assert error.__dict__["attempts"] == attempts
+
+
+@pytest.mark.requires_temporal
+async def test_stopping_the_worker_cancels_the_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = 0
+
+    async def refuses(*_: object, **__: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _not_found()
+
+    monkeypatch.setattr(worker_module, "make_current", refuses)
+    settings, deps = _in_process_settings(tmp_path)
+    stop = asyncio.Event()
+    async with temporal_client() as client:
+        polling = asyncio.create_task(_poll(settings, deps, client, stop, drain=False))
+        try:
+            async with asyncio.timeout(30):
+                while attempts == 0:
+                    await asyncio.sleep(0.02)
+        finally:
+            stop.set()
+            # The retry would run for a minute; stop cancels it.
+            await asyncio.wait_for(polling, 10)
+    assert attempts == 1
