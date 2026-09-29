@@ -211,6 +211,20 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'remember_last_project',
+    description:
+      'Choose the Bambuddy project the Customize page and the print dialog open on (null for "No project"). ' +
+      'Generate files its 3MF there; list_print_projects shows the current `last_project_id`.',
+    input: z.object({ project_id: z.number().int().nullable() }),
+    risk: 'write',
+    routes: ['PUT /api/v1/print/projects/last'],
+    handler: async ({ project_id }, { backend }) =>
+      json(
+        await ok(backend.PUT('/api/v1/print/projects/last', { body: { project_id } }), 'remember the project'),
+      ),
+  }),
+
+  defineTool({
     name: 'remember_printer_bed_type',
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
@@ -258,7 +272,9 @@ export const printTools: Tool[] = [
       "the way the print dialog opens: the chosen printer, this model's remembered nozzles, tier or process " +
       "and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
-      'spool or preset) is refused before anything is sliced. Follow it with get_print_progress.',
+      'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
+      'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
+      'Follow it with get_print_progress.',
     input: z.object({
       output_id: outputId,
       printer_id: z.number().int().optional(),
@@ -278,7 +294,7 @@ export const printTools: Tool[] = [
         .catchall(presetRef)
         .optional()
         .describe('A filament preset per slot id, in place of the spool\'s own'),
-      project_id: z.number().int().optional(),
+      project_id: nullable(z.number().int()).describe('Omit for the remembered project; null for "No project"'),
       options: printOptions,
     }),
     risk: 'outward',
@@ -370,7 +386,8 @@ export const printTools: Tool[] = [
                 bed_type: bedType,
                 filament_overrides: args.filament_overrides ?? {},
               },
-              project_id: args.project_id ?? null,
+              // Omitted stays omitted (the remembered project); null is "No project" (#317).
+              ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
             },
           }),
@@ -417,6 +434,30 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'file_output_in_project_folder',
+    description:
+      "Upload an output's editable 3MF into a Bambuddy project's library folder, as Generate does with a " +
+      'project chosen. Idempotent: the same project again reuses the file already there (`created: false`), ' +
+      'and a later print on the same printer reuses it too.',
+    input: z.object({ output_id: outputId, project_id: z.number().int() }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library', 'Manage Projects'],
+    routes: ['POST /api/v1/outputs/{output_id}/project-file'],
+    summarize: ({ output_id, project_id }) =>
+      `Upload output ${output_id}'s 3MF into Bambuddy project ${project_id}'s folder`,
+    handler: async ({ output_id, project_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/outputs/{output_id}/project-file', {
+            params: { path: { output_id } },
+            body: { project_id },
+          }),
+          `file ${output_id} in project ${project_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'file_output_under_project',
     description:
       "File an output's queue entries (and any finished prints' archives) under a Bambuddy project.",
@@ -435,7 +476,7 @@ export const printTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/print/outputs/{output_id}/project', {
             params: { path: { output_id } },
-            body: { project_id: project_id ?? null, queue_item_ids },
+            body: { ...(project_id === undefined ? {} : { project_id }), queue_item_ids },
           }),
           `file ${output_id} under a project`,
         ),
