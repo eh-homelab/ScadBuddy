@@ -39,6 +39,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import upload_route
+from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.requires_postgres
@@ -386,6 +387,34 @@ def test_a_refusal_the_choices_decide_is_still_answered_before_any_run(
 
     assert response.status_code == 422
     assert "different sizes" in response.json()["detail"]
+    assert not uploaded.called
+
+
+@respx.mock
+def test_a_racer_refused_by_its_own_read_answers_with_the_run_that_won(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    """Two POSTs of one request race: the winner claims its run while the loser is
+    still checking, and the loser's own read refuses. The loser's caller gets the
+    winner's run, not an unrelated-looking refusal."""
+    output_id = prepared(client, model)
+    request = body(nozzles=[{"size": "0.2"}, {"size": "0.4"}])
+    key = run_key(output_id, PrintRunRequest.model_validate(request))
+    uploaded = upload_route()
+    run_routes()
+    won: list[str] = []
+
+    def winner_claims(_: httpx.Request) -> httpx.Response:
+        won.append(_insert_run(pg_conninfo, output_id, key, "0 seconds"))
+        return httpx.Response(200, json=recording("printers.json"))
+
+    respx.get(f"{API}/printers/").mock(side_effect=winner_claims)
+
+    response = start(client, output_id, request)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == won[0]
+    assert response.json()["repeated"] is True
     assert not uploaded.called
 
 

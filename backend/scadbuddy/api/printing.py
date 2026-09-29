@@ -180,8 +180,17 @@ async def post_run(
         if chosen_project(body, settings) is not None
         else None
     )
-    async with client_for(settings) as client:
-        prepared = await prepare_run(client, outputs, meta, settings, body)
+    try:
+        async with client_for(settings) as client:
+            prepared = await prepare_run(client, outputs, meta, settings, body)
+    except ApiError:
+        # A racer with the same key may have claimed its run while this one was
+        # checking; its caller gets that run, not a refusal from a separate read.
+        raced = await runs.store.find(key)
+        if raced is None:
+            raise
+        response.status_code = status.HTTP_200_OK
+        return raced.model_copy(update={"repeated": True})
     run, created = await runs.store.claim(meta.id, key)
     if not created:
         # Another request for the same print claimed it while this one was checking.
