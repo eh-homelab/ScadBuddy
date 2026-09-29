@@ -121,9 +121,10 @@ async def require_installed_fonts(
             continue
         missing_names.append(name)
         missing_families.extend(family for family in missing if family not in missing_families)
+        # A bare dash ends the scan, so only the last family listed is the one it cut.
         hint = (
             " (a bare '-' starts a point size in fontconfig's syntax; write it '\\-')"
-            if cut_by_dash(value)
+            if cut_by_dash(value) and families[-1] in missing
             else ""
         )
         problems.append(

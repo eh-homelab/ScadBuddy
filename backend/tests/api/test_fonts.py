@@ -313,6 +313,17 @@ async def test_a_bare_dash_is_explained() -> None:
     assert "\\-" in raised.value.detail
 
 
+async def test_the_dash_hint_is_only_for_the_family_the_dash_cut() -> None:
+    """In a fallback list the dash cuts the last family; a missing earlier one gets no
+    hint to escape a dash it does not have (#740 review)."""
+    with pytest.raises(ApiError) as raised:
+        await require_installed_fonts(
+            FONT_SCHEMA, {"font": "Arial,Unifont-JP"}, Resolving({"Unifont"})
+        )
+    assert "'Arial'" in raised.value.detail
+    assert "\\-" not in raised.value.detail
+
+
 def test_a_render_or_preset_naming_a_family_that_is_not_installed_is_refused(
     app: FastAPI, client: TestClient
 ) -> None:
