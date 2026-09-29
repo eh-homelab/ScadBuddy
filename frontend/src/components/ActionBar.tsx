@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -6,8 +6,10 @@ import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
+import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
+import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
@@ -25,6 +27,10 @@ interface Props {
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
+  /** A high-resolution image of the view to share, from Generate's menu. */
+  captureImage: (options: SnapshotOptions) => Promise<Blob | null>
+  /** The view's size in CSS pixels. */
+  viewSize: () => { width: number; height: number }
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
   /**
@@ -47,6 +53,8 @@ export function ActionBar({
   upToDate = true,
   output,
   capture,
+  captureImage,
+  viewSize,
   fit,
   fitProblems,
   onPrinterModel,
@@ -58,6 +66,7 @@ export function ActionBar({
   const [downloading, setDownloading] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
+  const [imageOpen, setImageOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const ready = job?.status === 'done' && !rendering
@@ -165,15 +174,19 @@ export function ActionBar({
         </div>
 
         <div className="flex items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => void generate().catch(() => undefined)}
-            disabled={!ready || generating}
-            data-testid="generate"
-          >
-            {generating && <Spinner />}
-            {generating ? 'Generating' : 'Generate'}
-          </Button>
+          <div className="flex">
+            <Button
+              variant="primary"
+              onClick={() => void generate().catch(() => undefined)}
+              disabled={!ready || generating}
+              data-testid="generate"
+              className="rounded-r-none"
+            >
+              {generating && <Spinner />}
+              {generating ? 'Generating' : 'Generate'}
+            </Button>
+            <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
+          </div>
           <Button onClick={() => void download()} disabled={!output || downloading}>
             {downloading && <Spinner />}
             Download 3MF
@@ -194,6 +207,14 @@ export function ActionBar({
         </div>
       </footer>
 
+      <ImageDialog
+        open={imageOpen}
+        slug={slug}
+        captureImage={captureImage}
+        viewSize={viewSize}
+        onClose={() => setImageOpen(false)}
+      />
+
       <SendDialog
         open={sendOpen}
         output={output}
@@ -210,5 +231,66 @@ export function ActionBar({
         onPrinterModel={onPrinterModel}
       />
     </>
+  )
+}
+
+/** The other things Generate can make from the preview: for now, an image to share. */
+function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () => void }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={root} className="relative">
+      <Button
+        variant="primary"
+        onClick={() => setOpen((value) => !value)}
+        disabled={disabled}
+        aria-label="More to generate"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid="generate-menu"
+        className="rounded-l-none border-l-accent-ink/25 px-2"
+      >
+        <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3 fill-current">
+          <path d="M2 4.5 6 8.5 10 4.5z" />
+        </svg>
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 bottom-full z-30 mb-1 min-w-48 rounded-[6px] border border-line bg-surface py-1 shadow-xl"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="generate-image"
+            className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
+            onClick={() => {
+              setOpen(false)
+              onImage()
+            }}
+          >
+            Rendered image…
+            <span className="block text-[11px] text-faint">A high-resolution PNG of the view</span>
+          </button>
+        </div>
+      )}
+    </div>
   )
 }

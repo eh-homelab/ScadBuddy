@@ -1,0 +1,198 @@
+import { useEffect, useState } from 'react'
+import { DownloadBlockedError, downloadBlob } from '../lib/embed'
+import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
+import { Button } from './ui/Button'
+import { Dialog } from './ui/Dialog'
+import { Spinner } from './ui/Spinner'
+
+/** Pixels per CSS pixel of the viewer, offered as the image's size. */
+const IMAGE_SCALES = [2, 3, 4] as const
+
+interface Props {
+  open: boolean
+  /** Used in the file name. */
+  slug: string
+  captureImage: (options: SnapshotOptions) => Promise<Blob | null>
+  viewSize: () => { width: number; height: number }
+  onClose: () => void
+}
+
+/**
+ * A high-resolution image of the preview, as the camera sees it now, to share. The
+ * bounding box outline is always left out; the build plate and the background are the
+ * user's choice.
+ */
+export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Props) {
+  const [scale, setScale] = useState<number>(2)
+  const [plate, setPlate] = useState(true)
+  const [transparent, setTransparent] = useState(false)
+  const [preview, setPreview] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const size = open ? viewSize() : { width: 0, height: 0 }
+
+  // A small image of the same view with the same choices, redrawn as they change.
+  useEffect(() => {
+    if (!open) return
+    let url: string | null = null
+    let live = true
+    void captureImage({ scale: 1, plate, transparent }).then((blob) => {
+      if (!live || !blob) return
+      url = URL.createObjectURL(blob)
+      setPreview(url)
+    })
+    return () => {
+      live = false
+      if (url) URL.revokeObjectURL(url)
+    }
+  }, [open, plate, transparent, captureImage])
+
+  function close() {
+    setError(null)
+    setCopied(false)
+    setPreview(null)
+    onClose()
+  }
+
+  async function render(): Promise<Blob> {
+    const blob = await captureImage({ scale, plate, transparent })
+    if (!blob) throw new Error('The viewer could not draw the image.')
+    return blob
+  }
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    try {
+      // Through lib/embed, so the file survives Bambuddy's sandboxed frame.
+      await downloadBlob(render, `${slug}-render.png`)
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : 'Could not save the image.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function copy() {
+    setBusy(true)
+    setError(null)
+    setCopied(false)
+    try {
+      // The item takes the promise, so the write starts inside the click (Safari).
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': render() })])
+      setCopied(true)
+    } catch {
+      setError('The browser would not put the image on the clipboard. Save it instead.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const canCopy = typeof ClipboardItem !== 'undefined' && Boolean(navigator.clipboard?.write)
+
+  return (
+    <Dialog
+      open={open}
+      title="Rendered image"
+      description="The preview as it is framed now, drawn at a higher resolution to share."
+      onClose={close}
+      footer={
+        <>
+          {error && (
+            <span role="alert" className="mr-auto text-[12px] text-warn">
+              {error}
+            </span>
+          )}
+          {!error && copied && <span className="mr-auto text-[12px] text-ok">Copied</span>}
+          <Button onClick={close} disabled={busy}>
+            Cancel
+          </Button>
+          {canCopy && (
+            <Button onClick={() => void copy()} disabled={busy} data-testid="image-copy">
+              Copy
+            </Button>
+          )}
+          <Button variant="primary" onClick={() => void save()} disabled={busy} data-testid="image-save">
+            {busy && <Spinner />}
+            Save PNG
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div
+          className="flex aspect-video items-center justify-center overflow-hidden rounded-[6px] border border-line"
+          style={
+            transparent
+              ? {
+                  backgroundImage:
+                    'repeating-conic-gradient(var(--sb-surface-3, #333) 0% 25%, transparent 0% 50%)',
+                  backgroundSize: '16px 16px',
+                }
+              : undefined
+          }
+        >
+          {preview ? (
+            <img
+              src={preview}
+              alt="What the image will show"
+              data-testid="image-preview"
+              className="max-h-full max-w-full object-contain"
+            />
+          ) : (
+            <Spinner />
+          )}
+        </div>
+
+        <fieldset>
+          <legend className="text-[12px] text-muted">Size</legend>
+          <div className="mt-1.5 flex flex-wrap gap-4">
+            {IMAGE_SCALES.map((option) => {
+              const pixels = snapshotSize(size.width, size.height, option)
+              return (
+                <label key={option} className="flex cursor-pointer items-center gap-2 text-[13px]">
+                  <input
+                    type="radio"
+                    name="image-scale"
+                    checked={scale === option}
+                    onChange={() => setScale(option)}
+                    className="accent-[var(--sb-accent)]"
+                  />
+                  {option}×
+                  <span className="sb-num text-[12px] text-faint">
+                    {pixels.width} × {pixels.height}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </fieldset>
+
+        <div className="flex flex-wrap gap-4">
+          <label className="flex cursor-pointer items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              checked={plate}
+              onChange={(event) => setPlate(event.target.checked)}
+              className="accent-[var(--sb-accent)]"
+              data-testid="image-plate"
+            />
+            Show the build plate
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-[13px]">
+            <input
+              type="checkbox"
+              checked={transparent}
+              onChange={(event) => setTransparent(event.target.checked)}
+              className="accent-[var(--sb-accent)]"
+              data-testid="image-transparent"
+            />
+            Transparent background
+          </label>
+        </div>
+      </div>
+    </Dialog>
+  )
+}
