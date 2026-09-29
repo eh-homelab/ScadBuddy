@@ -15,6 +15,11 @@ const base = '/api/v1'
 /** A ref whose checkout the model does not parse against, so a failing check is reachable. */
 export const BREAKING_REF = 'v3.0.0'
 export const BREAKING_MESSAGE = "Can't open library 'BOSL2/std.scad'."
+/** A ref whose check OpenSCAD is killed on the render timeout, as `check_source` reports it. */
+export const SLOW_REF = 'v3.1.0'
+export const SLOW_MESSAGE = 'the check timed out after 60s'
+/** A ref answered as if no openscad binary were on PATH: ok, but not checked. */
+export const UNCHECKED_REF = 'v3.2.0'
 
 /** A commit for `ref` that stays the same across calls, as a tag's does upstream. */
 function commitOf(ref: string): string {
@@ -78,18 +83,32 @@ export const handlers = [
     }
     await delay(100)
     const broken = ref === BREAKING_REF
-    const check: LibraryCheck = {
-      ok: !broken,
-      checked: true,
-      timed_out: false,
-      diagnostics: broken
-        ? [{ severity: 'error', message: BREAKING_MESSAGE, file: 'model.scad', line: 1 }]
-        : [],
-      log_tail: broken ? [`WARNING: ${BREAKING_MESSAGE}`, 'Execution aborted'] : [],
-      parameters: broken ? null : 4,
-      ref,
-      commit: commitOf(ref),
-    }
+    const slow = ref === SLOW_REF
+    const candidate = { ref, commit: commitOf(ref) }
+    const check: LibraryCheck =
+      ref === UNCHECKED_REF
+        ? { ok: true, checked: false, timed_out: false, diagnostics: [], log_tail: [], parameters: null, ...candidate }
+        : slow
+          ? {
+              ok: false,
+              checked: true,
+              timed_out: true,
+              diagnostics: [{ severity: 'error', message: SLOW_MESSAGE }],
+              log_tail: [],
+              parameters: null,
+              ...candidate,
+            }
+          : {
+              ok: !broken,
+              checked: true,
+              timed_out: false,
+              diagnostics: broken
+                ? [{ severity: 'error', message: BREAKING_MESSAGE, file: 'model.scad', line: 1 }]
+                : [],
+              log_tail: broken ? [`WARNING: ${BREAKING_MESSAGE}`, 'Execution aborted'] : [],
+              parameters: broken ? null : 4,
+              ...candidate,
+            }
     return HttpResponse.json(check)
   }),
 

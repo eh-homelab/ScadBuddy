@@ -2,7 +2,14 @@ import { screen, within } from '@testing-library/react'
 import { delay, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { BUILTIN_SLUG } from '../../mocks/fixtures'
-import { BREAKING_MESSAGE, BREAKING_REF, setMockLibraryPin } from '../../mocks/features/libraryUpgrade'
+import {
+  BREAKING_MESSAGE,
+  BREAKING_REF,
+  SLOW_MESSAGE,
+  SLOW_REF,
+  UNCHECKED_REF,
+  setMockLibraryPin,
+} from '../../mocks/features/libraryUpgrade'
 import { problem, setMockInvalidLibraries } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -95,6 +102,27 @@ describe('LibraryUpgrade', () => {
       `model.scad:1 ${BREAKING_MESSAGE}`,
     )
     expect(within(result).getByText(/Execution aborted/)).toBeInTheDocument()
+  })
+
+  it('shows a check killed on the render timeout as timed out, not as a parse failure', async () => {
+    const { user } = await open(SLOW_REF)
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    const result = await within(row('Name Keychain')).findByTestId('library-check')
+    expect(result).toHaveTextContent(new RegExp(`^Timed out at ${SLOW_REF.replace(/\./g, '\\.')} \\([0-9a-f]{7}\\)\\.`))
+    expect(result).not.toHaveTextContent('Does not parse')
+    expect(within(result).getByRole('list', { name: 'Diagnostics' })).toHaveTextContent(SLOW_MESSAGE)
+    expect(within(result).queryByText('OpenSCAD log')).toBeNull()
+  })
+
+  it('shows a check no OpenSCAD could run as not checked, not as a pass', async () => {
+    const { user } = await open(UNCHECKED_REF)
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    const result = await within(row('Name Keychain')).findByTestId('library-check')
+    expect(result).toHaveTextContent(
+      new RegExp(`^Not checked at ${UNCHECKED_REF.replace(/\./g, '\\.')} \\([0-9a-f]{7}\\): no OpenSCAD was available to ask\\.$`),
+    )
+    expect(result).not.toHaveTextContent('Parses')
+    expect(within(result).queryByRole('list', { name: 'Diagnostics' })).toBeNull()
   })
 
   it('shows a refused check on its row', async () => {
