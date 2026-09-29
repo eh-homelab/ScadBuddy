@@ -331,8 +331,11 @@ def test_a_server_that_crashes_is_logged(
         "Content-Length: -1\r\n\r\n{}",
         "Content-Length: 8\r\n\r\nnot json",
         "Content-Length: 100\r\n\r\n{}",
+        "Content-Length: 6\r\n\r\n[1, 2]",
+        'Content-Length: 6\r\n\r\n"text"',
+        "Content-Length: 1\r\n\r\n5",
     ],
-    ids=["bad-length", "negative-length", "not-json", "truncated"],
+    ids=["bad-length", "negative-length", "not-json", "truncated", "array", "string", "number"],
 )
 def test_an_unreadable_server_message_ends_the_session(
     client: TestClient, model: str, pid_file: Path, caplog: pytest.LogCaptureFixture, raw: str

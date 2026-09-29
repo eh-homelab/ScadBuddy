@@ -194,9 +194,12 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 # server failure rather than raising out of the bridge.
                 logger.warning("openscad-lsp sent an unreadable message: %s", error)
                 return
-            if "method" not in message:
-                request_id = message.get("id")
-                sent = unanswered.get(request_id) if isinstance(request_id, int | str) else None
+            if not isinstance(message, dict):
+                logger.warning("openscad-lsp sent an unreadable message: not a JSON object")
+                return
+            request_id = message.get("id")
+            if "method" not in message and isinstance(request_id, int | str):
+                sent = unanswered.get(request_id)
                 if sent:
                     sent.pop(0)
                     if not sent:
