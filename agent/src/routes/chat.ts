@@ -18,7 +18,10 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 // the UI's domain events: "The agent's own streams (sessions, approvals, the
 // browser bridge, #254) are served by the agent under /api/v1/ai/*".
 //
-//   on open                → sessions.snapshot (every session the browser user sees)
+//   on open                → sessions.snapshot (every session the browser user sees),
+//                            then again whenever that list changes (read every
+//                            SNAPSHOT_MS), so a session started elsewhere, over
+//                            /mcp or on another tab or replica, shows up live
 //   user.message           → SessionManager.start (no sessionId: a new `chat`
 //                            session) or .send; the page context rides along
 //                            for the model only (manager.ts SendOptions)
@@ -40,6 +43,9 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 // never holds a Claude credential: every model call is the agent's own.
 
 export const CHAT_PATH = '/api/v1/ai/chat'
+
+/** How often an open connection re-reads the session list, sending it only when it changed. */
+export const SNAPSHOT_MS = 5_000
 
 /** Sessions one connection follows at once; the oldest is dropped past this. */
 export const MAX_FOLLOWS = 16
@@ -76,6 +82,8 @@ export type ChatConnectionOptions = {
   overflow?: () => void
   /** Overrides for tests. */
   limits?: Partial<ChatLimits>
+  /** SNAPSHOT_MS when omitted. */
+  snapshotMs?: number
 }
 
 export type ChatRouteDeps = {
@@ -87,6 +95,8 @@ export type ChatRouteDeps = {
   /** The runtime's WebSocket upgrade (`@hono/node-server`'s in main.ts). No socket route without it. */
   upgradeWebSocket: UpgradeWebSocket | undefined
   log?: (message: string) => void
+  /** SNAPSHOT_MS when omitted. */
+  snapshotMs?: number
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -117,6 +127,12 @@ export class ChatConnection {
   private queue: Promise<void> = Promise.resolve()
   private queued = 0
   private closed = false
+  private readonly snapshotMs: number
+  private snapshotTimer: NodeJS.Timeout | undefined
+  /** A timer re-read of the session list is queued or running. */
+  private snapshotPending = false
+  /** The last session list sent, as JSON, so an unchanged list is not sent again. */
+  private lastSnapshot = ''
   private readonly buffered: () => number
   private readonly overflow: () => void
   private readonly limits: ChatLimits
@@ -126,6 +142,7 @@ export class ChatConnection {
     this.out = out
     this.principal = options.principal ?? BROWSER_USER
     this.log = options.log ?? ((m) => console.error(m))
+    this.snapshotMs = options.snapshotMs ?? SNAPSHOT_MS
     this.buffered = options.buffered ?? (() => 0)
     this.overflow = options.overflow ?? (() => {})
     this.limits = {
@@ -169,11 +186,37 @@ export class ChatConnection {
     return !this.closed && !signal.aborted
   }
 
-  /** Sends the session picker's snapshot. */
+  /** Sends the session picker's snapshot, and keeps it current while open. */
   open(): Promise<void> {
-    return this.enqueue(async () => {
-      this.emit(await this.sessions.snapshot(this.principal))
-    })
+    const first = this.enqueue(() => this.sendSnapshot(true))
+    this.snapshotTimer = setInterval(() => {
+      // Queued like a frame, so a list never overtakes the events before it, but
+      // not counted against the frame cap, and never more than one at a time: a
+      // slow database must not fill the queue with stale re-reads and turn the
+      // panel's frames away as `busy`. A failed re-read is skipped quietly; the
+      // next tick tries again.
+      if (this.snapshotPending) return
+      this.snapshotPending = true
+      void this.enqueue(
+        () =>
+          this.sendSnapshot(false)
+            .catch(() => {})
+            .finally(() => {
+              this.snapshotPending = false
+            }),
+        { counted: false },
+      )
+    }, this.snapshotMs)
+    this.snapshotTimer.unref()
+    return first
+  }
+
+  private async sendSnapshot(always: boolean): Promise<void> {
+    const snapshot = await this.sessions.snapshot(this.principal)
+    const key = JSON.stringify(snapshot)
+    if (!always && key === this.lastSnapshot) return
+    this.lastSnapshot = key
+    this.emit(snapshot)
   }
 
   /**
@@ -217,6 +260,7 @@ export class ChatConnection {
 
   close(): void {
     this.closed = true
+    clearInterval(this.snapshotTimer)
     for (const controller of this.follows.values()) controller.abort()
     this.follows.clear()
   }
@@ -226,8 +270,9 @@ export class ChatConnection {
     return [...this.follows.keys()]
   }
 
-  private enqueue(task: () => Promise<void>): Promise<void> {
-    this.queued += 1
+  /** Runs `task` after everything queued before it. `counted` tasks (frames) take a `maxQueued` slot. */
+  private enqueue(task: () => Promise<void>, { counted = true } = {}): Promise<void> {
+    if (counted) this.queued += 1
     const run = this.queue.then(async () => {
       try {
         if (this.closed) return
@@ -235,7 +280,7 @@ export class ChatConnection {
       } catch (err) {
         this.emit(errorEvent(err, undefined, this.log))
       } finally {
-        this.queued -= 1
+        if (counted) this.queued -= 1
       }
     })
     this.queue = run
@@ -355,6 +400,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           const raw = ws.raw as { bufferedAmount?: number } | undefined
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
+            ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             buffered: () => raw?.bufferedAmount ?? 0,
             // 1013 Try Again Later: the client is not reading what it is sent.
             overflow: () => ws.close(1013, 'client too slow'),

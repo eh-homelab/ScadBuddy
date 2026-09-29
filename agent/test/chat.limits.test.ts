@@ -17,20 +17,27 @@ type Fake = {
   /** Log followers running now. */
   active: () => number
   started: () => number
-  /** Holds every start() until called. */
+  /** snapshot() calls so far. */
+  snapshots: () => number
+  /** Holds every start() (holdStart), and every snapshot() after the first (holdSnapshots), until called. */
   release: () => void
 }
 
-/** A manager whose every session log holds `events` deltas, and whose start() can be held. */
-function fakeManager(options: { events?: number; holdStart?: boolean } = {}): Fake {
+/**
+ * A manager whose every session log holds `events` deltas, and whose start(), or
+ * every session-list read after the first, can be held.
+ */
+function fakeManager(options: { events?: number; holdStart?: boolean; holdSnapshots?: boolean } = {}): Fake {
   let active = 0
   let started = 0
+  let snapshots = 0
   let release = () => {}
-  const held = options.holdStart
-    ? new Promise<void>((resolve) => {
-        release = resolve
-      })
-    : Promise.resolve()
+  const held =
+    options.holdStart || options.holdSnapshots
+      ? new Promise<void>((resolve) => {
+          release = resolve
+        })
+      : Promise.resolve()
   async function* follow(id: string, signal?: AbortSignal): AsyncGenerator<LoggedEvent> {
     active += 1
     try {
@@ -50,18 +57,22 @@ function fakeManager(options: { events?: number; holdStart?: boolean } = {}): Fa
     }
   }
   const manager = {
-    snapshot: () => Promise.resolve(event({ type: 'sessions.snapshot', sessions: [] })),
+    snapshot: async () => {
+      snapshots += 1
+      if (options.holdSnapshots && snapshots > 1) await held
+      return event({ type: 'sessions.snapshot', sessions: [] })
+    },
     get: (id: string) => Promise.resolve({ id }),
     start: async () => {
       started += 1
-      await held
+      if (options.holdStart) await held
       return { session: { id: randomUUID() } }
     },
     send: () => Promise.resolve({}),
     attach: (id: string, _p: unknown, o: { signal?: AbortSignal } = {}) => Promise.resolve(follow(id, o.signal)),
     events: { lastSeq: () => Promise.resolve(0) },
   } as unknown as SessionManager
-  return { manager, active: () => active, started: () => started, release: () => release() }
+  return { manager, active: () => active, started: () => started, snapshots: () => snapshots, release: () => release() }
 }
 
 /** A socket whose unsent bytes grow by `frameBytes` per event until the test drains it. */
@@ -220,6 +231,33 @@ describe('ChatConnection inbound limits', () => {
     await connection.receive('still not json')
     expect(errors(out, 'invalid')).toBe(9)
     expect(fake.started()).toBe(0)
+    connection.close()
+  })
+
+  it('re-reads the session list one at a time, outside the frame cap, when the database is slow', async () => {
+    const fake = fakeManager({ holdSnapshots: true })
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
+      log: () => {},
+      limits: { maxQueued: 2 },
+      snapshotMs: 5,
+    })
+    await connection.open()
+    await settle(100)
+    // The first re-read is still waiting on the database; the ticks since did not add more.
+    expect(fake.snapshots()).toBe(2)
+    // It holds the queue, but takes no frame slot: two frames still queue, the third is busy.
+    const { clientMessage } = await frontendClientMessages()
+    const frame = JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' } }))
+    const handled = [connection.receive(frame), connection.receive(frame), connection.receive(frame)]
+    expect(errors(out, 'busy')).toBe(1)
+    expect(fake.started()).toBe(0)
+    fake.release()
+    await Promise.all(handled)
+    expect(fake.started()).toBe(2)
+    // Once it lands, the next tick reads again.
+    await settle(50)
+    expect(fake.snapshots()).toBeGreaterThan(2)
     connection.close()
   })
 

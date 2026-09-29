@@ -44,8 +44,14 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
   }
 }
 
-async function status(app: ReturnType<typeof createApp>): Promise<AiStatusView> {
-  const res = await app.request('/api/v1/ai/status')
+/** What the ingress forwards for a page opened at the public URL. */
+const VIA_INGRESS = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https' }
+
+async function status(
+  app: ReturnType<typeof createApp>,
+  headers: Record<string, string> = VIA_INGRESS,
+): Promise<AiStatusView> {
+  const res = await app.request('/api/v1/ai/status', { headers })
   expect(res.status).toBe(200)
   expect(res.headers.get('cache-control')).toBe('no-store')
   expect(res.headers.get('x-scadbuddy-service')).toBe('agent')
@@ -123,6 +129,22 @@ describe('GET /api/v1/ai/status', () => {
       available: false,
       state: 'enabled',
       reason: expect.stringMatching(/chat socket/),
+    })
+  })
+
+  it('says the socket would be refused for a page not opened at the public HTTPS URL', async () => {
+    const credentials = new MemoryCredentials()
+    await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' }, kek)
+    const app = createApp(deps({ credentials }))
+    const plainHttp = await status(app, { host: 'scadbuddy.example', 'x-forwarded-proto': 'http' })
+    expect(plainHttp).toMatchObject({ available: false, state: 'enabled', chat: 'refused' })
+    expect(plainHttp.reason).toMatch(/HTTPS ingress.*public HTTPS address/)
+    const byLanIp = await status(app, { host: '10.0.0.5', 'x-forwarded-proto': 'https' })
+    expect(byLanIp).toMatchObject({ available: false, chat: 'refused', reason: expect.stringMatching(/public URL/) })
+    // A setup problem is named first; the chat verdict still rides along.
+    expect(await status(createApp(deps()), { host: '10.0.0.5', 'x-forwarded-proto': 'https' })).toMatchObject({
+      reason: 'No Claude credential is configured yet.',
+      chat: 'refused',
     })
   })
 

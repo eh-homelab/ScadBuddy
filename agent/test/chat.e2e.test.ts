@@ -10,7 +10,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 import { expectPanelAccepts, frontendChatReducer, frontendClientMessages } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { browser, manager, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, tempPaths } from './support/sessions.js'
 
 // The assistant panel's whole path, end to end: the panel's own client
 // messages (frontend protocol.ts `clientMessage`) over a real WebSocket to the
@@ -169,6 +169,30 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     panel.close()
     watcher.close()
   }, 90_000)
+
+  it('keeps the session picker current: a session started elsewhere appears without a reconnect', async () => {
+    script = () => ({ text: 'hi' })
+    const m = await sessions()
+    agent = await startLiveAgent(m, { chatSnapshotMs: 100 })
+    const panel = await openPanelSocket(agent)
+    await panel.until(is('sessions.snapshot'))
+    const quiet = panel.frames.length
+    // Unchanged: nothing more is sent.
+    await new Promise((r) => setTimeout(r, 400))
+    expect(panel.frames.length).toBe(quiet)
+
+    // Another principal starts a session (as an MCP client would); the open panel is told.
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 'from Claude Desktop' })
+    const seen = await panel.until(
+      (f) => f.type === 'sessions.snapshot' && JSON.stringify(f.sessions).includes(session.id),
+      { from: quiet, timeoutMs: 5000 },
+    )
+    expect(seen.at(-1)).toMatchObject({
+      sessions: [expect.objectContaining({ sessionId: session.id, title: 'from Claude Desktop', origin: 'mcp', owner: agentA })],
+    })
+    await expectPanelAccepts(panel.frames)
+    panel.close()
+  }, 30_000)
 
   it('interrupts a running turn from the socket', async () => {
     script = () => ({ hang: true })
