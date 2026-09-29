@@ -65,6 +65,8 @@ EXPECTED_PATHS = {
     "/api/v1/settings/test",
     "/api/v1/settings/targets",
     "/api/v1/settings/register-sidebar",
+    "/api/v1/settings/bambuddy",
+    "/api/v1/settings/remembered",
     "/api/v1/fonts",
     "/api/v1/fonts/catalogue",
     "/api/v1/fonts/install",

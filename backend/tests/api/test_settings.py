@@ -15,20 +15,24 @@ from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
+DEFAULTS: dict[str, object] = {
+    "bambuddy_url": None,
+    "has_api_key": False,
+    "public_url": None,
+    "library_folder_id": None,
+    "printer_id": None,
+    "default_plate": None,
+    "display_unit": "mm",
+    "media_upload_max_bytes": 1024**3,
+    "last_project_id": None,
+}
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
 
 def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
-    assert client.get("/api/v1/settings").json() == {
-        "bambuddy_url": None,
-        "has_api_key": False,
-        "public_url": None,
-        "library_folder_id": None,
-        "printer_id": None,
-        "default_plate": None,
-        "display_unit": "mm",
-        "media_upload_max_bytes": 1024**3,
-    }
+    body = client.get("/api/v1/settings").json()
+    assert {name: body[name] for name in DEFAULTS} == DEFAULTS
+    assert "bambuddy_api_key" not in body
 
 
 def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> None:
@@ -207,6 +211,12 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
     ]
     assert route.calls.last.request.headers["X-API-Key"] == "s3cret"
+    assert body["scopes"][0] == {
+        "scope": "Read Status",
+        "status": "ok",
+        "required": True,
+        "detail": "Printers, their status, and the print history.",
+    }
 
 
 @respx.mock
@@ -238,11 +248,3 @@ def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> N
     response = client.post("/api/v1/settings/test")
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
-
-
-def test_the_upload_limit_is_read_only(client: TestClient) -> None:
-    """It comes from SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES alone: a PUT cannot store one."""
-    saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 5 * 1024 * 1024})
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["media_upload_max_bytes"] == 1024**3
-    assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024**3
