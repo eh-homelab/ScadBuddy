@@ -10,6 +10,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LastProject,
   CatalogueLibrary,
   InvalidLibraryEntry,
   MediaView,
@@ -34,6 +35,7 @@ import type {
   PrintOptionsState,
   PrintOptionsUpdate,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   SendResult,
@@ -305,6 +307,11 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
   state.models = state.models.map((m) =>
     m.slug === slug ? { ...m, invalid_libraries: entries } : m,
   )
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -599,7 +606,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
@@ -2386,6 +2393,40 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
+  }),
+
+  // #317 — the project both pickers open on.
+  http.put(`${base}/print/projects/last`, async ({ request }) => {
+    const body = (await request.json()) as LastProject
+    state.lastProjectId = body.project_id ?? null
+    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #317 — Generate with a project files the editable 3MF in its folder, once per
+  // (folder, target): the same project again answers with the file already there.
+  http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id: number }
+    const project = state.projects.find((p) => p.id === body.project_id)
+    if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
+    const folderId = project.folder_id ?? nextNumber()
+    state.projects = state.projects.map((p) =>
+      p.id === project.id ? { ...p, folder_id: folderId, folder_name: p.folder_name ?? p.name } : p,
+    )
+    const before = output.library_files?.length ?? 0
+    const libraryFileId = copyIn(output, folderId)
+    const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+    await delay(100)
+    return HttpResponse.json({
+      project_id: project.id,
+      folder_id: folderId,
+      library_file_id: libraryFileId,
+      filename: `${output.slug}.3mf`,
+      created: after > before,
+      bambuddy_url: `${state.settings.bambuddy_url}/projects/${project.id}`,
+      edit_url: null,
+    } satisfies ProjectFile)
   }),
 
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
