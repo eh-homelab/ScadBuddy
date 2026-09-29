@@ -110,6 +110,19 @@ export function PrintPicker({
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
 
+  /**
+   * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
+   * reported up to `project.onCreating`) so `close()` can refuse to unmount the picker
+   * while its request is in flight. Unmounting mid-create would drop the guard the parent
+   * relies on without stopping the request, which still lands and moves the shared project
+   * once nothing is on screen to notice.
+   */
+  const [projectCreating, setProjectCreating] = useState(false)
+  function reportProjectCreating(creating: boolean) {
+    setProjectCreating(creating)
+    project?.onCreating?.(creating)
+  }
+
   const runPrint = useRunPrint({
     outputId,
     slug,
@@ -218,7 +231,9 @@ export function PrintPicker({
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
-    if (running) return
+    // Also ignored mid-create (#710 review): unmounting the picker would drop the
+    // creating guard while its request is still in flight.
+    if (running || projectCreating) return
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
@@ -260,7 +275,7 @@ export function PrintPicker({
           </>
         ) : (
           <>
-            <Button onClick={close} disabled={running}>
+            <Button onClick={close} disabled={running || projectCreating}>
               Cancel
             </Button>
             <Button
@@ -415,13 +430,14 @@ export function PrintPicker({
                   onChange={project.onChange}
                   list={project.list}
                   disabled={project.disabled}
-                  onCreating={project.onCreating}
+                  onCreating={reportProjectCreating}
                 />
               ) : (
                 <ProjectPicker
                   value={ownProjectId}
                   onChange={setOwnProjectId}
                   onLoaded={setOwnProjectId}
+                  onCreating={reportProjectCreating}
                 />
               )}
 

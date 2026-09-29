@@ -171,7 +171,7 @@ export function ProjectPicker({
       <select
         id={id}
         data-testid={testId}
-        disabled={disabled}
+        disabled={disabled || saving}
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {

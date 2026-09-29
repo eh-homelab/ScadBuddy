@@ -747,6 +747,60 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
     expect(bodies).toEqual([])
   })
+
+  /** A `POST` that waits until the returned function is called, then falls through. */
+  function hold(path: string): () => void {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post(path, async () => {
+        await gate
+        return undefined
+      }),
+    )
+    return release
+  }
+
+  it('refuses to close while its own "Create project" is in flight, and disables the select (#710 review)', async () => {
+    function Harness() {
+      const [open, setOpen] = useState(true)
+      return (
+        <PrintPicker
+          open={open}
+          slug="name-keychain"
+          output={{ ...output, library_files: [] }}
+          onClose={() => setOpen(false)}
+          onRan={vi.fn()}
+        />
+      )
+    }
+    const { user } = renderPage(<Harness />)
+    await loaded()
+
+    const picker = screen.getByTestId('project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // The picker's own in-flight save must not look reselectable, mid-create.
+    await waitFor(() => expect(picker).toBeDisabled())
+
+    // Closing (Cancel here; Escape and the backdrop go through the same `close()`) would
+    // unmount the picker and drop its guard before the abandoned request lands.
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(picker).toBeDisabled()
+
+    release()
+    await waitFor(() => expect(picker).toBeEnabled())
+    expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/)
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Print' })).toBeNull())
+  })
 })
 
 describe('PrintPicker · Remembered choices', () => {
