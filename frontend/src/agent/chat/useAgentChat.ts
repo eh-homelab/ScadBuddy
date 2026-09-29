@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { clientMessage, parseServerEvent, type PageContext } from './protocol'
+import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
 const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
+const QUEUED_STOP = 'The assistant is unreachable; your stop goes first when it reconnects.'
+const QUEUED_TAKE_OVER = 'The assistant is unreachable; your take-over will be sent once it reconnects.'
 
 export interface AgentChat {
   state: ChatState
@@ -112,17 +114,22 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [])
 
-  const interrupt = useCallback((sessionId: string) => {
-    if (transport.current?.send(clientMessage({ type: 'session.interrupt', sessionId })) === 'refused') {
-      dispatch({ type: 'not-sent', message: NOT_SENT })
-    }
+  /** Sends a control frame, saying so when it is refused or held for the reconnect. */
+  const control = useCallback((message: ClientMessage, queued: string) => {
+    const result = transport.current?.send(message)
+    if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
+    else if (result === 'queued') dispatch({ type: 'queued', message: queued })
   }, [])
 
-  const takeOver = useCallback((sessionId: string) => {
-    if (transport.current?.send(clientMessage({ type: 'session.handoff', sessionId })) === 'refused') {
-      dispatch({ type: 'not-sent', message: NOT_SENT })
-    }
-  }, [])
+  const interrupt = useCallback(
+    (sessionId: string) => control(clientMessage({ type: 'session.interrupt', sessionId }), QUEUED_STOP),
+    [control],
+  )
+
+  const takeOver = useCallback(
+    (sessionId: string) => control(clientMessage({ type: 'session.handoff', sessionId }), QUEUED_TAKE_OVER),
+    [control],
+  )
 
   const select = useCallback((sessionId: string | null) => {
     dispatch({ type: 'select', sessionId })
