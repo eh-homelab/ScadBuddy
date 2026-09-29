@@ -54,6 +54,9 @@ async def temporal_client() -> AsyncIterator[Client]:
 
 #: Where the dev server's store goes when tmpfs has room: on disk its first start
 #: takes ~3 s, too near temporalio's fixed 5 s start window on a loaded machine.
+#: A run killed with SIGTERM skips the cleanup and leaves its store behind in
+#: /dev/shm (RAM) until reboot: `ls -d /dev/shm/temporal-*` finds them, and
+#: `rm -rf /dev/shm/temporal-*` removes them once no test session is running.
 TMPFS = Path("/dev/shm")
 TMPFS_MIN_FREE = 512 * 2**20
 

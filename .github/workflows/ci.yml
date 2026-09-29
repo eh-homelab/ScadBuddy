@@ -589,10 +589,12 @@ jobs:
       # `requires_temporal` ones, and all of `tests/api` (every app renders on
       # Temporal, #546), start one dev server per session from the image's
       # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
-      # service is needed.
+      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
+      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
+      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
       - name: pytest
         run: >-
-          docker run --rm --network host
+          docker run --rm --network host --shm-size=1g
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
 
