@@ -4,9 +4,11 @@ import { api, ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import { filamentOptions } from '../mocks/fixtures'
+import type { PrintSource } from './printSource'
 import { useFilamentPlan } from './useFilamentPlan'
 
-const OUTPUT = 'a'.repeat(32)
+const OUTPUT_ID = 'a'.repeat(32)
+const OUTPUT: PrintSource = { kind: 'output', output: { id: OUTPUT_ID, slug: 'name-keychain' } }
 
 /**
  * A right/left-wired H2C (no Filament Track Switch): the 0.2 mounts on the right, the
@@ -59,7 +61,7 @@ describe('useFilamentPlan', () => {
   it('reads another plate’s filaments and seeds from those', async () => {
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, 2, '0.4'))
     await waitFor(() => expect(result.current.filaments).not.toBeNull())
-    expect(getFilaments).toHaveBeenCalledWith(OUTPUT, {
+    expect(getFilaments).toHaveBeenCalledWith(OUTPUT_ID, {
       printerId: choicesView.printer_id,
       plateId: 2,
     })
@@ -69,7 +71,7 @@ describe('useFilamentPlan', () => {
   it('"all plates" reads every plate’s slots at once', async () => {
     const { result } = renderHook(() => useFilamentPlan(OUTPUT, choicesView, 'all', '0.4'))
     await waitFor(() => expect(result.current.filaments).not.toBeNull())
-    expect(getFilaments).toHaveBeenCalledWith(OUTPUT, {
+    expect(getFilaments).toHaveBeenCalledWith(OUTPUT_ID, {
       printerId: choicesView.printer_id,
       allPlates: true,
     })
@@ -104,13 +106,13 @@ describe('useFilamentPlan', () => {
 
   it('a source (output) change resets the plan while the new one loads', async () => {
     const { result, rerender } = renderHook(
-      ({ id, choices }: { id: string; choices: ChoicesView | null }) =>
-        useFilamentPlan(id, choices, 1, '0.4'),
-      { initialProps: { id: OUTPUT, choices: choicesView as ChoicesView | null } },
+      ({ source, choices }: { source: PrintSource; choices: ChoicesView | null }) =>
+        useFilamentPlan(source, choices, 1, '0.4'),
+      { initialProps: { source: OUTPUT, choices: choicesView as ChoicesView | null } },
     )
     await waitFor(() => expect(result.current.filaments).not.toBeNull())
 
-    rerender({ id: OUTPUT, choices: null })
+    rerender({ source: OUTPUT, choices: null })
     expect(result.current.filaments).toBeNull()
     expect(result.current.plan).toEqual([])
   })
