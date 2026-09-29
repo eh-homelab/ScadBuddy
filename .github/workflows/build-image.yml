@@ -303,11 +303,12 @@ jobs:
   # `openscad-lsp --version` at build time, and the step below runs it again
   # from the loaded image so the check does not depend on that RUN line.
   #
-  # Runs on pushes to main too, so the cache below is warm for PRs; not on release
-  # tags, whose commit main has already checked.
+  # PRs only, and only those the trigger's paths filter lets in (a Dockerfile or
+  # workflow change): main's `build` job already writes this stage's arm64 layers
+  # to the default cache scope, which the cache below reads.
   openscad-lsp-arm64:
     name: Build and run openscad-lsp (arm64)
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
