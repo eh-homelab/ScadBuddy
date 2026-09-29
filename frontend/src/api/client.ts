@@ -1,4 +1,6 @@
 import type {
+  AnalysisReport,
+  AnalysisRun,
   Asset,
   AssetUsage,
   AttachResult,
@@ -688,6 +690,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /**
+   * #284 — judge an output against the request the print dialog would send. Reads only:
+   * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
+   */
+  runAnalyzers: (body: AnalysisRun) =>
+    request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
