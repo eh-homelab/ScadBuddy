@@ -153,7 +153,7 @@ export function CataloguePage() {
                 key={model.slug}
                 model={model}
                 upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
-                onOpen={(slides, index) => setLightbox({ slides, index })}
+                onOpen={(slides, index) => setLightbox({ slug: model.slug, slides, index })}
                 onTag={addTag}
               />
             ))}
