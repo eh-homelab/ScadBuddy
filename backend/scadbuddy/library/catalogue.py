@@ -148,7 +148,8 @@ class ModelNotFoundError(KeyError):
 
 
 class SidecarNotFoundError(KeyError):
-    """The model exists, but the thumbnail or README being removed does not."""
+    """The model exists, but the sidecar being removed does not: the thumbnail, the
+    README, a named sidecar file, or a sibling `.scad` file (`write_file`, #252)."""
 
 
 class TooManySourceFilesError(ValueError):

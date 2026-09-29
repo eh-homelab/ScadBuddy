@@ -150,3 +150,20 @@ def test_two_new_files_at_once_cannot_both_pass_the_cap(
         thread.join()
     assert sorted(outcomes) == ["refused", "written"]
     assert len(list(paths.model_dir(SLUG).glob("*.scad"))) == MAX_SOURCE_FILES
+
+
+def test_a_file_deleted_while_the_list_is_read_is_left_out(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Listed, then removed by another request before its size is read (PR #752
+    # review): the list leaves it out rather than failing.
+    upload(client)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    listing = state.catalogue.source_files
+    gone = paths.model_dir(SLUG) / "gone.scad"
+    monkeypatch.setattr(state.catalogue, "source_files", lambda slug: [*listing(slug), gone])
+
+    response = client.get(f"/api/v1/models/{SLUG}/files")
+
+    assert response.status_code == 200, response.text
+    assert [f["name"] for f in response.json()] == ["model.scad"]

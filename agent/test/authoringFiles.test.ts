@@ -92,6 +92,17 @@ describe('create_from_template', () => {
     expect(seen[0]!.body).toEqual({ name: 'My box' })
   })
 
+  it('refuses a description or tags for a duplicate instead of dropping them (PR #752 review)', async () => {
+    const { client, seen } = backend()
+    const result = await runTool(
+      tool('create_from_template'),
+      { name: 'My box', from: 'builtin:storage-box', tags: ['kitchen'] },
+      ctx(client),
+    )
+    expect(result.isError).toBe(true)
+    expect(seen).toEqual([])
+  })
+
   it("keeps the blank template to the authoring skill's conventions", () => {
     // Header naming the extruders (skill section 2).
     expect(BLANK_TEMPLATE).toContain('same file works unchanged on MakerWorld and in ScadBuddy')

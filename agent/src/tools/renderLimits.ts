@@ -11,7 +11,10 @@ import { ToolError } from './registry.js'
 //     backend job settles (a second one while the first runs is fine, a fleet
 //     of them is a queue nobody else gets into). A render handed back still
 //     running keeps its slot while render_model polls it in the background, for
-//     at most `holdMs` (PR #752 review);
+//     at most `holdMs` (PR #752 review). Past that the slot is freed whether or
+//     not the job has settled: a job that long (a raised SCADBUDDY_RENDER_TIMEOUT
+//     times many colours) is bounded only by the backend's shared
+//     `render_concurrency`, so this cap is best effort beyond `holdMs`;
 //   - at most `perWindow` started in any `windowMs`, so an edit/render loop that
 //     never converges stops and says so instead of rendering all night.
 //

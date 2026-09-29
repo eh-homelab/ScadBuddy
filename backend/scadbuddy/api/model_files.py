@@ -88,10 +88,14 @@ def list_source_files(slug: SlugPath, catalogue: CatalogueDep) -> list[SourceFil
         files = catalogue.source_files(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    listed = [
-        SourceFile(name=path.name, size=path.stat().st_size, main=path.name == SOURCE_NAME)
-        for path in files
-    ]
+    listed: list[SourceFile] = []
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            # Deleted between the listing and here (PR #752 review): it is gone.
+            continue
+        listed.append(SourceFile(name=path.name, size=size, main=path.name == SOURCE_NAME))
     return sorted(listed, key=lambda f: (not f.main, f.name))
 
 

@@ -799,7 +799,10 @@ agent bounds its own callers before a render reaches the queue
 - at most **2** of its renders in flight at once, counted until the backend job
   settles (done, failed or cancelled). A render `render_model` hands back still
   running keeps its slot while the agent polls the job in the background, for at most
-  **30 minutes**, or until the backend stops answering for it (PR #752 review);
+  **30 minutes**, or until the backend stops answering for it (PR #752 review). Past
+  30 minutes the slot is freed even if the job still runs, so for a job that long (a
+  raised render timeout, applied per colour) this cap is best effort, and only the
+  backend's shared render concurrency bounds it;
 - at most **30** started in any **10 minutes**.
 
 A refusal is an error result that names the limit and when to try again, and nothing is

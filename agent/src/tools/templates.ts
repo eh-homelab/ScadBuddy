@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { slug } from './common.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // Starting a model (issue #252: "Start from one of the bundled models/
 // examples, from a blank template with the customizer annotations and color()
@@ -106,6 +106,14 @@ export const templateTools: Tool[] = [
             }),
             `create ${name} from the blank template`,
           ),
+        )
+      }
+      // A duplicate keeps its source's description and tags; refused rather than
+      // dropped, so the caller knows (PR #752 review).
+      if (description !== undefined || tags !== undefined) {
+        throw new ToolError(
+          `description and tags are for a blank model; a duplicate of ${from} keeps its own. ` +
+            'Set them with update_model_details after creating it.',
         )
       }
       return json(
