@@ -1,6 +1,6 @@
 import { fireEvent, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import type { Job } from '../api/types'
+import type { Job, Output } from '../api/types'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
 
@@ -13,13 +13,13 @@ const job: Job = {
   colors: ['#FF0000'],
 }
 
-function setup(rendering = false) {
+function setup(rendering = false, current: Job | undefined = job, output?: Output) {
   const view = renderPage(
     <ActionBar
       slug="name-keychain"
-      job={job}
+      job={current}
       rendering={rendering}
-      output={undefined}
+      output={output}
       capture={async () => null}
       captureImage={async () => null}
       viewSize={() => ({ width: 800, height: 500 })}
@@ -81,5 +81,26 @@ describe("Generate's menu", () => {
   it('cannot open while the preview is rendering', () => {
     setup(true)
     expect(screen.getByRole('button', { name: 'More to generate' })).toBeDisabled()
+  })
+})
+
+// #709 — the status area reserves a 16rem basis only while it shows something, so the
+// buttons wrap below a status instead of truncating it, and never wrap for an empty one.
+describe('the status area', () => {
+  it('reserves no basis while it is empty', () => {
+    setup(false, { ...job, colors: [] })
+    expect(screen.getByTestId('action-status')).toHaveClass('flex-1')
+    expect(screen.getByTestId('action-status')).not.toHaveClass('flex-[1_1_16rem]')
+  })
+
+  it('reserves the basis while it shows the colors', () => {
+    setup()
+    expect(screen.getByTestId('action-status')).toHaveClass('flex-[1_1_16rem]')
+  })
+
+  it('reserves the basis while it shows the saved output', () => {
+    setup(false, { ...job, colors: [] }, { id: 'b'.repeat(32), name: 'Keychain' } as Output)
+    expect(screen.getByText('Saved Keychain')).toBeInTheDocument()
+    expect(screen.getByTestId('action-status')).toHaveClass('flex-[1_1_16rem]')
   })
 })

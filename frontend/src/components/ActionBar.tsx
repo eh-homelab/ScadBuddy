@@ -128,7 +128,11 @@ export function ActionBar({
    * otherwise force the button row to wrap even while this area is empty (the
    * debounced gap between an edit and the next settled render).
    */
-  const hasStatus = Boolean((job?.colors && job.colors.length > 0) || error || (output && !stale))
+  // The status area's guards below read these, so what it renders and whether the
+  // basis is reserved come from one place and cannot drift apart.
+  const colors = job?.colors && job.colors.length > 0 ? job.colors : null
+  const saved = !error && output && !stale ? output : null
+  const hasStatus = Boolean(colors || error || saved)
 
   async function generate(): Promise<Output | null> {
     if (!job) return null
@@ -221,12 +225,13 @@ export function ActionBar({
             would force the same wrap for no benefit. */}
         <div
           className={`flex min-w-0 items-center gap-3 ${hasStatus ? 'flex-[1_1_16rem]' : 'flex-1'}`}
+          data-testid="action-status"
         >
-          {job?.colors && job.colors.length > 0 && (
+          {colors && (
             <>
-              <ColorStrip colors={job.colors} />
+              <ColorStrip colors={colors} />
               <span className="shrink-0 whitespace-nowrap text-[12px] text-muted">
-                {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
+                {colors.length === 1 ? '1 colour' : `${colors.length} colours`}
               </span>
             </>
           )}
@@ -235,12 +240,12 @@ export function ActionBar({
               {error}
             </span>
           )}
-          {!error && output && !stale && (
+          {saved && (
             <span className="truncate text-[12px] text-ok">
-              Saved {output.name ?? output.id.slice(0, 8)}
+              Saved {saved.name ?? saved.id.slice(0, 8)}
             </span>
           )}
-          {!error && output && !stale && filed?.outputId === output.id && (
+          {saved && filed?.outputId === saved.id && (
             <span className="flex min-w-0 items-center gap-1.5 text-[12px]" data-testid="project-filed">
               <span className="truncate text-ok">Saved to {filed.name}</span>
               <button
@@ -252,7 +257,7 @@ export function ActionBar({
               </button>
             </span>
           )}
-          {!error && output && !stale && fileError && (
+          {saved && fileError && (
             <span role="alert" className="truncate text-[12px] text-warn">
               {fileError}
             </span>
