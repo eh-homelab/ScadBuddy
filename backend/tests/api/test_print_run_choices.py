@@ -1324,3 +1324,108 @@ def test_all_plates_with_a_later_plates_spool_on_the_wrong_side_is_a_422_before_
     assert response.json()["detail"].startswith("Slot 2's spool (AMS 2, left) is on the 0.4 mm")
     assert not upload.called
     assert not sliced.called
+
+
+def _both_04_one_spare_02() -> dict[str, Any]:
+    """#755's printer: a 0.4 on both sides and a single spare 0.2 in the rack."""
+    rack = recording("printer-status-rack.json")["nozzle_rack"]
+    return {
+        "nozzles": [
+            {"nozzle_type": "HS01", "nozzle_diameter": "0.4"},
+            {"nozzle_type": "HH01", "nozzle_diameter": "0.4"},
+        ],
+        "nozzle_rack": [
+            {**rack[0], "nozzle_type": "HS01", "nozzle_diameter": "0.4"},
+            rack[1],
+            {**rack[2], "nozzle_type": "HS00", "nozzle_diameter": "0.2"},
+        ],
+    }
+
+
+@respx.mock
+def test_the_check_gives_the_runs_nozzle_refusal_before_anything_is_uploaded(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#755: two colors at 0.2 on a 0.4/0.4 printer with one spare 0.2. The dialog's
+    check says what the run would refuse, word for word, and uploads nothing."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**_both_04_one_spare_02())
+    slice_routes()
+    request = {**body(), "filament_plan": TWO_SPOOLS}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+
+    assert check.status_code == 200, check.text
+    assert not upload.called
+    run = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
+    assert run.status_code == 422, run.text
+    assert check.json()["errors"] == [run.json()["detail"]]
+    assert check.json()["errors"][0].startswith(
+        "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one "
+        "spare 0.2 mm hotend in the rack. The slicer spreads a multi-color print across both"
+    )
+
+
+@respx.mock
+def test_the_check_gives_several_nozzle_refusals_as_the_runs_one_422(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#758 review: when the nozzles refuse for more than one reason, the run's 422 joins
+    the reasons into one detail. The check says exactly that detail, not the reasons one
+    by one, so the dialog's verdict and the run's refusal cannot read differently."""
+    from scadbuddy.bambuddy import print_run
+    from scadbuddy.bambuddy.extruders import ExtruderPlan
+
+    reasons = ["The right nozzle is 0.4 mm.", "The left nozzle is High Flow."]
+    monkeypatch.setattr(
+        print_run, "plan_extruders", lambda *args, **kwargs: ExtruderPlan(errors=list(reasons))
+    )
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**_both_04_one_spare_02())
+    slice_routes()
+    request = {**body(), "filament_plan": TWO_SPOOLS}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    run = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
+
+    assert check.status_code == 200, check.text
+    assert run.status_code == 422, run.text
+    assert not upload.called
+    assert check.json()["errors"] == [run.json()["detail"]] == [" ".join(reasons)]
+
+
+@respx.mock
+def test_the_check_refuses_nothing_when_both_nozzles_match(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(nozzles=BOTH_02)
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(), "filament_plan": TWO_SPOOLS},
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json() == {"errors": [], "warnings": []}
+
+
+@respx.mock
+def test_the_check_carries_the_nozzle_advisories(client: TestClient, model: str) -> None:
+    """One color at 0.2 with only the right nozzle 0.2: not refused, but the run warns
+    that the slicer picks the side, and the check says so first."""
+    output_id = prepared(client, model)
+    run_routes()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=on_spool(10))
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    [warning] = check.json()["warnings"]
+    assert warning["kind"] == "side-unknown"
+    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")

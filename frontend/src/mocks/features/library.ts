@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  PrintCheck,
   ChoicesView,
   FilamentOptions,
   LibraryEntry,
@@ -151,6 +152,14 @@ export const handlers = [
       library_file_id: Number(params['id']),
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
+  }),
+
+  // #755 — refuses a missing or unprintable file as the run does; a test that needs a
+  // verdict answers this route itself.
+  http.post(`${base}/print/library/:id/check`, ({ params }) => {
+    const refused = libraryRefusal(Number(params['id']))
+    if (refused) return refused
+    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
   }),
 
   http.post(`${base}/print/library/:id/run`, async ({ params, request }) => {
