@@ -197,6 +197,12 @@ class CachedBlobStore:
                 break
             if mtime > cutoff:
                 continue
+            try:  # re-read: a `dir_for` or `unpack_dir` since the scan touches it first
+                if (self.local.root / key).stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                total -= size  # gone already
+                continue
             self.local.remove(key)
             total -= size
             removed.append(key)
