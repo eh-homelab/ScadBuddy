@@ -10,6 +10,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LastProject,
   CatalogueLibrary,
   MediaView,
   ModelPatch,
@@ -33,6 +34,7 @@ import type {
   PrintOptionsState,
   PrintOptionsUpdate,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   SendResult,
@@ -891,6 +893,47 @@ function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   return undefined
 }
 
+/**
+ * A preset's tags as the server keeps them (#327, `_clean_tags`): trimmed, inner
+ * whitespace collapsed, blanks dropped, each kept once ignoring case, in order.
+ */
+export function cleanTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+  for (const raw of tags) {
+    const tag = raw.trim().replace(/\s+/g, ' ')
+    // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
+    const key = tag.toUpperCase().toLowerCase()
+    if (tag && !seen.has(key)) {
+      seen.add(key)
+      cleaned.push(tag)
+    }
+  }
+  return cleaned
+}
+
+/**
+ * A preset's description and tags past their bounds, refused as FastAPI refuses a
+ * body it cannot parse (`shapeRefusal`), or undefined. The description is trimmed and
+ * the tags cleaned first, as pydantic does before it checks the bounds.
+ */
+function detailsRefusal(description: string | null | undefined, tags: string[] | null | undefined) {
+  // Lengths in code points, as Python counts them.
+  if ([...(description ?? '').trim()].length > MAX_PRESET_DESCRIPTION) {
+    return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
+  }
+  const cleaned = cleanTags(tags ?? [])
+  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
+    return shapeRefusal(
+      `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+    )
+  }
+  if (cleaned.some((tag) => tag.includes(','))) {
+    return shapeRefusal('a preset tag cannot contain a comma')
+  }
+  return undefined
+}
+
 /** Why a preset save is refused, as the server words it, or undefined. */
 function presetRefusal(
   slug: string,
@@ -1402,18 +1445,14 @@ export const handlers = [
         ) {
           return shapeRefusal(`'${preset.id}' is not a preset id`)
         }
-        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
-          return shapeRefusal(
-            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
-          )
-        }
-        const tags = preset.tags ?? []
-        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
-          return shapeRefusal(
-            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
-          )
-        }
-        cleaned.push({ ...preset, name })
+        const details = detailsRefusal(preset.description, preset.tags)
+        if (details) return details
+        cleaned.push({
+          ...preset,
+          name,
+          description: (preset.description ?? '').trim(),
+          tags: cleanTags(preset.tags ?? []),
+        })
       }
       if (cleaned.length > MAX_PRESETS) {
         return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
@@ -1463,6 +1502,8 @@ export const handlers = [
         name: preset.name,
         origin: 'template',
         params: preset.params ?? {},
+        description: preset.description ?? '',
+        tags: preset.tags ?? [],
       }))
       state.presets[slug] = [...shipped, ...saved]
     }
@@ -1842,8 +1883,12 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const body = (await request.json()) as ParamPresetCreate
+    // The details' bounds are the body's shape: refused before the route looks up
+    // the model, as FastAPI parses the body first.
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, body.params ?? {}, null)
     if (refused) return refused
@@ -1852,6 +1897,8 @@ export const handlers = [
       name,
       origin: 'mine',
       params: body.params ?? {},
+      description: (body.description ?? '').trim(),
+      tags: cleanTags(body.tags ?? []),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -1869,11 +1916,14 @@ export const handlers = [
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
+    // Everything but the name is the original's, its description and tags too.
     const copy: ParamPreset = {
       id: nextHexId(),
       name,
       origin: 'mine',
       params: { ...source.params },
+      description: source.description,
+      tags: [...source.tags],
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
@@ -1884,10 +1934,12 @@ export const handlers = [
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
+    const body = (await request.json()) as ParamPresetUpdate
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
     if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Preset not found')
-    const body = (await request.json()) as ParamPresetUpdate
     const name = body.name?.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
     if (refused) return refused
@@ -1895,6 +1947,12 @@ export const handlers = [
       ...existing,
       name: name ?? existing.name,
       params: body.params ?? existing.params,
+      // Each detail given replaces the old one; an empty one clears it.
+      description:
+        body.description === undefined || body.description === null
+          ? existing.description
+          : body.description.trim(),
+      tags: body.tags === undefined || body.tags === null ? existing.tags : cleanTags(body.tags),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -2331,6 +2389,40 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
+  }),
+
+  // #317 — the project both pickers open on.
+  http.put(`${base}/print/projects/last`, async ({ request }) => {
+    const body = (await request.json()) as LastProject
+    state.lastProjectId = body.project_id ?? null
+    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #317 — Generate with a project files the editable 3MF in its folder, once per
+  // (folder, target): the same project again answers with the file already there.
+  http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id: number }
+    const project = state.projects.find((p) => p.id === body.project_id)
+    if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
+    const folderId = project.folder_id ?? nextNumber()
+    state.projects = state.projects.map((p) =>
+      p.id === project.id ? { ...p, folder_id: folderId, folder_name: p.folder_name ?? p.name } : p,
+    )
+    const before = output.library_files?.length ?? 0
+    const libraryFileId = copyIn(output, folderId)
+    const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+    await delay(100)
+    return HttpResponse.json({
+      project_id: project.id,
+      folder_id: folderId,
+      library_file_id: libraryFileId,
+      filename: `${output.slug}.3mf`,
+      created: after > before,
+      bambuddy_url: `${state.settings.bambuddy_url}/projects/${project.id}`,
+      edit_url: null,
+    } satisfies ProjectFile)
   }),
 
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
