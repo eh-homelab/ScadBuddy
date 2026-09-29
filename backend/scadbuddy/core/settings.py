@@ -289,17 +289,18 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " anyone who can reach the page run any program."
         ),
         "temporal_address": (
-            "Where the render worker and the API reach Temporal. The separate worker"
-            " process reads it from its environment, so it belongs to the deployment."
+            "Where renders run (#424). The render workers (`python -m scadbuddy.worker`) take"
+            " it from their own environment, so the deployment points the API and its workers"
+            " together; a form only the API reads would split them."
         ),
-        "temporal_namespace": "Part of the Temporal connection, like its address.",
+        "temporal_namespace": "Paired with the Temporal address; set with it by the deployment.",
         "temporal_task_queue_render": (
-            "The task queue the API and the separate worker must agree on, so both read it"
-            " from the deployment."
+            "Paired with the Temporal address: the API and the render workers must name the"
+            " same queue, and only the deployment sets both."
         ),
         "temporal_worker_inprocess": (
-            "Whether this process runs the render worker: the deployment's topology, fixed"
-            " at start."
+            "Whether this process runs a render worker at all, decided by how the deployment"
+            " is laid out (one replica, or a separate worker Deployment)."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",
