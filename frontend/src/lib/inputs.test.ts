@@ -35,3 +35,28 @@ describe('getPath / setPath', () => {
     expect(setPath({}, 'a.b.c', 1)).toEqual({ a: { b: { c: 1 } } })
   })
 })
+
+describe('inputs from a template are data, never prototype', () => {
+  it('mergePatch drops __proto__, constructor and prototype keys', () => {
+    const patch = JSON.parse('{"__proto__": {"polluted": 1}, "constructor": 2, "prototype": 3, "tab": "a"}')
+    const merged = mergePatch({ params: {} }, patch) as Record<string, unknown>
+    expect(merged).toEqual({ params: {}, tab: 'a' })
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype)
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined()
+  })
+  it('getPath reads own keys only', () => {
+    expect(getPath({ a: {} }, 'constructor')).toBeUndefined()
+    expect(getPath({ a: {} }, 'a.toString')).toBeUndefined()
+    expect(getPath({ a: {} }, '__proto__')).toBeUndefined()
+  })
+  it('getPath does not index arrays', () => {
+    expect(getPath({ list: [1, 2] }, 'list.0')).toBeUndefined()
+    expect(getPath({ list: [1, 2] }, 'list')).toEqual([1, 2])
+  })
+  it('splitInputs reads a non-object as no inputs', () => {
+    expect(splitInputs([1, 2] as unknown as Record<string, unknown>, { width: 1 })).toEqual({
+      params: { width: 1 },
+      extra: NO_EXTRA,
+    })
+  })
+})

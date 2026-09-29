@@ -236,5 +236,43 @@ describe('PresetPicker', () => {
     )
     await savePresetNamed(user, 'Lid')
     await waitFor(() => expect(saved).toEqual({ name: 'Lid', inputs: { params: {}, tab: 'lid' } }))
+    const select = await picker()
+    await user.selectOptions(select, 'Tiny')
+    await user.selectOptions(select, 'Lid')
+    expect(onApply).toHaveBeenLastCalledWith(expect.anything(), { tab: 'lid', v: 0 })
+  })
+
+  it('Reset to defaults clears the UI state a preset brought', async () => {
+    const lid = {
+      id: 'f'.repeat(32),
+      name: 'Lid',
+      origin: 'mine',
+      params: { name: 'Kai' },
+      inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 },
+    }
+    const saved: { inputs: Record<string, unknown> }[] = []
+    server.use(
+      http.get('/api/v1/models/:slug/presets', () => HttpResponse.json([lid])),
+      http.post('/api/v1/models/:slug/presets', async ({ request }) => {
+        const body = (await request.json()) as { name: string; inputs: Record<string, unknown> }
+        saved.push(body)
+        return HttpResponse.json(
+          { ...lid, id: String(saved.length).repeat(32), name: body.name, inputs: body.inputs },
+          { status: 201 },
+        )
+      }),
+    )
+    const { user } = render()
+    const select = await screen.findByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Lid' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Lid')
+    await savePresetNamed(user, 'With lid')
+    await waitFor(() => expect(saved[0]?.inputs).toMatchObject({ tab: 'lid' }))
+    const reset = screen.getByRole('button', { name: 'Reset to defaults' })
+    await waitFor(() => expect(reset).toBeEnabled())
+    await user.click(reset)
+    await savePresetNamed(user, 'After reset')
+    await waitFor(() => expect(saved).toHaveLength(2))
+    expect(saved[1]?.inputs).not.toHaveProperty('tab')
   })
 })

@@ -38,6 +38,7 @@ export function editTargetFor(output: Output): EditTarget {
     slug: output.slug,
     name: output.name ?? null,
     params: output.params,
+    inputs: output.inputs,
     model_version: output.model_version,
     source: 'record',
   }

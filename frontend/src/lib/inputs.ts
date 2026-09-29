@@ -17,11 +17,17 @@ function isParamValue(value: unknown): value is ParamValue {
   return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
 }
 
+/**
+ * `params` and the rest (`extra`) of stored inputs. `v` stays in `extra`, so `extra`
+ * is `{ v: 0 }`, not empty, for a template without a UI once anything is loaded:
+ * whether a template has a UI is its `ui` declaration, never `extra` being non-empty.
+ * Anything but an object reads as no inputs.
+ */
 export function splitInputs(
   raw: Record<string, unknown> | null | undefined,
   fallback: ParamValues = {},
 ): { params: ParamValues; extra: InputsExtra } {
-  if (!raw) return { params: fallback, extra: NO_EXTRA }
+  if (!isJsonObject(raw)) return { params: fallback, extra: NO_EXTRA }
   const { params, ...rest } = raw
   const valid =
     isJsonObject(params) && Object.values(params).every(isParamValue)
@@ -34,20 +40,25 @@ export function joinInputs(params: ParamValues, extra: InputsExtra): JsonObject 
   return { ...extra, params }
 }
 
+/** Keys a patch from a template's UI never writes: they would reach a prototype. */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
 export function mergePatch(target: Json | undefined, patch: Json): Json {
   if (!isJsonObject(patch)) return patch
   const result: JsonObject = isJsonObject(target) ? { ...target } : {}
   for (const [key, value] of Object.entries(patch)) {
+    if (UNSAFE_KEYS.has(key)) continue
     if (value === null) delete result[key]
     else result[key] = mergePatch(result[key], value)
   }
   return result
 }
 
+/** The value at a dotted path of own object keys; arrays are not indexed. */
 export function getPath(root: Json, path: string): Json | undefined {
   let node: Json | undefined = root
   for (const key of path.split('.')) {
-    if (!isJsonObject(node)) return undefined
+    if (!isJsonObject(node) || !Object.hasOwn(node, key)) return undefined
     node = node[key]
   }
   return node
