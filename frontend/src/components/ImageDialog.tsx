@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ModelSummary } from '../api/types'
 import { copyImage } from '../lib/clipboard'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
-import { addMedia, failure, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
+import { addMedia, failure, fileStamp, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -102,7 +102,7 @@ export function ImageDialog({
     setAdded(null)
     try {
       const blob = await render()
-      const file = new File([blob], `render-${stamp()}.png`, { type: 'image/png' })
+      const file = new File([blob], `render-${fileStamp()}.png`, { type: 'image/png' })
       const problem = mediaProblem(file, await uploadLimit())
       if (problem) throw new Error(`${problem} Choose a smaller size.`)
       const result = await addMedia(slug, file, model.media ?? [])
@@ -268,11 +268,4 @@ export function ImageDialog({
       </div>
     </Dialog>
   )
-}
-
-/** A sortable, file-name-safe time: 20260929-011530. */
-function stamp(): string {
-  const now = new Date()
-  const two = (n: number) => String(n).padStart(2, '0')
-  return `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`
 }

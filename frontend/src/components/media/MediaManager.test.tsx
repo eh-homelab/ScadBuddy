@@ -268,3 +268,149 @@ describe('MediaManager (#279)', () => {
     expect(shownIds()).toEqual(GALLERY)
   })
 })
+
+describe('MediaManager paste (#722)', () => {
+  function clipboard(files: File[], asItems = false) {
+    return asItems
+      ? {
+          files: [],
+          items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
+          types: ['Files'],
+        }
+      : { files, items: [], types: ['Files'] }
+  }
+
+  function spyUploads() {
+    const names: string[] = []
+    const upload = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      names.push(file.name)
+      return api.getModel(slug)
+    })
+    return { upload, names }
+  }
+
+  const shot = () => new File([PNG], 'image.png', { type: 'image/png' })
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  function outsideField() {
+    const field = document.createElement('input')
+    document.body.appendChild(field)
+    field.focus()
+    return field
+  }
+
+  afterEach(() => {
+    for (const extra of document.body.querySelectorAll(':scope > input, :scope > button')) {
+      extra.remove()
+    }
+  })
+
+  it('adds a pasted screenshot as an upload, named for when it was pasted', async () => {
+    const { names } = spyUploads()
+    await render()
+    expect(screen.getByTestId('media-paste-hint')).toHaveTextContent('or paste an image or video')
+
+    fireEvent.paste(screen.getByTestId('media-dropzone'), { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(names).toHaveLength(1))
+    expect(names[0]).toMatch(/^pasted-\d{8}-\d{6}\.png$/)
+  })
+
+  it('takes a paste from clipboard items, and keeps a real file name', async () => {
+    const { names } = spyUploads()
+    await render()
+    const clip = new File([PNG], 'clip.webm', { type: 'video/webm' })
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([clip], true) })
+
+    await waitFor(() => expect(names).toEqual(['clip.webm']))
+  })
+
+  it('takes a paste anywhere on the page while no text field has focus', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const button = document.createElement('button')
+    document.body.appendChild(button)
+    button.focus()
+
+    fireEvent.paste(button, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it('leaves a paste into a text field outside the section to that field', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const field = outsideField()
+
+    fireEvent.paste(field, { clipboardData: clipboard([shot()]) })
+
+    await settle()
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it('takes a paste into that field while the pointer is over the section', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const field = outsideField()
+
+    fireEvent.pointerEnter(screen.getByRole('region', { name: 'Media' }))
+    fireEvent.paste(field, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it("takes a paste into a caption, since that field is the section's own", async () => {
+    const { upload } = spyUploads()
+    await render()
+    const caption = within(item(0)).getByRole('textbox', { name: 'Caption' })
+    caption.focus()
+
+    fireEvent.paste(caption, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it('ignores a paste of plain text', async () => {
+    const { upload } = spyUploads()
+    await render()
+
+    fireEvent.paste(document.body, {
+      clipboardData: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain' }],
+        types: ['text/plain'],
+      },
+    })
+
+    await settle()
+    expect(upload).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('checks a pasted file as it checks an upload', async () => {
+    setMockUploadLimit(MiB)
+    const { upload } = spyUploads()
+    await render()
+    const gif = new File(['GIF89a'], 'image.gif', { type: 'image/gif' })
+    const clip = new File([new Uint8Array(MiB + 1)], 'clip.mp4', { type: 'video/mp4' })
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([gif, clip]) })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/is not a PNG, JPEG or WebP image/)
+    expect(alert).toHaveTextContent('clip.mp4 is larger than the 1 MB upload limit')
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it("does not take a paste into a built-in's media", async () => {
+    const { upload } = spyUploads()
+    await render(BUILTIN_SLUG)
+    expect(screen.queryByTestId('media-paste-hint')).not.toBeInTheDocument()
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([shot()]) })
+
+    await settle()
+    expect(upload).not.toHaveBeenCalled()
+  })
+})

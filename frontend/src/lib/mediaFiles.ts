@@ -19,6 +19,52 @@ export function mediaKindOf(file: File): 'image' | 'video' | undefined {
   return undefined
 }
 
+/**
+ * The images and videos a paste carries, as files to add like an upload (#722).
+ * Anything `image/*` or `video/*` is taken, so a GIF is refused by `mediaProblem`
+ * with a reason rather than dropped without a word. A pasted screenshot arrives as
+ * `image.png` (or with no name); it gets a name of its own, so several are told apart.
+ */
+export function pastedMedia(data: DataTransfer | null): File[] {
+  if (!data) return []
+  const isMedia = (type: string) => type.startsWith('image/') || type.startsWith('video/')
+  let files = Array.from(data.files ?? []).filter((file) => isMedia(file.type))
+  if (files.length === 0) {
+    files = Array.from(data.items ?? [])
+      .filter((item) => item.kind === 'file' && isMedia(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+  }
+  const when = fileStamp()
+  return files.map((file, index) => {
+    if (file.name && !/^image\.\w+$/i.test(file.name)) return file
+    const extension = file.type.split('/')[1]?.replace(/[^a-z0-9]/gi, '') || 'bin'
+    const suffix = files.length > 1 ? `-${index + 1}` : ''
+    return new File([file], `pasted-${when}${suffix}.${extension}`, { type: file.type })
+  })
+}
+
+/** A sortable, file-name-safe local time: 20260929-011530. */
+export function fileStamp(now = new Date()): string {
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`
+}
+
+/**
+ * Whether `element` takes typed or pasted text, where a paste is the field's own.
+ * A checkbox or a button does not.
+ */
+export function takesText(element: Element | null): boolean {
+  if (!element) return false
+  if (element instanceof HTMLTextAreaElement) return true
+  if (element instanceof HTMLInputElement) {
+    return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'].includes(
+      element.type,
+    )
+  }
+  return element instanceof HTMLElement && element.isContentEditable
+}
+
 /** Megabytes as the server's 413 names them (`limit / MiB`). */
 export function formatMegabytes(bytes: number): string {
   return `${Number((bytes / MiB).toFixed(2))} MB`

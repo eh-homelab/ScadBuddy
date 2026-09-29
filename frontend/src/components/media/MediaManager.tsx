@@ -1,7 +1,14 @@
-import { useRef, useState, type DragEvent } from 'react'
+import { useEffect, useEffectEvent, useRef, useState, type DragEvent } from 'react'
 import { api } from '../../api/client'
 import type { MediaView, ModelSummary } from '../../api/types'
-import { MEDIA_ACCEPT, failure, mediaProblem, useUploadLimit } from '../../lib/mediaFiles'
+import {
+  MEDIA_ACCEPT,
+  failure,
+  mediaProblem,
+  pastedMedia,
+  takesText,
+  useUploadLimit,
+} from '../../lib/mediaFiles'
 import { DuplicateModelButton } from '../DuplicateModelButton'
 import { Button } from '../ui/Button'
 
@@ -26,6 +33,10 @@ const FIELD =
  * from the keyboard), make cover, caption, delete. Each change is its own write and
  * the list shown is always the one the server answered with. A built-in's media is
  * shown as it is, with Duplicate as the way to change it.
+ *
+ * A pasted image or video is added as an upload is (#722): anywhere in the section
+ * while it has focus or the pointer, and from anywhere on the page while no text
+ * field has focus, since a paste into a field is the field's own.
  */
 export function MediaManager({ model: initial, onChanged }: Props) {
   const [model, setModel] = useState(initial)
@@ -45,6 +56,8 @@ export function MediaManager({ model: initial, onChanged }: Props) {
   const queue = useRef<Promise<void>>(Promise.resolve())
   const uploadKey = useRef(0)
   const inputRef = useRef<HTMLInputElement>(null)
+  const sectionRef = useRef<HTMLElement>(null)
+  const hovered = useRef(false)
   const uploadLimit = useUploadLimit()
 
   const slug = model.slug
@@ -111,6 +124,28 @@ export function MediaManager({ model: initial, onChanged }: Props) {
     }
   }
 
+  const onPaste = useEffectEvent((event: ClipboardEvent) => {
+    if (readOnly || event.defaultPrevented) return
+    const files = pastedMedia(event.clipboardData)
+    if (files.length === 0) return
+    const section = sectionRef.current
+    const active = document.activeElement
+    const here =
+      hovered.current ||
+      Boolean(section?.contains(active)) ||
+      (event.target instanceof Node && Boolean(section?.contains(event.target)))
+    if (!here && takesText(active)) return
+    event.preventDefault()
+    void add(files)
+  })
+
+  useEffect(() => {
+    if (readOnly) return
+    const listener = (event: ClipboardEvent) => onPaste(event)
+    document.addEventListener('paste', listener)
+    return () => document.removeEventListener('paste', listener)
+  }, [readOnly])
+
   function onDropFiles(event: DragEvent<HTMLDivElement>) {
     event.preventDefault()
     setDragging(false)
@@ -147,7 +182,13 @@ export function MediaManager({ model: initial, onChanged }: Props) {
   }
 
   return (
-    <section aria-label="Media" className="flex flex-col gap-3 text-[13px]">
+    <section
+      ref={sectionRef}
+      aria-label="Media"
+      className="flex flex-col gap-3 text-[13px]"
+      onPointerEnter={() => (hovered.current = true)}
+      onPointerLeave={() => (hovered.current = false)}
+    >
       {readOnly && (
         <div className="flex items-center justify-between gap-3 rounded-[6px] border border-line bg-surface-2 px-3 py-2 text-[12px] text-muted">
           <span>
@@ -316,6 +357,9 @@ export function MediaManager({ model: initial, onChanged }: Props) {
           }`}
         >
           <p className="text-muted">Drop images or videos here</p>
+          <p className="text-[12px] text-faint" data-testid="media-paste-hint">
+            or paste an image or video
+          </p>
           <Button size="sm" onClick={() => inputRef.current?.click()}>
             Choose files
           </Button>
