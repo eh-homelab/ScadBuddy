@@ -108,22 +108,41 @@ function abortMessage(signal: AbortSignal): string {
 export const DEFAULT_LEASE_MS = 60_000
 export const DEFAULT_RENEW_MS = 1_000
 
-export type SessionErrorCode = 'not_found' | 'forbidden' | 'busy' | 'budget_exhausted' | 'closed' | 'invalid'
+export type SessionErrorCode =
+  | 'not_found'
+  | 'forbidden'
+  | 'busy'
+  | 'budget_exhausted'
+  | 'closed'
+  | 'invalid'
+  | 'rate_limited'
 
-const STATUS_OF: Record<SessionErrorCode, 400 | 403 | 404 | 409> = {
+type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
+
+const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   not_found: 404,
   forbidden: 403,
   busy: 409,
   budget_exhausted: 409,
   closed: 409,
   invalid: 400,
+  rate_limited: 429,
 }
+
+/**
+ * New sessions one owner may start per window, across every route (the chat
+ * socket and POST /api/v1/ai/sessions), every connection and every replica:
+ * counted from `ai_sessions.created_at`. Each session has its own budget, so
+ * this is what bounds how many an owner can have spending at once.
+ */
+export const MAX_NEW_SESSIONS = 10
+export const NEW_SESSION_WINDOW_MS = 60_000
 
 /** A refused session operation; `status` is the HTTP status a route would answer with. */
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
-  readonly status: 400 | 403 | 404 | 409
+  readonly status: SessionErrorStatus
   constructor(code: SessionErrorCode, message: string) {
     super(message)
     this.code = code
@@ -167,6 +186,18 @@ export type StartOptions = {
   scope?: Record<string, unknown>
   /** Sent as the first turn when given. */
   prompt?: string
+  /** With `prompt`: see SendOptions.context. */
+  context?: string
+}
+
+export type SendOptions = {
+  /**
+   * Text the model gets after the user's message in this turn only, and that
+   * the transcript's `user.turn` event does not show: the panel's page context
+   * (route, open model, what the page reports, #256), rendered by the chat
+   * route (routes/chat.ts `renderPageContext`).
+   */
+  context?: string
 }
 
 export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
@@ -222,6 +253,8 @@ export type SessionManagerDeps = {
   approvalHashKey?: Buffer
   /** How often a parked turn polls its approval for a decision made on another replica. */
   approvalPollMs?: number
+  /** New sessions per owner per window (MAX_NEW_SESSIONS per NEW_SESSION_WINDOW_MS by default). */
+  newSessions?: { max: number; windowMs: number }
   leaseMs?: number
   renewMs?: number
   /** How often followers on other replicas poll the event log (EventLog). */
@@ -435,15 +468,37 @@ export class SessionManager {
     id: string,
     principal: Owner,
     fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+    options: { rateLimited?: boolean } = {},
   ): Promise<SessionRecord> {
     const { maxTurns, budgetUsd } = await this.limits()
-    const sql = this.deps.sql
-    await sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                               status, title, tags, scope, parent_id, max_turns, budget_usd)
-      VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
-              ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-              ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+    const insert = async (sql: Sql) => {
+      await sql`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
+                                 status, title, tags, scope, parent_id, max_turns, budget_usd)
+        VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
+                ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+    }
+    if (options.rateLimited) {
+      const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
+      await this.deps.sql.begin(async (tx) => {
+        // Per owner, held until commit, so concurrent starts count each other.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
+        const [recent] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM ai_sessions
+          WHERE owner_kind = ${principal.kind} AND owner_id = ${principal.id}
+            AND created_at > now() - (${windowMs} * interval '1 millisecond')`
+        if ((recent?.n ?? 0) >= max) {
+          throw new SessionError(
+            'rate_limited',
+            `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`,
+          )
+        }
+        await insert(tx as unknown as Sql)
+      })
+    } else {
+      await insert(this.deps.sql)
+    }
     const session = await this.row(id)
     if (!session) throw new Error(`session ${id} vanished after insert`)
     return session
@@ -459,13 +514,13 @@ export class SessionManager {
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
-    })
+    }, { rateLimited: true })
     await this.events.append(id, [
       event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     if (!prompt) return { session }
-    const turn = await this.send(id, principal, prompt)
+    const turn = await this.send(id, principal, prompt, options.context ? { context: options.context } : {})
     return { session: await this.get(id, principal), turn }
   }
 
@@ -473,7 +528,7 @@ export class SessionManager {
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
-  async send(id: string, principal: Owner, text: string): Promise<Turn> {
+  async send(id: string, principal: Owner, text: string, options: SendOptions = {}): Promise<Turn> {
     const prompt = text.trim()
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     const before = await this.get(id, principal)
@@ -488,7 +543,7 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    return this.startTurn(record(claimed), turnId, prompt, principal)
+    return this.startTurn(record(claimed), turnId, prompt, principal, options.context ? { context: options.context } : {})
   }
 
   /**
@@ -546,14 +601,18 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string } = {},
+    options: { keepResumeTurn?: string; context?: string } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
     // by one that is gone (claiming proved no turn is live): their calls can
     // no longer run. A resumed turn keeps the approval bound to it; its
     // sibling orphans are cancelled with the rest (approvals/service.ts).
-    await this.approvals.cancelPending(id, 'superseded by a new turn', options)
+    await this.approvals.cancelPending(
+      id,
+      'superseded by a new turn',
+      options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
+    )
     await this.events.append(id, [
       event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
@@ -561,7 +620,8 @@ export class SessionManager {
     const controller = new AbortController()
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
-    const done = this.runTurn(session, turnId, prompt, local)
+    const query = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const done = this.runTurn(session, turnId, query, local)
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.
