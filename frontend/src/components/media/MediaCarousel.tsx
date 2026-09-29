@@ -1,5 +1,5 @@
 import useEmblaCarousel from 'embla-carousel-react'
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { useHref, useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
@@ -89,14 +89,16 @@ function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
     return () => observer.disconnect()
   }, [near])
 
-  useEffect(() => {
+  // Before paint, so focus never shows on <body> between the cover and the carousel.
+  useLayoutEffect(() => {
     if (!near || !refocus.current) return
-    // The cover's own control in the carousel, named rather than found by render order:
-    // the first slide's button, or with a link the expand button. A carousel with
-    // neither is itself a tab stop.
-    const carousel = wrapper.current?.querySelector<HTMLElement>('[aria-roledescription="carousel"]')
-    const control = carousel?.querySelector<HTMLElement>('[data-slide-open="0"], [data-carousel-expand]')
-    ;(control ?? carousel)?.focus()
+    // The cover's control in the carousel, named rather than found by render order: the
+    // first slide's button, or with a link the expand button. A cover with neither has
+    // nothing to focus, so refocus is never set for it.
+    wrapper.current
+      ?.querySelector<HTMLElement>('[aria-roledescription="carousel"]')
+      ?.querySelector<HTMLElement>('[data-slide-open="0"], [data-carousel-expand]')
+      ?.focus()
   }, [near])
 
   return (
