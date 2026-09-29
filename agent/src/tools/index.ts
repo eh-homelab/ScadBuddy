@@ -1,4 +1,5 @@
 import { approvalTools } from './approvals.js'
+import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
 import { historyTools } from './history.js'
@@ -11,9 +12,10 @@ import type { Tool } from './registry.js'
 import { settingsTools } from './settings.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
-// Not here yet: browser_* tools (#254, #266), which are browser-only and so
-// are the one permitted difference between the two lists; session tools
-// (#300); and the tools in coverage.ts `PENDING_ROUTES`.
+// Not here yet: session tools (#300) and the tools in coverage.ts
+// `PENDING_ROUTES`. The browser_* tools (#254, browser.ts) are in both
+// projections: /mcp callers reach the tab they paired, the harness the tab
+// its session is paired with.
 
 export const ALL_TOOLS: readonly Tool[] = [
   ...catalogueTools,
@@ -24,6 +26,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...settingsTools,
   ...printTools,
   ...printMediaTools,
+  ...browserTools,
   ...approvalTools,
 ]
 

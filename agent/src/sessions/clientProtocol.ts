@@ -38,6 +38,10 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   z.object({ v, type: z.literal('session.attach'), sessionId }),
+  // The browser bridge (#254): which tab this panel is in (frontend
+  // src/agent/tabId.ts), so the sessions it chats with drive that tab
+  // (routes/chat.ts, bridge/hub.ts `pairSession`).
+  z.object({ v, type: z.literal('tab.bind'), tabId: z.string().regex(/^[A-Za-z0-9_-]{22,64}$/) }),
 ])
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 

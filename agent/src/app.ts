@@ -14,9 +14,11 @@ import type { PackageRepo } from './plugins/packages/store.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import type { AuditRepo } from './audit/log.js'
+import type { TabHub } from './bridge/hub.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerAuditRoutes } from './routes/audit.js'
+import { registerBridgeRoute } from './routes/bridge.js'
 import { registerChatRoute } from './routes/chat.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
@@ -38,7 +40,8 @@ import type { SessionManager } from './sessions/manager.js'
 // auth-mode routes (#251, routes/mcpTokens.ts, routes/mcpAuthMode.ts), the
 // headless-browser setting (#349, routes/headlessBrowser.ts), the session routes
 // and the assistant's chat socket (#300, #256, routes/sessions.ts,
-// routes/chat.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/chat.ts), the browser bridge's tab socket (#254, routes/bridge.ts),
+// and /mcp when `mcp` is given (#251, mcp/http.ts).
 //
 // Every response carries `X-ScadBuddy-Service: agent`, so a request through
 // the ingress shows which container answered it (spec §4.2: the agent's paths
@@ -115,6 +118,12 @@ export type AppDeps = {
    * without it), and credential and plugin writes are recorded in it.
    */
   audit?: AuditRepo | undefined
+  /**
+   * The tabs of the browser bridge (#254, bridge/hub.ts): their socket
+   * (routes/bridge.ts), and the chat socket's `tab.bind`. Left out, there is
+   * no bridge socket, and the browser_* tools answer "no browser attached".
+   */
+  tabs?: TabHub | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -427,7 +436,16 @@ export function createApp(deps: AppDeps): AgentApp {
     origins: deps.origins,
     upgradeWebSocket: deps.upgradeWebSocket,
     ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
+    ...(deps.tabs ? { tabs: deps.tabs } : {}),
   })
+  if (deps.tabs) {
+    registerBridgeRoute(app, {
+      tabs: deps.tabs,
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      upgradeWebSocket: deps.upgradeWebSocket,
+    })
+  }
 
   if (deps.mcp) {
     const database = deps.database

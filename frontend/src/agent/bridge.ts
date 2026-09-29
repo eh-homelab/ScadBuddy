@@ -31,7 +31,7 @@ const loadCatalog = () => import('./catalog')
  * The tab's side of the browser tools (#254). Pages and components register the
  * handlers valid while they are mounted; `call` validates the arguments against the
  * tool's schema and runs the newest mounted handler, answering a typed error — never a
- * throw — when there is none. The transport to the agent service (#266) and WebMCP
+ * throw — when there is none. The socket to the agent service (`link.ts`) and WebMCP
  * (`webmcp.ts`) are both just callers of this object.
  */
 export class AgentBridge {

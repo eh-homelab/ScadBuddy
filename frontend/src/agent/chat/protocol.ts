@@ -238,6 +238,13 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ v, type: z.literal('session.handoff'), sessionId }),
   /** Watch a session: the server replays its transcript as events, then streams live. */
   z.object({ v, type: z.literal('session.attach'), sessionId }),
+  /**
+   * Which tab this panel is in (`../tabId.ts`), sent first on every connection: the
+   * sessions it chats with are then paired with this tab, so their browser tools drive it
+   * (#254; AI spec §8.5, "The browser user's own chat sessions pair with their tab
+   * automatically"; agent `src/routes/chat.ts`).
+   */
+  z.object({ v, type: z.literal('tab.bind'), tabId: z.string().regex(/^[A-Za-z0-9_-]{22,64}$/) }),
 ])
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 

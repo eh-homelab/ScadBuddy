@@ -15,6 +15,7 @@ import {
   isAssistantShortcut,
 } from '../agent/chat/shortcut'
 import type { ChatTransportFactory } from '../agent/chat/transport'
+import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
@@ -33,15 +34,21 @@ const NAV = [
   { to: '/settings', label: 'Settings', end: false },
 ]
 
+// #254 — this tab's socket to the agent, and the pairing prompt, while the assistant is
+// available; like the panel, loaded only then.
+const AgentLink = lazy(async () => ({ default: (await import('./AgentLink')).AgentLink }))
+
 const PANEL_ID = 'assistant-panel'
 
 interface Props {
   embedded?: boolean
   /** Tests inject the mock agent; the app loads whichever this build has. */
   assistantTransport?: ChatTransportFactory
+  /** Tests inject the browser bridge's link (null for none); the app makes its own. */
+  tabLink?: TabLinkFactory | null
 }
 
-export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props) {
+export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   useLoadDisplayUnit()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
   useGlobalAgentTools()
@@ -170,6 +177,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
         </div>
       </header>
 
+      {ai.available && (
+        <Suspense fallback={null}>
+          <AgentLink factory={tabLink} />
+        </Suspense>
+      )}
       <div className="relative flex min-h-0 flex-1">
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <Outlet />
