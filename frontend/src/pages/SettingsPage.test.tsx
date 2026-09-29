@@ -81,7 +81,7 @@ describe('SettingsPage', () => {
     await seeded()
     expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
     // Bambuddy's ids are integers, so the <select> values are their decimal strings.
-    expect(screen.getByLabelText('Library folder')).toHaveValue('2')
+    expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveValue('2')
     expect(screen.getByLabelText('Printer')).toHaveValue('1')
     // #312: printing is the Print dialog's, which derives its own presets.
     expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
@@ -92,9 +92,10 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.selectOptions(screen.getByLabelText('Printer'), '')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('pipeline_id')
+    expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
     put.mockRestore()
   })
 
@@ -103,15 +104,17 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    const url = screen.getByLabelText('Bambuddy URL')
+    await user.type(url, '/')
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).not.toHaveProperty('bambuddy_api_key')
     await waitFor(() => expect(screen.getByText(/Saved at/)).toBeInTheDocument())
 
     await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
-    expect(put.mock.calls[1]?.[0]).toMatchObject({ bambuddy_api_key: 'secret' })
+    expect(put.mock.calls[1]?.[0]).toEqual({ bambuddy_api_key: 'secret' })
     put.mockRestore()
   })
 
@@ -120,7 +123,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByLabelText('API key')).toHaveValue(''))
     expect(screen.getByText(/Saved at/)).toBeInTheDocument()
   })
@@ -133,7 +136,7 @@ describe('SettingsPage', () => {
     const select = screen.getByLabelText('Default plate')
     await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
     await user.selectOptions(select, 'A1 mini')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
     expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
@@ -154,7 +157,7 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
     expect(getDisplayUnit()).toBe('mm')
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(getDisplayUnit()).toBe('in'))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ display_unit: 'in' })
     expect((await api.getSettings()).display_unit).toBe('in')

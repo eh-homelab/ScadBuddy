@@ -133,6 +133,16 @@ class FontService:
         self.data_dir = data_dir
         self.catalogue_ttl = catalogue_ttl
         self.client = client or GoogleFontsClient(api_key)
+        #: Set when the key changes (#322): the cached catalogue came from the other
+        #: source, so the next read fetches. A failed fetch still serves the cache.
+        self.catalogue_stale = False
+
+    def use_api_key(self, api_key: str | None) -> None:
+        """Fetch the catalogue with ``api_key`` from now on, and refetch it."""
+        if (api_key or None) == self.client.api_key:
+            return
+        self.client = GoogleFontsClient(api_key, timeout=self.client.timeout)
+        self.catalogue_stale = True
 
     @property
     def root(self) -> Path:
@@ -186,7 +196,7 @@ class FontService:
         catalogue is a far better answer than none, and the air-gapped case would
         otherwise lose the browse list entirely.
         """
-        if not refresh:
+        if not refresh and not self.catalogue_stale:
             cached = self.load_cached_catalogue()
             if cached is not None:
                 return cached
@@ -199,6 +209,7 @@ class FontService:
             logger.warning("serving a stale font catalogue: the fetch failed")
             return stale
         self.store_catalogue(fetched)
+        self.catalogue_stale = False
         return fetched
 
     def _read_cache_ignoring_age(self) -> FontCatalogue | None:

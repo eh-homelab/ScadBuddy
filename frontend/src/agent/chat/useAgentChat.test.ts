@@ -198,6 +198,36 @@ describe('useAgentChat', () => {
     expect(result.current.state.awaitingStart).toBe(false)
   })
 
+  it('says a stop or take-over made while disconnected is queued, and clears that on reconnect', () => {
+    let answer: SendResult = 'queued'
+    const t = scripted(() => answer)
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.interrupt('s1'))
+    expect(t.sent).toContainEqual({ v: 1, type: 'session.interrupt', sessionId: 's1' })
+    expect(result.current.state.notice).toMatch(/your stop goes first when it reconnects/)
+    act(() => result.current.takeOver('s1'))
+    expect(t.sent).toContainEqual({ v: 1, type: 'session.handoff', sessionId: 's1' })
+    expect(result.current.state.notice).toMatch(/your take-over will be sent once it reconnects/)
+    answer = 'sent'
+    act(() => t.h().onOpen?.())
+    expect(result.current.state.notice).toBeNull()
+  })
+
+  it('says a refused stop or take-over was not sent', () => {
+    const t = scripted(() => 'refused')
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => t.h().onOpen?.())
+    act(() => result.current.interrupt('s1'))
+    expect(result.current.state.notice).toMatch(/try again once it reconnects/)
+    act(() => t.h().onOpen?.())
+    act(() => result.current.takeOver('s1'))
+    expect(result.current.state.notice).toMatch(/try again once it reconnects/)
+  })
+
   it('says a refused message was not sent, and stops waiting for its session', () => {
     const t = scripted(() => 'refused')
     const { result } = renderHook(() => useAgentChat(t.factory))
