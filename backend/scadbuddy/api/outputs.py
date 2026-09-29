@@ -4,7 +4,7 @@ import asyncio
 import logging
 import zipfile
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
@@ -45,6 +45,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
+from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -66,6 +67,8 @@ class OutputSummary(OutputMeta):
 
 class OutputDetail(OutputSummary):
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: The template inputs this output was saved with (spec §4.3).
+    inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class OutputPlate(BaseModel):
@@ -78,6 +81,9 @@ class OutputPlate(BaseModel):
 class CreateOutputRequest(BaseModel):
     job_id: str
     name: str | None = None
+    #: The inputs on screen when Generate was pressed (spec §4.3). Their ``params``
+    #: must be the ones the job rendered; left out, the job's own inputs are recorded.
+    inputs: dict[str, Any] | None = None
 
 
 class EditTarget(BaseModel):
@@ -90,6 +96,7 @@ class EditTarget(BaseModel):
     slug: str
     name: str | None
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    inputs: dict[str, Any] = Field(default_factory=dict)
     model_version: str | None = None
     #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
     source: Literal["record", "3mf"]
@@ -100,6 +107,7 @@ def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCop
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
         params=store.params(meta.id),
+        inputs=store.inputs(meta.id),
         library_files=library_files,
     )
 
@@ -147,10 +155,23 @@ async def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
+    inputs = None
+    if body.inputs is not None:
+        try:
+            inputs = normalize_inputs(body.inputs, None)
+        except InputsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        if inputs["params"] != job.params:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"inputs.params are not the parameters job {job.id} rendered",
+            )
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
     await materialize_result(state.store.blobs, job.result)
     public_url = (await asyncio.to_thread(store.load)).public_url
-    meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
+    meta = await asyncio.to_thread(
+        outputs.create, job, name=body.name, public_url=public_url, inputs=inputs
+    )
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])
@@ -205,6 +226,7 @@ def get_edit_target(
             slug=stamped.model,
             name=None,
             params=stamped.params,
+            inputs=legacy_inputs(stamped.params),
             model_version=stamped.version,
             source="3mf",
         )
@@ -217,6 +239,7 @@ def get_edit_target(
         slug=meta.slug,
         name=meta.name,
         params=outputs.params(output_id),
+        inputs=outputs.inputs(output_id),
         model_version=meta.model_version,
         source="record",
     )
