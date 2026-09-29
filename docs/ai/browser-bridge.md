@@ -191,9 +191,10 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   untrusted-data envelope (#258), because it can quote the page.
 - **Results** are what `bridge.call()` returned, as JSON, in the untrusted-data
   envelope with the source "the user's open ScadBuddy tab". A result over 200 000
-  characters is answered by the tab as a `failed` error that asks for less
-  (`MAX_RESULT_CHARS`, [`link.ts`](../../frontend/src/agent/link.ts)), because the
-  agent's sockets take frames up to 256 KiB (`main.ts`).
+  bytes of UTF-8 (measured with `TextEncoder`, not string length) is answered by the tab
+  as a `failed` error that asks for less (`MAX_RESULT_BYTES`,
+  [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's sockets take
+  frames up to 256 KiB (`main.ts`).
 - **Not here:** `screenshot()`, which PR #339 left out of the tab on purpose; and the
   headless browser (#349, [headless-browser.md](headless-browser.md)), a separate
   Chromium whose Playwright tools are `mcp__plugin_playwright_playwright__browser_*`.

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from './bridge'
-import { createTabLink, MAX_RESULT_CHARS } from './link'
+import { createTabLink, MAX_RESULT_BYTES } from './link'
 import { TAB_ID } from './tabId'
 
 /** Just enough of a browser WebSocket for the link. */
@@ -103,7 +103,7 @@ describe('createTabLink', () => {
 
   it('answers a result too large for the socket with an error the agent can act on', async () => {
     const bridge = new AgentBridge()
-    bridge.register({ get_editor_text: () => ({ text: 'x'.repeat(MAX_RESULT_CHARS) }) }, { label: 'source' })
+    bridge.register({ get_editor_text: () => ({ text: 'x'.repeat(MAX_RESULT_BYTES) }) }, { label: 'source' })
     const { ws } = linked(bridge)
     ws().open()
     ws().deliver({ type: 'call', id: 'big', tool: 'get_editor_text', args: {} })
@@ -111,6 +111,18 @@ describe('createTabLink', () => {
     const result = ws().frames().find((f) => f.type === 'result')!
     expect(result.outcome).toMatchObject({ ok: false, error: { code: 'failed', message: expect.stringMatching(/ask for less/) } })
     expect(ws().sent.at(-1)!.length).toBeLessThan(1000)
+  })
+
+  it('counts a result in bytes, so non-ASCII text under the limit in characters is still refused (#731 review)', async () => {
+    const bridge = new AgentBridge()
+    // 3 bytes each in UTF-8, one UTF-16 unit each: half the limit in characters, 1.5x in bytes.
+    bridge.register({ get_editor_text: () => ({ text: '漢'.repeat(MAX_RESULT_BYTES / 2) }) }, { label: 'source' })
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'wide', tool: 'get_editor_text', args: {} })
+    await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
+    const result = ws().frames().find((f) => f.type === 'result')!
+    expect(result.outcome).toMatchObject({ ok: false, error: { code: 'failed', message: expect.stringMatching(/bytes/) } })
   })
 
   it('keeps the pairings the agent pushes, and sends the user’s answers', () => {

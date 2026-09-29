@@ -27,11 +27,12 @@ import { TAB_ID } from './tabId'
 
 export const BRIDGE_SOCKET_PATH = '/api/v1/ai/bridge'
 /**
- * The largest `result` frame sent, in characters. The agent's sockets take frames up to
- * 256 KiB (agent `src/main.ts`), and a larger one would close this socket; a result over
- * this is answered as a `failed` error instead, so the agent can ask for less.
+ * The largest `result` frame sent, in UTF-8 bytes (not string length: non-ASCII text takes
+ * up to 3 bytes per UTF-16 unit). The agent's sockets take frames up to 256 KiB (agent
+ * `src/main.ts`), and a larger one would close this socket; a result over this is answered
+ * as a `failed` error instead, so the agent can ask for less.
  */
-export const MAX_RESULT_CHARS = 200_000
+export const MAX_RESULT_BYTES = 200_000
 
 /** What the link needs of the bridge (`AgentBridge` has it all). */
 export interface LinkBridge {
@@ -114,7 +115,8 @@ export function createTabLink({
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
     const outcome = await bridge.call(tool, args)
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
-    if (frame.length > MAX_RESULT_CHARS) {
+    const bytes = new TextEncoder().encode(frame).byteLength
+    if (bytes > MAX_RESULT_BYTES) {
       frame = JSON.stringify(
         tabFrame({
           type: 'result',
@@ -124,7 +126,7 @@ export function createTabLink({
             error: {
               code: 'failed',
               message:
-                `The result of "${tool}" is ${frame.length} characters, over the ${MAX_RESULT_CHARS} this tab ` +
+                `The result of "${tool}" is ${bytes} bytes, over the ${MAX_RESULT_BYTES} this tab ` +
                 'sends; ask for less (a snapshot of one dialog, a range of the source).',
             },
           },
