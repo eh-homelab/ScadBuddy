@@ -178,6 +178,31 @@ class TemplatePreset(_PresetBody):
         default_factory=list, max_length=MAX_PRESET_TAGS
     )
 
+    @model_validator(mode="after")
+    def _one_state(self) -> TemplatePreset:
+        # Read from model.json, where `params` wins over the `inputs` beside it: a hand
+        # edit, or an older release, changes `params` only, and a disagreement must
+        # never cost the template its whole list.
+        inputs = self.inputs
+        if inputs is not None and "params" in self.model_fields_set:
+            inputs = {**inputs, "params": self.params}
+        try:
+            self.inputs = normalize_inputs(inputs, None if inputs is not None else self.params)
+        except InputsError as error:
+            raise ValueError(str(error)) from None
+        self.params = self.inputs["params"]
+        return self
+
+
+def for_model_json(preset: dict[str, Any]) -> dict[str, Any]:
+    """A template preset as ``model.json`` keeps it: ``params``, and ``inputs`` beside
+    them only when they carry UI state (keys besides ``params`` and ``v``), so a file
+    without UI state has one place to edit the values."""
+    inputs = preset.get("inputs")
+    if isinstance(inputs, dict) and set(inputs) <= {"params", "v"}:
+        return {key: value for key, value in preset.items() if key != "inputs"}
+    return preset
+
 
 def _checked(presets: list[TemplatePreset]) -> list[TemplatePreset]:
     """Names unique ignoring case, and explicit ids unique, as a picker needs them."""
@@ -379,12 +404,21 @@ class PresetStore:
             yield conn
 
     @staticmethod
-    def _view(row: DictRow) -> ParamPreset:
+    def _inputs(row: DictRow) -> dict[str, Any]:
+        """A row's inputs with its ``params`` column authoritative for their ``params``:
+        an older release (a rollback) updates ``params`` only. A row saved before
+        inputs (``'{}'``) reads as ``{"params": …, "v": 0}``."""
+        if not row["inputs"]:
+            return legacy_inputs(row["params"])
+        return {**row["inputs"], "params": row["params"]}
+
+    @classmethod
+    def _view(cls, row: DictRow) -> ParamPreset:
         return ParamPreset(
             id=row["id"],
             name=row["name"],
             params=row["params"],
-            inputs=row["inputs"] or legacy_inputs(row["params"]),
+            inputs=cls._inputs(row),
             origin="mine",
             updated_at=row["updated_at"],
         )
@@ -475,11 +509,12 @@ class PresetStore:
                 raise PresetNotFoundError(preset_id)
             if patch.name is not None:
                 self._require_free(model_id, saved, patch.name, own=preset_id)
-            current_inputs = current["inputs"] or legacy_inputs(current["params"])
+            current_inputs = self._inputs(current)
             if patch.inputs is not None:
                 inputs = patch.inputs
             elif patch.params is not None:
-                inputs = {**current_inputs, "params": patch.params}
+                # Checked as a whole again: the new values count toward the size cap.
+                inputs = normalize_inputs({**current_inputs, "params": patch.params}, None)
             else:
                 inputs = current_inputs
             row = conn.execute(
@@ -526,7 +561,7 @@ class PresetStore:
                         uuid.uuid4().hex,
                         row["name"],
                         Jsonb(row["params"]),
-                        Jsonb(row["inputs"]),
+                        Jsonb(self._inputs(row)),
                         row["created_at"],
                         row["updated_at"],
                     ),
