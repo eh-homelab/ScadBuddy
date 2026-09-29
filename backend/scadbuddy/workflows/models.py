@@ -127,6 +127,25 @@ class PlateSize(BaseModel):
     depth: float
 
 
+class LoadRequest(BaseModel):
+    slug: str
+    revision: str | None
+
+
+class LoadedPipeline(BaseModel):
+    """What `load_pipeline` returns: recorded in the history, so a replay runs this
+    source whatever the template holds by then (§3.4, §8.3)."""
+
+    source: str
+    file: str
+    api: int
+    #: sha256 of ``source``, or "default" (§3.2).
+    version: str
+    inputs_version: int
+    ui_api: int | None = None
+    plate: PlateSize
+
+
 class PackItem(BaseModel):
     part: Part
     count: int = Field(default=1, ge=1)

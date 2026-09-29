@@ -1,9 +1,10 @@
-"""The pipeline's own activities (spec 2026-09-27 §5.2): packing parts onto plates,
-and writing an output. Phase 4 Task 2 adds `load_pipeline` beside them."""
+"""The pipeline's own activities (spec 2026-09-27 §5.2): loading the template's
+pipeline, packing parts onto plates, and writing an output."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -11,12 +12,37 @@ from typing import Any
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from scadbuddy.library.catalogue import ModelMeta
+from scadbuddy.library.pipelines import (
+    DEFAULT_PIPELINE_FILE,
+    DEFAULT_PIPELINE_SOURCE,
+    PIPELINE_API_SUPPORTED,
+    inputs_version_of,
+    pipeline_version_of,
+)
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.plate import plate_for
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
-from scadbuddy.workflows.models import Layout, OutputRequest, PackRequest
+from scadbuddy.workflows.models import (
+    Layout,
+    LoadedPipeline,
+    LoadRequest,
+    OutputRequest,
+    PackRequest,
+    PlateSize,
+)
 from scadbuddy.workflows.outputs import build_output
 from scadbuddy.workflows.packing import PackError, shelf_pack
+
+
+def _refuse(message: str) -> ApplicationError:
+    return ApplicationError(message, type="PipelineApiError", non_retryable=True)
+
+
+def plate_size(model: str | None) -> PlateSize:
+    plate = plate_for(model)
+    return PlateSize(key=plate.key, width=plate.usable.width, depth=plate.usable.depth)
 
 
 def pack_layout(req: PackRequest) -> Layout:
@@ -40,7 +66,7 @@ class PipelineActivities:
         self._render = RenderActivities(deps)
 
     def all(self) -> Sequence[Callable[..., Any]]:
-        return [self.pack, self.write_output]
+        return [self.load_pipeline, self.pack, self.write_output]
 
     async def model_dir(self, slug: str, revision: str | None) -> Path:
         """The template's directory at ``revision``: the live one, or its export."""
@@ -50,6 +76,53 @@ class PipelineActivities:
             slug, revision, paths=d.paths, history=d.history, fetcher=d.fetcher
         )
         return source.scad.parent
+
+    @activity.defn(name="load_pipeline")
+    async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
+        """The template's pipeline source at ``req.revision``, read and never run: the
+        workflow runs it in its sandbox, where what raises is a nondeterministic call
+        (`os.getpid()`, `random.random()`, `datetime.now()`, `open()`), not an
+        import (spec §3.6)."""
+        directory = await self.model_dir(req.slug, req.revision)
+        try:
+            raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
+        except (OSError, ValueError) as error:
+            raise _refuse(f"model.json could not be read: {error}") from None
+        meta = ModelMeta.model_validate(raw)
+        ui_api = meta.ui.api if meta.ui is not None else None
+        plate = plate_size(None)
+        if meta.pipeline_error is not None:
+            raise _refuse(meta.pipeline_error)
+        if meta.pipeline is None:
+            return LoadedPipeline(
+                source=DEFAULT_PIPELINE_SOURCE,
+                file=DEFAULT_PIPELINE_FILE,
+                api=1,
+                version="default",
+                inputs_version=0,
+                ui_api=ui_api,
+                plate=plate,
+            )
+        if meta.pipeline.api not in PIPELINE_API_SUPPORTED:
+            majors = ", ".join(str(m) for m in PIPELINE_API_SUPPORTED)
+            raise _refuse(
+                f"{meta.pipeline.module} declares pipeline api {meta.pipeline.api}; "
+                f"this ScadBuddy supports majors {majors}"
+            )
+        path = directory / meta.pipeline.module
+        try:
+            source = await asyncio.to_thread(path.read_text, "utf-8")
+        except FileNotFoundError:
+            raise _refuse(f"{meta.pipeline.module} is missing from the template") from None
+        return LoadedPipeline(
+            source=source,
+            file=meta.pipeline.module,
+            api=meta.pipeline.api,
+            version=pipeline_version_of(source),
+            inputs_version=inputs_version_of(source),
+            ui_api=ui_api,
+            plate=plate,
+        )
 
     @activity.defn(name="pack")
     async def pack(self, req: PackRequest) -> Layout:

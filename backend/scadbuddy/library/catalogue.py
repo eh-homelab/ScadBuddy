@@ -53,6 +53,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
+from scadbuddy.library.pipelines import inputs_version_of
 from scadbuddy.library.presets import (
     PresetStore,
     TemplatePreset,
@@ -203,6 +204,18 @@ class UiDeclaration(BaseModel):
     api: int = Field(ge=1)
 
 
+#: `pipeline/` plus a Python module name: no `..`, no subdirectory, nothing outside it.
+PIPELINE_MODULE_PATTERN = r"^pipeline/[A-Za-z0-9_]+\.py$"
+
+
+class PipelineDeclaration(BaseModel):
+    """``model.json``'s ``pipeline`` (spec 2026-09-27 §5.1)."""
+
+    module: str = Field(pattern=PIPELINE_MODULE_PATTERN, max_length=200)
+    #: The pipeline-API major (§8.1). The worker decides whether it can run it.
+    api: int = Field(ge=1)
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -229,6 +242,37 @@ class ModelMeta(BaseModel):
     #: Why a ``ui`` on disk could not be read. The template still lists and
     #: customizes with the generated form (§4.2); never written back to model.json.
     ui_error: str | None = Field(default=None, exclude=True)
+    #: The template's own pipeline (#427), or None for the default (§5.3).
+    pipeline: PipelineDeclaration | None = None
+    #: Why a ``pipeline`` on disk could not be read; never written back.
+    pipeline_error: str | None = Field(default=None, exclude=True)
+    #: The unreadable declaration as written: `Catalogue.create` writes it back to
+    #: model.json, so the author fixes it and the host never deletes it.
+    pipeline_raw: Any = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _readable_pipeline(cls, data: Any) -> Any:
+        """A malformed ``pipeline`` costs only the pipeline: the template still lists,
+        and its jobs fail at `load_pipeline` with this error (§5.1)."""
+        if not isinstance(data, dict) or data.get("pipeline") is None:
+            return data
+        try:
+            PipelineDeclaration.model_validate(data["pipeline"])
+        except ValidationError as error:
+            problems = "; ".join(
+                f"pipeline.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                if detail["loc"]
+                else f"pipeline: {detail['msg']}"
+                for detail in error.errors()
+            )
+            return {
+                **data,
+                "pipeline": None,
+                "pipeline_raw": data["pipeline"],
+                "pipeline_error": f"model.json's pipeline is not valid: {problems}",
+            }
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -360,6 +404,11 @@ class ModelRecord(ModelMeta):
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
     ui_error: str | None = None
+    pipeline_error: str | None = None
+    #: The pipeline's ``INPUTS_VERSION`` (§8.2), read without running it; 0 without one.
+    #: A factory, not ``= 0``: a literal default makes the generated TypeScript type
+    #: require the field, and every client-built record would have to carry it.
+    inputs_version: int = Field(default_factory=int)
 
 
 class Catalogue:
@@ -599,6 +648,15 @@ class Catalogue:
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version, self._has_history)
 
+    def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
+        if meta.pipeline is None:
+            return 0
+        path = self.paths.model_dir(slug) / meta.pipeline.module
+        try:
+            return inputs_version_of(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            return 0
+
     def _record(
         self,
         slug: str,
@@ -642,6 +700,8 @@ class Catalogue:
             **meta.model_dump(exclude={"media"}),
             media=media,
             ui_error=meta.ui_error,
+            pipeline_error=meta.pipeline_error,
+            inputs_version=self._inputs_version(slug, meta),
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
@@ -737,7 +797,10 @@ class Catalogue:
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
-            self.write_raw_meta(slug, meta.model_dump(exclude={"media"}))
+            written = meta.model_dump(exclude={"media"})
+            if meta.pipeline is None and meta.pipeline_raw is not None:
+                written["pipeline"] = meta.pipeline_raw  # the author's, to fix; never dropped
+            self.write_raw_meta(slug, written)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
