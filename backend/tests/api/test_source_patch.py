@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 
 from scadbuddy.core.authorship import (
     AGENT_AUTHOR_NAME,
@@ -15,6 +16,8 @@ from scadbuddy.core.authorship import (
     AUTHOR_SESSION_HEADER,
     PRINCIPAL_TRAILER,
     SESSION_TRAILER,
+    InvalidAuthorError,
+    author_from,
 )
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.history import git_env
@@ -209,3 +212,10 @@ def test_a_malformed_author_is_a_400(client: TestClient, headers: dict[str, str]
     )
     assert response.status_code == 400
     assert source(client) == FIRST
+
+
+@pytest.mark.parametrize("header", [AUTHOR_HEADER, AUTHOR_SESSION_HEADER])
+def test_a_trailing_newline_is_not_a_valid_author(header: str) -> None:
+    # `$` matches before a final newline; the patterns end at \Z (review of #741).
+    with pytest.raises(InvalidAuthorError):
+        author_from(Headers({header: "token-abc\n"}))

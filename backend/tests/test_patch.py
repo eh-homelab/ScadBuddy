@@ -47,6 +47,13 @@ def test_a_removed_line_that_starts_with_two_dashes_is_not_a_file_header() -> No
     assert apply_unified_diff(source, "@@ -1,3 +1,2 @@\n x\n--- y\n z\n") == "x\nz\n"
 
 
+def test_a_removed_and_an_added_line_that_look_like_a_file_header_are_hunk_lines() -> None:
+    # Review of #741: inside a hunk's counted lines, `--- a` then `+++ b` is
+    # "-- a" removed and "++ b" added, not a second file.
+    diff = "--- a/model.scad\n+++ b/model.scad\n@@ -1,2 +1,2 @@\n--- foo\n+++ bar\n x\n"
+    assert apply_unified_diff("-- foo\nx\n", diff) == "++ bar\nx\n"
+
+
 def test_no_trailing_newline_is_kept_as_the_source_had_it() -> None:
     diff = "@@ -2 +2 @@\n-b\n+B\n\\ No newline at end of file\n"
     assert apply_unified_diff("a\nb", diff) == "a\nB"

@@ -58,8 +58,10 @@ SESSION_TRAILER = "ScadBuddy-Agent-Session"
 MAX_PRINCIPAL = 300
 #: Printable ASCII with no spaces: principal ids are `kind:<id>`, a URL-ish issuer
 #: and subject for OIDC.
-_PRINCIPAL = re.compile(rf"^[\x21-\x7e]{{1,{MAX_PRINCIPAL}}}$")
-_SESSION = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# \Z, not $: `$` also matches before a trailing newline, which would reach the
+# trailer (review of #741).
+_PRINCIPAL = re.compile(rf"^[\x21-\x7e]{{1,{MAX_PRINCIPAL}}}\Z")
+_SESSION = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 
 
 @dataclass(frozen=True)
