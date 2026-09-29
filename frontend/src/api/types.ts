@@ -82,6 +82,13 @@ export type ModelPatch = Schemas['ModelPatch']
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']
 export type ConnectionTest = Schemas['ConnectionTest']
+/** #322 — one Bambuddy scope's result in the connection test. */
+export type ScopeCheck = Schemas['ScopeCheck']
+/** #322 — where an env-seeded setting's value comes from. */
+export type SettingSource = NonNullable<Settings['sources']>[string]
+export type BootstrapValue = Schemas['BootstrapValue']
+export type RememberedChoices = Schemas['RememberedChoices']
+export type BambuddyStatus = Schemas['BambuddyStatus']
 export type BambuddyTargets = Schemas['BambuddyTargets']
 export type BambuddyFolder = Schemas['Folder']
 export type BambuddyPrinter = Schemas['Printer']
