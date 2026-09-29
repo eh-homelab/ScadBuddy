@@ -142,6 +142,8 @@ export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
 export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
+export type ProjectFile = Schemas['ProjectFile']
+export type LastProject = Schemas['LastProject']
 export type AttachResult = Schemas['AttachResult']
 
 /** #81 — the build volume the preview draws and checks the model against. */

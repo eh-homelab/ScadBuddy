@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.core.config import available_cpus, default_solid_concurrency, load_config
+from scadbuddy.core.config import (
+    ACTIVITY_TIMEOUT_MARGIN,
+    available_cpus,
+    default_solid_concurrency,
+    load_config,
+)
 from scadbuddy.core.settings import Settings
 from tests.conftest import UNUSED_DATABASE_URL
 
@@ -26,6 +31,42 @@ def test_settings_refuse_to_start_without_a_database_url(
         monkeypatch.setenv("SCADBUDDY_DATABASE_URL", value)
     with pytest.raises(ValueError, match="SCADBUDDY_DATABASE_URL is required"):
         Settings()
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "SCADBUDDY_TEMPORAL_ADDRESS",
+        "SCADBUDDY_TEMPORAL_NAMESPACE",
+        "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER",
+    ],
+)
+@pytest.mark.parametrize("value", ["  ", " temporal:7233", "temporal:7233\n"])
+def test_a_temporal_setting_with_whitespace_is_refused_by_name(
+    variable: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whitespace-only would read as "set" (the Temporal path) with a garbage value."""
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match=variable):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "variable", ["SCADBUDDY_TEMPORAL_NAMESPACE", "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER"]
+)
+def test_an_empty_temporal_namespace_or_queue_is_refused_by_name(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(variable, "")
+    with pytest.raises(ValueError, match=variable):
+        Settings()
+
+
+def test_an_empty_temporal_address_keeps_the_legacy_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "")
+    assert Settings().temporal_address == ""
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
@@ -210,3 +251,36 @@ def test_a_duplicate_staging_max_age_under_one_is_refused(tmp_path: Path, value:
         load_config({"SCADBUDDY_DUPLICATE_STAGING_MAX_AGE": value})
     with pytest.raises(ValueError, match="SCADBUDDY_DUPLICATE_STAGING_MAX_AGE must be at least 1"):
         Settings(data_dir=tmp_path, duplicate_staging_max_age=float(value)).to_config()
+
+
+def test_temporal_settings_reach_the_config() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        temporal_address="temporal:7233",
+        render_timeout=45.0,
+    )
+    config = settings.to_config()
+    assert config.temporal_address == "temporal:7233"
+    assert config.temporal_namespace == "scadbuddy"
+    assert config.temporal_task_queue_render == "render"
+    assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
+
+
+def test_load_config_reads_the_temporal_settings() -> None:
+    config = load_config(
+        {
+            "SCADBUDDY_TEMPORAL_ADDRESS": "temporal:7233",
+            "SCADBUDDY_TEMPORAL_NAMESPACE": "elsewhere",
+            "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER": "render-2",
+        }
+    )
+    assert config.temporal_address == "temporal:7233"
+    assert config.temporal_namespace == "elsewhere"
+    assert config.temporal_task_queue_render == "render-2"
+
+
+def test_load_config_defaults_the_temporal_settings() -> None:
+    config = load_config({})
+    assert config.temporal_address == ""
+    assert config.temporal_namespace == "scadbuddy"
+    assert config.temporal_task_queue_render == "render"
