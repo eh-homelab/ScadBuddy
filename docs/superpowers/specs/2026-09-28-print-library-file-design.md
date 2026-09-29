@@ -67,8 +67,10 @@ two implementations:
 
 **Agent coverage.** `agent/test/coverage.test.ts` fails CI when a backend route has
 neither an agent tool nor an entry in `PENDING_ROUTES` or `NOT_A_TOOL` in
-`agent/src/tools/coverage.ts`. The new routes go in `PENDING_ROUTES`, citing #313. An
-agent tool for library prints is a follow-up.
+`agent/src/tools/coverage.ts`. The new routes go in `NOT_A_TOOL`, with a
+`LIBRARY_PRINT_LATER` reason citing #313. `PENDING_ROUTES` can't hold them, because the
+coverage test fails for a pending operation that is already in `backend/openapi.json`.
+An agent tool for library prints is a follow-up.
 
 ## 5. Frontend
 
