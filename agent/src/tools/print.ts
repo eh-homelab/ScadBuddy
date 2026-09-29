@@ -42,18 +42,19 @@ type FetchResult<T> = { data?: T; error?: unknown; response: Response }
 export const RUN_REATTEMPTS = 3
 
 /**
- * The request never got the backend's own answer: a 502/503/504 from something in
- * between, whose body is not one of the backend's problems (they always carry a `detail`).
+ * The request never got the backend's own answer: a 502/503/504, or Cloudflare's 524,
+ * from something in between, whose body is not one of the backend's problems (they
+ * always carry a `detail`). The same list as the browser client's `unanswered`.
  */
 function unanswered(result: FetchResult<unknown>): boolean {
   const { error, response } = result
   const detail = typeof error === 'object' && error !== null && typeof (error as { detail?: unknown }).detail === 'string'
-  return [502, 503, 504].includes(response.status) && !detail
+  return [502, 503, 504, 524].includes(response.status) && !detail
 }
 
 /**
  * `send`, again while it goes unanswered (a dropped connection, fetch's `TypeError`, or
- * a proxy's own 502/503/504), as the browser client's `reattach` does. Safe only for a
+ * a proxy's own 502/503/504/524), as the browser client's `reattach` does. Safe only for a
  * request keyed to its run: the POST's `request_id` makes a re-send the same run, never a
  * second print, and the GET only reads. A problem the backend wrote is never re-sent.
  */

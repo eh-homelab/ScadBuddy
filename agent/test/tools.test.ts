@@ -357,9 +357,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(ids[1]).toBe(ids[0])
     })
 
-    it("re-sends after a proxy's own 504 page, with the same request_id", async () => {
+    it.each([502, 503, 504, 524])("re-sends after a proxy's own %i page, with the same request_id", async (code) => {
       const { ids, handler } = posts([
-        () => new HttpResponse('<html>upstream timed out</html>', { status: 504, headers: { 'content-type': 'text/html' } }),
+        () => new HttpResponse('<html>upstream timed out</html>', { status: code, headers: { 'content-type': 'text/html' } }),
         () => HttpResponse.json(running, { status: 202 }),
       ])
       server.use(handler, done)
