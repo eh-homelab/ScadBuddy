@@ -44,6 +44,8 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     InventoryRemain,
     LibraryFile,
+    LibraryListRow,
+    LibraryPlates,
     LocalPresetCatalogue,
     PresetCatalogue,
     Printer,
@@ -521,6 +523,35 @@ class BambuddyClient:
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
+
+    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
+        """``GET /library/files/`` — one folder's files, or the root's without one
+        (``include_root`` defaults to true). One read, however many files: Bambuddy
+        does not paginate it."""
+        what = (
+            "list the library files"
+            if folder_id is None
+            else f"list the files of library folder {folder_id}"
+        )
+        response = await self._send(
+            "GET",
+            "/library/files/",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id} if folder_id is not None else None,
+        )
+        return [LibraryListRow.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def library_plates(self, file_id: int) -> LibraryPlates:
+        """``GET /library/files/{id}/plates`` — the plates Bambuddy reads out of the
+        file, with whether each has a cover image."""
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}/plates",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read the plates of library file {file_id}",
+        )
+        return LibraryPlates.model_validate(response.json())
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a

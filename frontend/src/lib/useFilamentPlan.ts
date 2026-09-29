@@ -1,21 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError } from '../api/client'
+import { ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
 import { fitPlan, seedPlan } from './filaments'
+import { sourceApi, sourceKey, type PrintSource } from './printSource'
+import { useLatest } from './useLatest'
 
 /**
  * #87 — the inventory behind the filament picker, and the plan built on it, for the plate
- * (or all plates) chosen of an output whose choices have been read.
+ * (or all plates) chosen of a source whose choices have been read.
  *
  * `planChanged` is whether the plan differs from the server's suggestion, which is what
  * decides whether it is remembered for the model (#78).
  */
 export function useFilamentPlan(
-  outputId: string | undefined,
+  source: PrintSource | undefined,
   choices: ChoicesView | null,
   plate: number | 'all',
   size: string,
 ) {
+  const key = sourceKey(source)
+  const latest = useLatest(source)
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
@@ -42,7 +46,8 @@ export function useFilamentPlan(
   useEffect(() => {
     const token = (filamentAttempt.current += 1)
     setFilamentError(null)
-    if (!choices || !outputId) {
+    const current = latest.current
+    if (!choices || !current) {
       setFilaments(null)
       setPlan([])
       return
@@ -57,9 +62,8 @@ export function useFilamentPlan(
       seed(choices.filaments)
       return
     }
-    api
+    sourceApi(current)
       .getFilaments(
-        outputId,
         allPlates
           ? { printerId: choices.printer_id ?? null, allPlates: true }
           : { printerId: choices.printer_id ?? null, plateId: chosenPlate },
@@ -73,7 +77,7 @@ export function useFilamentPlan(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, outputId, chosenPlate, allPlates, rememberedPlan])
+  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =
