@@ -359,7 +359,9 @@ workers restart.
   render worker, and it shares the API's `/data` volume, as described under "Render
   worker (#424)" above.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
-  and ScadBuddy deletes only inside a `Work/` folder. To switch:
+  and ScadBuddy deletes only inside a `Work/` folder of the Library folder Settings
+  names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  To switch:
   1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
   2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
      **Render key**.
