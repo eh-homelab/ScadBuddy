@@ -32,6 +32,6 @@ def refresh_asset_metrics(state: AppState) -> None:
 def metrics(state: StateDep) -> Response:
     # The queue gauges are read from the job store per scrape; a failed read is
     # reported as scadbuddy_render_store_up 0 rather than failing the scrape.
-    state.queue.refresh_metrics()
+    state.render.refresh_metrics()
     refresh_asset_metrics(state)
     return Response(state.metrics.exposition(), media_type=CONTENT_TYPE_LATEST)

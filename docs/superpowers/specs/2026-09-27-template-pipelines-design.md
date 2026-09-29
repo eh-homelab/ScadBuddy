@@ -234,6 +234,14 @@ walls but not floors or corner posts. Children are started with
 another job may be sharing, and a Part nothing references is swept by the store's
 grace rule (§6.2).
 
+*(phase 1 note)* On the Temporal path the render cache is the piece's blob and its
+`piece.json` marker. `finish_piece` writes the marker last, atomically, and the
+`cached_piece` activity answers a later `RenderPiece` from it without running
+`openscad`. A piece with no revision is never served from the cache: its key stands for
+a live source that can change under it, the same rule the legacy `keep_render` applied.
+The legacy `models/<slug>/.renders/<key>/` cache went with the legacy queue (#546);
+nothing reads or writes it.
+
 Activity timeouts, and who kills what. `SCADBUDDY_RENDER_TIMEOUT` (operator-set,
 default 120 s) stays the one number an operator tunes: the `openscad_*` activities
 run the subprocess under it exactly as `runner.py` does today, and their
@@ -249,6 +257,11 @@ group** (`os.killpg`), because a template activity may spawn children of its own
 and a plain `kill()` on the parent would orphan them. Heartbeat every 5 s; retry
 policy 3 attempts with backoff.
 
+*(phase 1 note)* Two attempts of one piece can overlap in one blob directory: a retry
+after an activity timeout can start while the first attempt's `openscad` is still being
+killed. Every writer overwrites its files, and the `piece.json` marker is written last,
+so the blob is consistent once the marker exists.
+
 ### 3.5 Worker versioning
 
 Workers register with a **build ID** = the image's `SCADBUDDY_REVISION`. Temporal's
@@ -258,6 +271,23 @@ in-flight runs, then exit. The Deployment's `preStop` waits for the worker's
 `shutdown()` so a rolling update never kills a mid-house render. Workflow code
 carries `workflow.patched(...)` markers only where a change must apply to running
 workflows; the default is to let them finish on the old build.
+
+*(phase 1 note)* As built, there is no `preStop`:
+- **Start.** A worker makes its own build the deployment's current version when it
+  starts (`make_current`), so a new build receives new workflows once it is polling.
+- **SIGTERM.** tini forwards it, and it starts the drain. The worker keeps polling until
+  no workflow pinned to its build is running (a visibility count on
+  `TemporalWorkerDeploymentVersion`). This wait is bounded by
+  `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Past the bound the worker exits
+  anyway: workflows still pinned to its build have no poller, and their jobs stay
+  `running` until that build polls again.
+- **Activities.** After that, the SDK gives in-flight activities up to
+  `SCADBUDDY_RENDER_TIMEOUT + 60` s.
+- **Grace period.** `terminationGracePeriodSeconds` must be at least
+  `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown (e.g.
+  30 s): 690 s at the default.
+- **In-process mode.** `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (dev and tests) does not
+  drain.
 
 ### 3.6 To verify against the pinned `temporalio` before phase 1 lands
 
@@ -276,6 +306,8 @@ worker build-ID versioning semantics in the pinned SDK release (§3.5).
 - The real `openscad` path runs in the Dockerfile's `test` image as today.
 - CI's `postgres:17` service stays; a `temporalio/auto-setup` service is added to the
   backend job for an end-to-end submit → done test against a fake store.
+  (Phase 1 note: there is no such service. The `requires_temporal` tests start the
+  `temporal` CLI's dev server, which the Dockerfile's `test` image carries.)
 
 ## 4. Template UI
 
@@ -682,7 +714,8 @@ leaves every template working.
    Deployment at **one replica** sharing the API's data volume, with the `BlobStore`
    interface over the `local` backend (§6.2); worker versioning; `clusters`
    manifests (Temporal operator + CNPG, §3.1); `bambuddy_render_api_key` in
-   Settings (§9). Visible change: none,
+   Settings (§9). (Phase 1 note: the render key moved to phase 3, store-backed with
+   the Bambuddy blob store that uses it.) Visible change: none,
    except a worker restart no longer loses a render. Scaling render workers past one
    waits for phase 3.
 2. **Template UI** (§4, §8.1). `ui` in `model.json`, served modules, `Host` v1,

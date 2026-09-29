@@ -2,18 +2,17 @@
 
 A notification only reaches the session that listens, so the listener holds a
 dedicated connection outside any pool: a pooled connection goes back to other
-callers between uses. Each process needs one, whatever it listens for -- the render
-queue's wake-ups (`scadbuddy_render_queue`, #270) and the event bus
-(`scadbuddy_events`, spec §7) -- so both register a channel here and share it.
+callers between uses. Each process needs one, whatever it listens for -- today the
+event bus (`scadbuddy_events`, spec §7) -- and every follower registers a channel here
+and shares it.
 
-Every (re)connect tells each channel's ``on_connect``, with whether it is a
-*re*connect: anything NOTIFYed while nothing listened is gone, and each channel's
-owner decides what that costs it (the queue wakes its workers to look; the event bus
-publishes ``bus.resync``). A dropped or refused connection is retried after a capped
-exponential back-off with jitter, so replicas do not all reconnect in step after a
-database restart. An idle connection is checked every ``check_interval``, since a
-half-open TCP connection delivers nothing and raises nothing until something is sent
-on it.
+Every (re)connect tells each channel's ``on_connect``, with whether it is a *re*connect:
+anything NOTIFYed while nothing listened is gone, and each channel's owner decides what
+that costs it (the event bus publishes ``bus.resync``). A dropped or refused connection
+is retried after a capped exponential back-off with jitter, so replicas do not all
+reconnect in step after a database restart. An idle connection is checked every
+``check_interval``, since a half-open TCP connection delivers nothing and raises nothing
+until something is sent on it.
 
 Several owners may :meth:`~PgListener.run` it; the connection lives while at least
 one does. Channels are registered before the first run: a channel added to a live

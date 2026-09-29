@@ -26,36 +26,23 @@ CGROUP_ROOT = Path("/sys/fs/cgroup")
 # be a new job while this many already wait is refused with 503 + Retry-After.
 # Superseded and coalesced submits never count against it.
 DEFAULT_RENDER_QUEUE_MAX = 0
-# How long a job may wait for a worker before it is failed unrendered; 0 (the
-# default) never expires one -- every submit is accepted and, in time, rendered.
-DEFAULT_RENDER_QUEUE_TIMEOUT = 0.0
-# How often an idle worker looks for work it was not woken for: jobs another replica
-# submitted, or ones a reaped lease put back. With Postgres this is the poll only
-# while the LISTEN connection is down; it is also a failed claim's back-off.
-DEFAULT_RENDER_POLL_INTERVAL = 1.0
-# Postgres only: while the LISTEN connection is up, a NOTIFY wakes the workers for
-# every job any replica queues, and the poll only has to catch a notification lost
-# around a reconnect -- so it can be long.
-DEFAULT_RENDER_FALLBACK_POLL_INTERVAL = 30.0
-# A running job whose worker has not heartbeated for this long is presumed lost and
-# requeued (Postgres only; heartbeats go every third of it).
-DEFAULT_RENDER_LEASE_TIMEOUT = 60.0
-# Tries a job gets before a lost worker fails it for good.
-DEFAULT_RENDER_MAX_ATTEMPTS = 2
 # SLO targets. Not limits -- nothing is refused or dropped on reaching them. They are
 # exported beside the measurements (`scadbuddy_render_queue_depth_slo`,
 # `scadbuddy_render_latency_slo_seconds`) for alerts to compare against.
 DEFAULT_RENDER_QUEUE_DEPTH_SLO = 16
 DEFAULT_RENDER_LATENCY_SLO = 60.0
 DEFAULT_DATABASE_POOL_SIZE = 10
-# Temporal (spec 2026-09-27 §3.1). An empty address keeps the legacy render queue;
-# the final phase-1 PR makes it required. The namespace and task queue have defaults.
+# Temporal (spec 2026-09-27 §3.1): the address is required (#546); the namespace and
+# task queue have defaults.
 DEFAULT_TEMPORAL_NAMESPACE = "scadbuddy"
 DEFAULT_TEMPORAL_TASK_QUEUE_RENDER = "render"
 # An openscad activity's start_to_close is derived from the one timeout an operator
 # tunes (§3.4): the subprocess is killed at render_timeout, and Temporal gives up on
 # the attempt this much later, so the two can never invert.
 ACTIVITY_TIMEOUT_MARGIN = 60.0
+
+#: Library clones at once, in the API and the render worker alike.
+INSTALL_CONCURRENCY = 2
 # The event log (Postgres only) is for Last-Event-ID replay after a short disconnect,
 # not an audit trail: a day of events, and never more than this many rows. 0 is no
 # limit on that dimension.
@@ -109,11 +96,6 @@ class Config:
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
-    render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
-    render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
-    render_fallback_poll_interval: float = DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
-    render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
-    render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
@@ -157,7 +139,6 @@ class Config:
         for name, value in (
             ("SCADBUDDY_SOLID_CONCURRENCY", self.solid_concurrency),
             ("SCADBUDDY_RENDER_QUEUE_MAX", self.render_queue_max),
-            ("SCADBUDDY_RENDER_QUEUE_TIMEOUT", self.render_queue_timeout),
             ("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO", self.render_queue_depth_slo),
             ("SCADBUDDY_RENDER_LATENCY_SLO", self.render_latency_slo),
             ("SCADBUDDY_ASSET_MAX_TOTAL_BYTES", self.asset_max_total_bytes),
@@ -166,17 +147,6 @@ class Config:
         ):
             if value < 0:
                 raise ValueError(f"{name} must be at least 0, not {value}")
-        for name, value in (
-            ("SCADBUDDY_RENDER_POLL_INTERVAL", self.render_poll_interval),
-            ("SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL", self.render_fallback_poll_interval),
-            ("SCADBUDDY_RENDER_LEASE_TIMEOUT", self.render_lease_timeout),
-        ):
-            if value <= 0:
-                raise ValueError(f"{name} must be more than 0, not {value}")
-        if self.render_max_attempts < 1:
-            raise ValueError(
-                f"SCADBUDDY_RENDER_MAX_ATTEMPTS must be at least 1, not {self.render_max_attempts}"
-            )
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
             raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
@@ -297,22 +267,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             source.get("SCADBUDDY_SOLID_CONCURRENCY") or DEFAULT_SOLID_CONCURRENCY
         ),
         render_queue_max=int(source.get("SCADBUDDY_RENDER_QUEUE_MAX") or DEFAULT_RENDER_QUEUE_MAX),
-        render_queue_timeout=float(
-            source.get("SCADBUDDY_RENDER_QUEUE_TIMEOUT") or DEFAULT_RENDER_QUEUE_TIMEOUT
-        ),
-        render_poll_interval=float(
-            source.get("SCADBUDDY_RENDER_POLL_INTERVAL") or DEFAULT_RENDER_POLL_INTERVAL
-        ),
-        render_fallback_poll_interval=float(
-            source.get("SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL")
-            or DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
-        ),
-        render_lease_timeout=float(
-            source.get("SCADBUDDY_RENDER_LEASE_TIMEOUT") or DEFAULT_RENDER_LEASE_TIMEOUT
-        ),
-        render_max_attempts=int(
-            source.get("SCADBUDDY_RENDER_MAX_ATTEMPTS") or DEFAULT_RENDER_MAX_ATTEMPTS
-        ),
         render_queue_depth_slo=int(
             source.get("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO") or DEFAULT_RENDER_QUEUE_DEPTH_SLO
         ),

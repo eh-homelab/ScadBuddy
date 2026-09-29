@@ -21,6 +21,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -57,6 +58,7 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
 
 
@@ -508,6 +510,7 @@ def small_limit_client(
         frontend_dir=Path("/nonexistent"),
         media_upload_max_bytes=1024 * 1024,
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
@@ -616,6 +619,7 @@ def test_the_limit_comes_from_the_environment(
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
     with TestClient(create_app(settings)) as client:
         # Reported read-only, for the UI's own check before an upload.

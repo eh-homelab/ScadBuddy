@@ -283,6 +283,7 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
     # Nothing listens on port 1: every connect is refused, and the store gives up
     # within its connect timeout instead of hanging the request.
     state = getattr(app.state, STATE_ATTR)
+    kept = state.decisions
     state.decisions = PostgresDecisionStore(
         "postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0
     )
@@ -303,7 +304,7 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
         assert [event for event in events if event.kind == "analyzer.decision"] == []
     finally:
         state.decisions.close()
-        state.decisions = None
+        state.decisions = kept
 
 
 @respx.mock

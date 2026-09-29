@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 import trimesh
-from temporalio.api.workflowservice.v1 import SetWorkerDeploymentCurrentVersionRequest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -28,10 +26,10 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import activities
@@ -40,46 +38,25 @@ from scadbuddy.workflows.activities import (
     RenderActivities,
     WorkerDeps,
     _heartbeating,
+    _main_result,
+    _process_output,
     _write_piece,
 )
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, render_worker
+from scadbuddy.workflows.client import make_current, render_worker
 from scadbuddy.workflows.models import (
     Failure,
     PieceRequest,
     PieceResult,
     PrepareResult,
     Projection,
+    RenderMainResult,
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import write_openscad_3mf
+from tests.conftest import fake_3mf_openscad, write_openscad_3mf
 from tests.support.temporal import temporal_client
 
-#: Writes a `.param`, copies the 3MF named in `fake-env.json` to every `.3mf` output,
-#: and exits 1 on a source containing `%%FAIL%%`.
-FAKE_OPENSCAD = """#!/usr/bin/env python3
-import json
-import pathlib
-import shutil
-import sys
-
-args = sys.argv[1:]
-settings = json.loads(pathlib.Path(sys.argv[0]).with_name("fake-env.json").read_text())
-out = args[args.index("-o") + 1] if "-o" in args else None
-source = pathlib.Path(args[-1])
-if "%%FAIL%%" in source.read_text(encoding="utf-8"):
-    print("ERROR: Parser error: syntax error", file=sys.stderr)
-    raise SystemExit(1)
-if out is not None and out.endswith(".param"):
-    pathlib.Path(out).write_text(
-        json.dumps({"parameters": [{"name": "width", "type": "number", "initial": 10}]})
-    )
-elif out is not None and out.endswith(".3mf"):
-    shutil.copyfile(settings["FAKE_3MF"], out)
-"""
-
-
-REVISION = "c0ffee"
+REVISION = "c0ffee0"
 
 
 class _History:
@@ -100,16 +77,7 @@ def _paths(tmp_path: Path, source: str = "cube();\n") -> DataPaths:
 
 
 def _config(tmp_path: Path, paths: DataPaths) -> Config:
-    binary = tmp_path / "bin" / "fake-openscad"
-    binary.parent.mkdir()
-    binary.write_text(FAKE_OPENSCAD, encoding="utf-8")
-    binary.chmod(0o755)
-    model = write_openscad_3mf(
-        tmp_path / "bin" / "drawn.3mf",
-        [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))],
-    )
-    (binary.parent / "fake-env.json").write_text(json.dumps({"FAKE_3MF": str(model)}))
-    return Config(openscad=str(binary), data_dir=paths.root)
+    return Config(openscad=fake_3mf_openscad(tmp_path / "bin"), data_dir=paths.root)
 
 
 def _deps(
@@ -201,7 +169,7 @@ async def test_each_stage_activity_holds_the_library_lease_for_itself(
     assert gate.leased(checkout) == []
 
 
-@pytest.mark.parametrize("stage", ["render_solids", "finish_piece"])
+@pytest.mark.parametrize("stage", ["render_main", "render_solids", "finish_piece"])
 async def test_a_checkout_removed_between_activities_fails_the_next_one(
     tmp_path: Path, stage: str
 ) -> None:
@@ -216,7 +184,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
     req = _request()
     checkout = _checkout(paths)
     prepared = await _prepared_with_library(acts, env, req, checkout)
-    main = await env.run(acts.render_main, req, prepared)
+    main = RenderMainResult()
+    if stage != "render_main":
+        main = await env.run(acts.render_main, req, prepared)
     if stage == "finish_piece":
         await env.run(acts.render_solids, req, prepared, main)
 
@@ -224,7 +194,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
         shutil.rmtree(checkout)
 
     with pytest.raises(LibraryNotInstalledError, match="bosl"):
-        if stage == "render_solids":
+        if stage == "render_main":
+            await env.run(acts.render_main, req, prepared)
+        elif stage == "render_solids":
             await env.run(acts.render_solids, req, prepared, main)
         else:
             await env.run(acts.finish_piece, req, prepared, main)
@@ -233,6 +205,17 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
 
 
 # ── the stage activities ───────────────────────────────────────────────────────
+
+
+def test_a_render_that_echoed_no_plates_carries_none_between_activities() -> None:
+    """`RenderMainResult` mirrors `ProcessOutput`: no `echo(plates = N)` is None in
+    both, never a count the template did not state."""
+    output = ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
+    assert output.plates is None
+    main = _main_result(output)
+    assert main.plates is None
+    assert _process_output(RenderMainResult.model_validate_json(main.model_dump_json())) == output
+    assert RenderMainResult().plates == output.plates
 
 
 async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> None:
@@ -294,6 +277,20 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     failure = raised.value.details[0]
     assert isinstance(failure, Failure)
     assert failure.error == raised.value.message
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:
+    paths = _paths(tmp_path, "%%FAIL%%\n")
+    acts = RenderActivities(_deps(tmp_path, paths))
+
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(acts.render_preview_png, _request().slug)
+
+    assert raised.value.type == "OpenSCADError"
+    assert raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
@@ -548,16 +545,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
-            await client.workflow_service.set_worker_deployment_current_version(
-                SetWorkerDeploymentCurrentVersionRequest(
-                    namespace=client.namespace,
-                    deployment_name=DEPLOYMENT_NAME,
-                    build_id="test",
-                    ignore_missing_task_queues=True,
-                    allow_no_pollers=True,
-                ),
-                timeout=timedelta(seconds=30),
-            )
+            await make_current(client, namespace=client.namespace, build_id="test")
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
@@ -586,3 +574,53 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert raw.stat().st_mtime_ns == rendered
     refs.drop_holder("job", job.id)
     assert key in refs.referenced()  # the repeat's own ref
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_revision_less_job_never_renders_over_another_jobs_files(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """#642: without a revision the key named only the slug and params, so a second job
+    re-rendered a live source into the first job's blob directory, under its row."""
+    paths = _paths(tmp_path)
+    refs = BlobRefs(projection.pool)
+    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with render_worker(
+            client,
+            queue,
+            RenderActivities(deps),
+            build_id="test",
+            max_concurrent_activities=2,
+        ):
+            await make_current(client, namespace=client.namespace, build_id="test")
+
+            async def rendered(job: Job) -> Path:
+                projection.submit(job, render_key("demo", {"width": 1}, None))
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                    ),
+                    timeout=120,
+                )
+                done = projection.read(job.id)
+                assert done.state == "done", done.error
+                assert done.result is not None
+                return paths.root / done.result.model_3mf
+
+            first = await rendered(_job(width=1))
+            before = first.read_bytes()
+            # The author edits the template, which now draws a taller box.
+            paths.model_source("demo").write_text("cube(20);\n", encoding="utf-8")
+            write_openscad_3mf(
+                tmp_path / "bin" / "drawn.3mf",
+                [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 20)))],
+            )
+            second = await rendered(_job(width=1))
+
+    assert first.read_bytes() == before
+    assert second.parent != first.parent
+    assert second.read_bytes() != before

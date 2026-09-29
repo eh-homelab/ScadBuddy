@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render import geometry
 from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
@@ -28,8 +27,9 @@ from scadbuddy.render.geometry import (
     split_colours,
     wall_samples,
 )
-from scadbuddy.render.jobs import UNCOLOURED_WARNING, RenderQueue
+from scadbuddy.render.jobs import UNCOLOURED_WARNING
 from scadbuddy.render.split import ColourPart
+from tests.conftest import render_once
 
 STORAGE_BOX = Path(__file__).resolve().parents[2] / "models" / "storage-box" / "model.scad"
 
@@ -350,15 +350,7 @@ async def test_a_bundled_model_analyses_as_closed_and_printable(tmp_path: Path) 
     paths.model_dir("storage-box").mkdir(parents=True)
     shutil.copy(STORAGE_BOX, paths.model_source("storage-box"))
 
-    queue = RenderQueue(Config(openscad=load_config().openscad, data_dir=paths.root), paths)
-    await queue.start()
-    try:
-        job = await queue.submit("storage-box", {"lid_type": "none"})
-        await queue.join()
-    finally:
-        await queue.aclose()
-    done = queue.store.read(job.id)
-    assert done.state == "done", done.error
+    done, _ = await render_once(paths, "storage-box", {"lid_type": "none"})
     assert done.result is not None
 
     analysis = analyze_3mf(paths.root / done.result.model_3mf, warnings=done.result.warnings)

@@ -25,14 +25,9 @@ from scadbuddy.core.config import (
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
-    DEFAULT_RENDER_FALLBACK_POLL_INTERVAL,
     DEFAULT_RENDER_LATENCY_SLO,
-    DEFAULT_RENDER_LEASE_TIMEOUT,
-    DEFAULT_RENDER_MAX_ATTEMPTS,
-    DEFAULT_RENDER_POLL_INTERVAL,
     DEFAULT_RENDER_QUEUE_DEPTH_SLO,
     DEFAULT_RENDER_QUEUE_MAX,
-    DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
     DEFAULT_TEMPORAL_NAMESPACE,
@@ -60,11 +55,6 @@ class Settings(BaseSettings):
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
-    render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
-    render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
-    render_fallback_poll_interval: float = DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
-    render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
-    render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
@@ -122,6 +112,16 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("temporal_address")
+    @classmethod
+    def _temporal_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError(
+                "SCADBUDDY_TEMPORAL_ADDRESS is required: ScadBuddy renders on Temporal. Set"
+                " it to the Temporal frontend's host:port, e.g. temporal-frontend:7233"
+            )
+        return value
+
     @field_validator("database_pool_size")
     @classmethod
     def _pool_size_at_least_one(cls, value: int) -> int:
@@ -129,10 +129,9 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
         return value
 
-    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Empty (for now)
-    # keeps renders on the legacy queue; set, they run on Temporal. The final phase-1
-    # PR makes it required and removes the legacy queue.
-    temporal_address: str = ""
+    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Required
+    # (#546): every render runs on Temporal (spec 2026-09-27 §3.1).
+    temporal_address: str = Field(default="", validate_default=True)
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
     # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
@@ -164,6 +163,17 @@ class Settings(BaseSettings):
     revision: str = "unknown"
     version: str = "dev"
 
+    @field_validator("revision")
+    @classmethod
+    def _revision_fits_a_visibility_query(cls, value: str) -> str:
+        # It is the worker's build id, which the drain puts inside a quoted visibility
+        # query (workflows/client.py `drained`).
+        if '"' in value or any(c.isspace() for c in value):
+            raise ValueError(
+                f"SCADBUDDY_REVISION must not contain a double quote or whitespace: {value!r}"
+            )
+        return value
+
     def to_config(self) -> Config:
         return Config(
             openscad=self.openscad,
@@ -172,11 +182,6 @@ class Settings(BaseSettings):
             render_concurrency=self.render_concurrency,
             solid_concurrency=self.solid_concurrency,
             render_queue_max=self.render_queue_max,
-            render_queue_timeout=self.render_queue_timeout,
-            render_poll_interval=self.render_poll_interval,
-            render_fallback_poll_interval=self.render_fallback_poll_interval,
-            render_lease_timeout=self.render_lease_timeout,
-            render_max_attempts=self.render_max_attempts,
             render_queue_depth_slo=self.render_queue_depth_slo,
             render_latency_slo=self.render_latency_slo,
             check_concurrency=self.check_concurrency,

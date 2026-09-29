@@ -7,7 +7,6 @@ import json
 import os
 import time
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,13 +14,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.api.deps import STATE_ATTR, get_queue
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
-from tests.api.conftest import MODEL_SLUG, wait_for_job
+from scadbuddy.worker import worker_deps_from_state
+from tests.api.conftest import wait_for_job
+from tests.conftest import MODEL_SLUG
 
 # The fake openscad exports `width` and `label` (initial "hi"); the annotation is
 # ScadBuddy's own overlay, so it turns `label` into a file parameter.
@@ -398,17 +399,15 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     assert preset.status_code == 201, preset.text
     # The job and the output are the same render: drop the job, so only the output
     # keeps `in_output`, and leave a second job as the only thing keeping `in_job`.
-    paths.job_file(job["id"]).unlink()
+    state: AppState = getattr(app.state, STATE_ATTR)
+    with state.projection.pool.connection() as conn:
+        conn.execute("DELETE FROM render_jobs WHERE id = %s", (job["id"],))
     other = client.post(render, json={"params": {"label": in_job}})
     wait_for_job(client, other.json()["job_id"])
     for asset_id in (in_output, in_preset, in_job, unused):
         _age(paths, asset_id, 30 * 86400)
 
-    # The jobs are in the stubbed queue the `app` fixture swaps in, not in the app's
-    # own (Postgres) one, so the sweep reads that queue's store.
-    assert client.portal is not None
-    stubbed = client.portal.call(app.dependency_overrides[get_queue])
-    assert sweep_assets(replace(getattr(app.state, STATE_ATTR), queue=stubbed)) == [unused]
+    assert sweep_assets(state) == [unused]
 
     for asset_id in (in_output, in_preset, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
@@ -446,4 +445,9 @@ def test_the_boot_recounts_the_upload_store(
 def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
     """One store for the routes and the renders, caps and all (#390)."""
     state = getattr(app.state, STATE_ATTR)
-    assert state.queue.assets is state.assets
+    deps = worker_deps_from_state(state)
+    try:
+        assert deps.assets is state.assets
+    finally:
+        assert deps.thumbnail_executor is not None
+        deps.thumbnail_executor.shutdown()

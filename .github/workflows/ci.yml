@@ -511,9 +511,13 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
+    # About 15 min on main, the pytest step 10 of it. `tests/api` rendering on
+    # Temporal (#546) costs about 15% more there, so 45 still leaves a wide margin.
     timeout-minutes: 45
     # For the backend tests that need Postgres: every one that builds the app
-    # (the settings live there, #401) and the render queue's store. The test
+    # (the settings live there, #401), the render queue's store, the `render_jobs`
+    # projection the Temporal path writes (#424) and the other `requires_postgres`
+    # tests. The test
     # container reaches it on the runner's loopback (`--network host`), and each
     # test works in a schema of its own. The container smoke test below uses it
     # too, since the app will not start without it.
@@ -582,9 +586,15 @@ jobs:
       # No `-m` filter: inside the image `requires_openscad` tests are supposed
       # to run, and the point of building the image at all is that they can.
       # `requires_postgres` ones run against the service container above.
+      # `requires_temporal` ones, and all of `tests/api` (every app renders on
+      # Temporal, #546), start one dev server per session from the image's
+      # `temporal` CLI (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER), so no Temporal
+      # service is needed. `--shm-size`: the dev server keeps its store on /dev/shm
+      # when it has 512 MiB free (tests/support/temporal.py); Docker's default 64 MiB
+      # would send it to disk, whose ~3 s first start is near temporalio's 5 s limit.
       - name: pytest
         run: >-
-          docker run --rm --network host
+          docker run --rm --network host --shm-size=1g
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
 
@@ -606,12 +616,34 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: |
           set -euo pipefail
+          # Temporal is required too (#546), and the e2e below renders, so a
+          # dummy address will not do: a dev server from the test image's pinned
+          # `temporal` CLI, on the runner's network, and the app's in-process
+          # worker. It registers one task queue, far under the dev server's
+          # 100-per-deployment-version cap that `tests/api` has to raise
+          # (tests/support/temporal.py), so no dynamic config here.
+          docker run -d --name temporal-ci --network host --entrypoint temporal \
+            scadbuddy:ci-test server start-dev --headless --ip 0.0.0.0 --port 7233 \
+            --namespace default --log-level warn
+          for _ in $(seq 1 30); do
+            if docker exec temporal-ci temporal operator cluster health \
+                --address 127.0.0.1:7233 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec temporal-ci temporal operator cluster health --address 127.0.0.1:7233
+
           # The database is required (#401). The service container is on the
           # runner, reached through the host gateway; the app migrates the
           # default schema, which the pytest step's per-test schemas never touch.
+          # Temporal is reached the same way.
           docker run -d --name scadbuddy-ci -p 18080:8080 \
             --add-host=host.docker.internal:host-gateway \
             -e SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/scadbuddy_test \
+            -e SCADBUDDY_TEMPORAL_ADDRESS=host.docker.internal:7233 \
+            -e SCADBUDDY_TEMPORAL_NAMESPACE=default \
+            -e SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
             scadbuddy:ci
 
           # `|| true` on the inspect: under `bash -e` a failed inspect (the
@@ -736,11 +768,13 @@ jobs:
 
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
-        run: docker logs scadbuddy-ci || true
+        run: |
+          docker logs scadbuddy-ci || true
+          docker logs temporal-ci || true
 
       - name: Tear down
         if: always()
-        run: docker rm -f scadbuddy-ci || true
+        run: docker rm -f scadbuddy-ci temporal-ci || true
 
   # ── Each template's verify.sh (#229) ────────────────────────────────────────
   #

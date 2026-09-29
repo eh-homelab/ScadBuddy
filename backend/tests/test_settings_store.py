@@ -27,6 +27,7 @@ from scadbuddy.library.settings_store import (
     StoredSettings,
 )
 from scadbuddy.render.pg_store import MIGRATIONS
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 #: Threads per race, and how many times a race is run.
 WRITERS = 8
@@ -35,7 +36,9 @@ ROUNDS = 5
 
 @pytest.fixture
 def settings(tmp_path: Path, pg_conninfo: str) -> Settings:
-    return Settings(data_dir=tmp_path, database_url=pg_conninfo)
+    return Settings(
+        data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+    )
 
 
 @pytest.fixture

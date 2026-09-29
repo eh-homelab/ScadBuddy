@@ -268,8 +268,8 @@ class PresetStore:
         )
 
     def open(self) -> None:
-        """Connect, and apply the migrations (the render queue's list, which is the
-        backend's one list) if the queue has not yet."""
+        """Connect, and apply the migrations (`pg_store`'s list, which is the backend's
+        one list) if nothing has yet."""
         if self._pool is None:
             return
         self._pool.open(wait=True, timeout=self.connect_timeout)

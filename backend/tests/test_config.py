@@ -11,13 +11,14 @@ from scadbuddy.core.config import (
     load_config,
 )
 from scadbuddy.core.settings import Settings
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 @pytest.fixture(autouse=True)
 def _database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every `Settings` needs one (#401); these tests are about the other fields."""
     monkeypatch.setenv("SCADBUDDY_DATABASE_URL", UNUSED_DATABASE_URL)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", UNUSED_TEMPORAL_ADDRESS)
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])
@@ -228,3 +229,28 @@ def test_temporal_settings_reach_the_config() -> None:
     assert config.temporal_namespace == "scadbuddy"
     assert config.temporal_task_queue_render == "render"
     assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
+
+
+@pytest.mark.parametrize("value", ['abc"def', "abc def", "abc\tdef", " abc"])
+def test_a_revision_with_a_quote_or_whitespace_is_refused(value: str) -> None:
+    """The worker's drain puts it inside a quoted visibility query (#424)."""
+    with pytest.raises(ValueError, match="SCADBUDDY_REVISION must not contain"):
+        Settings(revision=value)
+
+
+def test_a_commit_or_tag_revision_loads() -> None:
+    assert Settings(revision="d5028c3b").revision == "d5028c3b"
+    assert Settings(revision="v1.2.3-rc.1+build.7").revision == "v1.2.3-rc.1+build.7"
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_settings_refuse_to_start_without_a_temporal_address(
+    value: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every render runs on Temporal (#546)."""
+    if value is None:
+        monkeypatch.delenv("SCADBUDDY_TEMPORAL_ADDRESS")
+    else:
+        monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_TEMPORAL_ADDRESS is required"):
+        Settings()

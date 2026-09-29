@@ -54,7 +54,6 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     DecisionsDep,
     EventsDep,
-    OptionalDecisionsDep,
     OutputsDep,
     SettingsStoreDep,
     UploadsDep,
@@ -82,10 +81,6 @@ SCOPE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-scope"
 UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
 DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
 
-NO_DATABASE = (
-    "decisions are stored in Postgres and SCADBUDDY_DATABASE_URL is not set, so none "
-    "were applied and none can be recorded"
-)
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 #: Where an applied diff would land, and what applying does today.
 ROUTE_NOTE = (
@@ -364,7 +359,7 @@ async def post_run(
     uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
-    decisions: OptionalDecisionsDep,
+    decisions: DecisionsDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -378,12 +373,10 @@ async def post_run(
     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
     ignored and ``hidden`` findings with the decision behind each.
 
-    Without a database, or with one that cannot be reached, the analyzers still run;
+    With a database that cannot be reached, the analyzers still run;
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
     context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
-    if decisions is None:
-        return build_report(context, [], detail=body.detail, decisions_unavailable=NO_DATABASE)
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
     except DATABASE_ERRORS as error:

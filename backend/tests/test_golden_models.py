@@ -1,6 +1,6 @@
 """Golden fixtures for the example models in `models/`.
 
-Each case renders a model through the production pipeline — `RenderQueue` into a
+Each case renders a model through the production pipeline — `render_job` into a
 real `openscad`, the colour split, then the 3MF and GLB writers — and compares
 the result against the recording in `tests/golden/<case>/`.
 
@@ -25,11 +25,10 @@ import pytest
 import trimesh
 import trimesh.graph
 
-from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.jobs import JobResult, RenderQueue
+from scadbuddy.render.jobs import JobResult
 from scadbuddy.render.schema import ParamValue
-from tests.conftest import GOLDEN, installed_font_families
+from tests.conftest import GOLDEN, installed_font_families, render_once
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
@@ -66,18 +65,8 @@ async def render_case(case: Case, root: Path) -> tuple[JobResult, DataPaths]:
     paths.model_dir(case.slug).mkdir(parents=True)
     shutil.copy(MODELS / case.slug / "model.scad", paths.model_source(case.slug))
 
-    queue = RenderQueue(Config(openscad=load_config().openscad, data_dir=root), paths)
-    await queue.start()
-    try:
-        job = await queue.submit(case.slug, case.params)
-        await queue.join()
-    finally:
-        await queue.aclose()
-
-    done = queue.store.read(job.id)
-    assert done.state == "done", done.error
-    assert done.result is not None
-    return done.result, paths
+    _, result = await render_once(paths, case.slug, case.params)
+    return result, paths
 
 
 def _bodies(mesh: trimesh.Trimesh) -> int:

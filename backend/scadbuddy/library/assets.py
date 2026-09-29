@@ -578,7 +578,7 @@ def referenced_asset_ids(
       output whose ``params.json`` is gone, the root model of its 3MF, where the
       provenance "Edit in ScadBuddy" falls back to is stamped;
     - ``params``: every saved preset's values (they are in Postgres) and every job's
-      in the render queue's store, finished or not;
+      in the ``render_jobs`` projection, finished or not;
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
