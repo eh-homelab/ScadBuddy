@@ -1477,8 +1477,11 @@ class RenderQueue:
             job.warnings = result.warnings
         finally:
             heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
+            # `wait` does not raise the heartbeat's CancelledError, so it needs no
+            # `suppress` -- which would also swallow a cancel of this worker landing
+            # here (`aclose`), and the worker would loop on with `aclose` waiting
+            # for it forever (#643).
+            await asyncio.wait({heartbeat})
         elapsed = time.monotonic() - started
         self.metrics.render_duration.labels(outcome).observe(elapsed)
         self._render_estimate += RENDER_ESTIMATE_WEIGHT * (elapsed - self._render_estimate)
