@@ -5,7 +5,7 @@ import importlib
 import logging
 import pkgutil
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -296,7 +296,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     sweeper: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
+    components = AsyncExitStack()
     try:
+        # Every component's `run` (`core/components.py`), now that the database and
+        # the bus are up. One that fails exits those already running and fails the
+        # boot; closed below, before the queue it may be using.
+        await components.enter_async_context(state.components.running())
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
@@ -337,6 +342,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await sweeper
         await state.print_watcher.aclose()
+        await components.aclose()
         await state.queue.aclose()
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)

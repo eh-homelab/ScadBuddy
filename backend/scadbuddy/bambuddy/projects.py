@@ -145,7 +145,7 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             )
         )
 
-    folder = next(iter(await client.folders_by_project(project.id)), None)
+    folder = project_folder(await client.folders_by_project(project.id))
     if folder is None and request.folder_id is not None:
         # Flattened, like every other folder lookup here: `/library/folders` answers
         # with a tree, so a folder nested under another is invisible to a scan of the
@@ -172,7 +172,7 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
     picker offers folderless projects on the promise that the first send creates the
     folder. One read when the folder exists; :func:`ensure_project` otherwise.
     """
-    folder = next(iter(await client.folders_by_project(project_id)), None)
+    folder = project_folder(await client.folders_by_project(project_id))
     if folder is not None:
         return folder.id
     view = await ensure_project(client, ProjectRequest(project_id=project_id))
@@ -182,6 +182,17 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
             f"Bambuddy did not link a library folder to project {project_id}",
         )
     return view.folder_id
+
+
+def project_folder(folders: list[Folder]) -> Folder | None:
+    """The project's own folder among the folders linked to it.
+
+    A sub-folder linked to the project too (``Media/``, #309) would be in the by-project
+    list, and, in whatever order Bambuddy lists them, "the first one" could be it. The
+    project folder is the one whose parent is not another folder of the same project.
+    """
+    ids = {folder.id for folder in folders}
+    return next((folder for folder in folders if folder.parent_id not in ids), None)
 
 
 class AttachResult(BaseModel):

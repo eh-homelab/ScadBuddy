@@ -31,6 +31,9 @@ points at a Postgres they can create schemas in, e.g.
 postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
+running Temporal or a `temporal` CLI is on `PATH` (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`
+can point at one); the test image ships it.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
@@ -127,6 +130,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
+- A new backend service is a `Component` (`core/components.py`) in a `component.py`
+  beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
+  `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
