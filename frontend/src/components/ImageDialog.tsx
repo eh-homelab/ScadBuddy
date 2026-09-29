@@ -177,7 +177,6 @@ export function ImageDialog({
     }
   }
 
-  const readOnly = model?.origin === 'builtin'
   const canCopy = typeof ClipboardItem !== 'undefined' && Boolean(navigator.clipboard?.write)
 
   return (
@@ -332,14 +331,12 @@ export function ImageDialog({
           className="flex flex-wrap items-center gap-2 border-t border-line pt-3"
         >
           <span className="mr-auto text-[12px] text-muted">
-            {readOnly
-              ? 'A built-in template’s media cannot change. Duplicate it to keep images with it.'
-              : 'Keep it with the template, to use as its cover or in any image picker.'}
+            Keep it with the template, to use as its cover or in any image picker.
           </span>
           <Button
             size="sm"
             onClick={() => void keep(false)}
-            disabled={busy || !model || readOnly}
+            disabled={busy || !model}
             data-testid="image-add-media"
           >
             Add to media
@@ -347,7 +344,7 @@ export function ImageDialog({
           <Button
             size="sm"
             onClick={() => void keep(true)}
-            disabled={busy || !model || readOnly}
+            disabled={busy || !model}
             data-testid="image-add-cover"
           >
             Add as cover

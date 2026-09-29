@@ -151,11 +151,20 @@ export async function addMedia(
   return { model, id: added[added.length - 1]?.id }
 }
 
-/** Moves `id` to the front of the template's media, which makes it the cover. */
+/**
+ * Makes `id` the template's cover: moved to the front of a template of mine's media,
+ * chosen as a built-in's cover (#722), whose shipped items keep their place.
+ */
 export async function makeCover(slug: string, media: MediaItemIds, id: string): Promise<ModelSummary | null> {
   const ids = media.map((item) => item.id)
   if (ids[0] === id || !ids.includes(id)) return null
+  if (isBuiltin(slug)) return await api.setMediaCover(slug, id)
   return await api.reorderMedia(slug, [id, ...ids.filter((other) => other !== id)])
+}
+
+/** `core/paths.py` `is_builtin`: a built-in's id is `builtin:<slug>`. */
+function isBuiltin(slug: string): boolean {
+  return slug.startsWith('builtin:')
 }
 
 type MediaItemIds = { id: string }[]

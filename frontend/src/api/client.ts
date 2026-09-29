@@ -514,6 +514,17 @@ export const api = {
       body: JSON.stringify({ ids }),
     }),
 
+  /**
+   * #722 — makes `id` the cover: a template of mine's is moved to the front; a
+   * built-in's is a choice of its own (`media_cover`), and null goes back to the one
+   * it ships.
+   */
+  setMediaCover: (slug: string, id: string | null) =>
+    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+      method: 'PUT',
+      body: JSON.stringify({ id }),
+    }),
+
   deleteMedia: (slug: string, id: string) =>
     request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 

@@ -123,6 +123,8 @@ const state = {
   plates: {} as Record<string, NonNullable<Job['plates']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
+  /** #722 — each built-in's media overlay, read from its record on its first write. */
+  mediaOverlays: new Map<string, MediaOverlay>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -235,6 +237,7 @@ export function resetMockState(): void {
   state.mergeFiles = {}
   state.plates = {}
   state.mediaFiles.clear()
+  state.mediaOverlays.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -308,7 +311,8 @@ export function setMockRemembered(remembered: {
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
-  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media, media_cover: null } : m))
+  state.mediaOverlays.delete(slug)
 }
 
 /** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
@@ -772,7 +776,7 @@ function sniffMedia(bytes: Uint8Array): SniffedMedia | undefined {
   return undefined
 }
 
-function legacyItem(): MediaView {
+function legacyItem(readonly: boolean): MediaView {
   return {
     id: 'thumbnail',
     file: 'thumbnail.png',
@@ -780,14 +784,71 @@ function legacyItem(): MediaView {
     caption: '',
     poster: null,
     missing: false,
+    readonly,
     content_type: 'image/png',
     size: 67,
   }
 }
 
-/** A model's media: a model with no `media` lists its own thumbnail as the legacy item. */
+/**
+ * A model's media: a model with no `media` lists its own thumbnail as the legacy item
+ * (a built-in's, as everything it ships, `readonly`).
+ */
 function mediaOf(model: ModelSummary): MediaView[] {
-  return model.media ?? (model.thumbnail_source === 'model' ? [legacyItem()] : [])
+  const legacy = model.thumbnail_source === 'model' ? [legacyItem(model.origin === 'builtin')] : []
+  return model.media ?? legacy
+}
+
+/**
+ * #722 — a built-in's media as `_media_listing` builds it: what it ships (read-only),
+ * then what was added to it, with the chosen cover moved to the front.
+ */
+interface MediaOverlay {
+  shipped: MediaView[]
+  added: MediaView[]
+  cover: string | null
+}
+
+function overlayOf(model: ModelSummary): MediaOverlay {
+  const known = state.mediaOverlays.get(model.slug)
+  if (known) return known
+  const listed = mediaOf(model)
+  return {
+    shipped: listed.filter((item) => item.readonly),
+    added: listed.filter((item) => !item.readonly),
+    cover: model.media_cover ?? null,
+  }
+}
+
+function listOverlay(overlay: MediaOverlay): Pick<ModelSummary, 'media' | 'media_cover'> {
+  const listed = [...overlay.shipped, ...overlay.added]
+  const chosen = listed.find((item) => item.id === overlay.cover)
+  if (!chosen || chosen === listed[0]) return { media: listed, media_cover: null }
+  return { media: [chosen, ...listed.filter((item) => item !== chosen)], media_cover: chosen.id }
+}
+
+/** A built-in's media write: kept outside its history, so no revision (`_overlay_change`). */
+function writeOverlay(model: ModelSummary, overlay: MediaOverlay): ModelSummary {
+  state.mediaOverlays.set(model.slug, overlay)
+  const listed = listOverlay(overlay)
+  const media = listed.media ?? []
+  const covered = media.some((item) => !item.missing && (item.kind === 'image' || item.poster))
+  const updated: ModelSummary = {
+    ...model,
+    ...listed,
+    // Without a cover of its own, whatever stood in (its preview) still does.
+    ...(covered || model.thumbnail_source === 'model' ? coverOf(model.slug, media) : {}),
+  }
+  state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
+  return updated
+}
+
+function shippedItem(slug: string, id: string) {
+  return problem(
+    403,
+    'Error',
+    `'${id}' is shipped with the built-in template '${slug}' and is read-only; only the media added to it can change`,
+  )
 }
 
 /** The first write gives the legacy item an id of its own, as `_edit_media` does. */
@@ -838,10 +899,8 @@ function writeMedia(
   })
 }
 
-/** The model a media write is for, or the problem the backend answers first. */
-function mediaTarget(slug: string, write: boolean): ModelSummary | Response {
-  const refused = write ? refuseBuiltin(slug) : undefined
-  if (refused) return refused
+/** The model media is read from or written to, or the 404. A built-in takes media too (#722). */
+function mediaTarget(slug: string): ModelSummary | Response {
   const model = state.models.find((m) => m.slug === slug)
   return model ?? problem(404, 'Not Found', `no model named '${slug}'`)
 }
@@ -1290,6 +1349,10 @@ export const handlers = [
       name: body.name,
       origin: 'mine',
       origin_url: null,
+      // #722: a built-in's list as it is shown, what was added to it included, all
+      // of it the copy's own.
+      media: upstream.media?.map((item) => ({ ...item, readonly: false })),
+      media_cover: null,
       // #179: the copy is the upstream's directory, so its thumbnail.png and
       // README.md come too; its outputs, and so any plate fallback, do not -- nor
       // its default-render preview, a derived file the copy gets rendered afresh.
@@ -1574,7 +1637,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item || item.missing) return noMediaItem(slug, id)
@@ -1589,7 +1652,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id/poster`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item?.poster) return problem(404, 'Not Found', `'${slug}' has no poster for '${id}'`)
@@ -1600,7 +1663,7 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const form = await request.formData()
     const upload = await stagedPart(form, 'file')
@@ -1641,11 +1704,18 @@ export const handlers = [
       caption: formText(form, 'caption') ?? '',
       poster: poster ? `${id}-poster.${poster.sniffed!.extension}` : null,
       missing: false,
+      readonly: false,
       content_type: kind.contentType,
       size: upload.size,
     }
     state.mediaFiles.set(`${slug}/${item.file}`, upload.bytes)
     if (poster && item.poster) state.mediaFiles.set(`${slug}/${item.poster}`, poster.bytes)
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      const added = writeOverlay(model, { ...overlay, added: [...overlay.added, item] })
+      await delay(120)
+      return HttpResponse.json(added)
+    }
     // Videos are not committed (the models' `.gitignore`); images and posters are.
     const files: ChangedFiles = [
       ...(item.kind === 'image' ? [{ status: 'A', path: `media/${item.file}` }] : []),
@@ -1662,9 +1732,16 @@ export const handlers = [
   http.patch(`${base}/models/:slug/media/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const { caption } = (await request.json()) as { caption: string }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const added = overlay.added.map((item) => (item.id === id ? { ...item, caption } : item))
+      return HttpResponse.json(writeOverlay(model, { ...overlay, added }))
+    }
     const media = mediaOf(model)
     if (!media.some((item) => item.id === id)) return noMediaItem(slug, id)
     const updated = writeMedia(
@@ -1678,15 +1755,25 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/media/order`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
-    const { ids } = (await request.json()) as { ids: string[] }
-    const media = mediaOf(model)
+    const { ids: named } = (await request.json()) as { ids: string[] }
+    // A built-in's shipped items keep their place: their ids are passed over (#722).
+    const overlay = model.origin === 'builtin' ? overlayOf(model) : undefined
+    const shipped = new Set(overlay?.shipped.map((item) => item.id))
+    const ids = named.filter((id) => !shipped.has(id))
+    const media = overlay ? overlay.added : mediaOf(model)
     const byId = new Map(media.map((item) => [item.id, item]))
     const permutation =
       ids.length === media.length && new Set(ids).size === ids.length && ids.every((id) => byId.has(id))
     if (!permutation) {
-      return problem(422, 'Unprocessable Content', 'the order must name every media item exactly once')
+      const what = overlay ? 'added media item' : 'media item'
+      return problem(422, 'Unprocessable Content', `the order must name every ${what} exactly once`)
+    }
+    if (overlay) {
+      return HttpResponse.json(
+        writeOverlay(model, { ...overlay, added: ids.map((id) => byId.get(id)!) }),
+      )
     }
     const updated = writeMedia(
       slug,
@@ -1697,11 +1784,57 @@ export const handlers = [
     return HttpResponse.json(updated)
   }),
 
+  // #722 — the cover: a template of mine's first item; a built-in's a choice of its own.
+  http.put(`${base}/models/:slug/media/cover`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const { id } = (await request.json()) as { id: string | null }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (id === null) return HttpResponse.json(writeOverlay(model, { ...overlay, cover: null }))
+      const listed = [...overlay.shipped, ...overlay.added]
+      if (!listed.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const cover = listed[0]?.id === id ? null : id
+      return HttpResponse.json(writeOverlay(model, { ...overlay, cover }))
+    }
+    if (id === null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        "a template's cover is its first item: name the one to move there",
+      )
+    }
+    const media = mediaOf(model)
+    const chosen = media.find((item) => item.id === id)
+    if (!chosen) return noMediaItem(slug, id)
+    if (media[0] === chosen) return HttpResponse.json(view(model))
+    const updated = writeMedia(
+      slug,
+      `Make ${id} the cover of ${slug}`,
+      [],
+      converted([chosen, ...media.filter((item) => item !== chosen)]),
+    )
+    return HttpResponse.json(updated)
+  }),
+
   http.delete(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      return HttpResponse.json(
+        writeOverlay(model, {
+          added: overlay.added.filter((item) => item.id !== id),
+          shipped: overlay.shipped,
+          cover: overlay.cover === id ? null : overlay.cover,
+        }),
+      )
+    }
     const media = mediaOf(model)
     const gone = media.find((item) => item.id === id)
     if (!gone) return noMediaItem(slug, id)
@@ -1737,7 +1870,7 @@ export const handlers = [
     const media = mediaOf(model)
     const legacy = media.length === 0 || (media.length === 1 && media[0]!.id === 'thumbnail')
     const id = nextMediaId()
-    const cover: MediaView = { ...legacyItem(), id, file: `${id}.png` }
+    const cover: MediaView = { ...legacyItem(false), id, file: `${id}.png` }
     const updated = reviseModel(
       slug,
       `Set ${slug} thumbnail`,
@@ -1748,7 +1881,7 @@ export const handlers = [
         thumbnail_source: 'model',
         thumbnail_output_id: null,
         media: legacy
-          ? [legacyItem()]
+          ? [legacyItem(false)]
           : [cover, ...converted(media[0]!.kind === 'image' ? media.slice(1) : media)],
         thumbnail_preview_id: null,
       },

@@ -46,6 +46,7 @@ function missingVideo(): MediaView {
     caption: 'Lost with the volume',
     poster: null,
     missing: true,
+    readonly: false,
     content_type: 'video/mp4',
     size: null,
   }
@@ -80,6 +81,7 @@ describe('MediaManager (#279)', () => {
           caption: '',
           poster: null,
           missing: false,
+          readonly: false,
           content_type: 'image/png',
           size: file.size,
         }
@@ -240,22 +242,62 @@ describe('MediaManager (#279)', () => {
     expect(await serverIds()).toEqual(GALLERY)
   })
 
-  it('shows a built-in media read-only, and offers Duplicate instead', async () => {
+  it("shows a built-in's shipped media read-only, and lets media be added after it (#722)", async () => {
     const gallery = (await api.getModel(GALLERY_SLUG)).media ?? []
-    setMockMedia(BUILTIN_SLUG, gallery)
+    setMockMedia(
+      BUILTIN_SLUG,
+      gallery.map((entry) => ({ ...entry, readonly: true })),
+    )
     await render(BUILTIN_SLUG)
 
     expect(shownIds()).toEqual(GALLERY)
-    expect(screen.getByText(/Built-in media is read-only/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
-    for (const name of ['Move up', 'Move down', 'Make cover', 'Delete', 'Remove']) {
+    expect(screen.getByText(/ships is read-only/)).toBeInTheDocument()
+    expect(screen.getAllByText('Shipped')).toHaveLength(GALLERY.length)
+    for (const name of ['Move up', 'Move down', 'Delete', 'Remove']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
     }
     expect(screen.queryByRole('textbox', { name: 'Caption' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Add images or videos')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('media-dropzone')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Add images or videos')).toBeInTheDocument()
+    expect(screen.getByTestId('media-dropzone')).toBeInTheDocument()
     expect(item(0).getAttribute('draggable')).not.toBe('true')
     expect(screen.getByText('Printed in blue and orange')).toBeInTheDocument()
+  })
+
+  it("edits only a built-in's added media, and chooses its cover apart from the order", async () => {
+    const [shipped] = (await api.getModel(GALLERY_SLUG)).media ?? []
+    const added = (id: string, caption: string): MediaView => ({
+      ...shipped!,
+      id,
+      file: `${id}.png`,
+      caption,
+      readonly: false,
+    })
+    setMockMedia(BUILTIN_SLUG, [
+      { ...shipped!, id: 'front', readonly: true },
+      added('aaaaaaaaaaaa', 'One'),
+      added('bbbbbbbbbbbb', 'Two'),
+    ])
+    const { user } = await render(BUILTIN_SLUG)
+
+    expect(within(item(0)).queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(within(item(1)).getByRole('button', { name: 'Move up' })).toBeDisabled()
+    await user.click(within(item(1)).getByRole('button', { name: 'Move down' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb', 'aaaaaaaaaaaa']))
+
+    await user.click(within(item(2)).getByRole('button', { name: 'Make cover' }))
+    await waitFor(() => expect(shownIds()).toEqual(['aaaaaaaaaaaa', 'front', 'bbbbbbbbbbbb']))
+    expect(within(item(0)).getByText('Cover')).toBeInTheDocument()
+    // The chosen cover is not moved with the rest.
+    expect(within(item(0)).queryByRole('button', { name: 'Move up' })).not.toBeInTheDocument()
+    expect((await api.getModel(BUILTIN_SLUG)).media_cover).toBe('aaaaaaaaaaaa')
+
+    await user.click(within(item(0)).getByRole('button', { name: 'Use the shipped cover' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb', 'aaaaaaaaaaaa']))
+
+    await user.click(within(item(2)).getByRole('button', { name: 'Delete' }))
+    await user.click(within(item(2)).getByRole('button', { name: 'Yes, delete' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb']))
+    expect(await serverIds(BUILTIN_SLUG)).toEqual(['front', 'bbbbbbbbbbbb'])
   })
 
   it('says why a write failed and keeps the list as it was', async () => {
@@ -403,14 +445,14 @@ describe('MediaManager paste (#722)', () => {
     expect(upload).not.toHaveBeenCalled()
   })
 
-  it("does not take a paste into a built-in's media", async () => {
-    const { upload } = spyUploads()
+  it("takes a paste into a built-in's media, after what it ships (#722)", async () => {
+    const { upload, names } = spyUploads()
     await render(BUILTIN_SLUG)
-    expect(screen.queryByTestId('media-paste-hint')).not.toBeInTheDocument()
+    expect(screen.getByTestId('media-paste-hint')).toBeInTheDocument()
 
     fireEvent.paste(document.body, { clipboardData: clipboard([shot()]) })
 
-    await settle()
-    expect(upload).not.toHaveBeenCalled()
+    await waitFor(() => expect(names).toHaveLength(1))
+    expect(upload).toHaveBeenCalledWith(BUILTIN_SLUG, expect.any(File), {}, expect.any(Function))
   })
 })

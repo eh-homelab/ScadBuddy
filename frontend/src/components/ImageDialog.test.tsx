@@ -5,6 +5,7 @@ import type { ModelSummary } from '../api/types'
 import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { BUILTIN_SLUG, GALLERY_SLUG } from '../mocks/fixtures'
+import { setMockMedia } from '../mocks/handlers'
 import { ImageDialog } from './ImageDialog'
 
 afterEach(() => {
@@ -41,6 +42,7 @@ describe('ImageDialog', () => {
         caption: '',
         poster: null,
         missing: false,
+        readonly: false,
         content_type: 'image/png',
         size: file.size,
       }
@@ -204,10 +206,21 @@ describe('ImageDialog', () => {
     })
   })
 
-  it("cannot add to a built-in's media", async () => {
+  it("adds to a built-in's media, choosing its cover rather than reordering (#722)", async () => {
+    setMockMedia(BUILTIN_SLUG, [
+      { ...(await api.getModel(GALLERY_SLUG)).media![0]!, id: 'front', readonly: true },
+    ])
+    mockUploadMedia()
+    const reorder = vi.spyOn(api, 'reorderMedia')
+    const choose = vi
+      .spyOn(api, 'setMediaCover')
+      .mockImplementation(async (slug) => await api.getModel(slug))
     setup(await api.getModel(BUILTIN_SLUG))
-    expect(screen.getByTestId('image-add-media')).toBeDisabled()
-    expect(screen.getByTestId('image-add-cover')).toBeDisabled()
-    expect(screen.getByText(/Duplicate it to keep images with it/)).toBeInTheDocument()
+
+    expect(screen.queryByText(/cannot change/)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('image-add-cover'))
+    expect(await screen.findByText('Added to the media as the cover')).toBeInTheDocument()
+    expect(choose).toHaveBeenCalledWith(BUILTIN_SLUG, 'f00dfeedbeef')
+    expect(reorder).not.toHaveBeenCalled()
   })
 })
