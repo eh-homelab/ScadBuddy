@@ -40,6 +40,8 @@ export type SessionRouteDeps = {
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
+  /** Aborted by the app's `close()`: every open event stream ends, so shutdown does not wait on it. */
+  shutdown: AbortSignal
 }
 
 export type SessionView = {
@@ -244,6 +246,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return streamSSE(c, async (stream) => {
         const controller = new AbortController()
         stream.onAbort(() => controller.abort())
+        const onShutdown = () => controller.abort()
+        deps.shutdown.addEventListener('abort', onShutdown, { once: true })
+        if (deps.shutdown.aborted) controller.abort()
         const keepalive = setInterval(() => {
           void stream.write(': keepalive\n\n').catch(() => controller.abort())
         }, SSE_KEEPALIVE_MS)
@@ -254,6 +259,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           }
         } finally {
           clearInterval(keepalive)
+          deps.shutdown.removeEventListener('abort', onShutdown)
           controller.abort()
         }
       })

@@ -219,7 +219,7 @@ export function statusReason(ai: AiStatus): string | undefined {
   return `The agent service is unavailable: ${inner}.`
 }
 
-/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep. */
+/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep, and every session event stream. */
 export type AgentApp = Hono & { close: () => Promise<void> }
 
 export function createApp(deps: AppDeps): AgentApp {
@@ -358,11 +358,13 @@ export function createApp(deps: AppDeps): AgentApp {
   })
 
   const ready = deps.database ? deps.database.ready : () => Promise.resolve(false)
+  const shutdown = new AbortController()
   registerSessionRoutes(app, {
     sessions: deps.sessions,
     ready,
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
+    shutdown: shutdown.signal,
   })
   registerChatRoute(app, {
     sessions: deps.sessions,
@@ -396,6 +398,7 @@ export function createApp(deps: AppDeps): AgentApp {
 
   return Object.assign(app, {
     close: async () => {
+      shutdown.abort()
       await mcp?.close()
     },
   })
