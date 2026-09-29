@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Final, Literal
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -35,6 +38,8 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
+    DEFAULT_TEMPORAL_NAMESPACE,
+    DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     Config,
 )
 
@@ -79,8 +84,8 @@ class Settings(BaseSettings):
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
-    # The largest media upload (#274). Environment only: GET /settings reports it
-    # read-only, and nothing stores an override.
+    # The largest media upload (#274). Env-seeded like the rest (#322): Settings can
+    # change it, and the upload gate reads the value in effect on every request.
     media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
@@ -135,6 +140,29 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
         return value
 
+    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Empty (for now)
+    # keeps renders on the legacy queue; set, they run on Temporal. The final phase-1
+    # PR makes it required and removes the legacy queue.
+    temporal_address: str = ""
+    temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
+    temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
+    # process (one replica, dev and tests). Production runs `python -m
+    # scadbuddy.worker` as its own Deployment and leaves this off.
+    temporal_worker_inprocess: bool = False
+
+    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @classmethod
+    def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
+        # As `database_url`: a value that is only whitespace would read as "set" (the
+        # Temporal path) with a garbage address. Only the address may be empty.
+        name = f"SCADBUDDY_{(info.field_name or '').upper()}"
+        if value != value.strip():
+            raise ValueError(f"{name} must not start or end with whitespace: {value!r}")
+        if not value and info.field_name != "temporal_address":
+            raise ValueError(f"{name} must not be empty")
+        return value
+
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.
@@ -150,6 +178,16 @@ class Settings(BaseSettings):
         return value
 
     log_level: str = Field(default="INFO")
+
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_known(cls, value: str) -> str:
+        level = value.strip().upper()
+        if level not in LOG_LEVELS:
+            raise ValueError(
+                f"SCADBUDDY_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, not {value!r}"
+            )
+        return level
 
     # Stamped into the image by .github/workflows/build-image.yml
     # (SCADBUDDY_REVISION / SCADBUDDY_VERSION build args): the commit and the
@@ -192,6 +230,9 @@ class Settings(BaseSettings):
             asset_sweep_grace=self.asset_sweep_grace,
             asset_sweep_interval=self.asset_sweep_interval,
             duplicate_staging_max_age=self.duplicate_staging_max_age,
+            temporal_address=self.temporal_address,
+            temporal_namespace=self.temporal_namespace,
+            temporal_task_queue_render=self.temporal_task_queue_render,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
@@ -213,6 +254,141 @@ class Settings(BaseSettings):
         if self.frontend_dir is not None:
             return self.frontend_dir if self.frontend_dir.is_dir() else None
         return _first_directory(REPO_ROOT / "frontend" / "dist", CONTAINER_FRONTEND_DIR)
+
+
+#: What ``log_level`` takes: the standard library's own level names.
+LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+#: The fields the UI cannot set (#322), each with the reason Settings shows beside it.
+#: Every other field of :class:`Settings` is env-seeded: ``SCADBUDDY_<FIELD>`` seeds it,
+#: a value saved in the UI wins, and a reset goes back to the environment, then the
+#: default. ``tests/test_settings_coverage.py`` fails when a field is neither, so an
+#: environment-only setting cannot slip in unnoticed.
+BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "data_dir": "The data volume. It is needed before any stored setting can be read.",
+        "database_url": (
+            "Where the settings themselves are kept, so the UI cannot choose it; it is also a"
+            " credential."
+        ),
+        "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "allowed_origins": (
+            "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
+            " decides who can reach the server, so it belongs to the deployment."
+        ),
+        "seed_models_dir": "Image layout, fixed when the image is built.",
+        "seed_libraries_dir": "Image layout, fixed when the image is built.",
+        "frontend_dir": "Image layout, fixed when the image is built.",
+        "openscad": (
+            "The binary the server runs. Choosing it from a web form would let anyone who can"
+            " reach the page run any program, and the verified OpenSCAD facts are tied to the"
+            " image's own build."
+        ),
+        "openscad_lsp": (
+            "The binary the server runs for the editor. Choosing it from a web form would let"
+            " anyone who can reach the page run any program."
+        ),
+        "temporal_address": (
+            "Where renders run (#424). The render workers (`python -m scadbuddy.worker`) take"
+            " it from their own environment, so the deployment points the API and its workers"
+            " together; a form only the API reads would split them."
+        ),
+        "temporal_namespace": "Paired with the Temporal address; set with it by the deployment.",
+        "temporal_task_queue_render": (
+            "Paired with the Temporal address: the API and the render workers must name the"
+            " same queue, and only the deployment sets both."
+        ),
+        "temporal_worker_inprocess": (
+            "Whether this process runs a render worker at all, decided by how the deployment"
+            " is laid out (one replica, or a separate worker Deployment)."
+        ),
+        "revision": "A build stamp that /healthz reports, not a setting.",
+        "version": "A build stamp that /healthz reports, not a setting.",
+    }
+)
+
+#: The env-seeded fields, in declaration order.
+ENV_SEEDED: Final = tuple(name for name in Settings.model_fields if name not in BOOTSTRAP_FIELDS)
+
+#: Env-seeded fields that are credentials: written, never read back (only "set").
+SECRET_FIELDS: Final = frozenset({"bambuddy_api_key", "google_fonts_api_key"})
+
+Applies = Literal["live", "restart"]
+
+#: When a changed value takes effect in a running process (#322). ``live`` is at once,
+#: on every replica (``api/runtime.py`` applies it on ``settings.changed``); ``restart``
+#: is at the next start, and until then ``GET /settings`` lists the field in
+#: ``restart_required``. A new env-seeded field must say which it is.
+APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
+    {
+        # Read from the store on every use.
+        "bambuddy_url": "live",
+        "bambuddy_api_key": "live",
+        "public_url": "live",
+        "default_plate": "live",
+        # The upload gate asks for the value in effect on every request.
+        "media_upload_max_bytes": "live",
+        # Read from the queue's config by each job, poll or admission check.
+        "render_timeout": "live",
+        "job_ttl": "live",
+        "solid_concurrency": "live",
+        "render_queue_max": "live",
+        "render_queue_timeout": "live",
+        "render_poll_interval": "live",
+        "render_queue_depth_slo": "live",
+        "render_latency_slo": "live",
+        # Sizes the worker tasks and the thumbnail pool, which are built at start.
+        "render_concurrency": "restart",
+        # Handed to the LISTEN connection and the reaper when they start.
+        "render_fallback_poll_interval": "restart",
+        "render_lease_timeout": "restart",
+        "render_max_attempts": "restart",
+        # Semaphores: resizing one with permits out would over- or under-admit.
+        "check_concurrency": "restart",
+        "lsp_sessions": "restart",
+        "realtime_sockets": "restart",
+        # Decides at start whether the preview scheduler runs at all.
+        "preview_renders": "restart",
+        # Decides at start whether the periodic sweep runs at all.
+        "asset_sweep_interval": "restart",
+        # Attributes of the stores that read them on every use.
+        "library_max_bytes": "live",
+        "asset_max_total_bytes": "live",
+        "asset_max_count": "live",
+        "asset_sweep_grace": "live",
+        "duplicate_staging_max_age": "live",
+        "event_log_retention_seconds": "live",
+        "event_log_retention_rows": "live",
+        # A key change swaps the client and refetches the catalogue.
+        "google_fonts_api_key": "live",
+        "fonts_catalogue_ttl": "live",
+        "log_level": "live",
+    }
+)
+
+
+def env_var(name: str) -> str:
+    """The environment variable that seeds ``name``."""
+    return f"SCADBUDDY_{name.upper()}"
+
+
+def check_value(name: str, value: Any) -> Any:
+    """``value`` for the env-seeded field ``name``, coerced, or ``ValueError`` naming it.
+
+    The bounds are the ones a deployment's ``SCADBUDDY_<FIELD>`` meets: the field's own
+    type and validators on :class:`Settings`, then :class:`Config`'s checks. Every other
+    field is left at its default for the check, so a failure is this field's.
+    """
+    probe = Settings.model_construct()
+    try:
+        Settings.__pydantic_validator__.validate_assignment(probe, name, value)
+    except ValidationError as error:
+        message = error.errors()[0]["msg"].removeprefix("Value error, ")
+        if not message.startswith(env_var(name)):
+            message = f"{env_var(name)}: {message}"
+        raise ValueError(message) from None
+    probe.to_config()
+    return getattr(probe, name)
 
 
 def _first_directory(*candidates: Path) -> Path | None:

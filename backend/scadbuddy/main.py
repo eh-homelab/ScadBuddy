@@ -5,7 +5,7 @@ import importlib
 import logging
 import pkgutil
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -17,6 +17,7 @@ from scadbuddy.api import assets, health, libraries, media, metrics, models
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
+from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -251,6 +252,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the queue's store opens.
     await asyncio.to_thread(state.settings_store.open)
+    # Then what the UI saved (#322), before anything below is sized or started from it.
+    snapshot = await asyncio.to_thread(state.settings_store.snapshot)
+    apply_runtime(state, snapshot.runtime, booting=True)
     state.paths.ensure()
     # Before the built-in sync: an existing models directory becomes revision 1,
     # so what a newer image changes in a built-in is a commit on top of it rather
@@ -290,7 +294,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # failure while starting up closes the queue as a shutdown does, rather than
     # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
+    # A change saved on any replica, this one's included, applies its live fields here.
+    unfollow = follow_changes(state)
+    components = AsyncExitStack()
     try:
+        # Every component's `run` (`core/components.py`), now that the database and
+        # the bus are up. One that fails exits those already running and fails the
+        # boot; closed below, before the queue it may be using.
+        await components.enter_async_context(state.components.running())
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
@@ -323,6 +334,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         yield
     finally:
+        unfollow()
         if state.previews is not None:
             await state.previews.aclose()
         if sweeper is not None:
@@ -330,9 +342,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await sweeper
         await state.print_watcher.aclose()
+        await components.aclose()
         await state.queue.aclose()
-        if state.decisions is not None:
-            await asyncio.to_thread(state.decisions.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
         grants = getattr(app.state, "agent_grants", None)
@@ -372,9 +383,10 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             RouteLimit(
                 "POST",
                 MEDIA_UPLOAD_PATH,
-                app_settings.media_upload_max_bytes,
+                # The value in effect, which Settings can change while running (#322).
+                lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
-                "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             )
         ],
     )

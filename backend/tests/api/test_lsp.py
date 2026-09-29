@@ -120,6 +120,15 @@ def pid_file(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def unreaped(monkeypatch: pytest.MonkeyPatch) -> dict[Any, Any]:
+    """Each test counts only its own unreaped servers: the module-level registry would
+    otherwise carry one test's never-reaped server (and its waiting task) into the next."""
+    fresh: dict[Any, Any] = {}
+    monkeypatch.setattr(lsp, "_unreaped", fresh)
+    return fresh
+
+
 @pytest.fixture
 def settings(settings: Settings, fake_lsp: str) -> Settings:
     return settings.model_copy(update={"openscad_lsp": fake_lsp})
@@ -438,6 +447,7 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
     pid_file: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    unreaped: dict[Any, Any],
 ) -> None:
     """A process stuck in the kernel outlives SIGKILL; waiting on it forever would
     hold the permit all the same (#201), so cleanup gives up after KILL_WAIT."""
@@ -469,6 +479,8 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
 
         assert closed.value.code == 1011
         assert "was not reaped within 0.2s" in caplog.text
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert len(unreaped) == 1
         with client.websocket_connect(route) as again:
             assert "result" in _initialize(again)
 
@@ -486,7 +498,6 @@ def test_unreaped_servers_are_counted(
     count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
     monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
-    monkeypatch.setattr(lsp, "_unreaped", {})
     spawn = asyncio.create_subprocess_exec
 
     async def unkillable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
@@ -529,13 +540,12 @@ def test_a_late_reaped_server_is_no_longer_counted(
     model: str,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    unreaped: dict[Any, Any],
 ) -> None:
     """A server that outlives KILL_WAIT but is reaped later drops out of the count on
     its own, without waiting for another server to be left unreaped."""
     monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
-    unreaped: dict[Any, Any] = {}
-    monkeypatch.setattr(lsp, "_unreaped", unreaped)
     spawn = asyncio.create_subprocess_exec
 
     async def slow_to_reap(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
