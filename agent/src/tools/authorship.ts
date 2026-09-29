@@ -22,9 +22,19 @@ const MAX_PRINCIPAL = 300
 /**
  * The backend takes printable ASCII with no spaces; a principal id can hold
  * anything an OIDC issuer or subject does, so the rest is percent-encoded.
+ * Cut to the bound a whole character at a time, so the cut never lands inside
+ * an escape (review of #741: a `%C3` cut to `%C` would be kept in the history
+ * as the principal). `toWellFormed` first, since `encodeURIComponent` throws
+ * on a lone surrogate.
  */
 export function principalHeader(id: string): string {
-  return id.replace(/[^\x21-\x7e]/gu, (c) => encodeURIComponent(c)).slice(0, MAX_PRINCIPAL) || 'unknown'
+  let out = ''
+  for (const c of id.toWellFormed()) {
+    const encoded = /^[\x21-\x7e]$/u.test(c) ? c : encodeURIComponent(c)
+    if (out.length + encoded.length > MAX_PRINCIPAL) break
+    out += encoded
+  }
+  return out || 'unknown'
 }
 
 export function authorHeaders(principal: Principal, session?: string): Record<string, string> {

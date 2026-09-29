@@ -148,6 +148,25 @@ describe('agent authorship (#252)', () => {
     expect(principalHeader('x'.repeat(400))).toHaveLength(300)
   })
 
+  it('cuts a long principal id between escapes, never inside one', () => {
+    // 298 + "%C3%BC" would end at 304; the whole "ü" is left out, not cut to "%C".
+    expect(principalHeader(`${'x'.repeat(298)}ü`)).toBe('x'.repeat(298))
+    expect(principalHeader(`${'x'.repeat(294)}ü`)).toBe(`${'x'.repeat(294)}%C3%BC`)
+    // A four-byte character is one code point: twelve characters, whole or not at all.
+    expect(principalHeader(`${'x'.repeat(290)}😀`)).toBe('x'.repeat(290))
+    expect(principalHeader(`${'x'.repeat(288)}😀`)).toBe(`${'x'.repeat(288)}%F0%9F%98%80`)
+    for (let n = 280; n <= 300; n++) {
+      const header = principalHeader(`${'x'.repeat(n)}${'é'.repeat(10)}`)
+      expect(header.length).toBeLessThanOrEqual(300)
+      expect(header).toMatch(/^x+(%C3%A9)*$/u)
+      expect(decodeURIComponent(header)).toBe(header.replaceAll('%C3%A9', 'é'))
+    }
+  })
+
+  it('encodes a lone surrogate instead of throwing', () => {
+    expect(principalHeader('a\uD800b')).toBe('a%EF%BF%BDb')
+  })
+
   it("carries the harness session's id through the in-process server", async () => {
     const { client, seen } = backend()
     const wired = harnessTools(services({ backend: client }))
