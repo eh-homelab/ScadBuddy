@@ -3,7 +3,7 @@ import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
+import type { Job, ModelSummary, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
@@ -31,6 +31,9 @@ interface Props {
   captureImage: (options: SnapshotOptions) => Promise<Blob | null>
   /** The view's size in CSS pixels. */
   viewSize: () => { width: number; height: number }
+  /** The template, so the rendered image can be added to its media. */
+  model?: ModelSummary
+  onModelChanged?: (model: ModelSummary) => void
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
   /**
@@ -55,6 +58,8 @@ export function ActionBar({
   capture,
   captureImage,
   viewSize,
+  model,
+  onModelChanged,
   fit,
   fitProblems,
   onPrinterModel,
@@ -212,6 +217,8 @@ export function ActionBar({
         slug={slug}
         captureImage={captureImage}
         viewSize={viewSize}
+        model={model}
+        onMediaChanged={onModelChanged}
         onClose={() => setImageOpen(false)}
       />
 

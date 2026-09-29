@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import type { ModelSummary } from '../api/types'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
+import { addMedia, failure, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -14,15 +16,28 @@ interface Props {
   slug: string
   captureImage: (options: SnapshotOptions) => Promise<Blob | null>
   viewSize: () => { width: number; height: number }
+  /** The template, for adding the image to its media; unknown until it loads. */
+  model?: ModelSummary
+  /** Called with the record after the image was added to the template's media. */
+  onMediaChanged?: (model: ModelSummary) => void
   onClose: () => void
 }
 
 /**
  * A high-resolution image of the preview, as the camera sees it now, to share. The
  * bounding box outline is always left out; the build plate and the background are the
- * user's choice.
+ * user's choice. Besides saving or copying it, it can be added to the template's
+ * media, where it can be the cover and is offered by every media picker.
  */
-export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Props) {
+export function ImageDialog({
+  open,
+  slug,
+  captureImage,
+  viewSize,
+  model,
+  onMediaChanged,
+  onClose,
+}: Props) {
   const [scale, setScale] = useState<number>(2)
   const [plate, setPlate] = useState(true)
   const [transparent, setTransparent] = useState(false)
@@ -30,6 +45,8 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [added, setAdded] = useState<string | null>(null)
+  const uploadLimit = useUploadLimit()
 
   const size = open ? viewSize() : { width: 0, height: 0 }
 
@@ -52,6 +69,7 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
   function close() {
     setError(null)
     setCopied(false)
+    setAdded(null)
     setPreview(null)
     onClose()
   }
@@ -75,6 +93,29 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
     }
   }
 
+  /** Adds the image to the template's media, and with `cover` puts it first. */
+  async function keep(cover: boolean) {
+    if (!model) return
+    setBusy(true)
+    setError(null)
+    setAdded(null)
+    try {
+      const blob = await render()
+      const file = new File([blob], `render-${stamp()}.png`, { type: 'image/png' })
+      const problem = mediaProblem(file, await uploadLimit())
+      if (problem) throw new Error(`${problem} Choose a smaller size.`)
+      const result = await addMedia(slug, file, model.media ?? [])
+      let record = result.model
+      if (cover && result.id) record = (await makeCover(slug, record.media ?? [], result.id)) ?? record
+      onMediaChanged?.(record)
+      setAdded(cover ? 'Added to the media as the cover' : 'Added to the media')
+    } catch (cause) {
+      setError(failure(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function copy() {
     setBusy(true)
     setError(null)
@@ -90,6 +131,7 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
     }
   }
 
+  const readOnly = model?.origin === 'builtin'
   const canCopy = typeof ClipboardItem !== 'undefined' && Boolean(navigator.clipboard?.write)
 
   return (
@@ -105,9 +147,13 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
               {error}
             </span>
           )}
-          {!error && copied && <span className="mr-auto text-[12px] text-ok">Copied</span>}
+          {!error && (copied || added) && (
+            <span role="status" className="mr-auto text-[12px] text-ok">
+              {added ?? 'Copied'}
+            </span>
+          )}
           <Button onClick={close} disabled={busy}>
-            Cancel
+            {added ? 'Done' : 'Cancel'}
           </Button>
           {canCopy && (
             <Button onClick={() => void copy()} disabled={busy} data-testid="image-copy">
@@ -192,7 +238,41 @@ export function ImageDialog({ open, slug, captureImage, viewSize, onClose }: Pro
             Transparent background
           </label>
         </div>
+
+        <section
+          aria-label="Template media"
+          className="flex flex-wrap items-center gap-2 border-t border-line pt-3"
+        >
+          <span className="mr-auto text-[12px] text-muted">
+            {readOnly
+              ? 'A built-in template’s media cannot change. Duplicate it to keep images with it.'
+              : 'Keep it with the template, to use as its cover or in any image picker.'}
+          </span>
+          <Button
+            size="sm"
+            onClick={() => void keep(false)}
+            disabled={busy || !model || readOnly}
+            data-testid="image-add-media"
+          >
+            Add to media
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => void keep(true)}
+            disabled={busy || !model || readOnly}
+            data-testid="image-add-cover"
+          >
+            Add as cover
+          </Button>
+        </section>
       </div>
     </Dialog>
   )
+}
+
+/** A sortable, file-name-safe time: 20260929-011530. */
+function stamp(): string {
+  const now = new Date()
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`
 }

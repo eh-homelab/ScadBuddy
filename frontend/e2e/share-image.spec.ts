@@ -33,3 +33,57 @@ test.describe('rendered image', () => {
     await test.info().attach('render.png', { body: bytes, contentType: 'image/png' })
   })
 })
+
+test.describe('rendered image in the media', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'msw-backed')
+
+  test('adds the image as the cover, then offers it to a file parameter', async ({ page }) => {
+    await page.goto('/m/gridfinity-bin')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    await page.getByTestId('generate-menu').click()
+    await page.getByTestId('generate-image').click()
+    const dialog = page.getByRole('dialog', { name: 'Rendered image' })
+    await expect(dialog.getByTestId('image-preview')).toBeVisible()
+    await dialog.getByTestId('image-add-cover').click()
+    // A 2× render and a multi-megabyte upload, both in software WebGL here.
+    await expect(dialog.getByText('Added to the media as the cover')).toBeVisible({
+      timeout: 30_000,
+    })
+    await dialog.getByRole('button', { name: 'Done' }).click()
+
+    // The page's gallery has it at once.
+    await expect(page.getByRole('list', { name: 'Gallery' }).getByRole('button')).toHaveCount(1)
+
+    // Edit details shows it as the cover in its picker.
+    await page.getByRole('button', { name: 'Edit details' }).click()
+    const details = page.getByRole('dialog', { name: 'Edit details' })
+    await expect(details.getByTestId('thumbnail-state')).toContainText('Set on this model')
+    await details.getByRole('button', { name: 'Change…' }).click()
+    const coverPicker = page.getByRole('dialog', { name: 'Choose the thumbnail' })
+    await expect(coverPicker.getByRole('button', { name: 'Choose Image 1' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await coverPicker.getByRole('button', { name: 'Cancel' }).click()
+    await details.getByRole('button', { name: 'Cancel' }).click()
+
+    // And a file parameter can take it, as a PNG of its own.
+    await page.getByRole('tab', { name: 'Features' }).click()
+    const rendered = page.waitForRequest(
+      (request) =>
+        request.method() === 'POST' &&
+        request.url().endsWith('/render') &&
+        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.params?.label_art ?? '')),
+    )
+    await page.getByRole('button', { name: 'Choose…' }).click()
+    const picker = page.getByRole('dialog', { name: 'Choose Label artwork' })
+    await picker
+      .getByRole('region', { name: "Template's images" })
+      .getByRole('button', { name: 'Choose Image 1' })
+      .click()
+    await expect(picker).toBeHidden()
+    await expect(page.getByText('Image 1.png')).toBeVisible()
+    await rendered
+  })
+})

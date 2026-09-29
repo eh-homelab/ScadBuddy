@@ -1,22 +1,49 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
+import type { ModelSummary } from '../api/types'
+import { BUILTIN_SLUG, GALLERY_SLUG } from '../mocks/fixtures'
 import { ImageDialog } from './ImageDialog'
 
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
 describe('ImageDialog', () => {
-  function setup() {
+  function setup(model?: ModelSummary, onMediaChanged = vi.fn()) {
     const captureImage = vi.fn(async () => new Blob(['png'], { type: 'image/png' }))
     URL.createObjectURL = vi.fn(() => 'blob:preview')
     URL.revokeObjectURL = vi.fn()
     render(
       <ImageDialog
         open
-        slug="name-puzzle"
+        slug={model?.slug ?? 'name-puzzle'}
         captureImage={captureImage}
         viewSize={() => ({ width: 800, height: 500 })}
+        model={model}
+        onMediaChanged={onMediaChanged}
         onClose={() => undefined}
       />,
     )
     return captureImage
+  }
+
+  // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
+  function mockUploadMedia() {
+    return vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      const model = await api.getModel(slug)
+      const added = {
+        id: 'f00dfeedbeef',
+        file: 'f00dfeedbeef.png',
+        kind: 'image' as const,
+        caption: '',
+        poster: null,
+        missing: false,
+        content_type: 'image/png',
+        size: file.size,
+      }
+      return { ...model, media: [...(model.media ?? []), added] }
+    })
   }
 
   it('offers sizes from the view and previews the choices', async () => {
@@ -41,5 +68,46 @@ describe('ImageDialog', () => {
     await waitFor(() => expect(click).toHaveBeenCalled())
     expect(captureImage).toHaveBeenLastCalledWith({ scale: 4, plate: false, transparent: false })
     click.mockRestore()
+  })
+
+  it("adds the image to the template's media", async () => {
+    const upload = mockUploadMedia()
+    const reorder = vi.spyOn(api, 'reorderMedia')
+    const onMediaChanged = vi.fn()
+    setup(await api.getModel(GALLERY_SLUG), onMediaChanged)
+
+    fireEvent.click(screen.getByTestId('image-add-media'))
+    expect(await screen.findByText('Added to the media')).toBeInTheDocument()
+    expect(upload).toHaveBeenCalledWith(
+      GALLERY_SLUG,
+      expect.objectContaining({ name: expect.stringMatching(/^render-\d{8}-\d{6}\.png$/) }),
+    )
+    expect(reorder).not.toHaveBeenCalled()
+    expect(onMediaChanged.mock.calls[0]?.[0].media.at(-1).id).toBe('f00dfeedbeef')
+  })
+
+  it('adds it as the cover: first in the media', async () => {
+    mockUploadMedia()
+    const reorder = vi
+      .spyOn(api, 'reorderMedia')
+      .mockImplementation(async (slug) => await api.getModel(slug))
+    setup(await api.getModel(GALLERY_SLUG))
+
+    fireEvent.click(screen.getByTestId('image-add-cover'))
+    expect(await screen.findByText('Added to the media as the cover')).toBeInTheDocument()
+    expect(reorder).toHaveBeenCalledWith(GALLERY_SLUG, [
+      'f00dfeedbeef',
+      'a1b2c3d4e5f6',
+      'b2c3d4e5f6a1',
+      'c3d4e5f6a1b2',
+      'd4e5f6a1b2c3',
+    ])
+  })
+
+  it("cannot add to a built-in's media", async () => {
+    setup(await api.getModel(BUILTIN_SLUG))
+    expect(screen.getByTestId('image-add-media')).toBeDisabled()
+    expect(screen.getByTestId('image-add-cover')).toBeDisabled()
+    expect(screen.getByText(/Duplicate it to keep images with it/)).toBeInTheDocument()
   })
 })

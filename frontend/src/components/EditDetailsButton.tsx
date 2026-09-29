@@ -3,12 +3,10 @@ import { ApiError, api } from '../api/client'
 import { useLatest } from '../lib/useLatest'
 import { useSubscription } from '../lib/realtime'
 import type { ModelPatch, ModelSummary } from '../api/types'
-import {
-  MAX_THUMBNAIL_SIZE,
-  isMarkdown,
-  readmeProblem,
-  thumbnailProblem,
-} from '../lib/modelFolder'
+import { isMarkdown, readmeProblem } from '../lib/modelFolder'
+import { addMedia, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
+import { MediaPicker } from './media/MediaPicker'
+import { MEDIA_KEY, mediaIdOf, mediaPickerItems } from './media/pickerItems'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -83,7 +81,12 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
   const [description, setDescription] = useState('')
   const [tags, setTags] = useState('')
   const [readme, setReadme] = useState('')
-  const [thumbnail, setThumbnail] = useState<File | null>(null)
+  // The media item that becomes the cover on save; the picker sets it.
+  const [cover, setCover] = useState<string | null>(null)
+  // What an upload was called, for the note: the new item has no caption.
+  const [uploadedNames, setUploadedNames] = useState<Record<string, string>>({})
+  const [picking, setPicking] = useState(false)
+  const uploadLimit = useUploadLimit()
   const [removeThumbnail, setRemoveThumbnail] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -116,7 +119,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     setBaseline(null)
     setLoadError(null)
     setError(null)
-    setThumbnail(null)
+    setCover(null)
     setRemoveThumbnail(false)
     try {
       const model = await api.getModel(slug)
@@ -140,16 +143,21 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     if (!savingRef.current) setOpen(false)
   }, [])
 
-  function chooseThumbnail(file: File | undefined) {
-    if (!file) return
-    const problem = thumbnailProblem(file)
-    if (problem) {
-      setError(problem)
-      return
+  /**
+   * Uploads an image from the picker into the template's media (it is kept there, like
+   * any other media item) and makes it the pending cover.
+   */
+  async function uploadCover(file: File) {
+    if (!baseline) return
+    const problem = mediaProblem(file, await uploadLimit())
+    if (problem) throw new Error(problem)
+    const { model: record, id } = await addMedia(slug, file, baseline.model.media ?? [])
+    setBaseline((current) => (current ? { ...current, model: record } : current))
+    if (id) {
+      setUploadedNames((names) => ({ ...names, [id]: file.name }))
+      setCover(id)
+      setRemoveThumbnail(false)
     }
-    setError(null)
-    setThumbnail(file)
-    setRemoveThumbnail(false)
   }
 
   async function loadReadme(file: File | undefined) {
@@ -183,11 +191,11 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
         setBaseline(current)
       }
 
-      if (thumbnail) {
-        record = await api.setThumbnail(slug, thumbnail)
+      if (cover) {
+        record = (await makeCover(slug, record.media ?? [], cover)) ?? record
         current = { ...current, model: record }
         setBaseline(current)
-        setThumbnail(null)
+        setCover(null)
       } else if (removeThumbnail) {
         record = await api.removeThumbnail(slug)
         current = { ...current, model: record }
@@ -221,6 +229,9 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
 
   const model = baseline?.model
   const ownThumbnail = model?.thumbnail_source === 'model' && !removeThumbnail
+  const media = model?.media ?? []
+  const coverItems = model ? mediaPickerItems(slug, media, { videos: true }) : []
+  const pendingCover = cover ? coverItems.find((item) => mediaIdOf(item) === cover) : undefined
   const readmeBlank = readme.trim() === ''
   const pendingReadme = baseline
     ? readmeChange(readme, baseline.readme, baseline.model.has_readme)
@@ -309,8 +320,8 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
             <fieldset className="flex flex-col gap-1.5">
               <legend className="mb-1 text-muted">Thumbnail</legend>
               <p className="text-[12px] text-faint" data-testid="thumbnail-state">
-                {thumbnail
-                  ? `${thumbnail.name} replaces the current one on save.`
+                {pendingCover
+                  ? `${uploadedNames[cover ?? ''] ?? pendingCover.label} becomes the cover on save.`
                   : removeThumbnail
                     ? 'Removed on save. A generated plate, or else a render of the default settings, stands in.'
                     : model.thumbnail_source === 'model'
@@ -322,33 +333,49 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                           : 'None set. A render of the default settings stands in once it is ready; a generated plate takes precedence.'}
               </p>
               <div className="flex items-center gap-2">
-                <label className="inline-flex cursor-pointer items-center rounded-[6px] border border-line bg-surface-2 px-2.5 py-1 text-[13px] hover:border-line-strong">
-                  {ownThumbnail || thumbnail ? 'Replace PNG' : 'Choose PNG'}
-                  <input
-                    type="file"
-                    accept=".png,image/png"
-                    className="sr-only"
-                    aria-label="Thumbnail (PNG)"
-                    onChange={(event) => {
-                      chooseThumbnail(event.target.files?.[0])
-                      event.target.value = ''
-                    }}
-                  />
-                </label>
-                {(ownThumbnail || thumbnail) && (
+                <Button size="sm" onClick={() => setPicking(true)}>
+                  {ownThumbnail || pendingCover ? 'Change…' : 'Choose…'}
+                </Button>
+                {(ownThumbnail || pendingCover) && (
                   <Button
                     size="sm"
                     variant="ghost"
                     onClick={() => {
-                      if (thumbnail) setThumbnail(null)
+                      if (pendingCover) setCover(null)
                       else setRemoveThumbnail(true)
                     }}
                   >
-                    {thumbnail ? 'Keep current' : 'Remove thumbnail'}
+                    {pendingCover ? 'Keep current' : 'Remove thumbnail'}
                   </Button>
                 )}
-                <span className="text-[12px] text-faint">PNG, up to {MAX_THUMBNAIL_SIZE}</span>
+                <span className="text-[12px] text-faint">From the template&apos;s media</span>
               </div>
+              <MediaPicker
+                open={picking}
+                title="Choose the thumbnail"
+                description="The template's first image is its cover. Pick one, or upload a new one to the template's media."
+                onClose={() => setPicking(false)}
+                sections={[
+                  {
+                    title: "Template's images",
+                    items: coverItems,
+                    empty: 'None yet. Upload one, or save a rendered image from Generate.',
+                  },
+                ]}
+                selected={cover ? `${MEDIA_KEY}${cover}` : ownThumbnail ? coverItems[0]?.key : undefined}
+                onPick={(item) => {
+                  const id = mediaIdOf(item)
+                  if (!id) return
+                  // Already the cover: nothing to change, unless a removal was pending.
+                  setCover(id === media[0]?.id && ownThumbnail ? null : id)
+                  setRemoveThumbnail(false)
+                }}
+                upload={{
+                  accept: 'image/png,image/jpeg,image/webp',
+                  hint: 'PNG, JPEG or WebP, up to 10 MB. Added to the template’s media.',
+                  onFile: uploadCover,
+                }}
+              />
             </fieldset>
 
             <label className="flex flex-col gap-1">

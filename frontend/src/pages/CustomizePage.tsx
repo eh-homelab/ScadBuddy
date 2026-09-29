@@ -706,6 +706,8 @@ export function CustomizePage() {
               capture={capture}
               captureImage={captureImage}
               viewSize={viewSize}
+              model={modelState.data}
+              onModelChanged={modelState.setData}
               fit={fit}
               fitProblems={misfit}
               onPrinterModel={setPrinterModel}
