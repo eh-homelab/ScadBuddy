@@ -230,7 +230,10 @@ def test_the_render_key_is_seeded_stored_and_cleared_like_the_full_key(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
     seeded = Settings(
-        data_dir=tmp_path, database_url=pg_conninfo, bambuddy_render_api_key="from-env"
+        data_dir=tmp_path,
+        database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        bambuddy_render_api_key="from-env",
     )
     store = SettingsStore(seeded)
     store.open()
@@ -279,6 +282,7 @@ def test_a_render_key_cleared_in_settings_beats_the_env_on_workers(
     seeded = Settings(
         data_dir=tmp_path,
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         bambuddy_api_key="full",
         bambuddy_render_api_key="from-env",
     )
