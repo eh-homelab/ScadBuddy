@@ -616,3 +616,53 @@ def test_a_template_write_does_not_hold_up_a_save_on_another(
     saved.set()
     writer.join(timeout=5)
     assert [preset.name for preset in store.saved_presets("b")] == ["X"]
+
+
+def test_a_preset_saves_inputs_and_reads_them_back(client: TestClient, model: str) -> None:
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    created = client.post(f"/api/v1/models/{model}/presets", json=body)
+    assert created.status_code == 201
+    preset = created.json()
+    assert preset["params"] == {"width": 12}
+    assert preset["inputs"] == {"params": {"width": 12}, "ui": {"tab": "lid"}, "v": 0}
+    listed = client.get(f"/api/v1/models/{model}/presets").json()
+    assert [p["inputs"] for p in listed if p["origin"] == "mine"] == [preset["inputs"]]
+
+
+def test_a_params_only_save_reads_as_version_zero_inputs(client: TestClient, model: str) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/presets", json={"name": "Wide", "params": {"width": 20}}
+    ).json()
+    assert created["inputs"] == {"params": {"width": 20}, "v": 0}
+
+
+def test_a_params_only_update_keeps_the_ui_state(client: TestClient, model: str) -> None:
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    preset = client.post(f"/api/v1/models/{model}/presets", json=body).json()
+    updated = client.patch(
+        f"/api/v1/models/{model}/presets/{preset['id']}", json={"params": {"width": 14}}
+    ).json()
+    assert updated["inputs"] == {"params": {"width": 14}, "ui": {"tab": "lid"}, "v": 0}
+
+
+def test_preset_inputs_are_checked_as_a_render_is(client: TestClient, model: str) -> None:
+    bad = {"name": "Bad", "inputs": {"params": {"nope": 1}}}
+    assert client.post(f"/api/v1/models/{model}/presets", json=bad).status_code == 422
+    clash = {"name": "Clash", "params": {"width": 1}, "inputs": {"params": {"width": 2}}}
+    assert client.post(f"/api/v1/models/{model}/presets", json=clash).status_code == 422
+
+
+def test_template_presets_carry_inputs_or_read_as_v0(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["presets"] = [
+        {"name": "Plain", "params": {"width": 5}},
+        {"name": "Designed", "inputs": {"params": {"width": 6}, "ui": {"tab": "b"}, "v": 2}},
+    ]
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    listed = client.get(f"/api/v1/models/{model}/presets").json()
+    by_name = {p["name"]: p for p in listed}
+    assert by_name["Plain"]["inputs"] == {"params": {"width": 5}, "v": 0}
+    assert by_name["Designed"]["inputs"] == {"params": {"width": 6}, "ui": {"tab": "b"}, "v": 2}
+    assert by_name["Designed"]["params"] == {"width": 6}
