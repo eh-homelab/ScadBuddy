@@ -86,7 +86,7 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
 
   return (
     <form
-      aria-label={`Suppress ${diagnostic.id}`}
+      aria-label={`Suppress ${diagnostic.key}`}
       onSubmit={(event) => void submit(event)}
       className="mt-2 space-y-2 rounded-[6px] border border-line bg-surface-2 p-2"
     >

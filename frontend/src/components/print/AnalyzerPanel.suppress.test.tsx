@@ -16,6 +16,7 @@ import {
   openEdgesDiagnostic,
   overhangDiagnostic,
 } from '../../mocks/analyzers'
+import { storedDecisions } from '../../mocks/features/analyzers'
 import * as fixtures from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -79,7 +80,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
 
-    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     const submit = within(form).getByRole('button', { name: 'Suppress' })
     // The narrowest scope is the default, as simple mode's is in #284.
     expect(within(form).getByLabelText('Scope')).toHaveDisplayValue('This print')
@@ -115,7 +116,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
-    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     await user.click(within(form).getByRole('checkbox', { name: 'Every SB1002 finding' }))
     await user.type(within(form).getByLabelText('Reason'), 'hollow by design')
     await user.click(within(form).getByRole('button', { name: 'Suppress' }))
@@ -128,7 +129,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
-    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     await user.type(within(form).getByLabelText('Reason'), 'for now')
     await user.click(within(form).getByRole('button', { name: 'Suppress' }))
     await waitFor(() => expect(screen.queryByTestId('diagnostic-SB1002:part-2')).toBeNull())
@@ -136,7 +137,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     await user.click(screen.getByText('1 not shown'))
     await user.click(
       within(screen.getByTestId('checks-set-aside')).getByRole('button', {
-        name: 'Remove the suppression of SB1002',
+        name: 'Remove the suppression of SB1002:part-2',
       }),
     )
     expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
@@ -159,7 +160,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     )
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
-    const remove = setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })
+    const remove = setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' })
     await user.click(remove)
     expect(await setAside().findByRole('alert')).toHaveTextContent(
       'the analyzer decision store cannot be reached (OperationalError)',
@@ -175,9 +176,9 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
     expect(setAside().getByText(/suppressed for This print: first/)).toBeVisible()
-    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
     expect(await setAside().findByText(/suppressed for This template: second/)).toBeVisible()
-    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })).toBeEnabled()
+    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' })).toBeEnabled()
   })
 
   it('asks before removing a suppression wider than the template', async () => {
@@ -185,16 +186,16 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     await stored({ kind: 'global', key: '' }, 'everywhere')
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
-    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
-    const ask = setAside().getByRole('group', { name: 'Remove the suppression of SB1002?' })
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
+    const ask = setAside().getByRole('group', { name: 'Remove the suppression of SB1002:part-2?' })
     expect(ask).toHaveTextContent('Remove it for every print?')
-    await user.click(within(ask).getByRole('button', { name: 'Keep the suppression of SB1002' }))
+    await user.click(within(ask).getByRole('button', { name: 'Keep the suppression of SB1002:part-2' }))
     expect(deleted).toHaveLength(0)
-    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' })).toBeEnabled()
+    expect(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' })).toBeEnabled()
 
-    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002' }))
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
     await user.click(
-      setAside().getByRole('button', { name: 'Confirm removing the suppression of SB1002' }),
+      setAside().getByRole('button', { name: 'Confirm removing the suppression of SB1002:part-2' }),
     )
     expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
     expect(deleted).toHaveLength(1)
@@ -229,7 +230,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
-    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     expect(within(form).getAllByRole('option').map((option) => option.textContent)).toEqual([
       'This template',
       'These parameters',
@@ -269,7 +270,7 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     const { user } = renderPanel()
     const row = await screen.findByTestId('diagnostic-SB1002:part-2')
     await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
-    const form = within(row).getByRole('form', { name: 'Suppress SB1002' })
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
     await user.type(within(form).getByLabelText('Reason'), 'r')
     await user.click(within(form).getByRole('button', { name: 'Suppress' }))
     expect(await within(form).findByRole('alert')).toHaveTextContent(
@@ -301,20 +302,57 @@ describe('AnalyzerPanel · suppress at a scope', () => {
       ),
     )
     const { user } = renderPanel()
-    const options = async (key: string, id: string) => {
+    const options = async (key: string) => {
       const row = await screen.findByTestId(`diagnostic-${key}`)
       await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
-      const form = within(row).getByRole('form', { name: `Suppress ${id}` })
+      const form = within(row).getByRole('form', { name: `Suppress ${key}` })
       return within(form)
         .getAllByRole('option')
         .map((option) => option.textContent)
     }
-    const slotted = await options('SB1002:part-2', 'SB1002')
+    const slotted = await options('SB1002:part-2')
     expect(slotted).not.toContain('Every pla print')
     expect(slotted).not.toContain('Every petg print')
     expect(slotted).toContain('Every print')
-    const whole = await options('SB1003', 'SB1003')
+    const whole = await options('SB1003')
     expect(whole).toEqual(expect.arrayContaining(['Every pla print', 'Every petg print']))
+  })
+  it('names each instance of one rule on its own, open and suppressed', async () => {
+    const partThree: AnalyzerDiagnostic = {
+      ...openEdgesDiagnostic,
+      key: 'SB1002:part-3',
+      location: { kind: 'mesh', part: 3, colour: 'Red', edges_truncated: false },
+    }
+    server.use(
+      http.post('/api/v1/analyzers/run', () =>
+        HttpResponse.json(
+          analysisReport(output, request, [openEdgesDiagnostic, partThree], storedDecisions()),
+        ),
+      ),
+    )
+    const { user } = renderPanel()
+    for (const key of ['SB1002:part-2', 'SB1002:part-3']) {
+      const row = await screen.findByTestId(`diagnostic-${key}`)
+      await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
+    }
+    // Both forms are open at once; each is found by its own instance, not the rule.
+    for (const key of ['SB1002:part-2', 'SB1002:part-3']) {
+      const form = screen.getByRole('form', { name: `Suppress ${key}` })
+      expect(screen.getByTestId(`diagnostic-${key}`)).toContainElement(form)
+      await user.type(within(form).getByLabelText('Reason'), 'hollow by design')
+      await user.click(within(form).getByRole('button', { name: 'Suppress' }))
+      await waitFor(() => expect(screen.queryByTestId(`diagnostic-${key}`)).toBeNull())
+    }
+
+    await user.click(screen.getByText('2 not shown'))
+    const removes = setAside().getAllByRole('button', { name: /^Remove the suppression of / })
+    expect(removes.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Remove the suppression of SB1002:part-2',
+      'Remove the suppression of SB1002:part-3',
+    ])
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-3' }))
+    expect(await screen.findByTestId('diagnostic-SB1002:part-3')).toBeVisible()
+    expect(screen.queryByTestId('diagnostic-SB1002:part-2')).toBeNull()
   })
 })
 

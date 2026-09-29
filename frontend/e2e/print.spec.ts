@@ -68,7 +68,7 @@ test.describe('print dialog', () => {
     // Suppressed at a scope, with the reason a suppression requires.
     const edges = checks.getByTestId('diagnostic-SB1002:part-2')
     await edges.getByRole('button', { name: 'Suppress…' }).click()
-    const form = edges.getByRole('form', { name: 'Suppress SB1002' })
+    const form = edges.getByRole('form', { name: 'Suppress SB1002:part-2' })
     await expect(form.getByRole('button', { name: 'Suppress' })).toBeDisabled()
     await form.getByLabel('Scope').selectOption({ label: 'This template' })
     await form.getByLabel('Reason').fill('the seam is inside the ring')

@@ -21,6 +21,11 @@ export function reset(): void {
   state.decisions = []
 }
 
+/** The decisions stored so far, for a test that answers `/run` with its own findings. */
+export function storedDecisions(): AnalyzerDecision[] {
+  return state.decisions
+}
+
 /** `analyzer.decision` on the `analyzers` topic, ids only (`core/events.py`). */
 function announceDecision(decision: AnalyzerDecision, action: 'recorded' | 'removed'): void {
   emitRealtime('analyzer.decision', ['analyzers'], {

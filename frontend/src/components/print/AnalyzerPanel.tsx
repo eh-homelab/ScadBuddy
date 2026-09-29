@@ -157,11 +157,11 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
     <>
       {' '}
       {confirming ? (
-        <span role="group" aria-label={`Remove the ${verb} of ${diagnostic.id}?`}>
+        <span role="group" aria-label={`Remove the ${verb} of ${diagnostic.key}?`}>
           Remove it for {scopeLabel(decision.scope).toLowerCase()}?{' '}
           <button
             type="button"
-            aria-label={`Confirm removing the ${verb} of ${diagnostic.id}`}
+            aria-label={`Confirm removing the ${verb} of ${diagnostic.key}`}
             onClick={remove}
             className={link}
           >
@@ -169,7 +169,7 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
           </button>{' '}
           <button
             type="button"
-            aria-label={`Keep the ${verb} of ${diagnostic.id}`}
+            aria-label={`Keep the ${verb} of ${diagnostic.key}`}
             onClick={() => setConfirming(false)}
             className={link}
           >
@@ -180,7 +180,7 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
         <button
           type="button"
           disabled={busy}
-          aria-label={`Remove the ${verb} of ${diagnostic.id}`}
+          aria-label={`Remove the ${verb} of ${diagnostic.key}`}
           onClick={wide ? () => setConfirming(true) : remove}
           className={link}
         >
