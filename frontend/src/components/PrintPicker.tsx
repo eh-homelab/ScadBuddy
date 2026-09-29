@@ -304,7 +304,6 @@ export function PrintPicker({
               <button
                 type="button"
                 onClick={picker.reload}
-                disabled={loading}
                 className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
               >
                 Retry

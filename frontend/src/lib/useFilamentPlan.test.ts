@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { api, ApiError } from '../api/client'
-import type { ChoicesView, FilamentOptions } from '../api/types'
+import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import { filamentOptions } from '../mocks/fixtures'
 import { useFilamentPlan } from './useFilamentPlan'
@@ -83,7 +83,7 @@ describe('useFilamentPlan', () => {
     act(() => result.current.setPlan([{ slot_id: 1, spool_id: 9 }]))
     expect(result.current.planChanged).toBe(true)
 
-    act(() => result.current.setPlan(choicesView.filaments.suggested as never))
+    act(() => result.current.setPlan(choicesView.filaments.suggested as SlotChoice[]))
     expect(result.current.planChanged).toBe(false)
   })
 
