@@ -109,7 +109,7 @@ export const customizerTools: Tool[] = [
         .catchall(z.unknown())
         .optional()
         .describe(
-          'Template inputs (a template with its own UI keeps state beside `params`); when given, `params` is ignored and inputs.params is what renders',
+          'Template inputs (a template with its own UI keeps state beside `params`); when given, leave `params` out: inputs.params is what renders',
         ),
       version: z.string().regex(/^[0-9a-f]{7,40}$/).optional().describe('Render an earlier revision'),
       save_output: z.boolean().default(false),
@@ -118,8 +118,16 @@ export const customizerTools: Tool[] = [
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
     handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
-      const rendered = (inputs?.['params'] ?? params) as typeof params
-      const report = validateParams(await fetchSchema(ctx, slug, version), rendered)
+      // With inputs, inputs.params is what renders (missing: the defaults). A `params`
+      // beside them would be dropped, so it is refused rather than validated in vain.
+      if (inputs && Object.keys(params).length > 0) {
+        throw new ToolError('not rendered: put the parameters in inputs.params, not beside inputs')
+      }
+      const given = inputs ? (inputs['params'] ?? {}) : params
+      if (typeof given !== 'object' || given === null || Array.isArray(given)) {
+        throw new ToolError('not rendered: inputs.params must be an object')
+      }
+      const report = validateParams(await fetchSchema(ctx, slug, version), given as typeof params)
       if (!report.valid) {
         throw new ToolError(
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,

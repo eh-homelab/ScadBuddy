@@ -178,9 +178,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run.
 - `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
-  inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, falls
-  back to the generated form), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by
-  portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
+  inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
+  reports a failure through `onFailure`; the Customize page then falls back to the generated form
+  with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
   `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
   `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped

@@ -141,6 +141,29 @@ describe('render_model', () => {
     expect(refused.isError).toBe(true)
   })
 
+  it('refuses params beside inputs, and checks the inputs.params it renders', async () => {
+    let posts = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => {
+        posts += 1
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const beside = await runTool(tool('render_model'), { slug: 'box', params: { width: 5 }, inputs: { house: {} } }, ctx())
+    expect(beside.isError).toBe(true)
+    expect(firstText(beside)).toBe('not rendered: put the parameters in inputs.params, not beside inputs')
+    const notObject = await runTool(tool('render_model'), { slug: 'box', inputs: { params: 'abc' } }, ctx())
+    expect(notObject.isError).toBe(true)
+    expect(firstText(notObject)).toBe('not rendered: inputs.params must be an object')
+    expect(posts).toBe(0)
+    // Without inputs.params the defaults render, and nothing else is checked.
+    const defaults = await runTool(tool('render_model'), { slug: 'box', inputs: { house: {} } }, ctx())
+    expect(defaults.isError).toBeFalsy()
+    expect(posts).toBe(1)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())

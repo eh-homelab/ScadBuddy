@@ -29,7 +29,7 @@ in `models/name-keychain/`:
 |---|---|
 | `model.scad` | The source. Included files sit beside it, because OpenSCAD runs with the model's directory as its working directory (main spec §6.1). |
 | `model.json` | `name`, `description`, `tags` and `source` (see `models/name-keychain/model.json`). It never holds the schema (main spec §4.2). |
-| `presets.json` | Named parameter sets, `{"presets": [{"name", "params"}]}` (see `models/name-keychain/presets.json`). A preset holds only the values it changes (`backend/openapi.json`, `GET /api/v1/models/{slug}/presets`). |
+| `presets.json` | Legacy; see `model.json` `presets` (section 10). Named parameter sets, `{"presets": [{"name", "params"}]}` (see `models/name-keychain/presets.json`). A preset holds only the values it changes (`backend/openapi.json`, `GET /api/v1/models/{slug}/presets`). |
 | `README.md`, `thumbnail.png` | Catalogue text and image. |
 | `ui/index.js` | Optional. The template's own customizer (`"ui": {"module": "ui/index.js", "slot": "panel" \| "page", "api": 1}` in `model.json`). Plain ES module, no build step, exporting `mount(root, host, ctx)`; see section 10, "Template UI" (template-pipelines spec `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §4.1). |
 | `verify.sh` | The template's render checks (section 8 below). |
