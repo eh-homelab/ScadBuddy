@@ -301,7 +301,8 @@ export const sessionTools: Tool[] = [
     name: 'sessions_start',
     description:
       "Start a ScadBuddy agent session owned by this caller, optionally with its first message. The session's " +
-      'tools run with this caller\'s tiers; outward actions still wait for a human approval in the ScadBuddy UI. ' +
+      "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
+      'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
@@ -343,8 +344,9 @@ export const sessionTools: Tool[] = [
     name: 'sessions_send',
     description:
       'Add a user message to a session this caller owns and start its turn. One turn at a time: while a turn ' +
-      'is running this is refused; wait, or sessions_interrupt it. Read the reply with sessions_get or ' +
-      'sessions_attach from after_seq.',
+      'is running this is refused; wait, or sessions_interrupt it. An outward action in the turn waits for a ' +
+      "decision in the ScadBuddy UI or by sessions_approve/sessions_deny (the approval grant). Read the reply with " +
+      'sessions_get or sessions_attach from after_seq.',
     input: z.object({
       session_id: sessionId,
       text: z.string().min(1).max(MESSAGE_MAX),

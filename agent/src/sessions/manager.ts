@@ -1130,6 +1130,12 @@ export class SessionManager {
       )
     }
     if (to.kind === 'browser') return this.transfer(session, to)
+    // A token that is not live could never accept: say so now, not after the
+    // offer has sat an hour (PR #715 review). An OIDC subject has no row to ask.
+    const live = await this.deps.currentTiers?.(to)
+    if (live !== undefined && live.length === 0) {
+      throw new SessionError('invalid', `${to.id} names no live MCP token (unknown, revoked or expired)`)
+    }
     return this.offer(session, to)
   }
 

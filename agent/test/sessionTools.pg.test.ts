@@ -2,7 +2,7 @@ import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/typ
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
 import type { Tier } from '../src/auth/principal.js'
-import { approvalGrantCheck, principalFor } from '../src/auth/tokens.js'
+import { approvalGrantCheck, liveTokenTiers, principalFor } from '../src/auth/tokens.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { ResourceHub } from '../src/resources/hub.js'
@@ -83,6 +83,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         run: runner,
         onAppend: publisher.onAppend,
         approvalGrants: approvalGrantCheck(tokens),
+        currentTiers: liveTokenTiers(tokens),
         mcpServers: (_session, turn) => {
           principals.push(turn)
           return {}
@@ -350,6 +351,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       closers.push(async () => stop())
       const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { prompt: 'hi', wait_seconds: 10 }))
       const id = session.id
+
+      // A token that does not exist is refused at once (PR #715 review).
+      expect(
+        errorText(await a.call('sessions_handoff', { session_id: id, to: 'token:00000000-0000-4000-8000-000000000000' })),
+      ).toMatch(/no live MCP token/)
 
       // A offers it to B: nothing moves yet, and the offer is announced.
       const offered = ok<{ owner: { kind: string; id?: string }; offer: { to: { id?: string }; until: string } }>(
