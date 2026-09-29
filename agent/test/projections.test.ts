@@ -58,6 +58,12 @@ describe('registry projections', () => {
 
     expect(inProcess.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
     expect(normalise(inProcess)).toEqual(normalise(external))
+    // A defaulted field lists its literal default on both sides, not just the
+    // same thing (claude-review of #526, finding 1).
+    for (const listing of [inProcess, external]) {
+      const tool = listing.find((t) => t.name === 'update_source')!
+      expect((tool.inputSchema.properties as Record<string, { default?: unknown }>).force?.default).toBe(false)
+    }
   })
 
   it('fill an omitted default in-process (the SDK 0.3.283 server refused it given a raw shape)', async () => {

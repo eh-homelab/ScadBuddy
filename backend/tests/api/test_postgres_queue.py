@@ -80,7 +80,7 @@ def test_two_replicas_each_hear_every_event_once(
             _wait(partial(_connected, bus))
             bus.add_listener(heard[name].append)
 
-        assert first.put("/api/v1/settings", json={"pipeline_id": 3}).status_code == 200
+        assert first.put("/api/v1/settings", json={"printer_id": 3}).status_code == 200
 
         _wait(lambda: len(changed("one")) >= 1 and len(changed("other")) >= 1)
         time.sleep(0.5)  # a duplicate would have arrived by now

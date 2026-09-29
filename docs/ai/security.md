@@ -19,9 +19,10 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
   authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)) and, when
   enabled, OIDC access tokens (see [MCP OIDC](#mcp-oidc-access-tokens)). The
-  other tool paths are the harness's in-process MCP servers (none registered in
-  `main.ts`) and the browser bridge in the user's own tab
-  ([browser-bridge.md](browser-bridge.md)).
+  other tool paths are the harness's in-process `scadbuddy` server (every session's
+  queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
+  the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
+  Nothing starts a session over HTTP yet (#266, #300).
 
 ## MCP bearer tokens
 
@@ -182,6 +183,18 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   with no gate (outside a session) it is answered with a **deny**, whose message tells
   the model to explain rather than retry. An outward tool therefore never runs
   unattended. External MCP clients use prepare/confirm instead (below).
+- **The registry's tiers.** Sessions get `tierOf` from
+  [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts): each registry tool
+  under its harness name `mcp__scadbuddy__<name>` maps to its `risk`, and every other
+  name (a plugin's tool) stays unknown, so `outward`. An outward registry tool that the
+  gate approved runs at once: the harness projection passes `gate: 'harness'` to
+  `runTool()` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts)), which
+  skips the `/mcp` prepare step. That is safe only because the in-process server is
+  reachable from a harness query alone, whose seam has already stopped the call.
+- **The session's principal.** The tools run as the session owner
+  (`harnessPrincipal()` in [`agent/src/auth/principal.ts`](../../agent/src/auth/principal.ts)):
+  the browser user with every tier, any other owner with `read` only, until the
+  `sessions.*` MCP tools and flows pass the tiers of the token or flow behind it.
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -213,6 +226,62 @@ outside the gateway path").
 **Runaway limits.** Each query gets `maxTurns` (25) and `maxBudgetUsd` (1 USD), plus an
 abort signal (`run.ts`). Sessions spend one budget across all their turns, and any
 watcher can interrupt (PR #377 body, "Budget and turns", "Interrupt").
+
+## MCP auth mode
+
+Spec §8.3 makes the mode "a database setting", and §9 lists "MCP auth mode" with the
+AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts):
+
+- `mcp_auth_mode`: `"bearer"` (the default when unset) or `"disabled"`. `oidc` is on
+  while the OIDC configuration is enabled (see [MCP OIDC](#mcp-oidc-access-tokens)), and
+  then wins over this key, even over `"disabled"`; a stored `"oidc"` without it is
+  `bearer`;
+- `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
+  `"outward"` by default (spec §8.3, "full access by default").
+
+It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
+warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
+verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
+While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
+and again whenever the settings change, not on every request. Outward calls still stop
+at the approval gate in every mode.
+
+Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)):
+
+- `PUT` is a settings write, so outward tier (spec §8.1). It passes the same interim gate
+  as the credential and token writes (`uiRequestProblem` in
+  [`guard.ts`](../../agent/src/routes/guard.ts): the UI's origin through the HTTPS
+  ingress, JSON only), and `GET` passes `uiReadProblem`. The limitation stated there
+  applies: this is not an approval, and anyone who can reach Settings can change the
+  mode (spec §8.3, "Stated plainly").
+- It sets `bearer` or `disabled` and the cap. `oidc` is refused: it is on while the OIDC
+  configuration is enabled (#262), not a value of this key.
+- Both keys are written in one transaction, so no request sees the new mode with the
+  old cap. The write is a compare-and-set: the body carries the stored mode and cap the
+  page showed (`expected`), and the transaction locks `ai_settings` against other writers,
+  re-reads them and answers `409` without writing when they differ. A stale Settings tab
+  therefore cannot turn authentication off without the confirmation the current setting
+  would have asked for.
+- Each change is logged as soon as it commits, before anything is read back, with the
+  client the trusted ingress names (the last `X-Forwarded-For` value, believed only from a
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` peer) and the socket peer.
+- `GET` answers through the same `mcpAuthSettings()` reader `/mcp` uses, so `mode` is
+  what `/mcp` applies (a stored unknown value shows as its fail-closed value).
+  `configured_mode` is the stored key. While OIDC is enabled, `mode` is `oidc` even when
+  `configured_mode` is `disabled`; a `PUT` of `disabled` then stores it and answers
+  `mode: "oidc"`, and Settings says OIDC still applies rather than that auth is off. A
+  stored `"oidc"` without an enabled configuration reads as `bearer`.
+- The UI asks for an explicit confirmation before it saves a change that lets
+  unauthenticated callers do more: switching to `disabled`, or raising the anonymous
+  cap while `disabled` stays on. It asks while OIDC is on too, saying the choice applies
+  once OIDC is turned off. It shows a warning in the section while calls without a token
+  are allowed, or would be once OIDC is turned off. **That confirmation is UI-only.** The `PUT` route does not require
+  it, so a request that passes the interim gate changes the mode without one; a
+  server-side approval for settings writes is #258.
+  [operating.md](operating.md#10-mcp-auth-mode) shows how to set the keys in the database
+  instead.
 
 ## MCP prepare/confirm on the approval store
 
@@ -384,8 +453,13 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 [plugin manifest reference](https://code.claude.com/docs/en/plugins-reference) and the
 [hooks reference](https://code.claude.com/docs/en/hooks), cited in the file. `bin/` is
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
-`assertPluginAllowed()` for every `pluginPaths` entry. ScadBuddy's own plugin passes
-(PR #379, row 8). Plugin packages add the rules in the next section.
+`assertPluginAllowed()` for every `pluginPaths` entry.
+
+ScadBuddy's own plugin (`plugins/scadbuddy`) passes (PR #379, row 8), but `main.ts` does
+not load it: with `tools: []` there is no `Skill` or `Agent` tool to use its skills or
+subagents ([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)
+asserts that, with no other plugin enabled, the registry tools are the only ones
+offered). Plugin packages add the rules in the next section.
 
 **The one exception is the headless browser** (#349). Its plugin is not read from
 anyone's directory: `materializeHeadlessBrowser()` in
@@ -409,7 +483,10 @@ only fetches, vets and stores the pin with its review. Nothing loads until the a
 approves that exact `commit_sha` and `content_hash` through
 `POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
 `CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
-until the admin approves the new one after seeing its file diff. The routes use the
+until the admin approves the new one after seeing its file diff. A re-pin fetched from
+another repository or path than the current pin (a marketplace entry that moved) is
+shown as such in the review, and approving it leaves the package disabled: the new
+source loads only once the admin enables it again. The routes use the
 same UI guard as credential writes, with the same limitation (Known limitations, 1).
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
@@ -577,6 +654,135 @@ they are stored:
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
 
+## Audit log (#258)
+
+Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credentials
+"redacted in logs and audit") and §9 ("the audit log" is AI state in Postgres). The MCP
+spec asks the same of a client: "Log tool usage for audit purposes"
+([MCP tools, Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)).
+The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
+([`agent/src/db/migrations/20260928T0950Z_audit.sql`](../../agent/src/db/migrations/20260928T0950Z_audit.sql)).
+
+| Kind | Recorded by | When |
+|---|---|---|
+| `tool_call` | `TurnAuditor` (`audit/turn.ts`), fed by `sessions/manager.ts` | every tool call a session turn makes: ScadBuddy's in-process tools and remote plugin tools, including calls refused or denied at the approval gate |
+| `tool_call` | `createExternalServer()` (`tools/projections.ts`) | every call over `/mcp`, with the client address |
+| `resource` | `installResources()` (`resources/server.ts`) | every `/mcp` `resources/read`, `subscribe` and `unsubscribe` (#264), with the URI; a tier refusal is `refused` |
+| `approval` | `ApprovalService` (`approvals/service.ts`) | approved, denied, expired, cancelled, and approved-but-voided |
+| `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
+| `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
+| `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
+
+Each row has who (principal kind, id and label; session and turn), the tool and tier,
+the input as a **keyed HMAC** (the approvals' own key, so a row matches its approval's
+`input_hash`) and a **scrubbed summary** (`summariseInput()`: `scrubForLog()`, capped),
+the approval id, the outcome (`ok`, `error`, `refused`, `denied`) and timings. A turn's
+credential and plugin secrets are redacted from the summary and the detail.
+
+**Who ran it and who approved it, on one row.** A `tool_call` row with an approval id
+also has `approved_by_*`: the principal that approved it, copied from
+`ai_approvals.decided_by_*` in the same `INSERT` when the approval's decision is
+`approved` (`AuditLog.record()`). Copied, not joined at read time, because an approval
+row goes with its session (`ON DELETE CASCADE`) and the audit row must outlive it. A
+denied, expired or cancelled call has none; the approval's own `approval` row names
+its decider as the principal.
+
+- **Append-only.** Triggers refuse `UPDATE`, `TRUNCATE` and any `DELETE` except the
+  retention sweep's, which sets `scadbuddy.audit_prune` for its own transaction only
+  (`set_config(…, true)`). This guards against a stray statement in the service's own
+  code; it is not tamper-evidence, since any role can set that setting for its
+  transaction, the service's role holds `DELETE` for the sweep, and a superuser can
+  drop the trigger.
+- **Retention.** `audit_retention_days` in `ai_settings` (default 90, 1–3650), pruned
+  hourly by `main.ts`. Changing it is itself a `settings` row.
+- **Reading it.** `GET /api/v1/ai/audit` (`routes/audit.ts`) behind `uiReadProblem`,
+  newest first, filtered by kind, outcome, surface, action, session, principal and time,
+  paged by an id cursor (`next` → `before`). `PUT /api/v1/ai/audit/settings` behind
+  `uiRequestProblem`. The UI is Settings → **AI activity**
+  ([`frontend/src/components/assistant/AiAuditSection.tsx`](../../frontend/src/components/assistant/AiAuditSection.tsx)).
+- **Recording never blocks the action.** A failed insert goes to the log
+  (`onError`); refusing to act would let a database blip stop every session, and the
+  table lives in the same database as what the actions touch.
+
+## Prompt-injection hardening (#258)
+
+Spec §8.6: "Prompt injection via model READMEs, upstream sources, library code, plugin
+output, Bambuddy data" is mitigated by "Tool results wrap such content as untrusted;
+outward actions always need a human approval; `tools: []`". Anthropic's guidance on
+indirect prompt injection
+([Mitigate jailbreaks and prompt injections](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks))
+decides the details, and Anthropic's own research write-up says "prompt injection is far
+from a solved problem"
+([Mitigating the risk of prompt injections in browser use](https://www.anthropic.com/research/prompt-injection-defenses)),
+so the marking is defence in depth and the approval gate is the boundary.
+
+- **Untrusted-data envelope** ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)).
+  `runToolWithOutcome()` re-encodes every text block a handler returns as
+  `{"untrusted_data": {"tool", "source", "content"}}`. The guidance: "Put untrusted
+  content only in tool results", "Tell Claude what the content is and where it came
+  from", and "JSON-encode untrusted content ... so an attacker cannot close a quote or
+  tag to 'break out' into an instruction context". Each tool may declare its `source`
+  (the README, OpenSCAD source and comments, render logs, upstream libraries, Google
+  Fonts, Bambuddy data); the rest get a default. Following "Don't put your own
+  instructions in tool results", the envelope carries no instruction. ScadBuddy's own
+  messages (tier refusals, the pending-approval notice, a `ToolError` summary) are not
+  wrapped. The panel's `tool.result` summary shows the content, unwrapped.
+- **Images, audio and blobs** (`markUntrustedContent()`). Bytes cannot be wrapped, and
+  an image can carry text as well as a README can; OWASP lists "multimodal" injection,
+  instructions hidden in images, among its scenarios
+  ([LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)).
+  So each image, audio or embedded-blob block is preceded by a text preamble,
+  `{"untrusted_data": {"tool", "source", "content_follows": {"type", "mime_type"}}}`,
+  which says only where the next block came from ("Tell Claude what the content is
+  and where it came from"), again with no instruction. An embedded *text* resource has
+  its text wrapped like any other text. A `resource_link` is a URI and is left alone.
+- **Plugin tool results** (`plugins/forwarder.ts` `rewriteMessages()`). Claude Code puts
+  a remote plugin's result straight into the model's context, and every plugin call
+  already passes through the loopback forwarder, so the forwarder rewrites each
+  `tools/call` response it relays (JSON or SSE) with `markUntrustedContent()`, under the
+  name the model knows the tool by (`mcp__<plugin>__<tool>`) and a source naming the
+  plugin as a third-party MCP server. A JSON-RPC error's message is wrapped too, since
+  Claude Code hands it to the model as the tool's error. `tools/list` is not: it is the
+  tool catalogue, which the registry already filters. Measured end to end in
+  `agent/test/plugins.e2e.test.ts` (the bundled Claude Code sends the model the wrapped
+  result) and `agent/test/plugins.untrusted.test.ts`.
+- **MCP resources** (#264, `resources/server.ts`, `markUntrustedResourceContents()`).
+  The resources serve the same READMEs, sources and Bambuddy data as the tools, so a
+  `resources/read` answer is marked as well: text contents become the envelope (with
+  the resource's own MIME type as `mime_type` inside it, and `application/json` as the
+  item's `mimeType`, which is what the text now is); a blob (a thumbnail, a 3MF) is
+  preceded by a preamble item. Every item also carries
+  `_meta["scadbuddy/untrusted"]` (tool, source, original MIME type) for a client that
+  reads metadata; `_meta` is the field MCP reserves "to allow clients and servers to
+  attach additional metadata to their interactions"
+  ([MCP basic protocol, `_meta`](https://modelcontextprotocol.io/specification/2025-06-18/basic)).
+  `resources/list` still names each resource's underlying MIME type.
+- **The boundary, stated where instructions belong.** `UNTRUSTED_CONTENT_POLICY` is
+  appended to Claude Code's system prompt on every session turn
+  (`sessions/manager.ts`, `systemPromptAppend`), per "State the policy in your system
+  prompt", modelled on the page's `<untrusted_content_policy>` example. `/mcp`'s server
+  `instructions` carry the same statement for an external client's model.
+- **Content can never approve an outward call.** Tiers are decided from the tool
+  *name* only (`decide()` in `harness/permissions.ts`; an unknown tool is `outward`),
+  and an outward call is approved only by a decision in the ScadBuddy UI
+  (`ApprovalService.decide()`, behind the origin gate); no tool argument or result is
+  read by either. Over `/mcp` an outward call only prepares a pending action.
+- **Replayed in tests.** `agent/test/injection.e2e.test.ts` runs the real SDK and
+  bundled Claude Code against the fake Anthropic endpoint, with the real registry over
+  an msw backend. A model README (the injection of #521's `readme-prompt-injection`
+  eval scenario) orders a `delete_model`, and an OpenSCAD comment orders a
+  `print_output`, and the fake model obeys each. The tests assert that the content
+  reached the model inside the envelope, the system prompt carried the policy, the
+  outward call parked for approval, the backend never received it (while parked, after
+  a denial, after an interrupt), and the audit log shows it `denied` / `refused` with
+  its approval id. `agent/test/untrusted.test.ts` covers the envelope (a README that
+  tries to close it stays inside the JSON string) and that tier decisions ignore
+  content.
+- **Not covered.** Tool results are not screened by a classifier (the guidance's
+  "Screen tool outputs" step). The preamble marks an image's provenance; it cannot
+  stop a model from reading text inside the image, which is why the approval gate,
+  not the marking, is the boundary.
+
 ## Known limitations
 
 From the merged code and PR bodies:
@@ -595,8 +801,10 @@ From the merged code and PR bodies:
 4. **Secrets as JS strings** stay in the heap until garbage-collected (`secrets.ts`,
    "PLAINTEXT IN MEMORY").
 5. **Scrubbing is name-based.** A tool that takes a secret under a name
-   `SENSITIVE_KEY` does not match would log it. The registry must let such tools
-   declare it before #251/#258 wire in real outward tools (spec §6; seam comment in
+   `SENSITIVE_KEY` does not match would log it. No registry tool takes a secret
+   argument today (the inputs in [`agent/src/tools/`](../../agent/src/tools/)). A tool
+   that does must declare it to the registry, and `scrubForLog` must read that
+   declaration (seam comment in
    [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
 6. **Session store items still to verify** (PR #377, "To verify"):
    - `SessionStore` is `@alpha` in SDK 0.3.283;
@@ -605,9 +813,11 @@ From the merged code and PR bodies:
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
 7. **Plugins are vetted, but no production turn runs yet.** `main.ts` gives the
-   `SessionManager` the enabled remote plugins, plugin packages and the headless
-   browser for each turn, but nothing starts a session over HTTP yet (the comment on
-   `sessions` in `main.ts`).
+   `SessionManager` ScadBuddy's registry tools, the enabled remote plugins, plugin
+   packages and the headless browser's vendored plugin (when enabled, see
+   [headless-browser.md](headless-browser.md)) for each turn, but nothing starts a session
+   over HTTP yet (the comment on `sessions` in `main.ts`). ScadBuddy's own plugin
+   (`plugins/scadbuddy`) is not loaded (see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put

@@ -1,4 +1,5 @@
 import type { Sql } from 'postgres'
+import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
 import {
   type Envelope,
   type Kek,
@@ -300,11 +301,18 @@ export class CredentialStore implements CredentialRepo {
   }
 }
 
-/** Non-secret AI settings in `ai_settings`. */
+/**
+ * Non-secret AI settings in `ai_settings`. Every write is recorded in the
+ * audit log when one is given (#258: settings writes are audited), with the
+ * key and the new value: the table holds no secrets by contract (its
+ * migration: "Never put a secret here"), and the value is capped.
+ */
 export class SettingsStore {
   private readonly sql: Sql
-  constructor(sql: Sql) {
+  private readonly audit: AuditSink | undefined
+  constructor(sql: Sql, audit?: AuditSink) {
     this.sql = sql
+    this.audit = audit
   }
 
   async get<T>(key: string): Promise<T | undefined> {
@@ -312,9 +320,61 @@ export class SettingsStore {
     return row?.value
   }
 
-  async set(key: string, value: unknown): Promise<void> {
-    await this.sql`
-      INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+  /** `context` says who wrote it; ScadBuddy itself when omitted. */
+  async set(key: string, value: unknown, context?: AuditContext): Promise<void> {
+    const startedAt = new Date()
+    let failure: unknown
+    try {
+      await this.sql`
+        INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+    } catch (err) {
+      failure = err
+    }
+    await this.audit?.record({
+      kind: 'settings',
+      action: key,
+      surface: context?.surface ?? 'system',
+      actor: context?.actor ?? SYSTEM_ACTOR,
+      clientIp: context?.clientIp,
+      outcome: failure === undefined ? 'ok' : 'error',
+      detail: `${key} = ${JSON.stringify(value) ?? 'undefined'}${failure === undefined ? '' : ` (failed: ${failure instanceof Error ? failure.message : String(failure)})`}`,
+      startedAt,
+      finishedAt: new Date(),
+    })
+    if (failure !== undefined) throw failure
+  }
+
+  /**
+   * Sets several keys in one transaction, so a reader on any replica sees all
+   * of them change or none (e.g. the MCP auth mode with its anonymous cap).
+   *
+   * With `check`, a compare-and-set: the table is locked against other writers
+   * (readers are not blocked), `check` reads the current values inside the
+   * transaction, and nothing is written unless it returns true. Answers
+   * whether the values were written.
+   */
+  async setMany(
+    values: Record<string, unknown>,
+    check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
+  ): Promise<boolean> {
+    return await this.sql.begin(async (tx) => {
+      if (check) {
+        await tx`LOCK TABLE ai_settings IN SHARE ROW EXCLUSIVE MODE`
+        const current = {
+          get: async <T>(key: string): Promise<T | undefined> => {
+            const [row] = await tx<{ value: T }[]>`SELECT value FROM ai_settings WHERE key = ${key}`
+            return row?.value
+          },
+        }
+        if (!(await check(current))) return false
+      }
+      for (const [key, value] of Object.entries(values)) {
+        await tx`
+          INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+      }
+      return true
+    })
   }
 }
