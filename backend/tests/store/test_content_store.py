@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from psycopg.errors import DeadlockDetected
 
 from scadbuddy.store.content import (
     BlobCorruptError,
@@ -365,10 +366,11 @@ def test_concurrent_re_puts_of_one_key_do_not_deadlock(
 
 
 def test_puts_swapping_objects_between_two_keys_do_not_deadlock(
-    pool: Pool, monkeypatch: pytest.MonkeyPatch
+    pool: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Each reuses the object the other key names: key-then-object ordering cannot
-    order these, so the deadlock Postgres breaks is retried. The first to commit frees
+    """Each reuses the object the other key names. Locking key-then-object leaves this
+    one deadlock (locking in key text order would avoid it too; retrying is simpler),
+    so the deadlock Postgres breaks is retried, and logged. The first to commit frees
     the other's object, so the retry finds it gone (`ContentStore` then uploads its own
     copy); neither is a deadlock."""
     index = BlobIndex(pool)
@@ -376,11 +378,15 @@ def test_puts_swapping_objects_between_two_keys_do_not_deadlock(
     index.put("k1", p, slug="demo", meta={})
     index.put("k2", o, slug="demo", meta={})
     _parked_hold(monkeypatch, _meet(threading.Barrier(2)))
-    results = _both(
-        lambda: index.put("k1", o, slug="demo", meta={}, reuse=True),
-        lambda: index.put("k2", p, slug="demo", meta={}, reuse=True),
-    )
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.store.index"):
+        results = _both(
+            lambda: index.put("k1", o, slug="demo", meta={}, reuse=True),
+            lambda: index.put("k2", p, slug="demo", meta={}, reuse=True),
+        )
     assert sorted(results) == ["ReuseLostError", "ok"]
+    [retried] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert retried.__dict__["key"] in ("k1", "k2")
+    assert retried.__dict__["attempt"] == 1
     k1, k2 = index.get("k1"), index.get("k2")
     assert k1 is not None and k2 is not None
     assert (k1.ref, k2.ref) in [(o, o), (p, p)]  # one moved; the other kept its object
@@ -417,6 +423,48 @@ async def test_a_release_waits_for_a_reuse_that_holds_the_object(
     named = store.index.get("b")
     assert named is not None and named.ref == old
     assert store.index.get("a") is None
+
+
+def _deadlocked(*_: object, **__: object) -> Any:
+    raise DeadlockDetected("deadlock detected")
+
+
+async def test_a_put_the_index_gave_up_on_removes_its_own_upload(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    monkeypatch.setattr(store.index, "put", _deadlocked)
+    with pytest.raises(DeadlockDetected):
+        await store.put("snapshot", b"fresh", name="a", scope=SCOPE, key="a")
+    assert not list((root / "snapshot").iterdir())  # no row will ever name it
+
+
+async def test_a_put_the_index_gave_up_on_keeps_a_reused_object(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    kept = await store.put("snapshot", b"same", name="a", scope=SCOPE, key="a")
+    monkeypatch.setattr(store.index, "swap", _deadlocked)
+    with pytest.raises(DeadlockDetected):
+        await store.replace("b", "snapshot", b"same", name="b", scope=SCOPE, expected=None)
+    assert await store.read(kept) == b"same"
+
+
+def test_mark_merges_meta_into_the_stale_rows_only(pool: Pool) -> None:
+    index = BlobIndex(pool)
+    for key in ("b", "a"):
+        index.put(key, _ref(key, "d"), slug="demo", meta={"x": 1})
+    cutoff = index.now()
+    index.put("c", _ref("c", "d"), slug="demo", meta={"x": 1})
+    index.mark(["a", "b", "c"], backend="bambuddy", cutoff=cutoff, stale=True)
+    marked = {key: (stat.meta if (stat := index.get(key)) else None) for key in "abc"}
+    assert marked == {
+        "a": {"x": 1, "stale": True},
+        "b": {"x": 1, "stale": True},
+        "c": {"x": 1},
+    }
 
 
 def test_a_local_object_id_with_a_trailing_newline_is_refused(tmp_path: Path) -> None:
