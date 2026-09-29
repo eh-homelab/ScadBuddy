@@ -6,8 +6,9 @@ test.describe('catalogue list mode (#278)', () => {
     'msw-backed; the real stack is covered by real-backend.spec.ts',
   )
 
-  test('the List view survives a reload, and is remembered without the URL', async ({ page }) => {
+  test('the view lives in the URL: it survives a reload, and no view means Cards', async ({ page }) => {
     await page.goto('/')
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByTestId('result-count')).toHaveText('4 of 4')
     const view = page.getByRole('group', { name: 'View' })
     await view.getByRole('button', { name: 'List' }).click()
@@ -19,24 +20,22 @@ test.describe('catalogue list mode (#278)', () => {
     await expect(page.locator('[data-model-row]')).toHaveCount(4)
     await expect(view.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
 
-    // With no `view` in the URL, the browser's last choice is restored into it.
+    // A URL with no `view` shows Cards, whatever was chosen before.
     await page.goto('/')
-    await expect(page).toHaveURL(/\/\?view=list$/)
-    await expect(page.locator('[data-model-row]')).toHaveCount(4)
-
-    await view.getByRole('button', { name: 'Cards' }).click()
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(0)
+    await expect(view.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+
+    await view.getByRole('button', { name: 'List' }).click()
+    await expect(page).toHaveURL(/\/\?view=list$/)
 
     // Back undoes the toggle, Forward redoes it.
     await page.goBack()
+    await expect(page).toHaveURL(/\/\?view=cards$/)
+    await expect(page.locator('[data-model-row]')).toHaveCount(0)
+    await page.goForward()
     await expect(page).toHaveURL(/\/\?view=list$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(4)
-    await page.goForward()
-    await expect(page).toHaveURL(/\/$/)
-    await expect(page.locator('[data-model-row]')).toHaveCount(0)
-    await page.reload()
-    await expect(view.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
   })
 
   test('a thumbnail opens the lightbox and the name navigates', async ({ page }) => {

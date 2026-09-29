@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
 import { useAgentHandlers } from '../agent/useAgentHandlers'
@@ -27,17 +27,9 @@ import {
   tagCounts,
   toParams,
 } from '../lib/catalogueQuery'
-import { readStoredView, storeView } from '../lib/catalogueView'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
-
-/** History state marking a catalogue entry whose view is settled (#278). */
-const SEEN = { catalogueView: 'seen' } as const
-
-function isSeen(state: unknown): boolean {
-  return typeof state === 'object' && state !== null && 'catalogueView' in state
-}
 
 export function CataloguePage() {
   // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
@@ -49,30 +41,17 @@ export function CataloguePage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
-  // #278 — arriving with no `view` in the URL, the one this browser last chose is
-  // written into it (replacing this entry), so the URL stays the one source of truth
-  // and back/forward move between views like any other filter (#276). Each entry the
-  // catalogue has seen is marked in its history state, which outlives this component
-  // (leaving for a model unmounts it) and the tab's own storage: Back/Forward or a
-  // reload onto a marked entry shows what its URL says, even when another tab has
-  // since chosen another view. An unmarked entry is a fresh arrival: the first load,
-  // the Models tab, the agent's `navigate`.
-  const location = useLocation()
+  // #278 — the view is always in the URL: one with no (or an unknown) `view` shows
+  // Cards and is rewritten to say so, replacing the entry.
   useEffect(() => {
-    if (isSeen(location.state)) return
-    const stored = readStoredView()
-    const view = !params.has('view') && stored ? stored : query.view
-    setParams(toParams({ ...query, view }), { replace: true, state: SEEN })
-    // Per navigation only: between navigations the URL alone decides.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.key])
+    if (params.get('view') !== query.view) setParams(toParams(query), { replace: true })
+  }, [params, query, setParams])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
-    if (next.view !== query.view) storeView(next.view)
-    setParams(toParams(next), { ...options, state: SEEN })
+    setParams(toParams(next), options)
   }
 
   function addTag(tag: string) {

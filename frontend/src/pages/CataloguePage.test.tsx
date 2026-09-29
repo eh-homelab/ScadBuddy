@@ -1,10 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { toSlides } from '../components/media/slides'
-import { CATALOGUE_VIEW_KEY, resetStoredView } from '../lib/catalogueView'
 import { BUILTIN_SLUG, GALLERY_SLUG, media, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
@@ -498,7 +497,7 @@ describe('CataloguePage cards (#277)', () => {
       within(card).getByRole('button', { name: 'Open Crème Coaster, image 3 of 4' }),
     ).toHaveAttribute('tabindex', '0')
     expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
-    expect(screen.getByTestId('search')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
@@ -620,12 +619,6 @@ describe('CataloguePage, live (#269)', () => {
 })
 
 describe('CataloguePage list mode (#278)', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
-    window.localStorage.clear()
-    resetStoredView()
-  })
-
   function rows(): HTMLElement[] {
     return [...document.querySelectorAll<HTMLElement>('[data-model-row]')]
   }
@@ -634,77 +627,62 @@ describe('CataloguePage list mode (#278)', () => {
     return screen.getByRole('heading', { name }).closest('[data-model-row]') as HTMLElement
   }
 
-  it('shows cards by default, with Cards pressed', async () => {
-    renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
+  it('shows cards for a URL with no view, and writes the view into it', async () => {
+    const { user } = renderCatalogue('/?tag=keychain')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
     const view = screen.getByRole('group', { name: 'View' })
     expect(within(view).getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
     expect(rows()).toHaveLength(0)
-  })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
 
-  it('switches to List, puts it in the URL and remembers it per browser', async () => {
-    const { user } = renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-
+    // Replaced, not pushed: List then Back returns to the normalized entry.
     await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
-    expect(rows()).toHaveLength(4)
-    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('list')
-
-    await user.click(screen.getByRole('button', { name: 'Cards' }))
-    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
-    expect(rows()).toHaveLength(0)
-    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('cards')
-  })
-
-  it('restores the remembered view into a URL that has none, replacing the entry', async () => {
-    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
-    const { user } = renderCatalogue('/?tag=keychain')
-    await screen.findByRole('heading', { name: 'Name Keychain' })
-    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list')
-    expect(rows()).toHaveLength(2)
-    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
-
-    // Replaced, not pushed: Cards then Back returns to List, not to a view-less URL.
-    await user.click(screen.getByRole('button', { name: 'Cards' }))
-    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain')
-    expect(rows()).toHaveLength(0)
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=list$/)
     await user.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list')
-    expect(rows()).toHaveLength(2)
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
+    expect(rows()).toHaveLength(0)
   })
 
-  it('keeps List across in-app navigation to the catalogue while it stays mounted', async () => {
+  it('treats an unknown view as cards and rewrites it', async () => {
+    renderCatalogue('/?view=grid')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('switches between List and Cards, naming each in the URL', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
+    expect(rows()).toHaveLength(4)
+
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('shows what the URL says on in-app navigation to the catalogue', async () => {
     const { user } = renderCatalogue()
     await screen.findByRole('heading', { name: 'Crème Coaster' })
     await user.click(screen.getByRole('button', { name: 'List' }))
     expect(rows()).toHaveLength(4)
 
+    // The agent's `navigate` and the Models tab name no view, so they show Cards.
     await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
     await waitFor(() =>
-      expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list'),
+      expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/),
     )
-    expect(rows()).toHaveLength(2)
-
-    await user.click(screen.getByRole('link', { name: 'Models' }))
-    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?view=list'))
-    expect(rows()).toHaveLength(4)
-    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
-  })
-
-  it('shows Cards on Back to an entry with no view, even with List remembered', async () => {
-    const { user } = renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('list')
-
-    await user.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
     expect(rows()).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/))
     expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
   })
 
-  it('keeps Cards on Back from a model, whatever another tab remembered meanwhile', async () => {
+  it('keeps List on Back from a model', async () => {
     // The real route topology: the catalogue and the customizer are sibling routes, so
     // leaving for a model unmounts the catalogue and Back mounts a fresh one.
     const user = renderPage(
@@ -729,28 +707,17 @@ describe('CataloguePage list mode (#278)', () => {
           }
         />
       </Routes>,
+      { route: '/?view=list' },
     ).user
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(0)
+    expect(rows()).toHaveLength(4)
 
     await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
     await screen.findByText('Customizer')
-    // Another tab of this browser chooses List while this one is on the model.
-    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
-
     await user.click(screen.getByRole('button', { name: 'Back' }))
     await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
-    expect(rows()).toHaveLength(0)
-    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
-  })
-
-  it('lets a view in the URL win over the remembered one', async () => {
-    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'cards')
-    renderCatalogue('/?view=list')
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
     expect(rows()).toHaveLength(4)
-    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
   })
 
   it('undoes and redoes a view toggle with back and forward', async () => {
@@ -761,46 +728,13 @@ describe('CataloguePage list mode (#278)', () => {
     expect(rows()).toHaveLength(4)
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
-    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(rows()).toHaveLength(0)
     expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
 
     await user.click(screen.getByRole('button', { name: 'Forward' }))
-    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
     expect(rows()).toHaveLength(4)
-  })
-
-  it('works when storage throws, as a sandboxed iframe may', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-      throw new DOMException('blocked', 'SecurityError')
-    })
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new DOMException('blocked', 'SecurityError')
-    })
-    const { user } = renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(0)
-
-    await user.click(screen.getByRole('button', { name: 'List' }))
-    expect(rows()).toHaveLength(4)
-    await user.click(screen.getByRole('button', { name: 'Cards' }))
-    expect(rows()).toHaveLength(0)
-  })
-
-  it('keeps the choice for this page when storage reads but will not write', async () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new DOMException('full', 'QuotaExceededError')
-    })
-    const first = renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-    await first.user.click(screen.getByRole('button', { name: 'List' }))
-    first.unmount()
-
-    // Back on the catalogue with no `view` in the URL, the choice is still List.
-    renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(4)
-    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
   })
 
   it('keeps the filters and sort when the view changes', async () => {
