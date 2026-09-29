@@ -10,6 +10,7 @@ export const SECTIONS = [
   { id: 'uploads', title: 'Uploads' },
   { id: 'rendering', title: 'Rendering' },
   { id: 'fonts', title: 'Fonts' },
+  { id: 'libraries', title: 'Libraries' },
   { id: 'preview', title: 'Preview' },
   { id: 'remembered', title: 'Remembered choices' },
   { id: 'assistant', title: 'Assistant' },
