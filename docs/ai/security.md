@@ -654,6 +654,135 @@ they are stored:
 Full payloads stay only in the SDK transcript (`ai_session_entries`), which is never
 sent to watchers.
 
+## Audit log (#258)
+
+Spec §8.3 ("the audit log records the client IP"), §8.6 ("audit log"; credentials
+"redacted in logs and audit") and §9 ("the audit log" is AI state in Postgres). The MCP
+spec asks the same of a client: "Log tool usage for audit purposes"
+([MCP tools, Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)).
+The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
+([`agent/src/db/migrations/20260928T0950Z_audit.sql`](../../agent/src/db/migrations/20260928T0950Z_audit.sql)).
+
+| Kind | Recorded by | When |
+|---|---|---|
+| `tool_call` | `TurnAuditor` (`audit/turn.ts`), fed by `sessions/manager.ts` | every tool call a session turn makes: ScadBuddy's in-process tools and remote plugin tools, including calls refused or denied at the approval gate |
+| `tool_call` | `createExternalServer()` (`tools/projections.ts`) | every call over `/mcp`, with the client address |
+| `resource` | `installResources()` (`resources/server.ts`) | every `/mcp` `resources/read`, `subscribe` and `unsubscribe` (#264), with the URI; a tier refusal is `refused` |
+| `approval` | `ApprovalService` (`approvals/service.ts`) | approved, denied, expired, cancelled, and approved-but-voided |
+| `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
+| `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
+| `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
+
+Each row has who (principal kind, id and label; session and turn), the tool and tier,
+the input as a **keyed HMAC** (the approvals' own key, so a row matches its approval's
+`input_hash`) and a **scrubbed summary** (`summariseInput()`: `scrubForLog()`, capped),
+the approval id, the outcome (`ok`, `error`, `refused`, `denied`) and timings. A turn's
+credential and plugin secrets are redacted from the summary and the detail.
+
+**Who ran it and who approved it, on one row.** A `tool_call` row with an approval id
+also has `approved_by_*`: the principal that approved it, copied from
+`ai_approvals.decided_by_*` in the same `INSERT` when the approval's decision is
+`approved` (`AuditLog.record()`). Copied, not joined at read time, because an approval
+row goes with its session (`ON DELETE CASCADE`) and the audit row must outlive it. A
+denied, expired or cancelled call has none; the approval's own `approval` row names
+its decider as the principal.
+
+- **Append-only.** Triggers refuse `UPDATE`, `TRUNCATE` and any `DELETE` except the
+  retention sweep's, which sets `scadbuddy.audit_prune` for its own transaction only
+  (`set_config(…, true)`). This guards against a stray statement in the service's own
+  code; it is not tamper-evidence, since any role can set that setting for its
+  transaction, the service's role holds `DELETE` for the sweep, and a superuser can
+  drop the trigger.
+- **Retention.** `audit_retention_days` in `ai_settings` (default 90, 1–3650), pruned
+  hourly by `main.ts`. Changing it is itself a `settings` row.
+- **Reading it.** `GET /api/v1/ai/audit` (`routes/audit.ts`) behind `uiReadProblem`,
+  newest first, filtered by kind, outcome, surface, action, session, principal and time,
+  paged by an id cursor (`next` → `before`). `PUT /api/v1/ai/audit/settings` behind
+  `uiRequestProblem`. The UI is Settings → **AI activity**
+  ([`frontend/src/components/assistant/AiAuditSection.tsx`](../../frontend/src/components/assistant/AiAuditSection.tsx)).
+- **Recording never blocks the action.** A failed insert goes to the log
+  (`onError`); refusing to act would let a database blip stop every session, and the
+  table lives in the same database as what the actions touch.
+
+## Prompt-injection hardening (#258)
+
+Spec §8.6: "Prompt injection via model READMEs, upstream sources, library code, plugin
+output, Bambuddy data" is mitigated by "Tool results wrap such content as untrusted;
+outward actions always need a human approval; `tools: []`". Anthropic's guidance on
+indirect prompt injection
+([Mitigate jailbreaks and prompt injections](https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks))
+decides the details, and Anthropic's own research write-up says "prompt injection is far
+from a solved problem"
+([Mitigating the risk of prompt injections in browser use](https://www.anthropic.com/research/prompt-injection-defenses)),
+so the marking is defence in depth and the approval gate is the boundary.
+
+- **Untrusted-data envelope** ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)).
+  `runToolWithOutcome()` re-encodes every text block a handler returns as
+  `{"untrusted_data": {"tool", "source", "content"}}`. The guidance: "Put untrusted
+  content only in tool results", "Tell Claude what the content is and where it came
+  from", and "JSON-encode untrusted content ... so an attacker cannot close a quote or
+  tag to 'break out' into an instruction context". Each tool may declare its `source`
+  (the README, OpenSCAD source and comments, render logs, upstream libraries, Google
+  Fonts, Bambuddy data); the rest get a default. Following "Don't put your own
+  instructions in tool results", the envelope carries no instruction. ScadBuddy's own
+  messages (tier refusals, the pending-approval notice, a `ToolError` summary) are not
+  wrapped. The panel's `tool.result` summary shows the content, unwrapped.
+- **Images, audio and blobs** (`markUntrustedContent()`). Bytes cannot be wrapped, and
+  an image can carry text as well as a README can; OWASP lists "multimodal" injection,
+  instructions hidden in images, among its scenarios
+  ([LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)).
+  So each image, audio or embedded-blob block is preceded by a text preamble,
+  `{"untrusted_data": {"tool", "source", "content_follows": {"type", "mime_type"}}}`,
+  which says only where the next block came from ("Tell Claude what the content is
+  and where it came from"), again with no instruction. An embedded *text* resource has
+  its text wrapped like any other text. A `resource_link` is a URI and is left alone.
+- **Plugin tool results** (`plugins/forwarder.ts` `rewriteMessages()`). Claude Code puts
+  a remote plugin's result straight into the model's context, and every plugin call
+  already passes through the loopback forwarder, so the forwarder rewrites each
+  `tools/call` response it relays (JSON or SSE) with `markUntrustedContent()`, under the
+  name the model knows the tool by (`mcp__<plugin>__<tool>`) and a source naming the
+  plugin as a third-party MCP server. A JSON-RPC error's message is wrapped too, since
+  Claude Code hands it to the model as the tool's error. `tools/list` is not: it is the
+  tool catalogue, which the registry already filters. Measured end to end in
+  `agent/test/plugins.e2e.test.ts` (the bundled Claude Code sends the model the wrapped
+  result) and `agent/test/plugins.untrusted.test.ts`.
+- **MCP resources** (#264, `resources/server.ts`, `markUntrustedResourceContents()`).
+  The resources serve the same READMEs, sources and Bambuddy data as the tools, so a
+  `resources/read` answer is marked as well: text contents become the envelope (with
+  the resource's own MIME type as `mime_type` inside it, and `application/json` as the
+  item's `mimeType`, which is what the text now is); a blob (a thumbnail, a 3MF) is
+  preceded by a preamble item. Every item also carries
+  `_meta["scadbuddy/untrusted"]` (tool, source, original MIME type) for a client that
+  reads metadata; `_meta` is the field MCP reserves "to allow clients and servers to
+  attach additional metadata to their interactions"
+  ([MCP basic protocol, `_meta`](https://modelcontextprotocol.io/specification/2025-06-18/basic)).
+  `resources/list` still names each resource's underlying MIME type.
+- **The boundary, stated where instructions belong.** `UNTRUSTED_CONTENT_POLICY` is
+  appended to Claude Code's system prompt on every session turn
+  (`sessions/manager.ts`, `systemPromptAppend`), per "State the policy in your system
+  prompt", modelled on the page's `<untrusted_content_policy>` example. `/mcp`'s server
+  `instructions` carry the same statement for an external client's model.
+- **Content can never approve an outward call.** Tiers are decided from the tool
+  *name* only (`decide()` in `harness/permissions.ts`; an unknown tool is `outward`),
+  and an outward call is approved only by a decision in the ScadBuddy UI
+  (`ApprovalService.decide()`, behind the origin gate); no tool argument or result is
+  read by either. Over `/mcp` an outward call only prepares a pending action.
+- **Replayed in tests.** `agent/test/injection.e2e.test.ts` runs the real SDK and
+  bundled Claude Code against the fake Anthropic endpoint, with the real registry over
+  an msw backend. A model README (the injection of #521's `readme-prompt-injection`
+  eval scenario) orders a `delete_model`, and an OpenSCAD comment orders a
+  `print_output`, and the fake model obeys each. The tests assert that the content
+  reached the model inside the envelope, the system prompt carried the policy, the
+  outward call parked for approval, the backend never received it (while parked, after
+  a denial, after an interrupt), and the audit log shows it `denied` / `refused` with
+  its approval id. `agent/test/untrusted.test.ts` covers the envelope (a README that
+  tries to close it stays inside the JSON string) and that tier decisions ignore
+  content.
+- **Not covered.** Tool results are not screened by a classifier (the guidance's
+  "Screen tool outputs" step). The preamble marks an image's provenance; it cannot
+  stop a model from reading text inside the image, which is why the approval gate,
+  not the marking, is the boundary.
+
 ## Known limitations
 
 From the merged code and PR bodies:

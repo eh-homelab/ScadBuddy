@@ -133,6 +133,9 @@ export function connectLanguageServer(
     register(initialized.capabilities)
   }
 
+  // Only send requests for capabilities the server advertises, on a document it has
+  // opened: openscad-lsp never answers anything else, and the backend ends a session
+  // with a request left unanswered for 60s (`REQUEST_TIMEOUT` in library/lsp.py).
   function register(capabilities: ServerCapabilities) {
     const { languages } = monaco
     if (capabilities.completionProvider) {
