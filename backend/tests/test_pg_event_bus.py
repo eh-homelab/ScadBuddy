@@ -566,6 +566,7 @@ def test_a_database_url_selects_the_postgres_bus_on_the_queue_s_listener(
     assert store.events is state.events
     assert state.events.listener is store.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)
+    assert isinstance(state.queue, RenderQueue)
     assert state.queue.events is state.events
     assert PG_CHANNEL in store.pg_listener.channels
 

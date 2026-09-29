@@ -13,6 +13,7 @@ from typing import Any
 
 import psycopg
 import pytest
+import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -29,6 +30,7 @@ from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
+from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import activities
@@ -37,6 +39,8 @@ from scadbuddy.workflows.activities import (
     RenderActivities,
     WorkerDeps,
     _heartbeating,
+    _main_result,
+    _process_output,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -46,13 +50,14 @@ from scadbuddy.workflows.models import (
     PieceResult,
     PrepareResult,
     Projection,
+    RenderMainResult,
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad
+from tests.conftest import fake_3mf_openscad, write_openscad_3mf
 from tests.support.temporal import temporal_client
 
-REVISION = "c0ffee"
+REVISION = "c0ffee0"
 
 
 class _History:
@@ -165,7 +170,7 @@ async def test_each_stage_activity_holds_the_library_lease_for_itself(
     assert gate.leased(checkout) == []
 
 
-@pytest.mark.parametrize("stage", ["render_solids", "finish_piece"])
+@pytest.mark.parametrize("stage", ["render_main", "render_solids", "finish_piece"])
 async def test_a_checkout_removed_between_activities_fails_the_next_one(
     tmp_path: Path, stage: str
 ) -> None:
@@ -180,7 +185,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
     req = _request()
     checkout = _checkout(paths)
     prepared = await _prepared_with_library(acts, env, req, checkout)
-    main = await env.run(acts.render_main, req, prepared)
+    main = RenderMainResult()
+    if stage != "render_main":
+        main = await env.run(acts.render_main, req, prepared)
     if stage == "finish_piece":
         await env.run(acts.render_solids, req, prepared, main)
 
@@ -188,7 +195,9 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
         shutil.rmtree(checkout)
 
     with pytest.raises(LibraryNotInstalledError, match="bosl"):
-        if stage == "render_solids":
+        if stage == "render_main":
+            await env.run(acts.render_main, req, prepared)
+        elif stage == "render_solids":
             await env.run(acts.render_solids, req, prepared, main)
         else:
             await env.run(acts.finish_piece, req, prepared, main)
@@ -197,6 +206,17 @@ async def test_a_checkout_removed_between_activities_fails_the_next_one(
 
 
 # ── the stage activities ───────────────────────────────────────────────────────
+
+
+def test_a_render_that_echoed_no_plates_carries_none_between_activities() -> None:
+    """`RenderMainResult` mirrors `ProcessOutput`: no `echo(plates = N)` is None in
+    both, never a count the template did not state."""
+    output = ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
+    assert output.plates is None
+    main = _main_result(output)
+    assert main.plates is None
+    assert _process_output(RenderMainResult.model_validate_json(main.model_dump_json())) == output
+    assert RenderMainResult().plates == output.plates
 
 
 async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> None:
@@ -258,6 +278,20 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     failure = raised.value.details[0]
     assert isinstance(failure, Failure)
     assert failure.error == raised.value.message
+    assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:
+    paths = _paths(tmp_path, "%%FAIL%%\n")
+    acts = RenderActivities(_deps(tmp_path, paths))
+
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(acts.render_preview_png, _request().slug)
+
+    assert raised.value.type == "OpenSCADError"
+    assert raised.value.non_retryable
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
 
 
@@ -541,3 +575,53 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert raw.stat().st_mtime_ns == rendered
     refs.drop_holder("job", job.id)
     assert key in refs.referenced()  # the repeat's own ref
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_a_revision_less_job_never_renders_over_another_jobs_files(
+    tmp_path: Path, projection: JobProjection
+) -> None:
+    """#642: without a revision the key named only the slug and params, so a second job
+    re-rendered a live source into the first job's blob directory, under its row."""
+    paths = _paths(tmp_path)
+    refs = BlobRefs(projection.pool)
+    deps = _deps(tmp_path, paths, projection=projection, refs=refs)
+
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with render_worker(
+            client,
+            queue,
+            RenderActivities(deps),
+            build_id="test",
+            max_concurrent_activities=2,
+        ):
+            await make_current(client, namespace=client.namespace, build_id="test")
+
+            async def rendered(job: Job) -> Path:
+                projection.submit(job, render_key("demo", {"width": 1}, None))
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                    ),
+                    timeout=120,
+                )
+                done = projection.read(job.id)
+                assert done.state == "done", done.error
+                assert done.result is not None
+                return paths.root / done.result.model_3mf
+
+            first = await rendered(_job(width=1))
+            before = first.read_bytes()
+            # The author edits the template, which now draws a taller box.
+            paths.model_source("demo").write_text("cube(20);\n", encoding="utf-8")
+            write_openscad_3mf(
+                tmp_path / "bin" / "drawn.3mf",
+                [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 20)))],
+            )
+            second = await rendered(_job(width=1))
+
+    assert first.read_bytes() == before
+    assert second.parent != first.parent
+    assert second.read_bytes() != before

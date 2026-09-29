@@ -8,9 +8,10 @@ declares them -- and keeps that render's plate image as a stand-in, in the
 The work never sits in a request's path. A catalogue change hands the model's id to
 :meth:`PreviewScheduler.request`, which returns at once; the scheduler's one worker
 waits out a short debounce (a burst of edits is rendered once), decides whether a
-render is needed at all, and runs one through
+render is needed at all, and runs one through its ``runner``: on the legacy queue,
 :meth:`~scadbuddy.render.jobs.RenderQueue.run_background`, behind every render a
-person has asked for. One preview at a time, with a pause after each, is also what
+person has asked for; on Temporal, :meth:`~scadbuddy.render.submit.RenderService.render_preview`,
+on the render worker. One preview at a time, with a pause after each, is also what
 throttles the boot-time pass over every model without a thumbnail.
 """
 
@@ -23,6 +24,8 @@ from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import Executor
 from contextlib import suppress
 
+from temporalio.exceptions import ApplicationError
+
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
@@ -32,7 +35,6 @@ from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
-    RenderQueue,
     extruder_order,
     library_lease,
     plate_thumbnails,
@@ -54,11 +56,33 @@ DEFAULT_INTERVAL = 1.0
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
 
-PreviewRender = Callable[[str], Awaitable[bytes]]
+#: Renders a slug's preview within the timeout it is given; it applies the timeout
+#: itself, so the legacy queue's runner can leave the wait for a worker out of it.
+PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 
 class PreviewFailedError(Exception):
     pass
+
+
+#: What a render activity's failure carries as its type when it raised one of these.
+_RENDER_ERROR_TYPES = frozenset({OpenSCADError.__name__, PreviewFailedError.__name__})
+
+
+def is_render_error(error: BaseException) -> bool:
+    """Whether ``error`` says this source does not render (so it is not worth trying
+    again until the source changes), rather than that the render could not be run:
+    OpenSCAD's own failure, here or on the worker (a workflow failure caused by one),
+    or a render past its timeout. An RPC error, a worker not polling yet, or any other
+    infrastructure failure is not."""
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, OpenSCADError | PreviewFailedError | TimeoutError):
+            return True
+        if isinstance(cause, ApplicationError) and cause.type in _RENDER_ERROR_TYPES:
+            return True
+        cause = cause.__cause__
+    return False
 
 
 async def render_preview(
@@ -110,8 +134,7 @@ class PreviewScheduler:
         self,
         catalogue: Catalogue,
         store: PreviewStore,
-        queue: RenderQueue,
-        render: PreviewRender,
+        runner: PreviewRender,
         *,
         timeout: float,
         debounce: float = DEFAULT_DEBOUNCE,
@@ -119,8 +142,7 @@ class PreviewScheduler:
     ) -> None:
         self.catalogue = catalogue
         self.store = store
-        self.queue = queue
-        self.render = render
+        self.runner = runner
         self.timeout = timeout
         self.debounce = debounce
         self.interval = interval
@@ -211,13 +233,19 @@ class PreviewScheduler:
         if key is None:
             return False
         try:
-            png = await self.queue.run_background(
-                lambda: asyncio.wait_for(self.render(slug), timeout=self.timeout)
-            )
+            png = await self.runner(slug, self.timeout)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             reason = str(error) or type(error).__name__
+            if not is_render_error(error):
+                # Not this source's fault: nothing is recorded, so the next request
+                # for it (an edit, the next boot's pass) tries again.
+                logger.warning(
+                    "could not run the default render for a preview; it is tried again later",
+                    extra={"slug": slug, "error": reason},
+                )
+                return True
             logger.warning(
                 "the default render for a preview failed; the model keeps no thumbnail",
                 extra={"slug": slug, "error": reason},

@@ -10,6 +10,7 @@ import signal
 from collections.abc import Awaitable, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -36,6 +37,9 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, make_current, render_worker
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +86,38 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
             max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=metrics,
+    )
+
+
+def worker_deps_from_state(state: AppState) -> WorkerDeps:
+    """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the worker on the API's own stores and
+    gates, so its renders lease the same checkouts the routes do. The thumbnail pool is
+    its own; the lifespan shuts it down with the worker."""
+    projection, blobs, refs = state.projection, state.blobs, state.refs
+    missing = [
+        name
+        for name, value in (("projection", projection), ("blobs", blobs), ("refs", refs))
+        if value is None
+    ]
+    if projection is None or blobs is None or refs is None:
+        raise RuntimeError(
+            f"the in-process render worker needs AppState.{', AppState.'.join(missing)},"
+            " which build_state sets together only with SCADBUDDY_TEMPORAL_ADDRESS"
+        )
+    return WorkerDeps(
+        config=state.config,
+        paths=state.paths,
+        assets=state.assets,
+        blobs=blobs,
+        refs=refs,
+        projection=projection,
+        history=state.history,
+        checkouts=state.checkouts,
+        fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
+        thumbnail_executor=ThreadPoolExecutor(
+            max_workers=state.config.render_concurrency, thread_name_prefix="thumbnail"
+        ),
+        metrics=state.metrics,
     )
 
 
