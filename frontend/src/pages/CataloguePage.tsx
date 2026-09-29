@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
@@ -8,6 +8,11 @@ import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
+import { MediaCarousel } from '../components/media/MediaCarousel'
+import { MediaLightbox } from '../components/media/MediaLightbox'
+import { namedSlides, type Slide } from '../components/media/slides'
+import { ModelOrigin } from '../components/ModelOrigin'
+import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
@@ -24,7 +29,6 @@ import {
 } from '../lib/catalogueQuery'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
-import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
@@ -32,9 +36,16 @@ export function CataloguePage() {
   const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  // One lightbox for the page: whichever card's media was clicked, at that item.
+  const [lightbox, setLightbox] = useState<{ slides: Slide[]; index: number } | null>(null)
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const query = useMemo(() => parseQuery(params), [params])
+  // #278 — the view is always in the URL: one with no (or an unknown) `view` shows
+  // Cards and is rewritten to say so, replacing the entry.
+  useEffect(() => {
+    if (params.get('view') !== query.view) setParams(toParams(query), { replace: true })
+  }, [params, query, setParams])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
@@ -131,20 +142,40 @@ export function CataloguePage() {
           <NoResults onClear={() => setQuery(clearFilters(query))} />
         )}
 
-        {shown.length > 0 && (
-          <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {shown.length > 0 && query.view === 'list' && (
+          <ul aria-label="Models" className="flex flex-col gap-2">
+            {shown.map((model) => (
+              <ModelRow
+                key={model.slug}
+                model={model}
+                upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
+                onOpen={(slides, index) => setLightbox({ slides, index })}
+                onTag={addTag}
+              />
+            ))}
+          </ul>
+        )}
+
+        {shown.length > 0 && query.view === 'cards' && (
+          <ul aria-label="Models" className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {shown.map((model) => (
               <ModelCard
                 key={model.slug}
                 model={model}
                 upstreamName={data?.find((m) => m.slug === model.upstream?.id)?.name}
                 onTag={addTag}
+                onOpenMedia={(slides, index) => setLightbox({ slides, index })}
               />
             ))}
           </ul>
         )}
       </div>
 
+      <MediaLightbox
+        slides={lightbox?.slides ?? []}
+        index={lightbox?.index ?? null}
+        onClose={() => setLightbox(null)}
+      />
       <UploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
@@ -169,24 +200,47 @@ function ModelCard({
   model,
   upstreamName,
   onTag,
+  onOpenMedia,
 }: {
   model: ModelSummary
   upstreamName?: string
   onTag: (tag: string) => void
+  onOpenMedia: (slides: Slide[], index: number) => void
 }) {
-  const origin = safeHttpUrl(model.origin_url)
+  const slides = useMemo(() => namedSlides(model), [model])
+  // The title is the card's one link, and its ::after stretches over the card. What
+  // must not follow it (the carousel, the tag chips, the origin link, the action row)
+  // sits above that on `relative z-10`: a carousel's buttons cannot nest in an anchor.
+  const raised = 'relative z-10'
   return (
     <li
       data-model-card={model.slug}
-      className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
-      <Link to={modelPath(model.slug)} className="block p-3 pb-0 focus-visible:rounded-[6px]">
-        <ModelThumbnail
-          src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
-          alt={model.name}
+      className="relative rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
+      <div className="p-3 pb-0">
+        <MediaCarousel
+          slides={slides}
+          onOpen={(index) => onOpenMedia(slides, index)}
+          label={model.name}
+          className={raised}
+          fallback={
+            <ModelThumbnail
+              src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
+              alt={model.name}
+            />
+          }
         />
+      </div>
 
+      <div className="px-3 pb-3">
         <div className="mt-3 flex items-center gap-2">
-          <h2 className="min-w-0 truncate text-[14px] font-medium">{model.name}</h2>
+          <h2 className="min-w-0 truncate text-[14px] font-medium">
+            <Link
+              to={modelPath(model.slug)}
+              className="outline-none after:absolute after:inset-0 after:rounded-[6px] after:content-[''] focus-visible:after:ring-2 focus-visible:after:ring-accent"
+            >
+              {model.name}
+            </Link>
+          </h2>
           <UpstreamBadge state={model.upstream_state} />
         </div>
         {model.origin === 'builtin' && (
@@ -199,13 +253,11 @@ function ModelCard({
             {model.description}
           </p>
         )}
-      </Link>
-      {/* Outside the card's link too: a tag is a button that adds it to the filter. */}
-      <div className="px-3 pb-3">
+        {/* Above the stretched link: a tag is a button that adds it to the filter. */}
         {(model.tags ?? []).length > 0 && (
           <ul className="mt-2.5 flex flex-wrap gap-1">
             {(model.tags ?? []).map((tag) => (
-              <li key={tag}>
+              <li key={tag} className={raised}>
                 <button
                   type="button"
                   aria-label={`Filter by ${tag}`}
@@ -223,22 +275,8 @@ function ModelCard({
           Updated {timeAgo(model.updated_at)}
         </p>
       </div>
-      {/* Outside the card's link: an anchor cannot nest inside another. Only an
-          http(s) origin is linked at all; anything else is not shown (#179). */}
-      {origin && (
-        <p className="truncate px-3 pb-2.5 text-[12px] text-faint">
-          From{' '}
-          <a
-            href={origin}
-            target="_blank"
-            rel="noreferrer"
-            className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
-          >
-            {hostOf(origin)}
-          </a>
-        </p>
-      )}
-      <div className="flex items-center justify-between gap-2 px-3 pb-2">
+      <ModelOrigin url={model.origin_url} className={`${raised} px-3 pb-2.5`} />
+      <div className={`${raised} flex items-center justify-between gap-2 px-3 pb-2`}>
         <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
         <span className="ml-auto">
           <DuplicateModelButton slug={model.slug} name={model.name} />
@@ -263,14 +301,6 @@ function summarise(model: ModelSummary) {
     description: model.description ?? null,
     tags: model.tags ?? [],
     origin: model.origin,
-  }
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return url
   }
 }
 

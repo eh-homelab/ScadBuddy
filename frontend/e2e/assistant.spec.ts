@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test.describe('assistant panel (#256)', () => {
   // Driven by the scripted mock agent (src/mocks/agent.ts), which only the mocked
-  // build has; against a real stack the agent service (#255) is not deployed yet.
+  // build has. The real agent is real-agent.spec.ts.
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
 
   test('streams a reply, shows a tool call, and waits for approval of an outward step', async ({
@@ -39,6 +39,55 @@ test.describe('assistant panel (#256)', () => {
     await expect(log.getByText('Sent. Two copies are in the queue.')).toBeVisible()
     await expect(card).toContainText('Approved by You.')
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+  })
+
+  // Spec §8.2: an outward step waits for a human. Deny must send nothing and say so;
+  // the card keeps the decision, and its buttons do not come back (#259).
+  test('Deny on the confirmation sends nothing and the turn ends', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Make the name bigger and send two to Bambuddy')
+    await composer.press('Enter')
+
+    const card = panel.getByRole('region', { name: 'Needs your approval' })
+    await expect(card).toContainText('Send name-keychain to Bambuddy project "Keychains", 2 copies?')
+    await expect(card).toContainText('outward')
+    await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
+    // The outward call is shown, but no result for it exists while it waits.
+    const send = panel.getByTestId('agent-tool').filter({ hasText: 'print_output' })
+    await expect(send).toContainText('outward')
+    await expect(panel.getByText('Denied: nothing was sent.')).toHaveCount(0)
+
+    await card.getByRole('button', { name: 'Deny' }).click()
+    await expect(card).toContainText('Denied by You.')
+    await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+    await expect(card.getByRole('button', { name: 'Deny' })).toHaveCount(0)
+    await expect(panel.getByText('Denied: nothing was sent.')).toBeVisible()
+    const log = panel.getByRole('log', { name: 'Conversation' })
+    await expect(log.getByText("OK, I didn't send it.")).toBeVisible()
+    await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+    await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
+  })
+
+  test('Stop while a confirmation waits withdraws it without sending', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Make the name bigger and send two to Bambuddy')
+    await composer.press('Enter')
+
+    const card = panel.getByRole('region', { name: 'Needs your approval' })
+    await expect(card.getByRole('button', { name: 'Approve' })).toBeVisible()
+    await panel.getByRole('button', { name: 'Stop', exact: true }).click()
+
+    // An interrupted approval resolves as not approved, with no decider.
+    await expect(card).toContainText('Denied.')
+    await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+    await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+    await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
   })
 
   test('comes out of the customizer’s full screen for Ctrl+`', async ({ page }) => {
