@@ -350,6 +350,28 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(posts).toBe(1)
   })
 
+  it('stops reading the run once its signal is aborted', async () => {
+    printRunPoll.intervalMs = 5
+    const controller = new AbortController()
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        if (reads === 2) controller.abort()
+        return HttpResponse.json(started)
+      }),
+    )
+
+    const error = await api
+      .runPrint('out-1', body, controller.signal)
+      .catch((caught: unknown) => caught)
+    expect(controller.signal.aborted).toBe(true)
+    expect(error).toBe(controller.signal.reason)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(reads).toBe(2)
+  })
+
   it('gives up re-attaching after a few unanswered tries', async () => {
     printRunPoll.intervalMs = 1
     printRunPoll.reattempts = 2

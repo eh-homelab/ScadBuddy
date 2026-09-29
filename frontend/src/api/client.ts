@@ -305,14 +305,33 @@ function unanswered(caught: unknown): boolean {
   )
 }
 
+/** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const abort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
 /** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
-async function reattach<T>(attempt: () => Promise<T>): Promise<T> {
+async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   for (let tries = 0; ; tries++) {
     try {
       return await attempt()
     } catch (caught) {
-      if (!unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
-      await new Promise((resolve) => setTimeout(resolve, printRunPoll.intervalMs))
+      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
+      await wait(printRunPoll.intervalMs, signal)
     }
   }
 }
@@ -733,22 +752,30 @@ export const api = {
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
+   * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: async (outputId: string, body: PrintRunRequest): Promise<PrintRunResult> => {
+  runPrint: async (
+    outputId: string,
+    body: PrintRunRequest,
+    signal?: AbortSignal,
+  ): Promise<PrintRunResult> => {
     // #470: the server answers 202 with a run and slices and queues in the background,
     // since that takes longer than the proxies in front wait. A repeat of the same
     // request (the same `request_id`) is the same run, so re-sending it after an
     // answer that never arrived re-attaches to that run and never queues a second print.
-    let run = await reattach(() =>
-      request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      }),
+    let run = await reattach(
+      () =>
+        request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+          signal,
+        }),
+      signal,
     )
     while (run.status === 'running') {
-      await new Promise((resolve) => setTimeout(resolve, printRunPoll.intervalMs))
+      await wait(printRunPoll.intervalMs, signal)
       const id = run.id
-      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`))
+      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
     }
     if (run.status === 'failed' || !run.result) {
       const error = run.error

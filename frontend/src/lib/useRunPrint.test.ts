@@ -53,6 +53,22 @@ describe('useRunPrint', () => {
     vi.restoreAllMocks()
   })
 
+  it('stops following the run when the dialog unmounts', async () => {
+    let signal: AbortSignal | undefined
+    runPrint.mockImplementationOnce((_output, _body, given) => {
+      signal = given
+      return new Promise(() => undefined)
+    })
+    const { result, unmount } = renderHook(() => useRunPrint(input()))
+    void act(() => void result.current.run())
+    await waitFor(() => expect(signal).toBeDefined())
+    expect(signal?.aborted).toBe(false)
+
+    unmount()
+
+    expect(signal?.aborted).toBe(true)
+  })
+
   it('sends the selection, leaving an unset quantity to the remembered one', async () => {
     const props = input()
     const { result } = renderHook(() => useRunPrint(props))

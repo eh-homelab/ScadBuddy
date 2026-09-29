@@ -63,6 +63,10 @@ export function useRunPrint({
   const [unanswered, setUnanswered] = useState<string | null>(null)
   /** Which `run()` may still update the dialog: bumped by each run. */
   const runAttempt = useRef(0)
+  /** Stops following the current run: the dialog unmounted, or was reset. */
+  const following = useRef<AbortController | null>(null)
+
+  useEffect(() => () => following.current?.abort(), [])
 
   // A refused run was refused for *these* choices; any change is worth another try.
   useEffect(() => {
@@ -105,6 +109,9 @@ export function useRunPrint({
     const printChoices = printChoicesOf(selection)
     if (!outputId || !choices || !printChoices) return
     const attempt = ++runAttempt.current
+    following.current?.abort()
+    const controller = new AbortController()
+    following.current = controller
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -122,14 +129,14 @@ export function useRunPrint({
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),
       }
-      const ran = await api.runPrint(outputId, body)
+      const ran = await api.runPrint(outputId, body, controller.signal)
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
-      if (attempt !== runAttempt.current) return
+      if (attempt !== runAttempt.current || controller.signal.aborted) return
       if (mayHaveRun(cause)) {
         setUnanswered((cause as ApiError).detail)
         return
@@ -143,6 +150,7 @@ export function useRunPrint({
   }
 
   function reset() {
+    following.current?.abort()
     setRunError(null)
     setRefused(false)
     setResult(null)
