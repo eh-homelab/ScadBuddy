@@ -327,10 +327,11 @@ def test_repinning_and_removing_checkouts_publish_their_events(
     _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}))
     assert client.delete("/api/v1/libraries/BOSL2").status_code == 409  # still pinned
     assert client.patch("/api/v1/models/widget/libraries/other", json={}).status_code == 404
+    # Through published(), which settles the Postgres bus first (#562).
     repinned = [
-        event.model_dump(exclude={"id", "at"})
-        for event in events
-        if event.kind in ("library.changed", "model.updated", "library.removed")
+        event
+        for event in published(events)
+        if event["kind"] in ("library.changed", "model.updated", "library.removed")
     ]
     events.clear()
     _ok(
