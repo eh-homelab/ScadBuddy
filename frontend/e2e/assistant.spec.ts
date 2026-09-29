@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test.describe('assistant panel (#256)', () => {
   // Driven by the scripted mock agent (src/mocks/agent.ts), which only the mocked
-  // build has; against a real stack the agent service (#255) is not deployed yet.
+  // build has. The real agent is real-agent.spec.ts.
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
 
   test('streams a reply, shows a tool call, and waits for approval of an outward step', async ({

@@ -8,10 +8,27 @@ import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport 
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
 
-const availability = vi.hoisted(() => ({ available: true }))
-vi.mock('../../agent/chat/availability', () => ({
-  useAiAvailability: () => availability,
-}))
+/** What `useAiAvailability` answers; `set` re-renders whoever reads it, as the real one does. */
+const availability = vi.hoisted(() => {
+  type Value = { available: boolean; state?: string; chat?: 'refused' }
+  let value: Value = { available: true }
+  const listeners = new Set<() => void>()
+  return {
+    get: () => value,
+    set: (next: Value) => {
+      value = next
+      for (const listener of listeners) listener()
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  }
+})
+vi.mock('../../agent/chat/availability', async () => {
+  const { useSyncExternalStore } = await import('react')
+  return { useAiAvailability: () => useSyncExternalStore(availability.subscribe, availability.get) }
+})
 
 let agent: MockAgentTransport
 const factory = () => {
@@ -58,16 +75,44 @@ async function openAndSend(text = 'Make the name bigger and send it') {
 }
 
 afterEach(() => {
-  availability.available = true
+  availability.set({ available: true })
 })
 
 describe('assistant panel', () => {
   it('is hidden, shortcut included, when AI is off', async () => {
-    availability.available = false
+    availability.set({ available: false, state: 'not_configured' })
     renderShell()
     expect(screen.queryByRole('button', { name: 'Assistant' })).not.toBeInTheDocument()
     fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
     await act(async () => {})
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
+  })
+
+  it('keeps an open panel through an outage, and drops it only when the agent says AI is off', async () => {
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await user.type(box, 'Make the name bigger{Enter}')
+    const transcript = (await screen.findAllByText('Make the name bigger')).length
+
+    // The agent is restarting: its status read fails, and the panel stays, transcript and all.
+    act(() => availability.set({ available: false, state: 'unreachable' }))
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    expect(screen.getAllByText('Make the name bigger')).toHaveLength(transcript)
+    expect(screen.getByRole('button', { name: 'Assistant' })).toBeInTheDocument()
+    act(() => availability.set({ available: false, state: 'unavailable' }))
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+
+    // Its chat gate refuses this address: off for this page.
+    act(() => availability.set({ available: false, state: 'unavailable', chat: 'refused' }))
+    expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Assistant' })).not.toBeInTheDocument()
+
+    // Back, then switched off (no credential): the same.
+    act(() => availability.set({ available: true, state: 'configured' }))
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    act(() => availability.set({ available: false, state: 'not_configured' }))
     expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
   })
 
@@ -223,7 +268,7 @@ describe('assistant panel', () => {
       connect: ({ onFrame }: { onFrame: (f: unknown) => void }) => {
         queueMicrotask(() => onFrame({ v: 1, type: 'approval.required', sessionId: 's', id: 'a', tool: 't', summary: 'x', risk: 'write' }))
       },
-      send: () => {},
+      send: () => 'sent' as const,
       close: () => {},
     })
     const { user } = renderPage(

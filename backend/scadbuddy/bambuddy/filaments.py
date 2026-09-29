@@ -73,6 +73,7 @@ WarningKind = Literal[
     "not-installed",
     "plate-differs",
     "hf-unsupported",
+    "side-unknown",
 ]
 
 
@@ -107,6 +108,11 @@ class SpoolOption(BaseModel):
     remaining_g: float | None = None
     storage_location: str | None = None
     loaded: LoadedAt | None = None
+    #: The physical extruder this spool feeds on the chosen printer — 0 right, 1 left —
+    #: and the letter for it (#469). ``None`` when the spool is not loaded there or the
+    #: printer does not say; the picker compares it with the nozzle mounted on that side.
+    extruder: int | None = None
+    side: Literal["L", "R"] | None = None
 
 
 class SlotNeed(BaseModel):
@@ -164,6 +170,13 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
     #: printer: a class target nobody has narrowed yet has no hardware to read.
     nozzles: list[NozzleInfo] = Field(default_factory=list)
+    #: The spare hotends in the chosen printer's rack, besides the mounted pair (#469):
+    #: the printer swaps one of the sliced size onto a side whose nozzle differs, so a
+    #: size a spare has fits that side too. Empty on a printer without a rack.
+    rack: list[NozzleInfo] = Field(default_factory=list)
+    #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
+    #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
+    track_switch: bool = False
 
 
 class QueueFilaments(BaseModel):

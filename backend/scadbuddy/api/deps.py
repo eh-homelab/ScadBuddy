@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progres
 from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
+from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -132,6 +133,21 @@ class AppState:
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
+    #: Read through :attr:`components`. An ``__init__`` field, so ``dataclasses.replace``
+    #: carries the built registry over to the copy rather than dropping it.
+    _components: Components | None = field(default=None, kw_only=True, repr=False)
+
+    @property
+    def components(self) -> Components:
+        """Every feature service that is a component (`core/components.py`), built over
+        this state by `build_state`: a new service goes there, not in a field here."""
+        if self._components is None:
+            raise RuntimeError("the components are not built yet: use build_state")
+        return self._components
+
+    @components.setter
+    def components(self, value: Components) -> None:
+        self._components = value
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
@@ -159,6 +175,14 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 
 
 def build_state(settings: Settings) -> AppState:
+    """The core services, then every discovered component over them."""
+    state = _build_core(settings)
+    state.components = Components(state, discover_components())
+    state.components.build_all()
+    return state
+
+
+def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
