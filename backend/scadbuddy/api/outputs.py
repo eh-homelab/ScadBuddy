@@ -161,11 +161,16 @@ async def create_output(
             inputs = normalize_inputs(body.inputs, None)
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        rendered = f"inputs.params are not the parameters job {job.id} rendered"
+        # The store's rule, which compares type as well as value (12.0 is not 12), so
+        # nothing this lets through fails the store's check half-way through the copy.
+        # It skips a job with no params, which the equality check covers.
         if inputs["params"] != job.params:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"inputs.params are not the parameters job {job.id} rendered",
-            )
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
+        try:
+            normalize_inputs(inputs, job.params)
+        except InputsError:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
     await materialize_result(state.store.blobs, job.result)
     public_url = (await asyncio.to_thread(store.load)).public_url

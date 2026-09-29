@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import time
 import zipfile
 
 import pytest
@@ -432,15 +431,9 @@ def test_an_old_records_upload_keys_are_ignored() -> None:
 def _rendered(client: TestClient, model: str, body: dict[str, object]) -> str:
     accepted = client.post(f"/api/v1/models/{model}/render", json=body)
     assert accepted.status_code == 202, accepted.text
-    url = accepted.json()["status_url"]
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        job = client.get(url).json()
-        if job["status"] in {"done", "failed"}:
-            assert job["status"] == "done", job
-            return str(job["id"])
-        time.sleep(0.02)
-    raise AssertionError("the render did not finish")
+    job = wait_for_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job
+    return str(job["id"])
 
 
 def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, model: str) -> None:
@@ -456,13 +449,33 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == output["inputs"]
 
 
-def test_an_output_refuses_inputs_the_job_did_not_render(client: TestClient, model: str) -> None:
-    job_id = _rendered(client, model, {"params": {"width": 12}})
+@pytest.mark.parametrize(
+    ("rendered", "sent"),
+    [
+        ({"width": 12}, {"width": 13}),
+        # Type as well as value, as the store checks them: 12.0 is not 12, True is not 1.
+        ({"width": 12}, {"width": 12.0}),
+        ({"width": 1}, {"width": True}),
+        # A job that rendered the defaults did not render a width.
+        ({}, {"width": 12}),
+    ],
+)
+def test_an_output_refuses_inputs_the_job_did_not_render(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    rendered: dict[str, object],
+    sent: dict[str, object],
+) -> None:
+    job_id = _rendered(client, model, {"params": rendered})
     refused = client.post(
         f"/api/v1/models/{model}/outputs",
-        json={"job_id": job_id, "inputs": {"params": {"width": 13}}},
+        json={"job_id": job_id, "inputs": {"params": sent}},
     )
-    assert refused.status_code == 422
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == f"inputs.params are not the parameters job {job_id} rendered"
+    output_dir = paths.outputs / model
+    assert not output_dir.exists() or not any(output_dir.iterdir())
 
 
 def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
