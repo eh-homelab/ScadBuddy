@@ -95,7 +95,7 @@ function pluginVerb(method: string, path: string): string | undefined {
   return undefined
 }
 
-export { type AiStatus, DEFAULT_HEALTH_TIMEOUT_MS } from './aiStatus.js'
+export type { AiStatus } from './aiStatus.js'
 
 /** The response header naming the service (see the module comment). */
 export const SERVICE_HEADER = 'X-ScadBuddy-Service'
