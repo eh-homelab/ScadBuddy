@@ -30,9 +30,9 @@ describe('parseQuery / toParams', () => {
     })
   })
 
-  it('omits every default', () => {
-    expect(toParams(DEFAULT_QUERY).toString()).toBe('')
-    expect(toParams(query({ q: '  ' })).toString()).toBe('')
+  it('omits every default but the view, which is always named', () => {
+    expect(toParams(DEFAULT_QUERY).toString()).toBe('view=cards')
+    expect(toParams(query({ q: '  ' })).toString()).toBe('view=cards')
   })
 
   it('round-trips every field, including a tag with a space and `&`', () => {
