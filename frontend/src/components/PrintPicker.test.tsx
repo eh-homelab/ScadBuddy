@@ -375,6 +375,28 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
+  it('says when the nozzle check could not run, and reads it again on request', async () => {
+    let failing = true
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        failing
+          ? HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+          : HttpResponse.json({ errors: [refusal], warnings: [] }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    const failed = await screen.findByTestId('nozzle-verdict-failed')
+    expect(failed).toHaveTextContent('The nozzle check could not run: Bambuddy did not answer')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+
+    failing = false
+    await user.click(within(failed).getByRole('button', { name: 'Check again' }))
+    expect(await screen.findByTestId('nozzle-verdict-error')).toHaveTextContent(refusal)
+    expect(screen.queryByTestId('nozzle-verdict-failed')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+  })
 })
 
 describe('PrintPicker · Advanced and refusals (fix round 1)', () => {

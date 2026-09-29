@@ -2587,9 +2587,6 @@ export const handlers = [
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
     return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
   }),
-  http.post(`${base}/print/library/:id/check`, () =>
-    HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck),
-  ),
 
   // --- #79 projects -----------------------------------------------------------------
 

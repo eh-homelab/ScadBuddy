@@ -18,6 +18,8 @@ export interface PrintCheckState {
   /** Whether `verdict` answers the request as it stands now, not an earlier one. */
   current: boolean
   error: Error | undefined
+  /** Read the verdict again, as after a failed read. */
+  reload: () => void
 }
 
 /**
@@ -51,5 +53,6 @@ export function usePrintCheck(
     verdict: state.error ? null : (answer?.verdict ?? null),
     current: !state.error && answer?.request === wanted,
     error: state.error,
+    reload: state.reload,
   }
 }

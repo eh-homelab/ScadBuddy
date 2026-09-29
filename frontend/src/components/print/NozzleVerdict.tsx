@@ -1,14 +1,36 @@
+import { ApiError } from '../../api/client'
 import type { PrintCheck } from '../../api/types'
 
 interface Props {
   verdict: PrintCheck | null
+  /** The check itself failed; Print is not held, so say the verdict is missing. */
+  error?: Error | undefined
+  onRetry?: () => void
 }
 
 /**
  * #755 — the run's nozzle verdict, shown in Checks before Print. An error is what the
  * run would refuse, so Print is held while one stands; a warning is advisory.
  */
-export function NozzleVerdict({ verdict }: Props) {
+export function NozzleVerdict({ verdict, error, onRetry }: Props) {
+  if (error) {
+    return (
+      <p
+        role="alert"
+        data-testid="nozzle-verdict-failed"
+        className="mt-2 rounded-[6px] border border-warn/50 bg-warn/10 px-2.5 py-2 text-[12.5px] text-warn"
+      >
+        The nozzle check could not run:{' '}
+        {error instanceof ApiError ? error.detail : 'ScadBuddy did not answer.'} Print still
+        refuses a run the nozzles cannot take.{' '}
+        {onRetry && (
+          <button type="button" onClick={onRetry} className="underline underline-offset-2">
+            Check again
+          </button>
+        )}
+      </p>
+    )
+  }
   const errors = verdict?.errors ?? []
   const warnings = verdict?.warnings ?? []
   if (errors.length === 0 && warnings.length === 0) return null

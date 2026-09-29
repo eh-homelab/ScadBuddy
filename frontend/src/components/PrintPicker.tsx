@@ -230,8 +230,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : null
   const check = usePrintCheck(source, checkRequest)
   const nozzlesRefuse = check.current && (check.verdict?.errors ?? []).length > 0
-  const verdict = <NozzleVerdict verdict={check.verdict} />
+  const verdict = (
+    <NozzleVerdict verdict={check.verdict} error={check.error} onRetry={check.reload} />
+  )
   const verdictShown =
+    check.error !== undefined ||
     (check.verdict?.errors ?? []).length + (check.verdict?.warnings ?? []).length > 0
 
   function close() {
