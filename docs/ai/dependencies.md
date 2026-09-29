@@ -45,6 +45,20 @@ the way OpenSCAD does:
   searched. OpenSCAD's built-in and user library directories are not.
 - Statements in the model's own files are followed, relative to each file's directory.
   Files inside a library are not.
+- Nothing outside the model's directory and its pinned checkouts is looked at. An
+  absolute target, and a relative one that leaves the model's directory
+  (`include <../../x.scad>`), is unresolved with a reason, and whether the file exists
+  is never asked, so a report says nothing about the rest of the container's
+  filesystem. A symbolic link counts where it leads: one out of the model's directory
+  or out of a checkout is not resolved through (review of #740).
+- A report is bounded: at most 512 statements across every file followed, 64 model
+  files, and 32 distinct unpinned library names given a suggestion
+  (`MAX_STATEMENTS`, `MAX_FILES`, `MAX_SUGGESTIONS`). Past any of them the report sets
+  `truncated`: later statements are not listed, and later names are unresolved with no
+  `suggestion`. The other models' pins behind a suggestion are read once per report,
+  and only when one is looked for (`Catalogue.library_pin_index`). At most two reports
+  are worked out at once per replica (`DEPENDENCY_CHECK_CONCURRENCY`); the rest wait
+  (review of #740).
 - An unresolved target carries a `reason`. When its first path component names a
   library the model does not pin (`use <BOSL2/std.scad>` names BOSL2), it also carries a
   `suggestion`: the curated library of that name (`source: "catalogue"`, pin it with
@@ -81,7 +95,10 @@ default font (DejaVu Sans in this image) with other geometry and no warning
   under the render's own environment (`backend/scadbuddy/core/fontconfig.py`
   `env_for`) and answers 500, naming the files, when the family does not resolve
   (`backend/scadbuddy/library/fonts.py` `FontService.install`). Outline, scalable faces
-  are the ones OpenSCAD's `FontCache::init_pattern` asks for.
+  are the ones OpenSCAD's `FontCache::init_pattern` asks for. A family counts as already
+  installed, so the install fetches nothing, only when it has such a face
+  (`FontService.renderable`); one fontconfig lists only as a bitmap face is downloaded
+  like any other (review of #740). The catalogue's `installed` flag uses the same test.
 - **`fc-list` is what OpenSCAD sees in this image.** `openscad --info` in the backend
   image lists its font path as fontconfig's own directories plus `$HOME/.fonts`, with no
   bundled font directory (measured 2026-09-29 on a locally built `test` image; not
@@ -93,6 +110,7 @@ default font (DejaVu Sans in this image) with other geometry and no warning
 - Without fontconfig on `PATH` (a development machine) nothing is refused and
   `fonts_checked` is false.
 
-`list_fonts` (`GET /api/v1/fonts`) lists each family by its first name, unescaped
+`list_fonts` (`GET /api/v1/fonts`) lists every family fontconfig has, a bitmap-only one
+included, by its first name, unescaped
 (`IBM 3270 Semi-Narrow`, not `IBM 3270 Semi\-Narrow`); `search_fonts` and
 `install_font` cover the Google Fonts catalogue.

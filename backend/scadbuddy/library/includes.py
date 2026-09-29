@@ -19,6 +19,13 @@ resolves each target:
 - **Nested statements** in a file of the model's own directory are followed, relative
   to that file's directory as OpenSCAD reads them. Files inside a library are the
   library's business and are not.
+- **Nothing outside the model's directory and its checkouts is looked at.** OpenSCAD
+  would open ``../../x.scad`` as it opens an absolute path; here either is unresolved
+  without asking whether the file exists, so a report cannot say what is on the
+  container's filesystem (review of #740). A symbolic link counts where it leads.
+- **A report is bounded**: at most :data:`MAX_STATEMENTS` statements, and
+  :data:`MAX_SUGGESTIONS` library names looked up for a suggestion, whatever the source
+  packs in (review of #740). The rest is ``truncated``.
 
 Nothing is fetched and nothing is written: a pin whose checkout is not on the volume is
 reported as such (a render would clone it again, ``CheckoutFetcher``), not cloned.
@@ -31,8 +38,9 @@ computed at run time is not reported.
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -48,6 +56,12 @@ from scadbuddy.library.libraries import CatalogueLibrary, ModelLibrary
 MAX_FILES = 64
 #: A nested file larger than this is not read (the source limit on a model is far below).
 MAX_FILE_BYTES = 2 * 1024 * 1024
+#: ``include``/``use`` statements resolved per report, across every file followed. Each
+#: costs a stat per search directory, and ``use<a/x.scad>use<b/x.scad>…`` packs tens
+#: of thousands into a source within the route's limit (review of #740).
+MAX_STATEMENTS = 512
+#: Distinct unpinned library names given a suggestion per report.
+MAX_SUGGESTIONS = 32
 
 # lexer.l: `include[ \t\r\n]*"<"` then `[^\t\r\n>]*` up to `>`.
 _STATEMENT = re.compile(r"(include|use)[ \t\r\n]*<([^\t\r\n>]*)>")
@@ -171,7 +185,7 @@ class IncludeTarget(BaseModel):
     path: str | None = Field(
         default=None,
         description="What it resolved to: relative to the model's directory, or "
-        "`<library>/<path>` inside a pinned library; null when unresolved or outside both",
+        "`<library>/<path>` inside a pinned library; null when unresolved",
     )
     library: str | None = Field(
         default=None, description="The pinned library it resolved into, if it did"
@@ -205,7 +219,10 @@ class DependencyReport(BaseModel):
     )
     truncated: bool = Field(
         default=False,
-        description=f"True when more than {MAX_FILES} files of the model were followed",
+        description=f"True when the report stops short: more than {MAX_FILES} files of "
+        f"the model to follow, more than {MAX_STATEMENTS} include/use statements (the "
+        f"rest are not listed), or more than {MAX_SUGGESTIONS} unpinned library names "
+        "to suggest a library for (the rest have no `suggestion`)",
     )
 
 
@@ -214,8 +231,10 @@ class Candidates:
     """Where unresolved targets could come from, gathered by the caller."""
 
     catalogue: Sequence[CatalogueLibrary]
-    #: name -> (slug, pin) of every model pinning a library of that name.
-    pins_of: Callable[[str], list[tuple[str, ModelLibrary | None]]]
+    #: library name -> (slug, pin) of every model pinning a library of that name. It
+    #: reads every model.json, so a report calls it once at most, and only when a
+    #: suggestion is looked for (review of #740).
+    pin_index: Callable[[], Mapping[str, Sequence[tuple[str, ModelLibrary]]]]
 
 
 def _is_file(path: Path) -> bool:
@@ -231,6 +250,17 @@ def _within(path: Path, root: Path) -> Path | None:
         return path.resolve().relative_to(root.resolve())
     except (OSError, ValueError):
         return None
+
+
+def _inside(base: Path, target: str, root: Path) -> Path | None:
+    """``base / target`` when it stays within ``root``, both written out and with every
+    symbolic link followed; None otherwise. Whether a file outside ``root`` exists is
+    never asked: it is not this report's to say (review of #740)."""
+    joined = base / target
+    # Written out first, so ``../../etc/passwd`` is refused without a filesystem call.
+    if not Path(os.path.normpath(joined)).is_relative_to(os.path.normpath(root)):
+        return None
+    return joined if _within(joined, root) is not None else None
 
 
 def resolve_dependencies(
@@ -254,22 +284,34 @@ def resolve_dependencies(
         else:
             missing_checkouts.append(pin.name)
     pinned = {pin.name: pin for pin in pins}
-    # Each lookup reads every model.json; once per library name.
-    looked_up: dict[str, list[tuple[str, ModelLibrary | None]]] = {}
-    pins_of = candidates.pins_of
+    truncated = False
+    # The index reads every model.json: built once, the first time a name needs it.
+    index: list[Mapping[str, Sequence[tuple[str, ModelLibrary]]]] = []
 
-    def cached(name: str) -> list[tuple[str, ModelLibrary | None]]:
-        if name not in looked_up:
-            looked_up[name] = pins_of(name)
-        return looked_up[name]
+    def pins_of(name: str) -> Sequence[tuple[str, ModelLibrary]]:
+        if not index:
+            index.append(candidates.pin_index())
+        return index[0].get(name, ())
 
-    candidates = Candidates(catalogue=candidates.catalogue, pins_of=cached)
+    heads: set[str] = set()
+    suggestions: dict[str, LibrarySuggestion | None] = {}
+
+    def suggest(target: str) -> LibrarySuggestion | None:
+        nonlocal truncated
+        head = target.partition("/")[0]
+        if head not in heads:
+            if len(heads) >= MAX_SUGGESTIONS:
+                truncated = True
+                return None
+            heads.add(head)
+        if target not in suggestions:
+            suggestions[target] = _suggest(target, candidates.catalogue, pins_of, libraries_root)
+        return suggestions[target]
 
     includes: list[IncludeTarget] = []
     fonts: list[FontUse] = []
     queue: list[tuple[str, Path, str]] = [(SOURCE_NAME, model_dir, source)]
     seen: set[Path] = {(model_dir / SOURCE_NAME).resolve()}
-    truncated = False
     while queue:
         name, directory, text = queue.pop(0)
         statements, literals = scan(text)
@@ -290,11 +332,14 @@ def resolve_dependencies(
                 )
             )
         for statement in statements:
+            if len(includes) >= MAX_STATEMENTS:
+                truncated = True
+                break
             entry, followed = _resolve(
                 statement, name, directory, model_dir, search, pinned, missing_checkouts
             )
-            if entry.status == "unresolved":
-                entry.suggestion = _suggest(statement.target, pinned, candidates, libraries_root)
+            if entry.status == "unresolved" and _names_a_library(statement.target, pinned):
+                entry.suggestion = suggest(statement.target)
             includes.append(entry)
             if followed is None or not followed.name.endswith(".scad"):
                 continue
@@ -361,14 +406,22 @@ def _resolve(
         reason = "an absolute path; a model can only rely on files beside it and in its libraries"
         return entry("unresolved", reason=reason), None
 
-    beside = directory / target
+    beside = _inside(directory, target, model_dir)
+    if beside is None:
+        # The file naming it is inside the model's directory, so a target that leaves
+        # that directory leaves every checkout too. Refused like an absolute path,
+        # before anything is asked of the filesystem about it (review of #740).
+        reason = (
+            "outside the model's directory; a model can only rely on files beside it "
+            "and in its libraries"
+        )
+        return entry("unresolved", reason=reason), None
     if _is_file(beside):
-        inside = _within(beside, model_dir)
-        return entry("resolved", path=inside), (beside if inside is not None else None)
+        return entry("resolved", path=_within(beside, model_dir)), beside
 
     for pin, root in search:
-        candidate = root / target
-        if _is_file(candidate):
+        candidate = _inside(root, target, root)
+        if candidate is not None and _is_file(candidate):
             return entry("resolved", path=_within(candidate, root), library=pin.name), None
 
     head, _, rest = target.partition("/")
@@ -399,26 +452,37 @@ def _checkouts(libraries_root: Path, name: str) -> Iterator[tuple[str, Path]]:
             yield checkout.name, checkout
 
 
+def _names_a_library(target: str, pinned: Mapping[str, ModelLibrary]) -> bool:
+    """Whether ``target`` names a library by its first path component that this model
+    does not pin (``use <BOSL2/std.scad>`` names BOSL2, as ``use <NAME/...>`` always
+    does, #93), and still names it once written out: ``BOSL2/../../x`` does not."""
+    head, _, rest = target.partition("/")
+    if not rest or head in pinned or head in ("", ".", ".."):
+        return False
+    written = Path(os.path.normpath(target)).parts
+    return len(written) > 1 and written[0] == head
+
+
 def _suggest(
     target: str,
-    pinned: dict[str, ModelLibrary],
-    candidates: Candidates,
+    catalogue: Sequence[CatalogueLibrary],
+    pins_of: Callable[[str], Sequence[tuple[str, ModelLibrary]]],
     libraries_root: Path,
 ) -> LibrarySuggestion | None:
-    """A library named by the target's first path component (``use <BOSL2/std.scad>``
-    names BOSL2, as ``use <NAME/...>`` always does, #93) that this model does not pin:
-    the curated one of that name, else one another model pins from its own URL."""
-    head, _, rest = target.partition("/")
-    if not rest or head in pinned:
-        return None
-    pins = [(slug, pin) for slug, pin in candidates.pins_of(head) if pin is not None]
+    """For a target that :func:`_names_a_library`: the curated library of that name,
+    else one another model pins from its own URL."""
+    head = target.partition("/")[0]
+    pins = list(pins_of(head))
     on_volume = dict(_checkouts(libraries_root, head))
 
     def has(commit: str) -> bool | None:
         root = on_volume.get(commit)
-        return None if root is None else _is_file(root / target)
+        if root is None:
+            return None
+        found = _inside(root, target, root)
+        return found is not None and _is_file(found)
 
-    curated = next((entry for entry in candidates.catalogue if entry.name == head), None)
+    curated = next((entry for entry in catalogue if entry.name == head), None)
     if curated is not None:
         # A checkout of the catalogue's own repository at the catalogue's ref, when
         # another model pins one, says whether the target is really in it.

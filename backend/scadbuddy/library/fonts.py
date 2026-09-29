@@ -44,6 +44,8 @@ from scadbuddy.library.googlefonts import (
 )
 
 FC_LIST = "fc-list"
+#: The faces OpenSCAD's ``FontCache::init_pattern`` asks fontconfig for.
+RENDERABLE = ":outline=true:scalable=true"
 FC_CACHE = "fc-cache"
 FC_TIMEOUT = 30.0
 
@@ -191,9 +193,16 @@ def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
     return completed.stdout
 
 
-def list_fonts(env: Mapping[str, str] | None = None) -> list[FontFamily]:
-    """Font families fontconfig can resolve, or an empty list without fontconfig."""
-    output = _run_fc([FC_LIST, ":", "family", "style"], os.environ if env is None else env)
+def list_fonts(
+    env: Mapping[str, str] | None = None, *, renderable: bool = False
+) -> list[FontFamily]:
+    """Font families fontconfig can resolve, or an empty list without fontconfig.
+
+    Every face by default, as ``GET /fonts`` lists them; ``renderable`` keeps the
+    outline, scalable ones a render can use, as :func:`resolvable_families` does.
+    """
+    pattern = RENDERABLE if renderable else ":"
+    output = _run_fc([FC_LIST, pattern, "family", "style"], os.environ if env is None else env)
     return parse_fc_list(output) if output is not None else []
 
 
@@ -204,9 +213,7 @@ def resolvable_families(env: Mapping[str, str] | None = None) -> set[str] | None
     Outline, scalable faces only: the ones OpenSCAD's ``FontCache::init_pattern`` asks
     fontconfig for.
     """
-    output = _run_fc(
-        [FC_LIST, ":outline=true:scalable=true", "family"], os.environ if env is None else env
-    )
+    output = _run_fc([FC_LIST, RENDERABLE, "family"], os.environ if env is None else env)
     if output is None:
         return None
     return {
@@ -262,10 +269,17 @@ class FontService:
         write_conf(self.data_dir)
 
     def installed(self) -> list[FontFamily]:
+        """Every family fontconfig lists, a bitmap one included: ``GET /fonts``."""
         return list_fonts(self.env())
 
+    def renderable(self) -> list[FontFamily]:
+        """Those of :meth:`installed` a render can draw, by :meth:`resolvable`'s filter.
+        What "already installed" means everywhere a family is judged, so an install
+        that finds one never disagrees with the render that uses it (review of #740)."""
+        return list_fonts(self.env(), renderable=True)
+
     def installed_families(self) -> set[str]:
-        return {family.family.casefold() for family in self.installed()}
+        return {family.family.casefold() for family in self.renderable()}
 
     def resolvable(self) -> set[str] | None:
         """:func:`resolvable_families` under the render's own environment."""
@@ -335,9 +349,10 @@ class FontService:
 
     def installed_family(self, family: str) -> InstalledFamily | None:
         """What fontconfig already has for ``family``, whether baked into the image or
-        downloaded earlier. None when it has never heard of it."""
-        folded = family.casefold()
-        match = next((f for f in self.installed() if f.family.casefold() == folded), None)
+        downloaded earlier. None when it has never heard of it, or has it only in a face
+        a render cannot use (a bitmap one)."""
+        wanted = normalise_family(family)
+        match = next((f for f in self.renderable() if normalise_family(f.family) == wanted), None)
         if match is None:
             return None
         manifest = self.family_dir(match.family) / MANIFEST_NAME
@@ -445,7 +460,7 @@ class FontService:
         ``fonts-lobster`` is the standing example — its file is family "Lobster Two").
         """
         folded = font.family.casefold()
-        for installed in self.installed():
+        for installed in self.renderable():
             if installed.family.casefold() == folded:
                 return installed.styles
         return [variant.style for variant in font.variants]

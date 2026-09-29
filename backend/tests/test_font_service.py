@@ -238,7 +238,7 @@ async def test_an_installed_family_is_returned_without_touching_the_network(
     client = FakeClient()
     fonts = service(tmp_path, client)
     monkeypatch.setattr(
-        FontService, "installed", lambda self: [FontFamily(family="Pacifico", styles=["Regular"])]
+        FontService, "renderable", lambda self: [FontFamily(family="Pacifico", styles=["Regular"])]
     )
 
     installed = await fonts.install("Pacifico")
@@ -255,11 +255,58 @@ async def test_force_reinstalls_a_family_fontconfig_already_has(
 ) -> None:
     client = FakeClient()
     fonts = service(tmp_path, client)
-    monkeypatch.setattr(FontService, "installed", lambda self: [])
+    monkeypatch.setattr(FontService, "renderable", lambda self: [])
 
     await fonts.install("Pacifico", force=True)
 
     assert client.downloads == ["https://raw/ofl/pacifico/Pacifico-Regular.ttf"]
+
+
+async def test_a_family_only_in_a_face_a_render_cannot_use_is_not_already_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #740: `fc-list :` lists a bitmap Pacifico, the render's filter does
+    not, so the fast path must not report it installed while renders refuse it."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        stdout = "Pacifico:style=Regular\n" if argv[:2] == ["fc-list", ":"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    client = FakeClient()
+    fonts = service(tmp_path, client)
+
+    # GET /fonts still lists every face fontconfig has.
+    assert [family.family for family in fonts.installed()] == ["Pacifico"]
+    assert fonts.renderable() == []
+    assert fonts.installed_family("Pacifico") is None
+    assert fonts.installed_families() == set()
+
+    await fonts.install("Pacifico")
+
+    assert client.downloads == ["https://raw/ofl/pacifico/Pacifico-Regular.ttf"]
+
+
+def test_the_renderable_listing_asks_with_the_renders_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    list_fonts()
+    list_fonts(renderable=True)
+
+    assert seen == [
+        ["fc-list", ":", "family", "style"],
+        ["fc-list", ":outline=true:scalable=true", "family", "style"],
+    ]
 
 
 REAL_FONTCONFIG = shutil.which("fc-list") and shutil.which("fc-cache")

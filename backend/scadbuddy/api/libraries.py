@@ -30,6 +30,7 @@ from scadbuddy.api.deps import (
     CheckoutsDep,
     ChecksDep,
     ConfigDep,
+    DependencyChecksDep,
     EventsDep,
     FetcherDep,
     FontsDep,
@@ -522,6 +523,7 @@ async def check_dependencies(
     paths: PathsDep,
     libraries: LibrariesDep,
     fonts: FontsDep,
+    permits: DependencyChecksDep,
     body: DependencyCheckRequest | None = None,
 ) -> DependencyReport:
     require_model_exists(catalogue, slug)
@@ -536,12 +538,16 @@ async def check_dependencies(
             source,
             declared_libraries(model_dir),
             libraries_root=paths.libraries,
-            candidates=Candidates(catalogue=libraries.entries(), pins_of=catalogue.library_pins),
+            candidates=Candidates(
+                catalogue=libraries.entries(), pin_index=catalogue.library_pin_index
+            ),
             resolvable_fonts=fonts.resolvable(),
         )
 
-    # Reads the model's files, every model.json and fc-list; off the loop.
-    return await asyncio.to_thread(report)
+    # Reads the model's files, every model.json and fc-list; off the loop, and a few
+    # at a time so a burst cannot hold the executor other routes share (review of #740).
+    async with permits:
+        return await asyncio.to_thread(report)
 
 
 def install_library_handlers(app: FastAPI) -> None:

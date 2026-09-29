@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import libraries as libraries_api
 from scadbuddy.api.deps import (
+    DEPENDENCY_CHECK_CONCURRENCY,
     INSTALL_CONCURRENCY,
     STATE_ATTR,
     AppState,
@@ -37,6 +38,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
+from scadbuddy.library.includes import resolve_dependencies
 from scadbuddy.library.libraries import (
     STAGING_PREFIX,
     CatalogueLibrary,
@@ -1633,6 +1635,57 @@ def test_a_font_the_image_does_not_have_is_reported(
         ("Pacifico", ["Pacifico"]),
     ]
     assert report["fonts_checked"] is True
+
+
+def test_a_target_outside_the_models_directory_says_nothing_about_the_filesystem(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """Review of #740: a `../` target that exists and one that does not answer alike."""
+    create_model(lib_client)
+    (paths.models / "neighbour.scad").write_text("", encoding="utf-8")
+
+    report = dependencies(
+        lib_client, source="include <../neighbour.scad>\ninclude <../nothing.scad>\n"
+    )
+
+    present, absent = report["includes"]
+    assert present["status"] == absent["status"] == "unresolved"
+    assert present["path"] is absent["path"] is None
+    assert present["reason"] == absent["reason"]
+
+
+def test_the_pin_index_answers_as_library_pins_does(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    catalogue = getattr(libraries_app.state, STATE_ATTR).catalogue
+
+    index = catalogue.library_pin_index()
+
+    assert index["BOSL2"] == [
+        (slug, found) for slug, found in catalogue.library_pins("BOSL2") if found is not None
+    ]
+
+
+def test_dependency_reports_wait_for_a_permit(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """Review of #740: a report runs in a worker thread only while it holds a permit."""
+    create_model(lib_client)
+    permits = getattr(libraries_app.state, STATE_ATTR).dependency_checks
+    held: list[int] = []
+    real = resolve_dependencies
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        held.append(permits._value)
+        return real(*args, **kwargs)
+
+    with patch.object(libraries_api, "resolve_dependencies", spy):
+        dependencies(lib_client)
+
+    assert held == [DEPENDENCY_CHECK_CONCURRENCY - 1]
+    assert permits._value == DEPENDENCY_CHECK_CONCURRENCY
 
 
 def test_resolving_the_dependencies_of_a_model_that_does_not_exist_is_a_404(

@@ -6,9 +6,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import pytest
+
 from scadbuddy.library.fonts import normalise_family
 from scadbuddy.library.includes import (
     MAX_FILES,
+    MAX_STATEMENTS,
+    MAX_SUGGESTIONS,
     Candidates,
     DependencyReport,
     FontLiteral,
@@ -43,12 +47,9 @@ def checkout(root: Path, name: str, commit: str, *files: str) -> None:
 
 
 def no_candidates(
-    pins: Mapping[str, Sequence[tuple[str, ModelLibrary | None]]] | None = None,
+    pins: Mapping[str, Sequence[tuple[str, ModelLibrary]]] | None = None,
 ) -> Candidates:
-    def pins_of(name: str) -> list[tuple[str, ModelLibrary | None]]:
-        return list((pins or {}).get(name, []))
-
-    return Candidates(catalogue=[BOSL2], pins_of=pins_of)
+    return Candidates(catalogue=[BOSL2], pin_index=lambda: pins or {})
 
 
 def report(
@@ -212,6 +213,160 @@ def test_an_absolute_path_is_unresolved(tmp_path: Path) -> None:
     [entry] = report(tmp_path, "include </etc/passwd>\n").includes
     assert entry.status == "unresolved"
     assert "absolute path" in (entry.reason or "")
+
+
+# ── nothing outside the model's directory and its checkouts (review of #740) ────
+
+
+def test_a_relative_escape_is_unresolved_like_an_absolute_path(tmp_path: Path) -> None:
+    # A file that does exist, one level above the model's directory.
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "secret.scad").write_text("", encoding="utf-8")
+
+    present, absent = report(
+        tmp_path, "include <../secret.scad>\ninclude <../nope.scad>\n"
+    ).includes
+
+    # Whether the file exists makes no difference to the answer.
+    for entry in (present, absent):
+        assert (entry.status, entry.path, entry.suggestion) == ("unresolved", None, None)
+        assert "outside the model's directory" in (entry.reason or "")
+    assert present.reason == absent.reason
+
+
+def test_a_deep_escape_is_refused_without_asking_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[Path] = []
+    is_file = Path.is_file
+
+    def spy(self: Path) -> bool:
+        asked.append(self)
+        return is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", spy)
+
+    [entry] = report(tmp_path, "include <parts/../../../../../../etc/passwd>\n").includes
+
+    assert entry.status == "unresolved"
+    assert "outside the model's directory" in (entry.reason or "")
+    assert asked == []
+
+
+def test_a_library_named_target_that_climbs_out_is_not_suggested(tmp_path: Path) -> None:
+    checkout(tmp_path / "libraries", "BOSL2", COMMIT, "std.scad")
+    others = {"BOSL2": [("gadget", pin("BOSL2"))]}
+
+    [entry] = report(
+        tmp_path, "use <BOSL2/../../../../etc/passwd>\n", candidates=no_candidates(others)
+    ).includes
+
+    assert entry.status == "unresolved"
+    assert "outside the model's directory" in (entry.reason or "")
+    assert entry.suggestion is None
+
+
+def test_a_path_up_and_back_inside_the_model_still_resolves(tmp_path: Path) -> None:
+    model = tmp_path / "models" / "widget"
+    (model / "parts").mkdir(parents=True)
+    (model / "helper.scad").write_text("", encoding="utf-8")
+    (model / "parts" / "body.scad").write_text("include <../helper.scad>\n", encoding="utf-8")
+
+    result = report(tmp_path, "include <parts/body.scad>\n")
+
+    assert [(e.target, e.status, e.path) for e in result.includes] == [
+        ("parts/body.scad", "resolved", "parts/body.scad"),
+        ("../helper.scad", "resolved", "helper.scad"),
+    ]
+
+
+def test_a_symlink_out_of_the_model_is_unresolved_and_not_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "real.scad").write_text("include <more.scad>\n", encoding="utf-8")
+    model = tmp_path / "models" / "widget"
+    model.mkdir(parents=True)
+    (model / "link.scad").symlink_to(outside / "real.scad")
+    (model / "dir").symlink_to(outside)
+
+    result = report(
+        tmp_path, "include <link.scad>\ninclude <dir/real.scad>\ninclude <dir/none.scad>\n"
+    )
+
+    # Nothing from inside real.scad, and the same answer for a file that is not there.
+    assert [e.status for e in result.includes] == ["unresolved"] * 3
+    assert len({e.reason for e in result.includes}) == 1
+    assert "outside the model's directory" in (result.includes[0].reason or "")
+
+
+def test_a_symlink_out_of_a_checkout_is_not_resolved_through(tmp_path: Path) -> None:
+    root = tmp_path / "libraries"
+    checkout(root, "BOSL2", COMMIT, "std.scad")
+    (tmp_path / "secret.scad").write_text("", encoding="utf-8")
+    (root / "BOSL2" / COMMIT / "BOSL2" / "leak.scad").symlink_to(tmp_path / "secret.scad")
+
+    [entry] = report(tmp_path, "use <BOSL2/leak.scad>\n", [pin("BOSL2")]).includes
+
+    assert (entry.status, entry.path) == ("unresolved", None)
+
+
+# ── a report is bounded (review of #740) ────────────────────────────────────────
+
+
+def test_a_dense_source_is_cut_at_the_statement_cap(tmp_path: Path) -> None:
+    source = "".join(f"use<lib{index}/x.scad>" for index in range(MAX_STATEMENTS * 20))
+
+    result = report(tmp_path, source)
+
+    assert len(result.includes) == MAX_STATEMENTS
+    assert result.unresolved == MAX_STATEMENTS
+    assert result.truncated
+
+
+def test_the_statement_cap_counts_every_file_followed(tmp_path: Path) -> None:
+    model = tmp_path / "models" / "widget"
+    model.mkdir(parents=True)
+    (model / "many.scad").write_text("include <nope.scad>\n" * MAX_STATEMENTS, encoding="utf-8")
+
+    result = report(tmp_path, "include <many.scad>\n")
+
+    assert len(result.includes) == MAX_STATEMENTS
+    assert result.truncated
+
+
+def test_suggestions_stop_at_the_name_cap_and_the_index_is_built_once(tmp_path: Path) -> None:
+    built: list[int] = []
+
+    def pin_index() -> dict[str, list[tuple[str, ModelLibrary]]]:
+        built.append(1)
+        return {}
+
+    names = MAX_SUGGESTIONS + 10
+    source = "".join(f"use<lib{index}/x.scad>use<lib{index}/y.scad>" for index in range(names))
+    source += "use<BOSL2/std.scad>"
+
+    result = report(tmp_path, source, candidates=Candidates(catalogue=[BOSL2], pin_index=pin_index))
+
+    assert built == [1]
+    assert len(result.includes) == names * 2 + 1
+    # Past the cap, still reported unresolved, only without a suggestion.
+    last = result.includes[-1]
+    assert (last.target, last.status, last.suggestion) == ("BOSL2/std.scad", "unresolved", None)
+    assert result.truncated
+
+
+def test_the_index_is_not_built_when_nothing_needs_a_suggestion(tmp_path: Path) -> None:
+    def pin_index() -> dict[str, list[tuple[str, ModelLibrary]]]:
+        raise AssertionError("the index was built")
+
+    result = report(
+        tmp_path,
+        "include <helper.scad>\n",
+        candidates=Candidates(catalogue=[BOSL2], pin_index=pin_index),
+    )
+
+    assert result.unresolved == 1
+    assert not result.truncated
 
 
 def test_a_model_file_is_followed_relative_to_its_own_directory(tmp_path: Path) -> None:

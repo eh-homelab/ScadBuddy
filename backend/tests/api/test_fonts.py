@@ -85,8 +85,9 @@ class FakeClient:
 class FakeBackedService(FontService):
     """Real service, stubbed client, and a fontconfig answer the test controls.
 
-    ``installed`` is overridden because the machine running the tests has its own fonts,
-    and "which families are installed" is exactly what several of these assert on.
+    ``installed``, ``renderable`` and ``resolvable`` are overridden because the machine
+    running the tests has its own fonts, and "which families are installed" is exactly
+    what several of these assert on.
     """
 
     client: FakeClient  # type: ignore[assignment]
@@ -96,6 +97,9 @@ class FakeBackedService(FontService):
         self.pretend_installed: list[FontFamily] = []
 
     def installed(self) -> list[FontFamily]:
+        return list(self.pretend_installed)
+
+    def renderable(self) -> list[FontFamily]:
         return list(self.pretend_installed)
 
     def refresh_cache(self) -> None:

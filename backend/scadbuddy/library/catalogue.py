@@ -651,6 +651,34 @@ class Catalogue:
             pins.append((slug, pin))
         return pins
 
+    def library_pin_index(self) -> dict[str, list[tuple[str, ModelLibrary]]]:
+        """Every readable pin of every model, by library name, reading each
+        ``model.json`` once: what :meth:`library_pins` answers for one name, less the
+        entries that cannot be read as a pin. One walk answers any number of names
+        (#253, review of #740)."""
+        index: dict[str, list[tuple[str, ModelLibrary]]] = {}
+        for slug in self.slugs():
+            try:
+                raw = self.read_raw_meta(slug)
+            except InvalidModelMetaError:
+                continue
+            entries = raw.get("libraries")
+            if not isinstance(entries, list):
+                continue
+            named: set[str] = set()
+            for entry in entries:
+                # The first entry of a name, as `_library_entries` takes it.
+                name = entry_name(entry)
+                if name is None or name in named:
+                    continue
+                named.add(name)
+                try:
+                    pin = ModelLibrary.model_validate(entry)
+                except ValidationError:
+                    continue
+                index.setdefault(name, []).append((slug, pin))
+        return index
+
     def _library_entries(self, name: str, commit: str | None = None) -> list[tuple[str, Any]]:
         """:meth:`library_users` with the entry that made each one a user, reading
         each ``model.json`` once: ``None`` for one that is not JSON."""

@@ -437,10 +437,14 @@ As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
 as resolved (file and library) or unresolved (reason, and a catalogue or installed
 library to pin), resolved as OpenSCAD's lexer and `find_valid_path` resolve them
 against the model's own pins, and lists `font = "…"` literals with their missing
-families (`backend/scadbuddy/library/includes.py`). A missing font family is enforced
-by the backend, not the tool: the render and preset routes answer 422 for a `// font`
+families (`backend/scadbuddy/library/includes.py`). A target outside the model's
+directory and its checkouts (absolute, `../`, or through a symbolic link) is unresolved
+without its existence being checked, and a report is capped in statements and library
+lookups, with `truncated` past the caps (review of #740). A missing font family is
+enforced by the backend, not the tool: the render and preset routes answer 422 for a `// font`
 value whose family fontconfig does not resolve, and `POST /api/v1/fonts/install`
-answers 500 when the family still does not resolve after the install
+answers 500 when the family still does not resolve after the install; "already
+installed" uses the same outline, scalable filter (review of #740)
 (`backend/scadbuddy/api/params.py` `require_installed_fonts`,
 `backend/scadbuddy/library/fonts.py`). Details and sources: `docs/ai/dependencies.md`.
 
