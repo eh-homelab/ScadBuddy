@@ -1,8 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api/client'
 import type { JsonObject } from '../lib/inputs'
 import { useLatest } from '../lib/useLatest'
+import { defineHostElements, provideRegistry, type HostElement } from './elements'
 import { createHost, type HostDeps, type HostHandle } from './host'
+import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
 import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
@@ -15,6 +18,20 @@ interface Props {
   deps: HostDeps
   inputs: JsonObject
   onFailure: (failure: TemplateUiFailure) => void
+  /** What the host renders into `<sb-*>` elements (spec §4.3); without it they stay empty. */
+  elementContext?: Omit<ElementContext, 'slot'>
+}
+
+const keys = new WeakMap<HostElement, number>()
+let nextKey = 0
+
+function keyOf(el: HostElement): string {
+  let key = keys.get(el)
+  if (key === undefined) {
+    key = nextKey++
+    keys.set(el, key)
+  }
+  return String(key)
 }
 
 function mountOf(module: unknown): Mount | undefined {
@@ -27,11 +44,13 @@ function theme(): 'light' | 'dark' {
 }
 
 /** A template's own interface (spec 2026-09-27 §4.2): not sandboxed, style-isolated. */
-export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props) {
+export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, elementContext }: Props) {
   const element = useRef<HTMLDivElement>(null)
   const handle = useRef<HostHandle | null>(null)
   const latest = useLatest({ deps, onFailure })
   const slot = ui.slot ?? 'panel'
+  const [elements, setElements] = useState<readonly HostElement[]>([])
+  const [, setRevision] = useState(0)
 
   useEffect(() => {
     const el = element.current
@@ -41,6 +60,12 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
       fail(`written for host API ${ui.api}; this ScadBuddy supports ${UI_API_SUPPORTED.join(', ')}`)
       return
     }
+    defineHostElements()
+    provideRegistry(el, {
+      add: (added) => setElements((current) => (current.includes(added) ? current : [...current, added])),
+      remove: (removed) => setElements((current) => current.filter((candidate) => candidate !== removed)),
+      changed: () => setRevision((n) => n + 1),
+    })
     const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     adoptAppStyles(root)
     const created = createHost({
@@ -84,6 +109,8 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
         console.error(`${ui.module}: its cleanup threw`, cause)
       }
       root.replaceChildren()
+      provideRegistry(el, undefined)
+      setElements([])
     }
   }, [slug, version, ui.module, ui.api, slot, latest])
 
@@ -91,5 +118,13 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
     handle.current?.notify(inputs)
   }, [inputs])
 
-  return <div ref={element} data-testid="template-ui" className="h-full min-h-0 overflow-auto" />
+  return (
+    <>
+      <div ref={element} data-testid="template-ui" className="h-full min-h-0 overflow-auto" />
+      {elementContext &&
+        elements.map((el) =>
+          createPortal(<HostElementContent element={el} context={{ ...elementContext, slot }} />, el, keyOf(el)),
+        )}
+    </>
+  )
 }
