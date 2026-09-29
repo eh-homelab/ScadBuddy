@@ -47,6 +47,10 @@ class FakeActivities:
         self.block_main = block_main
         self.block_solids = block_solids
 
+    @activity.defn(name="cached_piece")
+    async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
+        return None
+
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         self.calls.append("prepare")
@@ -122,6 +126,7 @@ def _worker(client: Client, queue: str, acts: FakeActivities) -> Worker:
         task_queue=queue,
         workflows=[TemplatePipeline, RenderPiece],
         activities=[
+            acts.cached_piece,
             acts.prepare,
             acts.render_main,
             acts.render_solids,
