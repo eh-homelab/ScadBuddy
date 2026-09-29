@@ -139,7 +139,7 @@ const CAPABILITIES = {
 async function started(
   model = fakeModel(),
   capabilities: object = CAPABILITIES,
-  readFile?: (file: { library?: string; path: string }) => Promise<string>,
+  readFile?: (file: { library?: string; commit?: string; path: string }) => Promise<string>,
 ) {
   const client = connectLanguageServer(model as never, '/api/v1/models/name-keychain/lsp', readFile)
   const socket = FakeSocket.last
@@ -240,7 +240,7 @@ describe('connectLanguageServer', () => {
 
     async function definitions(
       locations: object[],
-      readFile?: (file: { library?: string; path: string }) => Promise<string>,
+      readFile?: (file: { library?: string; commit?: string; path: string }) => Promise<string>,
     ) {
       const { socket, model, client } = await started(fakeModel(), CAPABILITIES, readFile)
       const pending = call('definition', 'provideDefinition', model, { lineNumber: 1, column: 1 }) as Promise<
@@ -261,7 +261,7 @@ describe('connectLanguageServer', () => {
     })
 
     it('open a sibling file and a library file read-only, under the URI the server named', async () => {
-      const readFile = vi.fn((file: { library?: string; path: string }) =>
+      const readFile = vi.fn((file: { library?: string; commit?: string; path: string }) =>
         Promise.resolve(`// ${file.library ?? 'model'}:${file.path}\n`),
       )
       const { found } = await definitions(
@@ -297,7 +297,7 @@ describe('connectLanguageServer', () => {
 
     it('never serve one pin of a library for another', async () => {
       const REPINNED = 'file:///libraries/BOSL2@ffffffffffffffffffffffffffffffffffffffff/shapes3d.scad'
-      const readFile = vi.fn((file: { commit?: string }) => Promise.resolve(`// at ${file.commit}\n`))
+      const readFile = vi.fn((file: { library?: string; commit?: string; path: string }) => Promise.resolve(`// at ${file.commit}\n`))
       const { found } = await definitions(
         [
           { uri: LIBRARY, range },
