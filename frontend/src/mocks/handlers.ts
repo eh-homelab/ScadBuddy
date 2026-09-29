@@ -948,6 +948,25 @@ function refusal(check: SourceCheck) {
   })
 }
 
+/**
+ * `params` sent beside `inputs` must be the same values, as the backend's
+ * `normalize_inputs` holds them; an empty `params` is not a claim about them.
+ */
+function paramsClash(
+  params: Record<string, ParamValue> | null | undefined,
+  inputs: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!params || !inputs || Object.keys(params).length === 0) return false
+  const other = (inputs['params'] ?? {}) as Record<string, ParamValue>
+  const names = Object.keys(params)
+  return names.length !== Object.keys(other).length || names.some((name) => other[name] !== params[name])
+}
+
+/** Inputs as the backend records them: a given `v` is kept, a missing one is 0. */
+function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
+  return { ...inputs, v: inputs['v'] ?? 0 }
+}
+
 export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
@@ -1826,6 +1845,9 @@ export const handlers = [
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const body = (await request.json()) as ParamPresetCreate
     const name = body.name.trim().replace(/\s+/g, ' ')
+    if (paramsClash(body.params, body.inputs)) {
+      return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
+    }
     const inputs = body.inputs ?? { params: body.params ?? {} }
     const presetParams = (inputs['params'] ?? {}) as Record<string, ParamValue>
     const refused = presetRefusal(slug, name, presetParams, null)
@@ -1835,7 +1857,7 @@ export const handlers = [
       name,
       origin: 'mine',
       params: presetParams,
-      inputs: { ...inputs, v: inputs['v'] ?? 0 },
+      inputs: withVersion(inputs),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -1874,7 +1896,12 @@ export const handlers = [
     if (!existing) return problem(404, 'Preset not found')
     const body = (await request.json()) as ParamPresetUpdate
     const name = body.name?.trim().replace(/\s+/g, ' ')
-    const inputs = body.inputs ?? (body.params ? { params: body.params } : undefined)
+    if (paramsClash(body.params, body.inputs)) {
+      return problem(422, 'Unprocessable Content', 'params and inputs.params disagree; send inputs only')
+    }
+    // `params` alone keeps the preset's other inputs keys, as the backend's update does.
+    const current = existing.inputs ?? { params: existing.params, v: 0 }
+    const inputs = body.inputs ?? (body.params ? { ...current, params: body.params } : undefined)
     const presetParams = inputs ? ((inputs['params'] ?? {}) as Record<string, ParamValue>) : undefined
     const refused = presetRefusal(slug, name ?? existing.name, presetParams ?? {}, id)
     if (refused) return refused
@@ -1882,7 +1909,7 @@ export const handlers = [
       ...existing,
       name: name ?? existing.name,
       params: presetParams ?? existing.params,
-      ...(inputs ? { inputs: { ...inputs, v: inputs['v'] ?? 0 } } : {}),
+      ...(inputs ? { inputs: withVersion(inputs) } : {}),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -1939,7 +1966,7 @@ export const handlers = [
       status: 'pending',
       created_at: new Date().toISOString(),
       params: renderParams,
-      inputs: { ...(body.inputs ?? {}), params: renderParams, v: 0 },
+      inputs: withVersion({ ...(body.inputs ?? {}), params: renderParams }),
       log_tail: [],
     })
     runJob(jobId)
@@ -2047,7 +2074,8 @@ export const handlers = [
       created_at: new Date().toISOString(),
       has_thumbnail: false,
       params: job.params,
-      inputs: body.inputs ? { ...body.inputs, v: 0 } : { params: job.params, v: 0 },
+      // The inputs sent with Generate, else the job's own, as the backend records them.
+      inputs: withVersion(body.inputs ?? job.inputs ?? { params: job.params }),
       bbox_mm: job.bbox_mm,
       colors: job.colors ?? [],
       parts: [],

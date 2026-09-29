@@ -2,10 +2,12 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { bbox } from '../mocks/fixtures'
+import { bbox, outputs } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
+import { CustomizePage } from './CustomizePage'
+import { EditPage } from './EditPage'
 import { HistoryPage } from './HistoryPage'
 
 function render() {
@@ -242,4 +244,37 @@ describe('HistoryPage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     expect(within(dialog).getByRole('radio', { name: /Slice and queue/ })).toBeChecked()
   })
+})
+
+describe('template inputs (spec 2026-09-27 §4.3)', () => {
+  it('Edit on a row keeps its UI state, and Generate saves it again', async () => {
+    const withUi = outputs.map((output) =>
+      output.name === 'Nova'
+        ? { ...output, inputs: { params: output.params, tab: 'lid', v: 0 } }
+        : output,
+    )
+    const bodies: unknown[] = []
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json(withUi)),
+      // The row is handed over; a fetch of the edit target would hide a dropped field.
+      http.get('/api/v1/outputs/:id/edit', () => new HttpResponse(null, { status: 500 })),
+      http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ ...withUi[0], id: 'd'.repeat(32) }, { status: 201 })
+      }),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/m/:slug/history" element={<HistoryPage />} />
+        <Route path="/edit/:outputId" element={<EditPage />} />
+        <Route path="/m/:slug" element={<CustomizePage />} />
+      </Routes>,
+      { route: '/m/name-keychain/history' },
+    )
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    const generate = await screen.findByTestId('generate')
+    await waitFor(() => expect(generate).toBeEnabled(), { timeout: 5000 })
+    await user.click(generate)
+    await waitFor(() => expect(bodies[0]).toMatchObject({ inputs: { tab: 'lid', v: 0 } }))
+  }, 15000)
 })
