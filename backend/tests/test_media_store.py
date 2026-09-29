@@ -326,6 +326,17 @@ class _CountingStore:
     def delete(self, template_id: str) -> None:
         self.store.delete(template_id)
 
+    def cover(self, template_id: str) -> str | None:
+        self.queries.append("cover")
+        return self.store.cover(template_id)
+
+    def covers_for(self, template_ids: Sequence[str]) -> dict[str, str]:
+        self.queries.append("covers_for")
+        return self.store.covers_for(template_ids)
+
+    def set_cover(self, template_id: str, item_id: str | None) -> None:
+        self.store.set_cover(template_id, item_id)
+
 
 @pytest.mark.requires_postgres
 def test_the_store_reads_many_templates_in_one_query(store: PostgresMediaStore) -> None:
@@ -358,6 +369,161 @@ def test_the_listing_reads_every_templates_media_in_one_query(
     assert counting.queries == ["items_for"]
     assert [item.caption for item in records["two"].media] == ["Two"]
     assert records["one"].media == []
+
+
+@pytest.mark.requires_postgres
+def test_the_listing_reads_the_built_ins_covers_in_one_more_query(
+    data: DataPaths, store: PostgresMediaStore
+) -> None:
+    (data.builtins / "keychain").mkdir(parents=True)
+    (data.builtins / "keychain" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    (data.builtins / "tag").mkdir(parents=True)
+    (data.builtins / "tag" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    counting = _CountingStore(store)
+    catalogue = Catalogue(data, media_store=counting, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue.create("mine", "cube(1);\n", ModelMeta(name="Mine"))
+    for slug in ("builtin:keychain", "builtin:tag"):
+        catalogue.add_media(slug, _stage(catalogue, PNG, "image", "png"))
+    counting.queries.clear()
+
+    catalogue.list_models()
+
+    assert counting.queries == ["items_for", "covers_for"]
+
+
+@pytest.mark.requires_postgres
+def test_the_store_keeps_one_cover_per_template(store: PostgresMediaStore) -> None:
+    store.set_cover("builtin:a", "one")
+    store.set_cover("builtin:a", "two")
+    store.set_cover("builtin:b", "three")
+
+    assert store.cover("builtin:a") == "two"
+    assert store.covers_for(["builtin:a", "builtin:b", "builtin:c"]) == {
+        "builtin:a": "two",
+        "builtin:b": "three",
+    }
+    store.set_cover("builtin:b", None)
+    assert store.cover("builtin:b") is None
+    store.delete("builtin:a")
+    assert store.cover("builtin:a") is None
+    assert store.covers_for([]) == {}
+
+
+@pytest.fixture
+def builtin(data: DataPaths, catalogue: Catalogue) -> str:
+    """A built-in shipping one image in its bundled model.json, and a thumbnail."""
+    directory = data.builtins / "keychain"
+    (directory / "media").mkdir(parents=True)
+    (directory / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    (directory / "media" / "front.png").write_bytes(PNG)
+    (directory / "model.json").write_text(
+        '{"name": "Keychain", "media": [{"id": "front", "file": "front.png", "kind": "image"}]}',
+        encoding="utf-8",
+    )
+    return "builtin:keychain"
+
+
+@pytest.mark.requires_postgres
+def test_media_added_to_a_built_in_follows_what_it_ships(
+    catalogue: Catalogue, builtin: str, store: PostgresMediaStore, data: DataPaths
+) -> None:
+    shipped_tree = sorted(p.name for p in data.model_dir(builtin).rglob("*"))
+
+    record = catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png"), caption="Mine")
+
+    front, added = record.media
+    assert (front.id, front.readonly) == ("front", True)
+    assert (added.caption, added.readonly, added.missing) == ("Mine", False, False)
+    assert record.media_cover is None
+    # In the data directory, never in the image's mirror.
+    assert (data.builtin_media_dir(builtin) / added.file).read_bytes() == PNG
+    assert sorted(p.name for p in data.model_dir(builtin).rglob("*")) == shipped_tree
+    assert [item.id for item in store.items(builtin)] == [added.id]
+    _, path = catalogue.media_item(builtin, added.id)
+    assert path == data.builtin_media_dir(builtin) / added.file
+
+
+@pytest.mark.requires_postgres
+def test_what_a_built_in_ships_cannot_change(catalogue: Catalogue, builtin: str) -> None:
+    from scadbuddy.library.catalogue import MediaReadOnlyError
+
+    with pytest.raises(MediaReadOnlyError):
+        catalogue.set_caption(builtin, "front", "x")
+    with pytest.raises(MediaReadOnlyError):
+        catalogue.remove_media(builtin, "front")
+    assert [(item.id, item.caption) for item in catalogue.list_media(builtin)] == [("front", "")]
+
+
+@pytest.mark.requires_postgres
+def test_a_built_ins_added_media_is_captioned_reordered_and_removed(
+    catalogue: Catalogue, builtin: str, data: DataPaths
+) -> None:
+    one = catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png")).media[1]
+    two = catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png")).media[2]
+
+    catalogue.set_caption(builtin, two.id, "Second")
+    # A shipped id in the order is passed over: it keeps its place.
+    record = catalogue.reorder(builtin, [two.id, "front", one.id])
+    assert [(item.id, item.caption) for item in record.media] == [
+        ("front", ""),
+        (two.id, "Second"),
+        (one.id, ""),
+    ]
+    with pytest.raises(MediaOrderError):
+        catalogue.reorder(builtin, [two.id])
+
+    record = catalogue.remove_media(builtin, two.id)
+
+    assert [item.id for item in record.media] == ["front", one.id]
+    assert not (data.builtin_media_dir(builtin) / two.file).exists()
+
+
+@pytest.mark.requires_postgres
+def test_a_built_ins_cover_is_a_choice_of_its_own(
+    catalogue: Catalogue, builtin: str, store: PostgresMediaStore
+) -> None:
+    added = catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png")).media[1]
+
+    record = catalogue.set_cover(builtin, added.id)
+
+    assert [item.id for item in record.media] == [added.id, "front"]
+    assert record.media_cover == added.id
+    assert catalogue.thumbnail(builtin) is not None
+    # The first shipped item is the cover without a choice.
+    record = catalogue.set_cover(builtin, "front")
+    assert record.media_cover is None
+    assert store.cover(builtin) is None
+    with pytest.raises(MediaNotFoundError):
+        catalogue.set_cover(builtin, "abcdefabcdef")
+
+    catalogue.set_cover(builtin, added.id)
+    record = catalogue.remove_media(builtin, added.id)
+
+    assert [item.id for item in record.media] == ["front"]
+    assert store.cover(builtin) is None
+
+
+@pytest.mark.requires_postgres
+def test_a_cover_of_mine_is_moved_to_the_front(catalogue: Catalogue) -> None:
+    first = catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png")).media[0]
+    second = catalogue.add_media("demo", _stage(catalogue, PNG, "image", "png")).media[1]
+
+    record = catalogue.set_cover("demo", second.id)
+
+    assert [item.id for item in record.media] == [second.id, first.id]
+    assert record.media_cover is None
+    with pytest.raises(MediaOrderError):
+        catalogue.set_cover("demo", None)
+
+
+@pytest.mark.requires_postgres
+def test_a_built_ins_limit_counts_what_it_ships(
+    catalogue: Catalogue, builtin: str, store: PostgresMediaStore
+) -> None:
+    store.replace(builtin, [_item(f"i{index}") for index in range(MAX_MEDIA_ITEMS - 1)])
+
+    with pytest.raises(TooManyMediaError):
+        catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png"))
 
 
 @pytest.mark.requires_postgres

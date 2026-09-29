@@ -56,13 +56,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'PATCH /api/v1/models/{slug}/media/{item_id}',
       'PUT /api/v1/models/{slug}/media/order',
+      'PUT /api/v1/models/{slug}/media/cover',
       'DELETE /api/v1/models/{slug}/media/{item_id}',
     ] as const
   ).map((operation) => ({
     operation,
     reason:
-      "Captioning, reordering and removing a template's media happen on the edit page (#279); the plan " +
-      'adds no agent tools in the gallery epic (#273, decision 7).',
+      "Captioning, reordering, choosing the cover of and removing a template's media happen on the edit page " +
+      '(#279, #722); the plan adds no agent tools in the gallery epic (#273, decision 7).',
   })),
   {
     operation: 'GET /api/v1/analyzers',
