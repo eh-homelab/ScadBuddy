@@ -208,11 +208,13 @@ export function ActionBar({
   return (
     <>
       <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+        {/* A real basis, not flex-1's 0: when the buttons and this can't share a line,
+            the footer wraps the buttons below instead of squeezing the status to 0 px. */}
+        <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
-              <span className="text-[12px] text-muted">
+              <span className="shrink-0 whitespace-nowrap text-[12px] text-muted">
                 {job.colors.length === 1 ? '1 colour' : `${job.colors.length} colours`}
               </span>
             </>
