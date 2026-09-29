@@ -28,9 +28,11 @@ export type FeedItem =
       summary: string
       /**
        * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `approved`/`denied` from `approval.resolved`.
+       * the server has not confirmed it; `queued` when it is waiting for the connection
+       * to come back (sent first on reconnect); `approved`/`denied` from
+       * `approval.resolved`, the server's confirmation.
        */
-      state: 'pending' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
@@ -43,6 +45,12 @@ export interface SessionState {
   status: SessionStatus
   items: FeedItem[]
   result?: { costUsd?: number; turns: number }
+  /**
+   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
+   * Their decision goes out right after the attach, so the replayed card shows `sent`,
+   * not live buttons, until `approval.resolved`.
+   */
+  queuedDecisions?: string[]
 }
 
 export interface ChatState {
@@ -60,11 +68,16 @@ export interface ChatState {
 export type ChatAction =
   | { type: 'server'; event: ServerEvent }
   | { type: 'connected' }
-  | { type: 'disconnected'; reason?: string }
+  /** `keepStart`: the first turn awaiting its session is queued for the reconnect, not lost. */
+  | { type: 'disconnected'; reason?: string; keepStart?: boolean }
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string }
+  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
+  /** The transport refused a message (its queue is full): nothing was sent. */
+  | { type: 'not-sent'; message: string }
+  /** The transport holds a message until the connection is back; it will be sent. */
+  | { type: 'queued'; message: string }
 
 export const initialChatState: ChatState = {
   sessions: {},
@@ -113,8 +126,35 @@ function push(session: SessionState, item: FeedItem): SessionState {
 
 function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
-    case 'sessions.snapshot':
-      return event.sessions.reduce(upsertSummary, state)
+    case 'sessions.snapshot': {
+      // Sent on connect and again whenever the list changes (the agent re-reads it
+      // while the socket is open), so a session started elsewhere shows up live and
+      // one deleted elsewhere goes. The list replaces the panel's: what the snapshot
+      // leaves out is dropped, except the open session, and sessions already known
+      // keep their transcripts. The open session's live events are newer than a
+      // list read before them, so its status is not taken from the list.
+      const listed = new Set(event.sessions.map((s) => s.sessionId))
+      const sessions: Record<string, SessionState> = {}
+      for (const s of event.sessions) {
+        const existing = state.sessions[s.sessionId]
+        sessions[s.sessionId] = existing
+          ? {
+              ...existing,
+              title: s.title,
+              origin: s.origin,
+              owner: s.owner,
+              status: s.sessionId === state.activeId ? existing.status : s.status,
+            }
+          : blankSession({ id: s.sessionId, ...s })
+      }
+      const active = state.activeId ? state.sessions[state.activeId] : undefined
+      if (active && !listed.has(active.id)) sessions[active.id] = active
+      // Sessions new to the panel go first, newest first as the server lists them;
+      // the rest keep their place.
+      const fresh = event.sessions.map((s) => s.sessionId).filter((id) => !(id in state.sessions))
+      const kept = state.order.filter((id) => id in sessions)
+      return { ...state, sessions, order: [...fresh, ...kept] }
+    }
 
     case 'session.started': {
       const known = event.sessionId in state.sessions
@@ -196,7 +236,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: 'pending',
+          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -227,13 +267,30 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       }))
 
     case 'error': {
+      const message = errorMessage(event.code, event.message)
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(s, { kind: 'error', id: `error-${s.items.length}`, message: event.message }),
+          push(s, { kind: 'error', id: `error-${s.items.length}`, message }),
         )
       }
-      return { ...state, notice: event.message, awaitingStart: false }
+      return { ...state, notice: message, awaitingStart: false }
     }
+  }
+}
+
+/**
+ * The words for an agent `error` frame. The connection limits (agent
+ * `src/routes/chat.ts`) get the panel's own wording, since what was refused is the
+ * message the user just sent and they need to know to send it again.
+ */
+function errorMessage(code: string | undefined, message: string): string {
+  switch (code) {
+    case 'busy':
+      return 'The assistant is still working through the messages already sent, so this one was not taken. Wait a moment, then send it again.'
+    case 'rate_limited':
+      return 'Too many new chats started in a short time, so this one was not started. Wait a minute, then send it again.'
+    default:
+      return message
   }
 }
 
@@ -247,7 +304,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         connected: false,
-        awaitingStart: false,
+        awaitingStart: action.keepStart ? state.awaitingStart : false,
         notice: action.reason ?? 'Lost the connection to the assistant.',
       }
     case 'protocol-error':
@@ -259,14 +316,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Attaching replays the transcript from the start (protocol: `session.attach`),
       // so the feed is rebuilt from the replay rather than appended to.
       return action.sessionId
-        ? patchSession(next, action.sessionId, (s) => ({ ...s, items: [] }))
+        ? patchSession(next, action.sessionId, (s) => ({
+            ...s,
+            items: [],
+            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
+          }))
         : next
     }
+    case 'not-sent':
+      return { ...state, awaitingStart: false, notice: action.message }
+    case 'queued':
+      // Still awaiting its session's start, if it starts one: the message goes out on reconnect.
+      return { ...state, notice: action.message }
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: 'sent' }
+            ? { ...i, state: action.queued ? 'queued' : 'sent' }
             : i,
         ),
       )
