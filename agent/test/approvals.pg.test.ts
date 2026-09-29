@@ -18,6 +18,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
+import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -147,6 +148,36 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const { session, approval } = await orphan()
     expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ decision: 'denied', decidedBy: browser })
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turns: 0 })
+  })
+
+  it('a decision racing create cannot log approval.resolved before approval.required', async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    // An event log that tries to decide the approval just before
+    // `approval.required` is written: the fastest possible decision.
+    let raced: unknown
+    const events = Object.create(m.events) as EventLog
+    events.append = async (sessionId, batch, tx) => {
+      const required = batch.find((e) => e.type === 'approval.required')
+      if (required && 'id' in required) {
+        raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
+      }
+      return m.events.append(sessionId, batch, tx)
+    }
+    const service = new ApprovalService({ sql: db.sql, events })
+    const approval = await service.create({
+      sessionId: session.id,
+      turnId: null,
+      toolUseId: 'toolu_1',
+      tool: 'mcp__stub__print',
+      input: { job: 'box.3mf' },
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    // The row is not there to decide until it commits with its event.
+    expect(raced).toMatchObject({ code: 'not_found' })
+    await service.decide(browser, approval.id, false)
+    const types = (await m.events.read(session.id, 0, 1000)).map((e) => e.event.type)
+    expect(types.filter((t) => t.startsWith('approval.'))).toEqual(['approval.required', 'approval.resolved'])
   })
 
   it('an approved orphan is used once, only by the turn it is bound to, with the same tool and input', async () => {
