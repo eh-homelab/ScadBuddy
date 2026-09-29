@@ -18,7 +18,7 @@ from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -33,7 +33,12 @@ def _build(  # type: ignore[no-untyped-def]
 ):
     config = Config(data_dir=tmp_path)
     source = RenderSettingsSource(
-        pool, Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL)
+        pool,
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
     )
     return config, build_store(
         backend=backend,  # type: ignore[arg-type]
@@ -88,7 +93,12 @@ def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
     tmp_path: Path, pool: Pool
 ) -> None:
     """SCADBUDDY_STORE_BACKEND=bambuddy with nothing stored: the seed is refused too."""
-    seeded = Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL, store_backend="bambuddy")
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="bambuddy",
+    )
     current = load_render_store_settings(pool, seeded)
     assert current.store_backend == "bambuddy"
     with pytest.raises(StoreNotReadyError) as refused:
@@ -99,7 +109,11 @@ def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
 def test_the_named_recovery_puts_a_stored_bambuddy_back_on_the_local_store(
     tmp_path: Path, pool: Pool
 ) -> None:
-    defaults = Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL)
+    defaults = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
     with pool.connection() as conn:
         conn.execute("INSERT INTO settings (name, value) VALUES ('store_backend', '\"bambuddy\"')")
     assert load_render_store_settings(pool, defaults).store_backend == "bambuddy"
