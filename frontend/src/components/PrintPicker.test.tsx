@@ -86,6 +86,49 @@ describe('PrintPicker', () => {
     expect(body).not.toHaveProperty('pipeline_id')
   })
 
+  /** The dialog on printer 1 as if it had no track switch, so each AMS is wired to a side. */
+  function unswitched() {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: { ...choicesView.filaments, track_switch: false },
+        }),
+      ),
+    )
+  }
+
+  it('rules out spools by the nozzle size chosen, following a change of size (#469)', async () => {
+    unswitched()
+    renderPicker()
+    const slot = await screen.findByTestId('filament-slot-2')
+    // The default 0.4: spool 9 feeds the right extruder, where the 0.2 is fitted.
+    expect(within(slot).getByTestId('spool-9')).toBeDisabled()
+    expect(within(slot).getByTestId('spool-22')).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+
+    await waitFor(() => expect(within(slot).getByTestId('spool-9')).toBeEnabled())
+    expect(within(slot).getByTestId('spool-22')).toBeDisabled()
+  })
+
+  it('never opens on a spool the size rules out, and swaps one a size change rules out (#469)', async () => {
+    unswitched()
+    const { user } = renderPicker()
+    // The suggestion is spool 21 (on the right's 0.2) for slot 1; at the default 0.4 it
+    // is swapped for the same blue on the shelf, which has no side to rule it out.
+    const one = await screen.findByTestId('filament-slot-1')
+    await waitFor(() => expect(within(one).getByTestId('spool-26')).toBeChecked())
+    expect(within(one).getByTestId('spool-21')).not.toBeChecked()
+
+    // Spool 22 is on the left's 0.4; at 0.2 it can't print, so the pink on the shelf
+    // takes its place rather than leaving a selection Print would be refused for.
+    const two = screen.getByTestId('filament-slot-2')
+    await user.click(within(two).getByTestId('spool-22'))
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() => expect(within(two).getByTestId('spool-27')).toBeChecked())
+  })
+
   it('disables Print and names the slot when a spool has no preset for the size', async () => {
     vi.spyOn(api, 'runPrint').mockRejectedValue(
       new ApiError(422, 'Generic TPU has no slicer preset for a 0.2 mm nozzle. Pick one under Advanced.'),
@@ -1030,6 +1073,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
+  it('never GETs /filaments for plate 1 without all plates', async () => {
+    // #525 finding 3: the msw mock's per-plate filtering in `handlers.ts` is only
+    // safe because plate 1 without `all_plates` is seeded from the bulk
+    // `choices.filaments` payload and never hits this route. Pin that directly.
+    const reads = watch('GET', '/filaments')
+    renderPicker()
+    await loaded()
+    expect(reads.urls).toHaveLength(0)
+  })
+
   it('offers each plate of a multi-plate output, reading that plate’s slots', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>
@@ -1077,6 +1130,31 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
+  })
+
+  it('reads every plate for all plates, not plate 1 alone', async () => {
+    // #480: the default mock gives plate N only slot N and `all_plates` the union, so a
+    // read that dropped `all_plates` would come back with slot 1 alone.
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument())
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+
+    expect(await screen.findByTestId('filament-slot-1')).toBeInTheDocument()
+    expect(screen.getByTestId('filament-slot-2')).toBeInTheDocument()
+    expect(reads.urls.at(-1)).toContain('all_plates=true')
   })
 
   it('offers a row for a slot only a later plate uses when printing all plates', async () => {

@@ -27,8 +27,9 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own. Saved presets are kept in the
-  database.
+  saved preset, to an editable preset of your own. Any preset can carry a short
+  Markdown `description` and `tags`, shown under the picker; **Edit details** renames a
+  saved one and sets them. Saved presets are kept in the database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -414,9 +415,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Streamable HTTP MCP servers named after the plugin, so their tools reach
   the model as `mcp__<name>__<tool>` (`main.ts` passes
   `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
-  plugin tool parks for approval like any other, #258). Nothing starts a
-  session over HTTP yet, so for now the connection test is what reaches a
-  plugin. Rules (`agent/src/plugins/registry.ts`):
+  plugin tool parks for approval like any other, #258). Sessions start from
+  the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
     host resolves to is loopback. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
@@ -489,15 +489,45 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   them; `recall` is the obvious candidate. Not yet verified against a running
   Hindsight: the tool names and annotations a real server lists, and whether
   `reflect` writes anything.
+- **Sessions and the assistant's chat** (#300, #256; `agent/src/routes/chat.ts`,
+  `agent/src/routes/sessions.ts`). The browser never holds a Claude credential:
+  every model call is the agent's own, and every route below acts as the browser
+  user behind the same guards as the credential routes.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
+  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
+  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
+  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+
+  A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
+  script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`
+  before it is read; the socket caps a frame at 256 KiB. New sessions, from the
+  socket or `POST`, are limited per owner (`MAX_NEW_SESSIONS` in
+  `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
+  another replica does not reset it); the socket answers an `error` frame with
+  code `rate_limited`. Approvals
+  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
+  their tiers), plus enabled plugins. Every agent response carries
+  `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
   Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
-- Nothing deploys it yet. The clusters manifest, and the ingress routes for
-  `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories
-  that give it routes. Until then the image's publish job is
+- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
+  agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
+  backend, the agent and the assistant's WebSocket on one origin, which is what
+  works inside Bambuddy's iframe. The rules, an example `Ingress` and a
+  `curl` check per path (every agent response carries
+  `X-ScadBuddy-Service: agent`) are in `docs/ai/operating.md` §1.1.
+  `frontend/vite.config.ts` routes the same way for `pnpm dev` and
+  `pnpm preview`. The clusters manifest is in eh-homelab/clusters, and until it
+  deploys the sidecar the image's publish job is
   `continue-on-error`, so it cannot hold back a backend deploy, and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
