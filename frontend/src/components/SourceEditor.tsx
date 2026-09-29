@@ -174,7 +174,14 @@ export function SourceEditor({
         const target = resource.toString()
         landing.current = selectionOrPosition ?? null
         if (target === own) {
-          setViewing(null)
+          if (source.getModel()?.uri.toString() === own) {
+            // Already showing the model ("Open Definition to the Side" in a single
+            // editor): no switch will run the landing effect, so move the cursor here.
+            landing.current = null
+            if (selectionOrPosition) reveal(source, selectionOrPosition)
+          } else {
+            setViewing(null)
+          }
           return true
         }
         const file = definitionFile(target, directoryOf(own))

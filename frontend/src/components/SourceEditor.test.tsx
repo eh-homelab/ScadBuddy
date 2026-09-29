@@ -217,6 +217,27 @@ describe('SourceEditor', () => {
       expect(screen.queryByTestId('definition-bar')).toBeNull()
     })
 
+    it('moves the cursor for a jump within the model it already shows', () => {
+      render(<SourceEditor {...props} uri={MODEL} />)
+      instance.setPosition.mockClear()
+
+      expect(jump(MODEL, { lineNumber: 4, column: 2 })).toBe(true)
+      expect(instance.setPosition).toHaveBeenCalledWith({ lineNumber: 4, column: 2 })
+      expect(instance.revealPositionInCenterIfOutsideViewport).toHaveBeenCalledWith({ lineNumber: 4, column: 2 })
+      expect(screen.getByTestId('monaco').dataset.path).toBe(MODEL)
+    })
+
+    it('goes back to the model for a jump into it from a shown file, to where it pointed', () => {
+      render(<SourceEditor {...props} uri={MODEL} />)
+      jump(LIBRARY)
+      instance.setSelection.mockClear()
+
+      expect(jump(MODEL, RANGE)).toBe(true)
+      expect(screen.getByTestId('monaco').dataset.path).toBe(MODEL)
+      expect(screen.queryByTestId('definition-bar')).toBeNull()
+      expect(instance.setSelection).toHaveBeenCalledWith(RANGE)
+    })
+
     it('comes back to a model on its own source, not the file it last showed', () => {
       // The file's text model went with the old session: reopening it would be empty.
       const { rerender } = render(<SourceEditor {...props} uri={MODEL} />)
