@@ -98,6 +98,30 @@ describe('useAgentChat', () => {
     expect(approval(result.current.state)).toMatchObject({ state: 'denied' })
   })
 
+  it('keeps a queued decision decided through the reconnect replay', () => {
+    let answer: SendResult = 'queued'
+    const t = scripted(() => answer)
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      parked(t.h())
+      result.current.select('s1')
+    })
+    act(() => {
+      parked(t.h())
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.decide('s1', 'a1', true))
+    expect(approval(result.current.state)).toMatchObject({ state: 'queued' })
+    answer = 'sent'
+    // The reconnect clears the feed and the attach replays the parked approval.
+    act(() => t.h().onOpen?.())
+    act(() => parked(t.h()))
+    expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
+    act(() => t.h().onFrame(frame({ type: 'approval.resolved', sessionId: 's1', id: 'a1', approved: true, by: owner })))
+    expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
+  })
+
   it('keeps the card pending, and says so, when the decision is refused', () => {
     let answer: SendResult = 'refused'
     const t = scripted(() => answer)

@@ -45,6 +45,12 @@ export interface SessionState {
   status: SessionStatus
   items: FeedItem[]
   result?: { costUsd?: number; turns: number }
+  /**
+   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
+   * Their decision goes out right after the attach, so the replayed card shows `sent`,
+   * not live buttons, until `approval.resolved`.
+   */
+  queuedDecisions?: string[]
 }
 
 export interface ChatState {
@@ -230,7 +236,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: 'pending',
+          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -310,7 +316,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Attaching replays the transcript from the start (protocol: `session.attach`),
       // so the feed is rebuilt from the replay rather than appended to.
       return action.sessionId
-        ? patchSession(next, action.sessionId, (s) => ({ ...s, items: [] }))
+        ? patchSession(next, action.sessionId, (s) => ({
+            ...s,
+            items: [],
+            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
+          }))
         : next
     }
     case 'not-sent':
