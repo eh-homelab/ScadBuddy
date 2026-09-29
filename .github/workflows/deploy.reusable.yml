@@ -175,6 +175,10 @@ jobs:
             # and never a sibling package that shares its prefix: the agent
             # sidecar, ghcr.io/eh-homelab/scadbuddy-agent, runs in the same pod
             # and has its own image line in the same manifest.
+            # A bare `image: ghcr.io/eh-homelab/scadbuddy` with no tag or digest
+            # therefore no longer matches, and the run fails "found 0". That is
+            # deliberate: clusters pins by digest (an untagged ref would pull
+            # the Nexus proxy's day-old `latest`), and deploy-pin.test.sh pins it.
             local image_line="^(\s*)image: ${IMAGE//./\\.}[:@][^[:space:]]*\$"
             expect_one "$target" "$image_line" "image"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/version: ' "version annotation"

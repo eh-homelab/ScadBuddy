@@ -123,6 +123,16 @@ else
   fail "worker: step failed: $(grep '::error' "$work/log")"
 fi
 
+# 6. A bare image with no tag or digest is REJECTED, on purpose: clusters pins
+#    by digest, and a ref with neither is a hand edit this pipeline should not
+#    silently adopt. It fails loudly rather than rewriting an unexpected line.
+if run "$(deployment scadbuddy "$IMAGE")"; then
+  fail "bare image: step passed, expected an error"
+else
+  grep -q 'expected exactly one image line, found 0' "$work/log" \
+    || fail "bare image: wrong error: $(grep '::error' "$work/log")"
+fi
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures case(s) failed" >&2
   exit 1
