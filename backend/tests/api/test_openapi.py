@@ -21,6 +21,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/thumbnail",
     "/api/v1/models/{slug}/media",
     "/api/v1/models/{slug}/media/order",
+    "/api/v1/models/{slug}/media/cover",
     "/api/v1/models/{slug}/media/{item_id}",
     "/api/v1/models/{slug}/media/{item_id}/poster",
     "/api/v1/models/{slug}/readme",
@@ -54,6 +55,7 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/choices",
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
+    "/api/v1/print/runs/{run_id}",
     "/api/v1/analyzers",
     "/api/v1/analyzers/run",
     "/api/v1/analyzers/fixes/preview",
@@ -80,6 +82,8 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/assets/{asset_id}/content",
     "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
+    "/api/v1/models/{slug}/libraries/{name}/files/{path}",
+    "/api/v1/models/{slug}/files/{path}",
     "/api/v1/libraries/installed",
     "/api/v1/libraries/{name}",
     "/api/v1/libraries/{name}/users",
@@ -93,6 +97,13 @@ EXPECTED_PATHS = {
     "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
     "/api/v1/prints/{archive_id}/files/sliced",
     "/api/v1/prints/{archive_id}/files/source",
+    "/api/v1/print/library",
+    "/api/v1/print/library/{file_id}/plates",
+    "/api/v1/print/library/{file_id}/thumbnail",
+    "/api/v1/print/library/{file_id}/plates/{index}/thumbnail",
+    "/api/v1/print/library/{file_id}/choices",
+    "/api/v1/print/library/{file_id}/filaments",
+    "/api/v1/print/library/{file_id}/run",
 }
 
 

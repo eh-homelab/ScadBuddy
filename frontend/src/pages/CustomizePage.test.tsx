@@ -119,13 +119,12 @@ describe('CustomizePage', () => {
     expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
   })
 
-  it('shows a built-in media read-only, with Duplicate (#279)', async () => {
+  it("opens a built-in's media to add to, what it ships read-only (#279, #722)", async () => {
     const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
     await user.click(await screen.findByRole('button', { name: 'Media' }))
     const dialog = screen.getByRole('dialog', { name: 'Media' })
-    expect(within(dialog).getByText(/Built-in media is read-only/)).toBeInTheDocument()
-    expect(within(dialog).queryByLabelText('Add images or videos')).not.toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+    expect(within(dialog).getByText(/ships is read-only/)).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
   })
 
   it('offers to edit the model details (#179)', async () => {

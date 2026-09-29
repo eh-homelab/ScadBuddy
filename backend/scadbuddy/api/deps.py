@@ -7,12 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.components import Components, discover_components
@@ -27,6 +28,7 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
@@ -50,6 +52,7 @@ logger = logging.getLogger(__name__)
 STATE_ATTR = "scadbuddy"
 VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
+RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
@@ -90,6 +93,8 @@ class AppState:
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
+    #: The print dialog's runs, answered 202 and run in the background (#470).
+    print_runs: PrintRuns
     metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -305,6 +310,7 @@ def _build_core(settings: Settings) -> AppState:
             prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
+        print_runs=PrintRuns(PrintRunStore(pool), events),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -466,6 +472,17 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
 
+def require_print_runs(state: StateDep) -> PrintRuns:
+    """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
+    if not state.print_runs.store.available:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "print runs are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
+            type_=DATABASE_REQUIRED_PROBLEM,
+        )
+    return state.print_runs
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -498,6 +515,7 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
+PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
@@ -515,6 +533,7 @@ FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
+RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]

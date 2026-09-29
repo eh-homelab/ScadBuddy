@@ -1,5 +1,6 @@
 import type * as Monaco from 'monaco-editor/editor/editor.api'
 import {
+  definitionFile,
   directoryOf,
   socketUrl,
   toCompletion,
@@ -8,6 +9,7 @@ import {
   toLocations,
   type LspCompletionItem,
   type LspHover,
+  type DefinitionFile,
   type LspTextEdit,
 } from './lsp'
 import { OPENSCAD_LANGUAGE_ID, monaco } from './monaco'
@@ -42,15 +44,24 @@ interface Incoming {
  * Any failure — no server installed, the session cap reached, the socket dropped —
  * leaves the editor as it was without one: requests in flight settle with nothing,
  * and nothing is retried.
+ *
+ * A definition in another file (#185), a sibling the model `include`s or a library it
+ * pins (the bridge names those `file:///libraries/<name>/…`), is fetched with
+ * `readFile` and opened as a read-only model of its own under that URI, so peek shows
+ * it and SourceEditor's editor opener can switch to it. Those models live as long as
+ * the session. Without `readFile`, or when the fetch fails, the location is dropped.
  */
 export function connectLanguageServer(
   model: Monaco.editor.ITextModel,
   path: string,
+  readFile?: (file: DefinitionFile) => Promise<string>,
 ): Monaco.IDisposable {
   const uri = model.uri.toString()
+  const root = directoryOf(uri)
   const socket = new WebSocket(socketUrl(path))
   const pending = new Map<number, (result: unknown) => void>()
   const disposables: Monaco.IDisposable[] = []
+  const opened = new Map<string, Promise<Monaco.editor.ITextModel | null>>()
   let nextId = 1
   let disposed = false
 
@@ -88,8 +99,35 @@ export function connectLanguageServer(
     pending.clear()
   }
 
+  /** The read-only model for a definition's file, fetched once per session. */
+  function openDefinition(target: string): Promise<Monaco.editor.ITextModel | null> {
+    let file = opened.get(target)
+    if (!file) {
+      file = fetchDefinition(target)
+      opened.set(target, file)
+    }
+    return file
+  }
+
+  async function fetchDefinition(target: string): Promise<Monaco.editor.ITextModel | null> {
+    const file = definitionFile(target, root)
+    if (!file || !readFile) return null
+    let text: string
+    try {
+      text = await readFile(file)
+    } catch {
+      // Not cached: the next jump asks again.
+      opened.delete(target)
+      return null
+    }
+    if (disposed) return null
+    const resource = monaco.Uri.parse(target)
+    // A model already at this URI holds the same file: a library's URI names its
+    // pinned commit (`<name>@<commit>`), and a checkout never changes under one.
+    return monaco.editor.getModel(resource) ?? monaco.editor.createModel(text, OPENSCAD_LANGUAGE_ID, resource)
+  }
+
   socket.onopen = async () => {
-    const root = directoryOf(uri)
     const initialized = await request<{ capabilities: ServerCapabilities }>('initialize', {
       processId: null,
       rootUri: root,
@@ -185,10 +223,14 @@ export function connectLanguageServer(
               textDocument: document,
               position: position(at),
             })
-            // Only this file: an `include`d one has no model in this editor to open (#185).
-            return toLocations(result)
-              .filter((location) => location.uri === uri)
-              .map((location) => ({ uri: target.uri, range: location.range }))
+            const shown = await Promise.all(
+              toLocations(result).map(async (location) => {
+                if (location.uri === uri) return { uri: target.uri, range: location.range }
+                const file = await openDefinition(location.uri)
+                return file ? { uri: file.uri, range: location.range } : null
+              }),
+            )
+            return shown.filter((location) => location !== null)
           },
         }),
       )
@@ -214,6 +256,12 @@ export function connectLanguageServer(
       disposed = true
       for (const disposable of disposables) disposable.dispose()
       disposables.length = 0
+      for (const file of opened.values()) {
+        void file.then((model) => {
+          if (model && !model.isDisposed()) model.dispose()
+        })
+      }
+      opened.clear()
       socket.close()
     },
   }
