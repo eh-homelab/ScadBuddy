@@ -19,6 +19,7 @@ from scadbuddy.store.content import (
     BlobRef,
     BlobScope,
     RefusedDeleteError,
+    ReuseLostError,
     StoreFullError,
     sweep_content,
 )
@@ -214,6 +215,47 @@ async def test_racing_puts_to_one_key_leave_no_orphan(
     assert sorted(p.name for p in (root / "piece").iterdir()) == [
         named.ref.backend_id.removeprefix("piece/")
     ]
+
+
+class _ReleasedWhileReused(LocalContentBackend):
+    """Finds the object a put means to reuse, then holds that put until a delete has
+    freed and removed the object, as a release racing the reuse would."""
+
+    def __init__(self, root: Path, release: asyncio.Event) -> None:
+        super().__init__(root)
+        self.gate = asyncio.Barrier(2)
+        self.release = release
+
+    async def exists(self, backend_id: str) -> bool:
+        found = await super().exists(backend_id)
+        await self.gate.wait()
+        await self.release.wait()
+        return found
+
+
+async def test_a_reuse_that_loses_to_a_release_uploads_its_own_copy(
+    tmp_path: Path, pool: Pool
+) -> None:
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    old = await store.put("snapshot", b"same", name="a", scope=SCOPE, key="a")
+    released = asyncio.Event()
+    backend = _ReleasedWhileReused(root, released)
+    store.backend = backend
+
+    async def release_a() -> None:
+        await backend.gate.wait()  # the put found `old` and means to reuse it
+        await store.delete("a")
+        released.set()
+
+    ref, _ = await asyncio.gather(
+        store.put("snapshot", b"same", name="b", scope=SCOPE, key="b"), release_a()
+    )
+    assert (root / ref.backend_id).is_file()  # its own copy, not the freed object
+    assert await store.read(ref) == b"same"
+    gone = old.model_copy(update={"backend_id": f"snapshot/{'0' * 64}"})
+    with pytest.raises(ReuseLostError):
+        store.index.put("c", gone, slug="demo", meta={}, reuse=True)
 
 
 def test_a_local_object_id_with_a_trailing_newline_is_refused(tmp_path: Path) -> None:
