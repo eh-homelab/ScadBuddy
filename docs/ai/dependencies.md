@@ -51,10 +51,10 @@ the way OpenSCAD does:
   is never asked, so a report says nothing about the rest of the container's
   filesystem. A symbolic link counts where it leads: one out of the model's directory
   or out of a checkout is not resolved through (review of #740).
-- A report is bounded: at most 512 statements across every file followed, 64 model
-  files, and 32 distinct unpinned library names given a suggestion
-  (`MAX_STATEMENTS`, `MAX_FILES`, `MAX_SUGGESTIONS`). Past any of them the report sets
-  `truncated`: later statements are not listed, and later names are unresolved with no
+- A report is bounded: at most 512 statements and 512 font literals across every
+  file followed, 64 model files, and 32 distinct unpinned library names given a
+  suggestion (`MAX_STATEMENTS`, `MAX_FONTS`, `MAX_FILES`, `MAX_SUGGESTIONS`). Past any
+  of them the report sets `truncated`: later statements and font literals are not listed, and later names are unresolved with no
   `suggestion`. The other models' pins behind a suggestion are read once per report,
   and only when one is looked for (`Catalogue.library_pin_index`). At most two reports
   are worked out at once per replica (`DEPENDENCY_CHECK_CONCURRENCY`); the rest wait

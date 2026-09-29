@@ -11,6 +11,7 @@ import pytest
 from scadbuddy.library.fonts import normalise_family
 from scadbuddy.library.includes import (
     MAX_FILES,
+    MAX_FONTS,
     MAX_STATEMENTS,
     MAX_SUGGESTIONS,
     Candidates,
@@ -327,6 +328,15 @@ def test_a_symlink_out_of_a_checkout_is_not_resolved_through(tmp_path: Path) -> 
 
 
 # ── a report is bounded (review of #740) ────────────────────────────────────────
+
+
+def test_a_dense_source_is_cut_at_the_font_cap(tmp_path: Path) -> None:
+    result = report(tmp_path, 'font="a";' * (MAX_FONTS * 20) + "include <helper.scad>\n")
+
+    assert len(result.fonts) == MAX_FONTS
+    assert result.truncated
+    # The statements after them are still resolved.
+    assert [entry.target for entry in result.includes] == ["helper.scad"]
 
 
 def test_a_dense_source_is_cut_at_the_statement_cap(tmp_path: Path) -> None:

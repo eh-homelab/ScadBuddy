@@ -23,9 +23,10 @@ resolves each target:
   would open ``../../x.scad`` as it opens an absolute path; here either is unresolved
   without asking whether the file exists, so a report cannot say what is on the
   container's filesystem (review of #740). A symbolic link counts where it leads.
-- **A report is bounded**: at most :data:`MAX_STATEMENTS` statements, and
-  :data:`MAX_SUGGESTIONS` library names looked up for a suggestion, whatever the source
-  packs in (review of #740). The rest is ``truncated``.
+- **A report is bounded**: at most :data:`MAX_STATEMENTS` statements,
+  :data:`MAX_FONTS` font literals, and :data:`MAX_SUGGESTIONS` library names looked up
+  for a suggestion, whatever the source packs in (review of #740). The rest is
+  ``truncated``.
 
 Nothing is fetched and nothing is written: a pin whose checkout is not on the volume is
 reported as such (a render would clone it again, ``CheckoutFetcher``), not cloned.
@@ -60,6 +61,9 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 #: costs a stat per search directory, and ``use<a/x.scad>use<b/x.scad>…`` packs tens
 #: of thousands into a source within the route's limit (review of #740).
 MAX_STATEMENTS = 512
+#: Font literals listed per report, across every file followed: ``font="a";`` packs
+#: tens of thousands into a source within the route's limit too (review of #740).
+MAX_FONTS = 512
 #: Distinct unpinned library names given a suggestion per report.
 MAX_SUGGESTIONS = 32
 
@@ -220,9 +224,10 @@ class DependencyReport(BaseModel):
     truncated: bool = Field(
         default=False,
         description=f"True when the report stops short: more than {MAX_FILES} files of "
-        f"the model to follow, more than {MAX_STATEMENTS} include/use statements (the "
-        f"rest are not listed), or more than {MAX_SUGGESTIONS} unpinned library names "
-        "to suggest a library for (the rest have no `suggestion`)",
+        f"the model to follow, more than {MAX_STATEMENTS} include/use statements or "
+        f"{MAX_FONTS} font literals (the rest are not listed), or more than "
+        f"{MAX_SUGGESTIONS} unpinned library names to suggest a library for (the rest "
+        "have no `suggestion`)",
     )
 
 
@@ -316,6 +321,9 @@ def resolve_dependencies(
         name, directory, text = queue.pop(0)
         statements, literals = scan(text)
         for literal in literals:
+            if len(fonts) >= MAX_FONTS:
+                truncated = True
+                break
             families = font_families(literal.value)
             missing = (
                 []
