@@ -120,7 +120,14 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
 
   return (
     <>
-      <div ref={element} data-testid="template-ui" className="h-full min-h-0 overflow-auto" />
+      <div
+        // One element, and so one shadow root, per mount: an async mount still in flight
+        // when the template changes can only write into its own, detached root.
+        key={[slug, version ?? '', ui.module, ui.api, slot].join('\n')}
+        ref={element}
+        data-testid="template-ui"
+        className="h-full min-h-0 overflow-auto"
+      />
       {elementContext &&
         elements.map((el) =>
           createPortal(<HostElementContent element={el} context={{ ...elementContext, slot }} />, el, keyOf(el)),
