@@ -124,6 +124,23 @@ describe('redact', () => {
 })
 
 describe('render_model', () => {
+  it('renders template inputs and validates their params', async () => {
+    let body: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const inputs = { params: { width: 5 }, house: { storeys: 2 } }
+    await runTool(tool('render_model'), { slug: 'box', inputs }, ctx())
+    expect(body).toEqual({ inputs, version: null })
+    const refused = await runTool(tool('render_model'), { slug: 'box', inputs: { params: { width: 0 } } }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
   it('refuses invalid parameters before queueing anything', async () => {
     server.use(http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)))
     const result = await runTool(tool('render_model'), { slug: 'box', params: { width: 0 } }, ctx())
