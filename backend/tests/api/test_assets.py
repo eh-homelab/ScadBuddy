@@ -446,8 +446,9 @@ def test_the_boot_recounts_the_upload_store(
     assert (usage["count"], usage["bytes"]) == (0, 0)
 
 
-def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
-    """One store for the routes and the renders, caps and all (#390)."""
+def test_the_render_workers_use_the_apps_upload_store(client: TestClient, app: FastAPI) -> None:
+    """One store for the routes and the renders, caps and all (#390). With the app
+    started: the worker's deps read the store bundle the lifespan builds."""
     state = getattr(app.state, STATE_ATTR)
     deps = worker_deps_from_state(state)
     try:
