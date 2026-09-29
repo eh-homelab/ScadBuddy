@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import type { UpgradeWebSocket } from 'hono/ws'
+import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
@@ -6,11 +8,18 @@ import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import type { RemoteAddress } from './routes/guard.js'
 import { ROUTES } from './routes/index.js'
 import type { KekStatus } from './secrets.js'
+import type { SessionManager } from './sessions/manager.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz and /mcp (when `mcp` is given; #251, mcp/http.ts) are
 // here; every other route group is a file in routes/ that exports `route`
-// (routes/module.ts), registered below without an edit to this file.
+// (routes/module.ts), registered below without an edit to this file: among them
+// /api/v1/ai/status (routes/status.ts) and the session routes and the assistant's
+// chat socket (#300, #256, routes/sessions.ts, routes/chat.ts).
+//
+// Every response carries `X-ScadBuddy-Service: agent`, so a request through
+// the ingress shows which container answered it (spec §4.2: the agent's paths
+// must win over the backend's /api/v1/*; docs/ai/operating.md has the check).
 
 export type Probe = () => Promise<boolean>
 
@@ -42,27 +51,22 @@ export interface AppDeps {
    * credential routes, so there is one allowlist (src/http/origins.ts).
    */
   mcp?: McpEndpointDeps | undefined
+  /**
+   * Sessions (#300); the session routes and the chat socket answer 503 without it.
+   * Shared by routes/sessions.ts, routes/chat.ts and routes/status.ts.
+   */
+  sessions?: SessionManager | undefined
+  /**
+   * The runtime's WebSocket upgrade; without it there is no chat socket (and status
+   * says so). Shared by routes/chat.ts and routes/status.ts.
+   */
+  upgradeWebSocket?: UpgradeWebSocket | undefined
 }
 
-export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
+export { type AiStatus, DEFAULT_HEALTH_TIMEOUT_MS } from './aiStatus.js'
 
-/**
- * `ai` is `enabled` only when every prerequisite holds; otherwise it names the
- * first one missing, in the order an operator has to fix them. Today only the
- * CI smoke test reads it (.github/workflows/ci.yml asserts the no-database
- * string); nothing in the backend or frontend does yet. Keep the strings stable
- * for that test and for the UI gate #261 plans to build on them.
- */
-export type AiStatus =
-  | 'enabled'
-  | 'disabled (no database)'
-  | 'unavailable (database unreachable)'
-  | 'unavailable (database migrations failed)'
-  | 'unavailable (database timed out)'
-  | `disabled (no key-encryption key: ${string})`
-  | 'disabled (no Claude credential)'
-  | 'unavailable (stored credential was sealed with a different key-encryption key)'
-  | 'unavailable (stored credential is in an outdated format; save it again)'
+/** The response header naming the service (see the module comment). */
+export const SERVICE_HEADER = 'X-ScadBuddy-Service'
 
 export type Health = {
   status: 'ok'
@@ -70,61 +74,24 @@ export type Health = {
   database: 'ok' | 'unreachable' | 'not configured'
   backend: 'ok' | 'unreachable'
   secret_key: 'ok' | 'not configured'
-  credential: 'configured' | 'not configured' | 'unknown'
+  credential: CredentialState
 }
 
-const TIMED_OUT = Symbol('timed out')
-
-/** `promise`, or TIMED_OUT after `ms`. The promise keeps running; its result is dropped. */
-async function within<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
-  let timer: NodeJS.Timeout | undefined
-  const deadline = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), ms)
-  })
-  try {
-    return await Promise.race([promise, deadline])
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function aiStatus(deps: AppDeps, dbOk: boolean | undefined): Promise<Pick<Health, 'ai' | 'credential'>> {
-  if (dbOk === undefined || !deps.database || !deps.credentials) {
-    return { ai: 'disabled (no database)', credential: 'unknown' }
-  }
-  if (!dbOk) return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
-  // Both steps are bounded: ready() may be waiting on the migration advisory
-  // lock (bounded itself by lock_timeout, db/migrations.ts), and a liveness
-  // probe must answer well inside its own timeout regardless.
-  const timeoutMs = deps.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS
-  const ready = await within(deps.database.ready(), timeoutMs)
-  if (ready === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
-  if (!ready) return { ai: 'unavailable (database migrations failed)', credential: 'unknown' }
-  let stored
-  try {
-    stored = await within(deps.credentials.get(), timeoutMs)
-  } catch {
-    return { ai: 'unavailable (database unreachable)', credential: 'unknown' }
-  }
-  if (stored === TIMED_OUT) return { ai: 'unavailable (database timed out)', credential: 'unknown' }
-  const credential = stored ? 'configured' : 'not configured'
-  if (!deps.kek.ok) return { ai: `disabled (no key-encryption key: ${deps.kek.reason})`, credential }
-  if (!stored) return { ai: 'disabled (no Claude credential)', credential }
-  if (stored.kekId !== deps.kek.kek.id) {
-    return { ai: 'unavailable (stored credential was sealed with a different key-encryption key)', credential }
-  }
-  if (stored.legacyFormat) {
-    return { ai: 'unavailable (stored credential is in an outdated format; save it again)', credential }
-  }
-  return { ai: 'enabled', credential }
-}
-
-/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep. */
+/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep, and every session event stream. */
 export type AgentApp = Hono & { close: () => Promise<void> }
 
 export function createApp(deps: AppDeps): AgentApp {
   const app = new Hono()
   let mcp: McpHandle | undefined
+
+  app.use('*', async (c, next) => {
+    await next()
+    try {
+      c.res.headers.set(SERVICE_HEADER, 'agent')
+    } catch {
+      // An immutable response (a WebSocket upgrade's): it goes without.
+    }
+  })
 
   // Liveness: always 200 while the process serves HTTP. A missing or
   // unreachable database or backend is REPORTED, not failed on, so a Postgres
@@ -146,7 +113,8 @@ export function createApp(deps: AppDeps): AgentApp {
     return c.json(body)
   })
 
-  for (const { route } of ROUTES) route.register(app, deps)
+  const shutdown = new AbortController()
+  for (const { route } of ROUTES) route.register(app, deps, shutdown.signal)
 
   if (deps.mcp) {
     const database = deps.database
@@ -171,6 +139,7 @@ export function createApp(deps: AppDeps): AgentApp {
 
   return Object.assign(app, {
     close: async () => {
+      shutdown.abort()
       await mcp?.close()
     },
   })

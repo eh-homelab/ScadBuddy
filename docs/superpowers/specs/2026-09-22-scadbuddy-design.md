@@ -261,10 +261,8 @@ jobs/<job-id>.json                render job state (pending/running/done/failed,
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 cache/preview-work/.work-<uuid>/  a default-render preview's scratch space while it renders (§6.2.2)
-assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
-assets/<sha256>.json              its original name, kind and size; swept once unreferenced
-.assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
-.assets.usage.json                the upload store's running count and bytes (§5.5, "Usage")
+assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5); its name,
+                                  kind, size and last use are an `assets` row (#591)
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -610,16 +608,19 @@ string.
     `detail` names the setting and whose `usage` extension is the store's
     `{count, bytes, max_count, max_total_bytes}`. Content already stored is
     never refused, so re-uploading what an output uses keeps working at the cap.
-    The check and the write happen under one lock, so two uploads cannot both take
-    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
-  - *Usage.* A running total, not a directory scan (#390): `.assets.usage.json`
-    beside the store holds `{count, bytes, dirty}`, read and rewritten under the
-    store's flock by every upload that adds a blob and every sweep removal, so the
-    quota check is O(1) and replicas sharing the volume see the same numbers. A
-    change marks it dirty before touching a file and clean once counted; a dirty,
-    missing or unreadable ledger is recounted from the directory on the next read,
-    so a crash mid-change costs one scan, never a wrong total. The boot recounts
-    it unconditionally, for files added or removed while nothing was running.
+    The check and the insert happen in one transaction holding the store's advisory
+    lock, so two uploads -- in one process or on two replicas -- cannot both take
+    the last slot; a re-upload of stored content needs no room and skips it.
+    Sizes are of the stored bytes, after sanitising and downscaling.
+  - *Usage.* `count(*)` and `sum(size)` over the `assets` table (#591), not a
+    directory scan and not a running total: the metadata is one row per asset
+    (`id, name, kind, size, width, height, created_at, last_used_at`), so there is
+    nothing to recount at boot and every replica reads the same numbers. The bytes
+    stay on the volume. A blob is written before its row's insert commits, so no row
+    is ever without its blob; a blob with no row (an insert that failed, or one from
+    before #591, since nothing was copied over) is an orphan that `get` does not
+    find and usage does not count. The file-based store's `<id>.json` sidecars,
+    `.assets.usage.json` and `.assets.lock` are ignored and removed by the sweep.
     `GET /assets/usage` answers the same four numbers; Settings shows
     them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
     `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
@@ -636,13 +637,14 @@ string.
     values, so a damaged record still keeps what it names, and a coincidental
     match only keeps a file longer. An older revision's shipped `presets.json` in
     the models history is not read: shipped presets name samples, not uploads.
-  - *Last use.* An asset's last use is the later mtime of its two files. An upload
-    (a re-upload included) rewrites them; every `file` value that a render submit,
-    a render's staging or a preset save validates is marked used (`AssetStore.use`,
-    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+  - *Last use.* An asset's last use is its row's `last_used_at` (an orphan blob's is
+    its mtime). An upload (a re-upload included) sets it; every `file` value that
+    a render submit, a render's staging or a preset save validates is marked used
+    (`AssetStore.use`, which `file_assets` calls). So a preset save now also refuses (422) a `file`
     value that is not an upload or a sample, as a render always did.
   - *The sweep* removes an asset nothing keeps whose last use is older than
-    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s). It runs at
+    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s): every row, and
+    every orphan blob on the volume. It runs at
     boot, after the render queue has opened its store, and then every
     `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 1 day; 0 turns the sweep off, boot
     included). Like the tombstone, orphan and library-staging sweeps it is best
@@ -652,17 +654,22 @@ string.
     read first, and if any source cannot be read (a store outage, an unreadable
     record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
     the set, so what protects it is the last use: every path that creates one
-    marks the asset used under the store's lock, and the sweep re-checks the last
-    use under the same lock immediately before it removes each asset. Either the
-    use wins, and the sweep sees a fresh asset and skips it, or the sweep wins and
-    the use is a not-found: a 422 for that render or preset, never a job that
-    loses its file halfway. A running render was marked used when it staged its
-    files, and its job stays in the store until the TTL prunes it. An upload whose
-    first render has not been submitted yet is protected by the grace alone, which
-    is why the grace has a floor. Removal takes the metadata first, so `get` stops
-    finding the asset before its bytes go. The lock is an `flock` on
-    `data/.assets.lock`, beside the store rather than in it, so it also holds
-    between replicas sharing the volume.
+    marks the asset used (an `UPDATE` of its row), and the sweep re-checks the last
+    use with that row locked (`SELECT … FOR UPDATE`) immediately before it removes
+    each asset. Either the use wins, and the sweep sees a fresh asset and skips it,
+    or the sweep wins and the use is a not-found: a 422 for that render or preset,
+    never a job that loses its file halfway. A running render was marked used when
+    it staged its files, and its job stays in the store until the TTL prunes it. An
+    upload whose first render has not been submitted yet is protected by the grace
+    alone, which is why the grace has a floor. Removal deletes the row first, so
+    `get` stops finding the asset before its bytes go. Each removal holds that
+    asset's advisory lock at session scope, from before the re-check until the blob
+    is gone -- past the commit of the delete -- and an upload holds the same lock
+    for its transaction, so an upload of the same content waits rather than
+    inserting a row over a blob about to be removed, while uploads of other content
+    never wait on a removal. The locks are Postgres's, so they hold between
+    replicas sharing the volume and the database. A removal that fails, in a file
+    or in the database, is logged and skipped; the rest are still tried.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job
@@ -1158,7 +1165,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must be a per-model pin `{name, url, ref, commit}` (#93): a bare name or a malformed pin is a 422 naming it, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them in `libraries` before anything is cloned (the same body for either content type, #437; a JSON body with other validation errors as well gets the usual `errors` list with that `libraries` key beside it, so neither is lost). Nothing is cloned for a create that would fail without the network: the slug is derived and checked for a conflict (a 422 when it yields no slug, a 409 when the slug is taken) before any clone (#436). Each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. Neither `origin_url` nor `upstream` is ever taken from `meta` (only `/models/import` sets the one and `/models/{slug}/duplicate` the other). A `libraries` entry in it must be a per-model pin `{name, url, ref, commit}` (#93): a bare name or a malformed pin is a 422 naming it, and a pin whose checkout is not on this volume the 409 its render would be; the pins (one per name) are on the parse check's `OPENSCADPATH`. The uploaded `.scad` is held to the same 1,000,000-character cap as a paste (a 422 naming it, before the parse check runs); the README is capped like `PUT /readme`, and the thumbnail like `PUT /thumbnail` (a PNG of at most 10 MiB: every set is a commit, kept for good, so the cap bounds the history). The `meta` part is at most 64 KiB (`MAX_META_BYTES`; a bundled `model.json` is about 1 KiB), refused over it with a 422 naming the limit before it is decoded or parsed, and parsed off the event loop; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check. The JSON body's `libraries: [name, ...]`, or the multipart form's repeated `libraries` fields, name curated libraries to pin at create (#169): every name must match the library-name pattern and be in the catalogue, else a 422 naming them in `libraries` before anything is cloned (the same body for either content type, #437; a JSON body with other validation errors as well gets the usual `errors` list with that `libraries` key beside it, so neither is lost). Nothing is cloned for a create that would fail without the network: the slug is derived and checked for a conflict (a 422 when it yields no slug, a 409 when the slug is taken) before any clone (#436). Each is then cloned at the catalogue's `ref` exactly as `PUT /models/{slug}/libraries/{name}` without a body would (same install cap, same 502 when the fetch fails, nothing created), put on the parse check's `OPENSCADPATH`, and recorded in the model's first commit, with the checkout gate held from the clone to that commit so no library removal lands in between. One create pins at most 16 libraries (`MAX_CREATE_LIBRARIES`, #444): the gate is held across all of its clones, so removals wait for every one of them, and the cap bounds that wait. The gate is not taken per library instead, because a removal between two of one create's clones could delete a checkout already cloned but not yet recorded. More distinct names than the cap (a name given twice counts once, and one the `meta` part already pins not at all) are a 422 naming them in `libraries`, the same body as above, before anything is cloned. A name the `meta` part already pins keeps that pin. The New Model page suggests the catalogue names its source's `use`/`include` lines open, ticked by default |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |

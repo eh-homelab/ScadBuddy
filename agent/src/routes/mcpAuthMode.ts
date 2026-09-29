@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import {
+  DEFAULT_MCP_AUTH,
   type McpAuthMode,
   type McpAuthSettings,
   mcpAuthSettings,
@@ -11,7 +12,6 @@ import {
 import { type Tier, TIERS } from '../auth/principal.js'
 import { forwardedClient, type OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
-import { DEFAULT_MCP_AUTH } from '../auth/authenticate.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/auth (#251, spec §8.3): Settings reads and changes the `/mcp`

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
+import type { PluginForwarder } from '../plugins/forwarder.js'
 import {
   assertEndpointAllowed,
   normalisePluginUrl,
@@ -12,11 +13,9 @@ import {
   type RemotePlugin,
   toolPrefix,
 } from '../plugins/registry.js'
-import type { PluginTest } from '../plugins/testConnection.js'
+import { type PluginTest, testPlugin } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { PluginForwarder } from '../plugins/forwarder.js'
-import { testPlugin } from '../plugins/testConnection.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/plugins (issue #297): the admin surface of the plugin registry

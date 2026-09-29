@@ -1,11 +1,10 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
-import type { McpAuthMode, McpAuthSettings } from '../auth/authenticate.js'
+import { DEFAULT_MCP_AUTH, type McpAuthMode, type McpAuthSettings } from '../auth/authenticate.js'
 import { TIERS } from '../auth/principal.js'
 import type { TokenRecord, TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import { DEFAULT_MCP_AUTH } from '../auth/authenticate.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp-tokens (#251, spec §8.1 "minted in Settings, stored hashed",
