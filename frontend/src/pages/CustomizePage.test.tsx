@@ -14,6 +14,7 @@ import {
   targets,
   versionIds,
 } from '../mocks/fixtures'
+import * as fixtures from '../mocks/fixtures'
 import { setMockPlates } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
@@ -82,12 +83,12 @@ function watchRequests(): string[] {
 }
 
 /** Records every render request's body, so what was ASKED of the server can be asserted. */
-function watchRenders(): Promise<{ params: Record<string, unknown>; version?: string }>[] {
-  const bodies: Promise<{ params: Record<string, unknown>; version?: string }>[] = []
+function watchRenders(): Promise<{ inputs: { params: Record<string, unknown> }; version?: string }>[] {
+  const bodies: Promise<{ inputs: { params: Record<string, unknown> }; version?: string }>[] = []
   server.events.on('request:start', ({ request }) => {
     if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
       bodies.push(
-        request.clone().json() as Promise<{ params: Record<string, unknown>; version?: string }>,
+        request.clone().json() as Promise<{ inputs: { params: Record<string, unknown> }; version?: string }>,
       )
     }
   })
@@ -555,7 +556,7 @@ describe('CustomizePage', () => {
     // 'Nova' was only ever typed into the pinned revision, so no request may
     // carry it once the page is back on the model's current source.
     for (const body of bodies) {
-      if (body.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
+      if (body.inputs.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
     }
     // Two debounced renders and a schema refetch do not fit the default budget.
   }, 20000)
@@ -1198,5 +1199,38 @@ describe('full screen', () => {
     // With nothing else to take it, the next one leaves full screen.
     await user.keyboard('{Escape}')
     expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+  })
+})
+
+describe('template inputs (spec 2026-09-27 §4.3)', () => {
+  it('reopens an output with its UI state and saves it again with the output', async () => {
+    const outputId = 'c'.repeat(32)
+    server.use(
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: 'name-keychain',
+          name: 'Tagged',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+    )
+    const bodies: unknown[] = []
+    server.use(
+      http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ ...fixtures.outputs[0], id: 'd'.repeat(32) }, { status: 201 })
+      }),
+    )
+    const { user } = render(`/m/name-keychain?from=${outputId}`)
+    const generate = await screen.findByTestId('generate')
+    await waitFor(() => expect(generate).toBeEnabled(), { timeout: 5000 })
+    await user.click(generate)
+    await waitFor(() =>
+      expect(bodies[0]).toMatchObject({ inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 } }),
+    )
   })
 })
