@@ -2082,6 +2082,7 @@ class Catalogue:
         for stale in present:
             if stale.name not in wanted:
                 _remove_tree(stale)
+        self._drop_builtin_media(wanted)
         changed: list[str] = []
         for slug in wanted:
             try:
@@ -2098,6 +2099,30 @@ class Catalogue:
                 "synced built-in templates", extra={"changed": changed, "from": str(bundled)}
             )
         return commit
+
+    def _drop_builtin_media(self, wanted: list[str]) -> None:
+        """Remove the media added to built-ins the image no longer has (#722): their
+        rows and cover choice, then their files, so a later built-in that takes the
+        slug starts with only what it ships. Best effort, as the sync is."""
+        try:
+            kept = sorted(self.paths.builtin_media.iterdir())
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.exception("could not list the media added to built-ins")
+            return
+        for stale in kept:
+            if stale.name in wanted:
+                continue
+            model_id = f"{BUILTIN_PREFIX}{stale.name}"
+            try:
+                if self.media_store is not None:
+                    self.media_store.delete(model_id)
+                _remove_tree(stale)
+            except Exception:
+                logger.exception(
+                    "could not remove a removed built-in's media", extra={"slug": model_id}
+                )
 
     def link_seeded(self) -> str | None:
         """Make every seeded template of mine a duplicate of its built-in, as one commit.

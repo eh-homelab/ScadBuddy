@@ -5,6 +5,7 @@ reading a bundled ``model.json``'s entries, the history's ignore rules, the
 from __future__ import annotations
 
 import os
+import shutil
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -578,3 +579,32 @@ def test_a_crashed_uploads_staging_is_swept_once_it_is_old(data: DataPaths) -> N
 
     assert removed == [stale.path.name]
     assert fresh.path.exists()
+
+
+@pytest.mark.requires_postgres
+def test_a_removed_built_ins_added_media_goes_with_it(
+    catalogue: Catalogue, store: PostgresMediaStore, data: DataPaths, tmp_path: Path
+) -> None:
+    bundled = tmp_path / "bundled"
+    for slug in ("keychain", "coaster"):
+        (bundled / slug).mkdir(parents=True)
+        (bundled / slug / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    catalogue.sync_builtins(bundled)
+    gone, kept = "builtin:keychain", "builtin:coaster"
+    added = catalogue.add_media(gone, _stage(catalogue, PNG, "image", "png")).media[-1]
+    catalogue.set_cover(gone, added.id)
+    catalogue.add_media(kept, _stage(catalogue, PNG, "image", "png"))
+
+    shutil.rmtree(bundled / "keychain")
+    catalogue.sync_builtins(bundled)
+
+    assert store.items(gone) == []
+    assert store.cover(gone) is None
+    assert not data.builtin_media_dir(gone).exists()
+    # A later built-in with the slug starts with only what it ships.
+    (bundled / "keychain").mkdir()
+    (bundled / "keychain" / "model.scad").write_text("cube(2);\n", encoding="utf-8")
+    catalogue.sync_builtins(bundled)
+    assert catalogue.list_media(gone) == []
+    assert len(store.items(kept)) == 1
+    assert data.builtin_media_dir(kept).is_dir()

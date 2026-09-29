@@ -402,6 +402,20 @@ describe('MediaManager paste (#722)', () => {
     await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
   })
 
+  it('gives a page-wide paste to the newest of two mounted managers only', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const second = await api.getModel(BUILTIN_SLUG)
+    renderPage(<MediaManager model={second} onChanged={vi.fn()} />)
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(upload.mock.calls[0]?.[0]).toBe(BUILTIN_SLUG)
+  })
+
   it("takes a paste into a caption, since that field is the section's own", async () => {
     const { upload } = spyUploads()
     await render()

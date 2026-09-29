@@ -26,6 +26,9 @@ interface Upload {
 const FIELD =
   'w-full rounded-[6px] border border-line bg-surface-2 px-2 py-1 text-[13px] text-ink outline-none focus:border-accent'
 
+/** Mounted managers, oldest first: a paste aimed at none of them goes to the newest. */
+const pasteTargets: object[] = []
+
 /**
  * #279 — a template's images and videos, in order (the first is the cover), with
  * everything to change them: add (picker or drop), reorder (drag, or Move up/down
@@ -39,7 +42,8 @@ const FIELD =
  *
  * A pasted image or video is added as an upload is (#722): anywhere in the section
  * while it has focus or the pointer, and from anywhere on the page while no text
- * field has focus, since a paste into a field is the field's own.
+ * field has focus, since a paste into a field is the field's own. With more than one
+ * manager mounted, that page-wide paste goes to the newest only.
  */
 export function MediaManager({ model: initial, onChanged }: Props) {
   const [model, setModel] = useState(initial)
@@ -140,6 +144,7 @@ export function MediaManager({ model: initial, onChanged }: Props) {
     }
   }
 
+  const pasteTarget = useRef({})
   const onPaste = useEffectEvent((event: ClipboardEvent) => {
     if (event.defaultPrevented) return
     const files = pastedMedia(event.clipboardData)
@@ -150,15 +155,20 @@ export function MediaManager({ model: initial, onChanged }: Props) {
       hovered.current ||
       Boolean(section?.contains(active)) ||
       (event.target instanceof Node && Boolean(section?.contains(event.target)))
-    if (!here && takesText(active)) return
+    if (!here && (takesText(active) || pasteTargets.at(-1) !== pasteTarget.current)) return
     event.preventDefault()
     void add(files)
   })
 
   useEffect(() => {
+    const me = pasteTarget.current
+    pasteTargets.push(me)
     const listener = (event: ClipboardEvent) => onPaste(event)
     document.addEventListener('paste', listener)
-    return () => document.removeEventListener('paste', listener)
+    return () => {
+      document.removeEventListener('paste', listener)
+      pasteTargets.splice(pasteTargets.indexOf(me), 1)
+    }
   }, [])
 
   function onDropFiles(event: DragEvent<HTMLDivElement>) {

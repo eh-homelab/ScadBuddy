@@ -713,3 +713,19 @@ def test_the_limit_comes_from_the_environment(
 
     assert response.status_code == 413, response.text
     assert "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("media/order", {"ids": ["../escape"]}),
+        ("media/cover", {"id": "../escape"}),
+        ("media/cover", {"id": ""}),
+    ],
+)
+def test_an_id_that_is_not_a_media_id_is_refused(
+    client: TestClient, model: str, path: str, body: dict[str, object]
+) -> None:
+    response = client.put(f"/api/v1/models/{model}/{path}", json=body)
+
+    assert response.status_code == 422

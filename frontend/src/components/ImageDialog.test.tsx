@@ -50,6 +50,28 @@ describe('ImageDialog', () => {
     })
   }
 
+  it('releases the preview when it unmounts while open', async () => {
+    const captureImage = vi.fn(async () => new Blob(['png'], { type: 'image/png' }))
+    URL.createObjectURL = vi.fn(() => 'blob:preview')
+    const revoke = vi.fn()
+    URL.revokeObjectURL = revoke
+    const view = render(
+      <ImageDialog
+        open
+        slug="name-puzzle"
+        captureImage={captureImage}
+        viewSize={() => ({ width: 800, height: 500 })}
+        onClose={() => undefined}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('image-preview')).toBeInTheDocument())
+    expect(revoke).not.toHaveBeenCalled()
+
+    view.unmount()
+
+    expect(revoke).toHaveBeenCalledWith('blob:preview')
+  })
+
   it('offers sizes from the view and previews the choices', async () => {
     const captureImage = setup()
     expect(screen.getByText('1600 × 1000')).toBeInTheDocument()

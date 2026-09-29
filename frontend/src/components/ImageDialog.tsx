@@ -86,16 +86,11 @@ export function ImageDialog({
   // once a frame at most, so a drag draws only the latest.
   useEffect(() => {
     if (!open) return
-    let url: string | null = null
     let live = true
     const drawn = requestAnimationFrame(() => {
       void captureImage({ scale: 1, plate, transparent, ...(view ? { view } : {}) }).then((blob) => {
         if (!live || !blob) return
-        url = URL.createObjectURL(blob)
-        setPreview((previous) => {
-          if (previous) URL.revokeObjectURL(previous)
-          return url
-        })
+        setPreview(URL.createObjectURL(blob))
       })
     })
     return () => {
@@ -106,6 +101,13 @@ export function ImageDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, plate, transparent, captureImage, pose, aspect])
 
+  // Each preview URL is released when the next replaces it, and the last one when the
+  // dialog closes or unmounts (a route change with the dialog open).
+  useEffect(() => {
+    if (!preview) return
+    return () => URL.revokeObjectURL(preview)
+  }, [preview])
+
   function reset() {
     setPose(cameraView?.() ?? null)
   }
@@ -114,10 +116,7 @@ export function ImageDialog({
     setError(null)
     setCopied(false)
     setAdded(null)
-    setPreview((previous) => {
-      if (previous) URL.revokeObjectURL(previous)
-      return null
-    })
+    setPreview(null)
     onClose()
   }
 

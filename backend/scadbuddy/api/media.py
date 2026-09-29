@@ -22,7 +22,7 @@ from typing import IO, Annotated, Any
 
 from fastapi import APIRouter, Path, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
@@ -55,6 +55,7 @@ from scadbuddy.library.media import (
 router = APIRouter(tags=["media"])
 
 MediaIdPath = Annotated[str, Path(pattern=MEDIA_ID_PATTERN)]
+MediaId = Annotated[str, StringConstraints(pattern=MEDIA_ID_PATTERN)]
 
 #: A stored item's id names its contents for good: a replaced cover gets a new id.
 IMMUTABLE_CACHE_CONTROL = "private, max-age=31536000, immutable"
@@ -87,13 +88,13 @@ class MediaOrder(BaseModel):
     """Every item's id, once each, in the new order. On a built-in, every added
     item's: a shipped item keeps its place, and its id may be left out."""
 
-    ids: list[str] = Field(max_length=MAX_MEDIA_ITEMS)
+    ids: list[MediaId] = Field(max_length=MAX_MEDIA_ITEMS)
 
 
 class MediaCover(BaseModel):
     """The item to make the cover."""
 
-    id: str | None = Field(
+    id: MediaId | None = Field(
         description=(
             "The item's id. None goes back to a built-in's shipped cover; a template "
             "of mine's cover is always one of its items."
