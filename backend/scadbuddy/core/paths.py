@@ -57,10 +57,6 @@ class DataPaths:
         return self.root / "outputs"
 
     @property
-    def jobs(self) -> Path:
-        return self.root / "jobs"
-
-    @property
     def blobs(self) -> Path:
         """Rendered pieces, keyed by `piece_key` (spec §6.2's `local` backend)."""
         return self.root / "blobs"
@@ -139,17 +135,10 @@ class DataPaths:
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id
 
-    def job_file(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.json"
-
-    def job_work_dir(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.work"
-
     def ensure(self) -> None:
         for directory in (
             self.models,
             self.outputs,
-            self.jobs,
             self.blobs,
             self.cache,
             self.fonts,

@@ -342,7 +342,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `running` (no workflow; nothing would finish it), with an error naming the
   upgrade; its `pending` renders are started on Temporal as usual. From a release
   already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
-  nothing to do.
+  nothing to do. Nothing reads what the legacy queue left on the volume any more:
+  `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
 
 ### The agent sidecar (AI, #261)
 

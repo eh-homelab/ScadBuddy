@@ -28,10 +28,9 @@ __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "Re
 #: How a job settled; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
-#: What a job store call that failed was doing: a worker claiming or recording a
-#: job, a heartbeat, the lease reaper, the per-scrape read of the queue gauges, or
-#: (Temporal) starting a submitted job's workflow or cancelling a superseded one.
-StoreOperation = Literal["work", "heartbeat", "reap", "read", "start_workflow", "cancel_workflow"]
+#: What a `render_jobs` call that failed was doing: the per-scrape read of the
+#: queue gauges, or starting a submitted job's workflow or cancelling a superseded one.
+StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
 EventDropReason = Literal["oversize", "outbox_full", "error"]
@@ -80,7 +79,7 @@ class Metrics:
         )
         self.store_errors = Counter(
             "scadbuddy_render_store_errors",
-            "Job store calls that failed, by what they were doing.",
+            "render_jobs calls that failed, by what they were doing.",
             ["operation"],
             registry=r,
         )

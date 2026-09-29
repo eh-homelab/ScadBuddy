@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -22,9 +21,9 @@ from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from tests.conftest import write_openscad_3mf
 from tests.support.temporal import (
+    WorkflowReaper,
     temporal_available,
     temporal_server,
-    terminate_open_workflows,
 )
 
 FAIL_WIDTH = 999.0
@@ -63,13 +62,24 @@ def temporal_address() -> Iterator[str]:
         yield address
 
 
+@pytest.fixture(scope="session")
+def workflow_reaper(temporal_address: str) -> Iterator[WorkflowReaper]:
+    with WorkflowReaper(temporal_address, "default") as reaper:
+        yield reaper
+
+
 @pytest.fixture(autouse=True)
 def _temporal(temporal_address: str) -> None:
     """The API tests skip without a Temporal: the app renders nowhere else (#546)."""
 
 
 @pytest.fixture
-def settings(settings: Settings, temporal_address: str, fake_openscad: str) -> Iterator[Settings]:
+def settings(
+    settings: Settings,
+    temporal_address: str,
+    workflow_reaper: WorkflowReaper,
+    fake_openscad: str,
+) -> Iterator[Settings]:
     """The app renders on the session's Temporal with its own in-process worker, on a
     task queue of its own: each test has its own data directory and database schema,
     so a worker is per app, not per session. The fake openscad exports a red 10x10x5
@@ -93,7 +103,7 @@ def settings(settings: Settings, temporal_address: str, fake_openscad: str) -> I
             "temporal_worker_inprocess": True,
         }
     )
-    asyncio.run(terminate_open_workflows(temporal_address, "default", queue))
+    workflow_reaper.terminate(queue)
 
 
 @pytest.fixture

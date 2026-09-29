@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -12,9 +13,9 @@ from temporalio.worker import Worker
 
 from tests.support.temporal import (
     WorkerThread,
+    WorkflowReaper,
     current_address,
     temporal_client,
-    terminate_open_workflows,
 )
 
 
@@ -58,13 +59,22 @@ def test_a_worker_thread_raises_what_stopped_its_worker() -> None:
 
 
 @pytest.mark.requires_temporal
-async def test_terminate_open_workflows_ends_only_the_queues_running_workflows() -> None:
+async def test_the_reaper_ends_only_the_queues_running_workflows_on_one_client() -> None:
     async with temporal_client() as client:
-        queue, other = (f"t-{uuid.uuid4().hex[:8]}" for _ in range(2))
-        mine = await client.start_workflow(Shout.run, "a", id=f"a-{queue}", task_queue=queue)
-        theirs = await client.start_workflow(Shout.run, "b", id=f"b-{other}", task_queue=other)
+        queues = [f"t-{uuid.uuid4().hex[:8]}" for _ in range(3)]
+        started = [
+            await client.start_workflow(Shout.run, q, id=f"s-{q}", task_queue=q) for q in queues
+        ]
 
-        await terminate_open_workflows(current_address(client), client.namespace, queue)
+        with WorkflowReaper(current_address(client), client.namespace) as reaper:
+            first = reaper.client
+            await asyncio.to_thread(reaper.terminate, queues[0])
+            await asyncio.to_thread(reaper.terminate, queues[1])
+            assert reaper.client is first  # one connection for every teardown
 
-        assert (await mine.describe()).status == WorkflowExecutionStatus.TERMINATED
-        assert (await theirs.describe()).status == WorkflowExecutionStatus.RUNNING
+        statuses = [(await handle.describe()).status for handle in started]
+        assert statuses == [
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.RUNNING,
+        ]

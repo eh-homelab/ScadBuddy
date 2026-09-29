@@ -896,7 +896,9 @@ async def render_job(
             # take their own.
             await held.enter_async_context(library_lease(checkouts, job.id, prepared.library_path))
             schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
-        work = paths.job_work_dir(job.id)
+        # The whole pipeline in one process is the tests' harness now; the worker
+        # runs these stages as activities, each in a scratch dir of its own.
+        work = paths.cache / "render-job" / job.id
         work.mkdir(parents=True, exist_ok=True)
 
         with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:

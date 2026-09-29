@@ -419,8 +419,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _stop_worker(state, *worker)
         await state.render.aclose()
         await asyncio.to_thread(state.projection.close)
-        if state.decisions is not None:
-            await asyncio.to_thread(state.decisions.close)
+        await asyncio.to_thread(state.decisions.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
         grants = getattr(app.state, "agent_grants", None)

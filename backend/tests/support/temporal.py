@@ -9,7 +9,7 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 
 from temporalio.client import Client
@@ -82,14 +82,45 @@ def temporal_server() -> Iterator[str]:
         loop.close()
 
 
-async def terminate_open_workflows(address: str, namespace: str, task_queue: str) -> None:
+async def terminate_open_workflows(client: Client, task_queue: str) -> None:
     """End every workflow still running on ``task_queue``."""
-    client = await Client.connect(address, namespace=namespace)
     query = f"TaskQueue = '{task_queue}' AND ExecutionStatus = 'Running'"
     async for execution in client.list_workflows(query):
         handle = client.get_workflow_handle(execution.id, run_id=execution.run_id)
         with suppress(RPCError):  # it closed in between
             await handle.terminate("the test that started it ended")
+
+
+class WorkflowReaper:
+    """Terminates what a test left open, for a whole session on ONE client: a
+    temporalio `Client` has no close, so one per teardown would leak a connection per
+    test. The client lives on a loop of its own in a thread, since the sync fixtures
+    that call `terminate` have none."""
+
+    def __init__(self, address: str, namespace: str) -> None:
+        self._address, self._namespace = address, namespace
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._loop.run_forever, name="temporal-reaper", daemon=True
+        )
+        self.client: Client | None = None
+
+    def __enter__(self) -> WorkflowReaper:
+        self._thread.start()
+        self.client = self._run(Client.connect(self._address, namespace=self._namespace))
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+        self._loop.close()
+
+    def terminate(self, task_queue: str) -> None:
+        assert self.client is not None, "use the reaper as a context manager"
+        self._run(terminate_open_workflows(self.client, task_queue))
+
+    def _run[T](self, coro: Coroutine[object, object, T]) -> T:
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=60)
 
 
 def current_address(client: Client) -> str:

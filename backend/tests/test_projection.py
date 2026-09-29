@@ -389,3 +389,25 @@ def test_start_up_fails_the_rows_a_legacy_queue_left_running_only(
     assert announcing.read(legacy_pending.id).state == "pending"
     assert announcing.read(on_temporal.id).state == "running"
     assert "job.failed" in _kinds(pg_conninfo)
+
+
+def test_a_result_stored_before_its_newer_fields_still_reads(
+    projection: JobProjection, pg_conninfo: str
+) -> None:
+    """Rows outlive a deploy: a `result` written before `diagnostics` and
+    `source_version` existed must still load, with their defaults."""
+    job = _job()
+    projection.submit(job, render_key("demo", job.params, None))
+    projection.mark_started(job.id)
+    assert projection.finish(job.model_copy(update={"state": "done", "result": _result()}))
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET result = result - 'diagnostics' - 'source_version'"
+            " WHERE id = %s",
+            (job.id,),
+        )
+
+    stored = projection.read(job.id).result
+
+    assert stored is not None
+    assert (stored.diagnostics, stored.source_version) == ([], "")
