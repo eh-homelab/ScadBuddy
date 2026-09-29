@@ -805,3 +805,33 @@ def test_a_hand_edited_template_preset_keeps_the_list(
     assert set(listed) == {"Plain", "Designed"}
     assert listed["Designed"]["params"] == {"width": 99}
     assert listed["Designed"]["inputs"] == {"params": {"width": 99}, "ui": {"tab": "b"}, "v": 0}
+
+
+# ── fix round 2: request bodies stay strict; model.json keeps `v` ────────────
+
+
+def test_a_metadata_patch_whose_preset_disagrees_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Only a stored file is read leniently: a client that sends both and changed one
+    is told so, rather than having its `inputs.params` edit dropped."""
+    clash = {"name": "A", "params": {"width": 1}, "inputs": {"params": {"width": 2}, "ui": {}}}
+    refused = _patch_presets(client, model, [clash])
+    assert refused.status_code == 422, refused.text
+    assert "disagree" in refused.text
+    # The same disagreement in the committed file still loads, with `params`'s values.
+    _define(paths, model, [clash])
+    [listed] = [p for p in client.get(_url(model)).json() if p["origin"] == "template"]
+    assert listed["params"] == {"width": 1}
+    assert listed["inputs"] == {"params": {"width": 1}, "ui": {}, "v": 0}
+
+
+def test_an_inputs_version_survives_model_json(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    versioned = {"name": "V", "inputs": {"params": {"width": 3}, "v": 2}}
+    assert _patch_presets(client, model, [versioned]).status_code == 200
+    [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert written["inputs"] == {"params": {"width": 3}, "v": 2}
+    [listed] = [p for p in client.get(_url(model)).json() if p["origin"] == "template"]
+    assert listed["inputs"] == {"params": {"width": 3}, "v": 2}
