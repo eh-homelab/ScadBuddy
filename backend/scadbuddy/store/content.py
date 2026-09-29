@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from psycopg.errors import DeadlockDetected
+
 from scadbuddy.store.content_models import (
     SWEPT_KINDS,
     BlobCorruptError,
@@ -164,18 +166,28 @@ class ContentStore:
         ref, reused = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
         try:
-            previous = await asyncio.to_thread(
-                self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
-            )
-        except ReuseLostError:
-            # Freed between the lookup and this row: store this put's own copy.
-            ref, _ = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
-            previous = await asyncio.to_thread(
-                self.index.put, key, ref, slug=scope.slug, meta=meta or {}
-            )
+            try:
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
+                )
+            except ReuseLostError:
+                # Freed between the lookup and this row: store this put's own copy.
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if previous is not None and previous.backend_id != ref.backend_id:
             await self._release_replaced(key, previous)
         return ref
+
+    async def _release_unindexed(self, ref: BlobRef, reused: bool) -> None:
+        """After the index gave up on a deadlock: remove what this call uploaded, which
+        no row will name. A reused object is another row's, and stays."""
+        if not reused:
+            await self._release(ref)
 
     async def _release_replaced(self, key: str, previous: BlobRef) -> None:
         if previous.backend != self.name:
@@ -209,20 +221,24 @@ class ContentStore:
         ref, reused = await self._store(kind, data, name=name, scope=scope)
         previous = await asyncio.to_thread(self.index.get, key)
         try:
-            landed = await asyncio.to_thread(
-                self.index.swap,
-                key,
-                ref,
-                expected=expected,
-                slug=scope.slug,
-                meta=meta or {},
-                reuse=reused,
-            )
-        except ReuseLostError:
-            ref, _ = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
-            landed = await asyncio.to_thread(
-                self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
-            )
+            try:
+                landed = await asyncio.to_thread(
+                    self.index.swap,
+                    key,
+                    ref,
+                    expected=expected,
+                    slug=scope.slug,
+                    meta=meta or {},
+                    reuse=reused,
+                )
+            except ReuseLostError:
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                landed = await asyncio.to_thread(
+                    self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if not landed:
             await self._release(ref)
             return None

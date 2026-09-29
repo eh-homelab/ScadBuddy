@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
@@ -14,6 +15,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 
+logger = logging.getLogger(__name__)
 Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = "key, sha256, kind, backend, backend_id, size, slug, meta, touched_at"
 #: Attempts at an index write that Postgres picks as a deadlock's victim (`_retrying`).
@@ -87,11 +89,13 @@ class BlobIndex:
         if row is None:
             raise ReuseLostError(f"{ref.backend}:{ref.backend_id} was freed while being reused")
 
-    def _retrying[T](self, write: Callable[[Connection[DictRow]], T]) -> T:
+    def _retrying[T](self, key: str, write: Callable[[Connection[DictRow]], T]) -> T:
         """Run ``write`` (its own transactions) on one pooled connection, again when
         Postgres breaks a deadlock with it. Taking each key's lock before the hold
-        orders a transaction's locks, except between two reuses that each lock their
-        key and hold the other's row: puts swapping objects between two keys."""
+        leaves one deadlock: two reuses that each lock their key and hold the other's
+        row, i.e. puts swapping objects between two keys. Locking every row in key text
+        order (picking the object's row unlocked first) would order those too; retrying
+        is simpler. The last attempt's `DeadlockDetected` propagates."""
         with self._pool.connection() as conn:
             for attempt in range(1, _DEADLOCK_ATTEMPTS + 1):
                 try:
@@ -99,6 +103,10 @@ class BlobIndex:
                 except DeadlockDetected:
                     if attempt == _DEADLOCK_ATTEMPTS:
                         raise
+                    logger.warning(
+                        "retrying an index write Postgres picked as a deadlock's victim",
+                        extra={"key": key, "attempt": attempt},
+                    )
         raise AssertionError("unreachable")
 
     def put(
@@ -142,7 +150,7 @@ class BlobIndex:
                     if inserted.rowcount == 1:
                         return None
 
-        return self._retrying(write)
+        return self._retrying(key, write)
 
     def swap(
         self,
@@ -182,7 +190,7 @@ class BlobIndex:
                     )
                 return cursor.rowcount == 1
 
-        return self._retrying(write)
+        return self._retrying(key, write)
 
     def now(self) -> datetime:
         """The database's clock, which every `touched_at` is stamped with."""
@@ -195,12 +203,21 @@ class BlobIndex:
     def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
         """Merge ``meta`` into the rows of ``keys`` on ``backend`` not touched since
         ``cutoff``. A later `put` rewrites `meta`, which clears the mark."""
-        with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE store_blobs SET meta = meta || %s"
-                " WHERE key = ANY(%s) AND backend = %s AND touched_at <= %s",
-                (Jsonb(meta), list(keys), backend, cutoff),
-            )
+        where = "key = ANY(%s) AND backend = %s AND touched_at <= %s"
+        args = (list(keys), backend, cutoff)
+
+        def write(conn: Connection[DictRow]) -> None:
+            with conn.transaction():
+                # Keys first, in key order, as every other index write locks them; an
+                # UPDATE over many rows would take them in scan order.
+                conn.execute(
+                    f"SELECT 1 FROM store_blobs WHERE {where} ORDER BY key FOR UPDATE", args
+                )
+                conn.execute(
+                    f"UPDATE store_blobs SET meta = meta || %s WHERE {where}", (Jsonb(meta), *args)
+                )
+
+        self._retrying(",".join(sorted(keys)), write)
 
     def touch(self, key: str) -> None:
         with self._pool.connection() as conn:
