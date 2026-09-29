@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelPatch, ModelSummary } from '../api/types'
+import type { ModelPatch, ModelSummary, Settings } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -867,14 +867,17 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(removed.thumbnail_source).not.toBe('model')
   })
 
-  it('reports the upload limit read-only: a settings PUT does not change it', async () => {
-    const limit = (await api.getSettings()).media_upload_max_bytes
+  it('stores an upload limit a settings PUT sets, as a value set here (#322)', async () => {
     const saved = await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ media_upload_max_bytes: 1024 }),
-    }).then((response) => response.json() as Promise<{ media_upload_max_bytes: number }>)
-    expect(saved.media_upload_max_bytes).toBe(limit)
+    }).then((response) => response.json() as Promise<Settings>)
+    expect(saved.media_upload_max_bytes).toBe(1024)
+    expect(saved.sources?.media_upload_max_bytes).toBe('stored')
+    const reset = await api.putSettings({ reset: ['media_upload_max_bytes'] })
+    expect(reset.media_upload_max_bytes).toBe(1024 * 1024 * 1024)
+    expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
   it('refuses an upload over the limit with a 413 naming it', async () => {
