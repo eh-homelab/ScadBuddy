@@ -415,7 +415,13 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
     )
     app = worker_module._health_app(
-        Settings(data_dir=tmp_path, database_url=UNUSED_DATABASE_URL), Metrics(), store
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
+        Metrics(),
+        store,
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
