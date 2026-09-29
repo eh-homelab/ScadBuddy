@@ -26,11 +26,20 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.project_file import (
+    ProjectFile,
+    ProjectFileRequest,
+    file_into_project,
+    project_stem,
+)
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -42,7 +51,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
 logger = logging.getLogger(__name__)
@@ -430,3 +439,80 @@ async def send_output_to_bambuddy(
     settings = store.load()
     async with client_for(settings) as client:
         return await send_output(client, outputs, uploads, meta, settings)
+
+
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
+
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
+        return {}
+    if schema is None:
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
+    """
+    try:
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)
+
+
+@router.post(
+    "/outputs/{output_id}/project-file",
+    response_model=ProjectFile,
+    summary="File this output's 3MF in a project's Bambuddy folder",
+)
+async def post_project_file(
+    output_id: OutputIdPath,
+    body: ProjectFileRequest,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    store: SettingsStoreDep,
+    catalogue: CatalogueDep,
+) -> ProjectFile:
+    """Upload the editable project 3MF into the project's folder (#317), as Generate does
+    when a project is chosen.
+
+    Idempotent per (folder, target): the same project chosen again answers with the file
+    already there (``created: false``), and a later print on the same printer reuses it
+    (#316). The folder is created and linked if the project has none. Every Bambuddy
+    call is made here, so the API key never reaches the browser.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    stem = await output_stem(meta, outputs, catalogue)
+    async with client_for(settings) as client:
+        return await file_into_project(
+            client, outputs, uploads, meta, settings, body.project_id, stem=stem
+        )

@@ -9,7 +9,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -58,7 +58,7 @@ from scadbuddy.bambuddy.send import (
     resolve_print_options,
     target_for,
 )
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
@@ -105,9 +105,9 @@ class PrintRunRequest(BaseModel):
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
-    #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
-    #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
-    #: be — a print with no project is simply one nobody filed.
+    #: The Bambuddy project this print belongs to (#79). Omitted means the remembered
+    #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
+    #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
@@ -210,6 +210,24 @@ async def _spool_colours(
     ]
 
 
+class ChoosesProject(Protocol):
+    """A request body with an optional ``project_id``."""
+
+    @property
+    def project_id(self) -> int | None: ...
+
+    @property
+    def model_fields_set(self) -> set[str]: ...
+
+
+def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
+    """The request's ``project_id`` when it sent one, ``null`` included ("No project");
+    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    if "project_id" in request.model_fields_set:
+        return request.project_id
+    return settings.last_project_id
+
+
 async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
     """The printer's live status, read once per run (#469); unreadable is ``None``."""
     try:
@@ -234,20 +252,22 @@ async def _spool_sides(
     used: set[int],
     printer_id: int,
     printer_status: PrinterStatus | None,
-) -> list[SlotSide]:
-    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
+) -> tuple[list[SlotSide], list[SpoolAssignment] | None]:
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469), and
+    the assignments read for it, so the plates' read reuses them (#480).
 
     With no printer status no side can be told, so the assignments aren't read; and an
     unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
-    status does, rather than failing a run that used to succeed."""
+    status does, rather than failing a run that used to succeed. Either way the
+    assignments are ``None``, and the plates' read tries them itself."""
     own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
-    assignments: list[SpoolAssignment] = []
+    assignments: list[SpoolAssignment] | None = None
     if printer_status is not None:
         try:
             assignments = await client.spool_assignments()
         except (ApiError, ValueError):
             logger.info("spool assignments unreadable; no spool's side is known")
-    return slot_sides(own, assignments, printer_status, printer_id=printer_id)
+    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
 
 
 async def run_for_output(
@@ -257,8 +277,14 @@ async def run_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    stem: str | None = None,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    ``stem`` names a copy uploaded into a project's folder (:func:`project_filename`,
+    #317). A print into a project also records its printer and nozzle for that project,
+    which is what the next Generate into it lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
@@ -304,7 +330,9 @@ async def run_for_output(
     # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
     used = _used_slots(store, meta, plate_ids)
-    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
     extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
     if extruders.errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
@@ -320,10 +348,10 @@ async def run_for_output(
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # the copy is looked up by (folder, target): a project gets a copy of its own, and
     # one another project printed from is neither moved nor deleted (#316).
-    project_id = request.project_id or settings.last_project_id
+    project_id = chosen_project(request, settings)
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     library_file_id = await ensure_uploaded(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
     )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
@@ -348,6 +376,7 @@ async def run_for_output(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(meta.colors),
+        assignments=assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
@@ -415,6 +444,11 @@ async def run_for_output(
         )
         if warning.kind == "low-filament"
     ]
+    if project_id is not None:
+        await uploads.remember_project_target(
+            project_id,
+            ProjectTarget(printer_id=printer_id, nozzle_diameter=choices.nozzles[0].size),
+        )
     return _queued(
         client,
         outcomes,
