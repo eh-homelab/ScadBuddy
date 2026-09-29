@@ -694,6 +694,26 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
+def test_the_all_plates_filament_read_reads_the_spools_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Two plates, one spool inventory: the spools are the same for every plate, so an
+    all-plates read asks for them once (#480)."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+    before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    response = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    )
+    assert response.status_code == 200, response.text
+    assert [slot["slot_id"] for slot in response.json()["slots"]] == [1, 2]
+    reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    assert reads - before == 1
+
+
+@respx.mock
 def test_all_plates_with_no_spool_for_a_later_plates_slot_is_a_422_naming_it(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -740,6 +760,35 @@ def test_all_plates_with_every_slot_chosen_slices_each_plate(
     assert response.status_code == 200, response.text
     bodies = [json.loads(call.request.content) for call in sliced.calls]
     assert [slice_body["plate"] for slice_body in bodies] == [1, 2]
+
+
+@respx.mock
+def test_an_all_plates_run_reads_the_assignments_and_printer_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The run's filament read shares what every plate has in common, as the dialog's
+    does: only each plate's slots are read per plate (#480)."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    slice_routes()
+    queue_route()
+
+    def reads(suffix: str) -> int:
+        return sum(1 for call in respx.calls if call.request.url.path.endswith(suffix))
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
+    )
+
+    assert response.status_code == 200, response.text
+    assert reads("/inventory/assignments") == 1
+    assert reads("/printers/1/inventory-remain") == 1
+    assert reads("/filament-requirements") == 2
 
 
 # --- final review 2: the run refuses a printer it cannot resolve presets for ----------
