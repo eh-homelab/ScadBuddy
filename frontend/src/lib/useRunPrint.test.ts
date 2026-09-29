@@ -26,8 +26,7 @@ const selection: PrintSelection = {
  */
 function input(overrides: Partial<PrintSelection> = {}) {
   return {
-    outputId: OUTPUT,
-    slug: 'name-keychain',
+    source: { kind: 'output' as const, output: { id: OUTPUT, slug: 'name-keychain' } },
     choices: choicesView,
     printerId: 1,
     selection: { ...selection, ...overrides },

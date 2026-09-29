@@ -29,6 +29,7 @@ const AssistantPanel = lazy(async () => ({
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
+  { to: '/library', label: 'Library', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
@@ -115,8 +116,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
       <header
-        className={`flex shrink-0 items-center gap-5 border-b border-line bg-surface px-4 ${
-          embedded ? 'h-10' : 'h-14'
+        className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-surface px-4 py-1.5 sm:gap-x-5 ${
+          embedded ? 'min-h-10' : 'min-h-14'
         }`}
         data-embedded={embedded ? 'true' : 'false'}
       >
