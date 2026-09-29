@@ -40,9 +40,11 @@ Methods and their limits
     *Overhangs.* A face's overhang angle is how far its outward normal tips below
     horizontal: 0 deg for a vertical wall, 90 deg for a flat ceiling. Buckets are
     cumulative ("45 deg or more" includes the 60 and 75 deg faces). Faces lying on
-    the bed are bed contact, not overhang. Nothing here knows whether an overhang
-    is supported from below (a bridge between two pillars looks like any other
-    90 deg ceiling), so the areas are an upper bound on what needs support.
+    the bed are bed contact, not overhang -- using a looser proximity bound than
+    bed contact's own, since CSG noise on the model's resting face is not itself
+    an overhang (#756). Nothing here knows whether an overhang is supported from
+    below (a bridge between two pillars looks like any other 90 deg ceiling), so
+    the areas are an upper bound on what needs support.
 
     *Bed contact.* Downward-facing faces (within 1 deg of straight down) whose
     three vertices all lie within :data:`BED_TOLERANCE_MM` of ``bed_z``. The
@@ -108,6 +110,13 @@ ANALYSIS_VERSION = 2
 OVERHANG_ANGLES = (45, 60, 75)
 #: How far above the lowest vertex a face may sit and still count as on the bed.
 BED_TOLERANCE_MM = 0.01
+#: A looser bound than BED_TOLERANCE_MM, used only to keep the model's own resting
+#: face out of the overhang buckets (#756). OpenSCAD's CSG booleans (offset, hull,
+#: difference for a hole) can leave that face a few hundredths of a millimetre out
+#: of plane -- past BED_TOLERANCE_MM's tight band but nowhere near needing
+#: support -- so a triangle sharing the mesh's lowest vertex was wrongly counted as
+#: overhang. One default 0.4 mm-nozzle layer height is a generous, still-safe bound.
+OVERHANG_BED_TOLERANCE_MM = 0.2
 #: A face counts as facing straight down when its normal is within 1 degree of -Z.
 _DOWN_COSINE = math.cos(math.radians(1.0))
 #: Faces per part the wall estimate casts a ray from.
@@ -588,9 +597,11 @@ def analyze_geometry(
             points = corners[contact].reshape(-1, 3)
             contact_low = np.minimum(contact_low, points.min(axis=0))
             contact_high = np.maximum(contact_high, points.max(axis=0))
+        # A looser bed-proximity test than `on_bed`: see OVERHANG_BED_TOLERANCE_MM.
+        near_bed = (corners[:, :, 2] <= bed_z + OVERHANG_BED_TOLERANCE_MM).all(axis=1)
         angle = np.degrees(np.arcsin(np.clip(-normals[:, 2], -1.0, 1.0)))
         for threshold in OVERHANG_ANGLES:
-            selected = (angle >= threshold - 1e-9) & ~on_bed & (areas > 0)
+            selected = (angle >= threshold - 1e-9) & ~near_bed & (areas > 0)
             if selected.any():
                 bucket_area[threshold] += float(areas[selected].sum())
                 bucket_faces[threshold] += int(selected.sum())

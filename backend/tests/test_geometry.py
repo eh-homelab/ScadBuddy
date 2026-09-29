@@ -165,6 +165,23 @@ def test_overhang_buckets_follow_the_angle_below_horizontal() -> None:
     assert analysis.height_to_base_ratio is None
 
 
+def test_a_noisy_bed_face_is_not_reported_as_overhang() -> None:
+    # #756: OpenSCAD's CSG booleans can leave the model's own resting face a few
+    # hundredths of a millimetre out of plane. Nudge one bottom corner of an
+    # otherwise flat cube up by 0.03 mm -- comfortably past BED_TOLERANCE_MM's
+    # 0.01 mm but nowhere near needing support -- and its triangles must still
+    # read as bed contact, not overhang.
+    cube = _cube()
+    vertices = cube.vertices.copy()
+    corner = (vertices[:, 0] == 10) & (vertices[:, 1] == 10) & (vertices[:, 2] == 0)
+    vertices[corner, 2] = 0.03
+    noisy = trimesh.Trimesh(vertices, cube.faces, process=False)
+
+    analysis = analyze_geometry([_part(noisy)])
+
+    assert all(bucket.area_mm2 == 0 and bucket.bbox is None for bucket in analysis.overhangs)
+
+
 def test_split_parts_are_not_edge_checked() -> None:
     opened = trimesh.Trimesh(_cube().vertices, _cube().faces[:-2], process=False)
 
