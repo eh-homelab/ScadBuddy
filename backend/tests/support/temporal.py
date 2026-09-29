@@ -8,9 +8,11 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
+from pathlib import Path
 
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -50,8 +52,19 @@ async def temporal_client() -> AsyncIterator[Client]:
         await env.shutdown()
 
 
+#: Where the dev server's store goes when tmpfs has room: on disk its first start
+#: takes ~3 s, too near temporalio's fixed 5 s start window on a loaded machine.
+TMPFS = Path("/dev/shm")
+TMPFS_MIN_FREE = 512 * 2**20
+
+
+def _store_dir() -> str | None:
+    usable = TMPFS.is_dir() and os.access(TMPFS, os.W_OK)
+    return str(TMPFS) if usable and shutil.disk_usage(TMPFS).free >= TMPFS_MIN_FREE else None
+
+
 @contextmanager
-def temporal_server() -> Iterator[str]:
+def temporal_server(db_file: Path | None = None) -> Iterator[str]:
     """The address of a Temporal for a whole test session: SCADBUDDY_TEST_TEMPORAL_ADDRESS,
     or a dev server started here and stopped on exit. Its namespace is `default`. The
     dev server is a subprocess, so the loop that started it need not keep running.
@@ -60,15 +73,29 @@ def temporal_server() -> Iterator[str]:
     them register with the one deployment version: past Temporal's default of 100
     task queues per version a new queue is refused and its renders never start, so
     the dev server allows more. A server named by the address needs the same
-    (`matching.maxTaskQueuesInDeploymentVersion`)."""
+    (`matching.maxTaskQueuesInDeploymentVersion`).
+
+    Its store is a file (``db_file``, or one on tmpfs when it has room), not memory:
+    the in-memory SQLite was lost mid-session under load (the log says "interrupted",
+    then "Namespace default is not found"), and every test after that failed."""
     if TEST_TEMPORAL_ADDRESS:
         yield TEST_TEMPORAL_ADDRESS
         return
+    with (
+        tempfile.TemporaryDirectory(dir=_store_dir(), prefix="temporal-") as scratch,
+        _dev_server(db_file or Path(scratch) / "temporal.db") as address,
+    ):
+        yield address
+
+
+@contextmanager
+def _dev_server(db_file: Path) -> Iterator[str]:
     loop = asyncio.new_event_loop()
     env = loop.run_until_complete(
         WorkflowEnvironment.start_local(
             dev_server_existing_path=TEST_TEMPORAL_DEV_SERVER or shutil.which("temporal"),
             data_converter=pydantic_data_converter,
+            dev_server_database_filename=str(db_file),
             dev_server_extra_args=[
                 "--dynamic-config-value",
                 f"matching.maxTaskQueuesInDeploymentVersion={MAX_TASK_QUEUES_PER_VERSION}",

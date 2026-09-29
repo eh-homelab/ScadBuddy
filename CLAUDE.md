@@ -53,7 +53,8 @@ test's queue registers with one worker-deployment version, so the dev server rai
 `matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
 renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs the same.
 The fixture terminates the workflows a test leaves open, since an abandoned piece
-would be joined by the next test that renders it.
+would be joined by the next test that renders it. The dev server's store is a SQLite
+file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:

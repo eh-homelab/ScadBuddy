@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import uuid
+from pathlib import Path
 
 import pytest
 from temporalio import workflow
@@ -14,8 +16,10 @@ from temporalio.worker import Worker
 from tests.support.temporal import (
     WorkerThread,
     WorkflowReaper,
+    _store_dir,
     current_address,
     temporal_client,
+    temporal_server,
 )
 
 
@@ -78,3 +82,16 @@ async def test_the_reaper_ends_only_the_queues_running_workflows_on_one_client()
             WorkflowExecutionStatus.TERMINATED,
             WorkflowExecutionStatus.RUNNING,
         ]
+
+
+@pytest.mark.requires_temporal
+def test_the_session_dev_server_keeps_its_store_in_a_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In memory, the dev server's SQLite was lost mid-session under load ("interrupted",
+    then "Namespace default is not found") and every later API test failed."""
+    monkeypatch.setattr("tests.support.temporal.TEST_TEMPORAL_ADDRESS", None)
+    with tempfile.TemporaryDirectory(dir=_store_dir()) as scratch:
+        db = Path(scratch) / "temporal.db"
+        with temporal_server(db_file=db):
+            assert db.is_file()
