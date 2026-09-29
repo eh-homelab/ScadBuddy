@@ -42,7 +42,8 @@ function intercept(navigator: Navigator, hold: (original: Navigator['push']) => 
  * - every router navigation, `navigate()` calls included: the app uses a declarative
  *   `BrowserRouter`, which has no `useBlocker`, so the router's navigator is wrapped;
  * - Back: a sentinel entry is pushed on top of the page, so Back pops it without leaving
- *   the page, and the push drops any Forward entries.
+ *   the page, and the push drops any Forward entries. Each pop re-pushes it at once, so
+ *   Back pressed again before the dialog is answered is held too.
  */
 export function useLeaveGuard(dirty: boolean) {
   const navigate = useNavigate()
@@ -50,6 +51,8 @@ export function useLeaveGuard(dirty: boolean) {
   const { navigator } = useContext(UNSAFE_NavigationContext)
   const [pending, setPending] = useState<string | typeof BACK | null>(null)
   const bypass = useRef(false)
+  /** Set while a confirmed Back leaves, so its own `popstate` is not held again. */
+  const leavingBack = useRef(false)
 
   useEffect(() => {
     if (!dirty) return
@@ -88,7 +91,15 @@ export function useLeaveGuard(dirty: boolean) {
     if (!dirty) return
     if (!onSentinel()) pushSentinel()
     const onPop = () => {
-      if (!onSentinel()) setPending(BACK)
+      if (leavingBack.current) {
+        leavingBack.current = false
+        return
+      }
+      if (onSentinel()) return
+      // Re-armed at once, not when the dialog is answered: a second Back before then
+      // pops this new sentinel instead of leaving the page.
+      pushSentinel()
+      setPending(BACK)
     }
     window.addEventListener('popstate', onPop)
     return () => {
@@ -100,15 +111,14 @@ export function useLeaveGuard(dirty: boolean) {
 
   return {
     pending,
-    stay: () => {
-      if (pending === BACK) pushSentinel()
-      setPending(null)
-    },
+    stay: () => setPending(null),
     leave: () => {
       const to = pending
       setPending(null)
       if (to === BACK) {
-        window.history.back()
+        // Past the re-armed sentinel and the page's own entry.
+        leavingBack.current = true
+        window.history.go(-2)
         return
       }
       if (to === null) return

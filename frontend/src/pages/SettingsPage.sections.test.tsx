@@ -262,6 +262,35 @@ describe('SettingsPage sections (#322)', () => {
     expect(await screen.findByText('The catalogue')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/')
   })
+
+  it('holds a second Back pressed before the dialog is answered', async () => {
+    window.history.replaceState(null, '', '/')
+    window.history.pushState(null, '', '/elsewhere')
+    window.history.pushState(null, '', '/settings')
+    const user = userEvent.setup()
+    render(
+      <BrowserRouter>
+        <Routes>
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/elsewhere" element={<p>Elsewhere</p>} />
+          <Route path="/" element={<p>The catalogue</p>} />
+        </Routes>
+      </BrowserRouter>,
+    )
+    await seeded()
+    await user.clear(screen.getByLabelText('Render timeout'))
+    await user.type(screen.getByLabelText('Render timeout'), '45')
+
+    act(() => window.history.back())
+    await screen.findByRole('dialog', { name: 'Leave without saving?' })
+    act(() => window.history.back())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(window.location.pathname).toBe('/settings')
+    expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
+
+    await user.click(screen.getByRole('button', { name: 'Leave without saving' }))
+    expect(await screen.findByText('Elsewhere')).toBeInTheDocument()
+  })
 })
 
 describe('SettingsPage secrets (#322)', () => {
