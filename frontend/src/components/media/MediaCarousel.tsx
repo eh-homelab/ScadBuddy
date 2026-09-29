@@ -1,12 +1,21 @@
 import useEmblaCarousel from 'embla-carousel-react'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useHref, useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
 
 interface Props {
   slides: Slide[]
-  /** A click, Enter or Space on the media itself; never a slide change. */
+  /**
+   * A click, Enter or Space on the media itself; never a slide change. With `to`, it
+   * is the expand button's instead, since a click on the media follows the link.
+   */
   onOpen?: (index: number) => void
+  /**
+   * Where a click on the media goes: a catalogue card's template, so the picture
+   * opens what the rest of the card opens rather than a lightbox to close first.
+   */
+  to?: string
   /** What to show with no slides: the template's placeholder. */
   fallback?: ReactNode
   className?: string
@@ -24,26 +33,29 @@ interface Props {
  * is its poster with a play badge, and plays in the lightbox. Its controls keep their
  * clicks to themselves, so inside a card (#277) they never follow the card's link.
  */
-export function MediaCarousel({ slides, onOpen, fallback, className, label, lazy }: Props) {
+export function MediaCarousel({ slides, onOpen, to, fallback, className, label, lazy }: Props) {
   if (slides.length === 0) return <>{fallback}</>
-  if (slides.length === 1) return <Cover slide={slides[0]!} onOpen={onOpen} className={className} />
-  if (lazy) return <LazyCarousel slides={slides} onOpen={onOpen} className={className} label={label} />
-  return <Carousel slides={slides} onOpen={onOpen} className={className} label={label} />
+  if (slides.length === 1) return <Cover slide={slides[0]!} onOpen={onOpen} to={to} className={className} />
+  if (lazy) return <LazyCarousel slides={slides} onOpen={onOpen} to={to} className={className} label={label} />
+  return <Carousel slides={slides} onOpen={onOpen} to={to} className={className} label={label} />
 }
 
 /** One slide on its own: a template with one picture, or a carousel's first until it mounts. */
 function Cover({
   slide,
   onOpen,
+  to,
   className,
 }: {
   slide: Slide
   onOpen?: (index: number) => void
+  to?: string
   className?: string
 }) {
   return (
-    <div className={className}>
-      <SlideMedia slide={slide} index={0} onOpen={onOpen} focusable eager />
+    <div className={`relative ${className ?? ''}`}>
+      <SlideMedia slide={slide} index={0} onOpen={onOpen} to={to} focusable eager />
+      {to && onOpen && <ExpandButton slide={slide} onClick={() => onOpen(0)} />}
     </div>
   )
 }
@@ -79,10 +91,12 @@ function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
 
   useEffect(() => {
     if (!near || !refocus.current) return
-    // The first slide's own control, named rather than found by render order; a carousel
-    // whose slides open nothing is itself a tab stop.
+    // The cover's own control in the carousel, named rather than found by render order:
+    // the first slide's button, or with a link the expand button. A carousel with
+    // neither is itself a tab stop.
     const carousel = wrapper.current?.querySelector<HTMLElement>('[aria-roledescription="carousel"]')
-    ;(carousel?.querySelector<HTMLElement>('[data-slide-open="0"]') ?? carousel)?.focus()
+    const control = carousel?.querySelector<HTMLElement>('[data-slide-open="0"], [data-carousel-expand]')
+    ;(control ?? carousel)?.focus()
   }, [near])
 
   return (
@@ -90,7 +104,7 @@ function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
       {near ? (
         <Carousel {...props} />
       ) : (
-        <Cover slide={props.slides[0]!} onOpen={props.onOpen} className={props.className} />
+        <Cover slide={props.slides[0]!} onOpen={props.onOpen} to={props.to} className={props.className} />
       )}
     </div>
   )
@@ -102,7 +116,7 @@ function contained(event: MouseEvent) {
   event.stopPropagation()
 }
 
-function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>) {
+function Carousel({ slides, onOpen, to, className, label }: Omit<Props, 'fallback'>) {
   const [viewportRef, embla] = useEmblaCarousel(carouselOptions(useReducedMotion()))
   // The carousel's own record of where it is, so the controls and labels never
   // depend on Embla having measured anything; a swipe moves it through `select`.
@@ -162,6 +176,7 @@ function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>)
                 slide={slide}
                 index={position}
                 onOpen={onOpen}
+                to={to}
                 focusable={position === index}
                 eager={position === 0}
               />
@@ -169,6 +184,8 @@ function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>)
           ))}
         </div>
       </div>
+
+      {to && onOpen && <ExpandButton slide={slides[index]!} onClick={() => onOpen(index)} />}
 
       <ArrowButton
         direction="previous"
@@ -218,6 +235,33 @@ function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>)
   )
 }
 
+/** Opens the lightbox where a click on the media follows a link instead. */
+function ExpandButton({ slide, onClick }: { slide: Slide; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={`View ${slide.alt} full size`}
+      data-carousel-expand=""
+      onClick={(event) => {
+        contained(event)
+        onClick()
+      }}
+      className="absolute left-1.5 top-1.5 flex h-7 w-7 cursor-zoom-in items-center justify-center rounded-full bg-black/55 text-white opacity-80 hover:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+    >
+      <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden="true">
+        <path
+          d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </button>
+  )
+}
+
 function ArrowButton({
   direction,
   disabled,
@@ -252,19 +296,22 @@ function ArrowButton({
 
 /**
  * One slide's picture: an image, a video's poster, or a neutral tile for a video with
- * none, the video ones with a play badge. A button when it opens the lightbox, and
- * then only the visible slide's is in the tab order.
+ * none, the video ones with a play badge. With somewhere to go, a click goes there;
+ * otherwise a button when it opens
+ * the lightbox, and then only the visible slide's is in the tab order.
  */
 function SlideMedia({
   slide,
   index,
   onOpen,
+  to,
   focusable,
   eager,
 }: {
   slide: Slide
   index: number
   onOpen?: (index: number) => void
+  to?: string
   focusable: boolean
   eager: boolean
 }) {
@@ -296,6 +343,7 @@ function SlideMedia({
       )}
     </>
   )
+  if (to) return <LinkedPicture to={to} className={frame} picture={picture} />
   if (!onOpen) return <span className={frame}>{picture}</span>
   return (
     <button
@@ -311,5 +359,35 @@ function SlideMedia({
     >
       {picture}
     </button>
+  )
+}
+
+/**
+ * The picture where a click on it follows a link: a card's template. Not a link of its
+ * own, since the card's title already is that link (and its keyboard route); the
+ * expand button beside it opens the lightbox. A modified click (Ctrl, Cmd or Shift) or
+ * a middle click opens it in a new tab, as it would on the title.
+ */
+function LinkedPicture({ to, className, picture }: { to: string; className: string; picture: ReactNode }) {
+  const navigate = useNavigate()
+  const href = useHref(to)
+  const newTab = () => window.open(href, '_blank', 'noopener')
+  return (
+    <span
+      data-media-link={href}
+      onClick={(event) => {
+        contained(event)
+        if (event.metaKey || event.ctrlKey || event.shiftKey) newTab()
+        else void navigate(to)
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return
+        contained(event)
+        newTab()
+      }}
+      className={`${className} cursor-pointer`}
+    >
+      {picture}
+    </span>
   )
 }

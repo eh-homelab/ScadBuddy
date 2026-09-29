@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
-import type { Slide } from './slides'
+import type { Slide, SlideLink } from './slides'
 
 // Only needed once something is opened, so its library loads then (#275).
 const LightboxView = lazy(() => import('./LightboxView'))
@@ -9,6 +9,8 @@ interface Props {
   /** The slide to open at; null is closed. */
   index: number | null
   onClose: () => void
+  /** A link in its toolbar, to where the media came from. */
+  link?: SlideLink
 }
 
 /**
@@ -17,7 +19,7 @@ interface Props {
  * Bambuddy's iframe, the iframe -- and never asks for the Fullscreen API, which the
  * iframe does not grant. Focus goes back to whatever opened it once it closes.
  */
-export function MediaLightbox({ slides, index, onClose }: Props) {
+export function MediaLightbox({ slides, index, onClose, link }: Props) {
   const open = index !== null
   const opener = useRef<HTMLElement | null>(null)
 
@@ -34,7 +36,7 @@ export function MediaLightbox({ slides, index, onClose }: Props) {
   if (index === null) return null
   return (
     <Suspense fallback={null}>
-      <LightboxView slides={slides} index={index} onClose={onClose} />
+      <LightboxView slides={slides} index={index} onClose={onClose} link={link} />
     </Suspense>
   )
 }
