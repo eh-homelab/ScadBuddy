@@ -57,6 +57,16 @@ const FLYOUT_ID = 'parameters-flyout'
  */
 const FLYOUT_WIDTH = 'var(--sb-flyout)'
 
+/** An import's origin for the page's label; a URL the record holds that does not parse
+ *  must not take the page down. */
+function importedFrom(originUrl: string): string {
+  try {
+    return `imported from ${new URL(originUrl).host}`
+  } catch {
+    return 'imported'
+  }
+}
+
 export function CustomizePage() {
   const { slug = '' } = useParams()
   const [search, setSearch] = useSearchParams()
@@ -93,6 +103,11 @@ export function CustomizePage() {
     extra: InputsExtra | null
   }>({ of: null, values: null, extra: null })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
+  // The template's own Generate (<sb-generate>): its save in flight, and why the last failed.
+  const [uiGenerate, setUiGenerate] = useState<{ generating: boolean; error: string | null }>({
+    generating: false,
+    error: null,
+  })
   const captureRef = useRef<PreviewCapture | null>(null)
 
   /**
@@ -148,9 +163,14 @@ export function CustomizePage() {
   // record's `ui` declaration, never `extra` being non-empty.
   const record = modelState.data
   const declared = (record?.ui ?? null) as UiDeclaration | null
-  const [uiFailure, setUiFailure] = useState<{ slug: string; failure: TemplateUiFailure } | null>(null)
+  // Keyed by the revision as well: another revision's interface may work.
+  const [uiFailure, setUiFailure] = useState<{
+    slug: string
+    version: string | undefined
+    failure: TemplateUiFailure
+  } | null>(null)
   const failure =
-    uiFailure?.slug === slug
+    uiFailure?.slug === slug && uiFailure.version === version
       ? uiFailure.failure
       : record?.ui_error
         ? { file: 'model.json', message: record.ui_error }
@@ -553,7 +573,7 @@ export function CustomizePage() {
     record?.origin === 'builtin'
       ? 'built-in'
       : record?.origin_url
-        ? `imported from ${new URL(record.origin_url).host}`
+        ? importedFrom(record.origin_url)
         : 'mine'
 
   // One element, in the workspace or in the template's <sb-preview>: only one of them is
@@ -573,7 +593,8 @@ export function CustomizePage() {
         plate={plate}
         captureRef={captureRef}
         leading={
-          full && (
+          // The page slot has no parameters flyout: the template's own page is the panel.
+          full && customUi?.slot !== 'page' && (
             <ParametersButton
               ref={flyoutButton}
               open={flyout}
@@ -598,12 +619,37 @@ export function CustomizePage() {
     onInputs: hostDeps.setInputs,
     preview: previewElement,
     generate: (
-      <Button
-        onClick={() => void hostDeps.generate().catch(() => undefined)}
-        disabled={rendering || !settled || job?.status !== 'done'}
-      >
-        {rendering || !settled ? (renderStage ? `Rendering: ${renderStage}` : 'Rendering…') : 'Generate'}
-      </Button>
+      <span className="inline-flex items-center gap-2">
+        <Button
+          onClick={() => {
+            // One save at a time: a second click while one runs would make two outputs.
+            if (uiGenerate.generating) return
+            setUiGenerate({ generating: true, error: null })
+            hostDeps.generate().then(
+              () => setUiGenerate({ generating: false, error: null }),
+              (error: unknown) =>
+                setUiGenerate({
+                  generating: false,
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+            )
+          }}
+          disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
+        >
+          {uiGenerate.generating
+            ? 'Generating…'
+            : rendering || !settled
+              ? renderStage
+                ? `Rendering: ${renderStage}`
+                : 'Rendering…'
+              : 'Generate'}
+        </Button>
+        {uiGenerate.error && (
+          <span role="alert" className="text-[12px] text-warn">
+            Could not generate: {uiGenerate.error}
+          </span>
+        )}
+      </span>
     ),
   }
 
@@ -651,7 +697,7 @@ export function CustomizePage() {
       version={uiVersion}
       deps={hostDeps}
       inputs={inputs}
-      onFailure={(next) => setUiFailure({ slug, failure: next })}
+      onFailure={(next) => setUiFailure({ slug, version, failure: next })}
       elementContext={elementContext}
     />
   )
@@ -794,7 +840,8 @@ export function CustomizePage() {
             </Button>
           </div>
         )}
-        {declared && failure && (
+        {/* A malformed declaration arrives as `ui: null` plus `ui_error`: banner that too. */}
+        {failure && (declared || record?.ui_error) && (
           <div
             role="alert"
             aria-label="Template interface failed"
@@ -809,7 +856,15 @@ export function CustomizePage() {
       </div>
 
       {customUi?.slot === 'page' ? (
-        <div ref={workspace} data-testid="workspace" className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
+        <div
+          ref={workspace}
+          data-testid="workspace"
+          // As the panel layout: where the Fullscreen API is refused (inside Bambuddy's
+          // frame) the `window` mode is this element covering the window.
+          className={`grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] ${
+            full ? `bg-bg ${fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative'}` : ''
+          }`}
+        >
           <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
             {uiPresets}
             {uiOrigin}
@@ -861,8 +916,9 @@ export function CustomizePage() {
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
                   <PresetPicker
-                    // A preset picked on one model means nothing on the next.
-                    key={slug}
+                    // A preset picked on one model means nothing on the next; a preset a
+                    // template UI saved (presetsRevision) must show in the list too.
+                    key={`${slug}:${presetsRevision}`}
                     slug={slug}
                     schema={schema}
                     values={values}

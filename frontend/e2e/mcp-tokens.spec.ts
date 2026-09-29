@@ -54,7 +54,7 @@ test.describe('MCP access tokens', () => {
     await expect(section.getByRole('button', { name: 'Revoke Claude Code' })).toHaveCount(0)
   })
 
-  test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, context, baseURL }) => {
+  test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, context, baseURL, browserName }) => {
     // Bambuddy's External Link frame: another origin, its sandbox flags and no
     // allow="clipboard-write", so the async Clipboard API is not granted to it.
     const host = new URL('/mockServiceWorker.js', baseURL)
@@ -64,7 +64,8 @@ test.describe('MCP access tokens', () => {
     await page.route(host.href, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
     // A routed page is not on the loopback address space, so Chrome's Local Network
     // Access checks refuse its loopback frame. Bambuddy on the LAN is local; grant it.
-    await context.grantPermissions(['local-network-access'])
+    // Chromium's permission: another browser's context throws on the unknown name.
+    if (browserName === 'chromium') await context.grantPermissions(['local-network-access'])
     await page.goto(host.href)
     await page.setContent(
       `<iframe src="${new URL('/settings', baseURL).href}" title="ScadBuddy"

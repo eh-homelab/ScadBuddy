@@ -1733,11 +1733,20 @@ export const handlers = [
   }),
 
   // #425 — a template's own UI files, live or pinned; the module graph is plain JS.
+  // A pinned revision serves `UI_MODULES['<slug>@<commit>']` when a test gives one, else
+  // the live files: the mock keeps no history of ui/, so a test of a pinned UI that must
+  // differ from the live one adds its own entry.
   ...['/models/:slug/ui/*', '/models/:slug/versions/:commit/ui/*'].map((route) =>
     http.get(`${base}${route}`, ({ params, request }) => {
       const slug = decodeURIComponent(String(params['slug']))
-      const path = decodeURIComponent(new URL(request.url).pathname.split('/ui/')[1] ?? '')
-      const body = UI_MODULES[slug]?.[path]
+      const commit = params['commit'] === undefined ? undefined : String(params['commit'])
+      // Everything after the route's own `ui/`, so a nested `…/ui/…` path stays whole.
+      const match = /^\/api\/v1\/models\/[^/]+\/(?:versions\/[^/]+\/)?ui\/(.+)$/.exec(
+        new URL(request.url).pathname,
+      )
+      const path = decodeURIComponent(match?.[1] ?? '')
+      const files = (commit !== undefined ? UI_MODULES[`${slug}@${commit}`] : undefined) ?? UI_MODULES[slug]
+      const body = files?.[path]
       return body === undefined
         ? problem(404, 'Not Found', `no ui file '${path}'`)
         : new HttpResponse(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } })
