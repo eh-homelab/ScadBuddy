@@ -12,6 +12,7 @@ import type {
   Job,
   LastProject,
   CatalogueLibrary,
+  InvalidLibraryEntry,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -312,6 +313,13 @@ export function setMockRemembered(remembered: {
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
+export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEntry[]): void {
+  state.models = state.models.map((m) =>
+    m.slug === slug ? { ...m, invalid_libraries: entries } : m,
+  )
 }
 
 /** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
@@ -2607,12 +2615,14 @@ export const handlers = [
     const libraries = current.some((row) => row.name === name)
       ? current.map((row) => (row.name === name ? pin : row))
       : [...current, pin]
-    const updated = { ...model, libraries }
+    // As the backend's `pin_library`: the pin takes the place of any entry of that name.
+    const invalid = (model.invalid_libraries ?? []).filter((entry) => entry.name !== name)
+    const updated = { ...model, libraries, invalid_libraries: invalid }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
 
-  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const name = String(params['name'])
     const refused = refuseBuiltin(slug)
@@ -2620,11 +2630,35 @@ export const handlers = [
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const current = model.libraries ?? []
-    if (!current.some((row) => row.name === name)) {
+    const invalid = model.invalid_libraries ?? []
+    const at = new URL(request.url).searchParams.get('index')
+    if (at !== null) {
+      // #217 — that invalid entry alone, as the backend's `unpin_library(index=)`.
+      const index = Number(at)
+      if (!invalid.some((entry) => entry.index === index && entry.name === name)) {
+        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'; nothing was removed`)
+      }
+      await delay(50)
+      const updated = {
+        ...model,
+        invalid_libraries: invalid
+          .filter((entry) => entry.index !== index)
+          .map((entry) =>
+            entry.index !== null && entry.index > index ? { ...entry, index: entry.index - 1 } : entry,
+          ),
+      }
+      state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+      return HttpResponse.json(view(updated))
+    }
+    if (![...current, ...invalid].some((row) => row.name === name)) {
       return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
     }
     await delay(50)
-    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    const updated = {
+      ...model,
+      libraries: current.filter((row) => row.name !== name),
+      invalid_libraries: invalid.filter((entry) => entry.name !== name),
+    }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
