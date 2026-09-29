@@ -1126,6 +1126,7 @@ describe('CustomizePage, project file (#317)', () => {
   }
 
   /** The bodies of every request to a path ending in `suffix`, by method. */
+  /** Bodies of the `method` requests whose path ends with `path` (a string) or matches it. */
   function watchBodies(method: string, path: string | RegExp): Promise<unknown>[] {
     const bodies: Promise<unknown>[] = []
     server.events.on('request:start', ({ request }) => {
@@ -1269,8 +1270,8 @@ describe('CustomizePage, project file (#317)', () => {
     withLastProject(1)
     // The PUT that remembers the choice never answers: the run alone must carry it.
     server.use(http.put('/api/v1/print/projects/last', () => new Promise<never>(() => undefined)))
-    // The print run only; the dialog's analyzer check also POSTs to `/analyzers/run`.
     const ran = watchBodies('POST', /^\/api\/v1\/print\/outputs\/[^/]+\/run$/)
+    // The print run only: the dialog's analyzers also POST to `/analyzers/run` (#563).
     const { user } = render()
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
     await user.selectOptions(pagePicker(), '')
