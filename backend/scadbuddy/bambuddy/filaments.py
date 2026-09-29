@@ -569,8 +569,8 @@ async def gather_plate_options(
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
     the printer's, and among plates the first failing one in ``plate_ids`` order wins.
 
-    ``assignments`` already read by the caller (a run reads them before the upload) are
-    used as they are rather than read again."""
+    ``assignments`` already read by the caller (a run reads them for the spools' sides,
+    #469) are used instead of reading them again."""
     spools = await client.spools()
     if assignments is None:
         assignments = await client.spool_assignments()
