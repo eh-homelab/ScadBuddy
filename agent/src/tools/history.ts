@@ -14,6 +14,8 @@ export const historyTools: Tool[] = [
     description: "A model's revision history, newest first: commit id, message and time.",
     input: z.object({ slug, limit: z.number().int().min(1).max(500).optional() }),
     risk: 'read',
+    source:
+      'revision messages written by model authors or upstreams',
     routes: ['GET /api/v1/models/{slug}/versions'],
     handler: async ({ slug, limit }, { backend }) =>
       json(
@@ -29,6 +31,8 @@ export const historyTools: Tool[] = [
     description: 'The unified diff of a revision against its parent, or against `base` when given.',
     input: z.object({ slug, commit, base: commit.optional() }),
     risk: 'read',
+    source:
+      "OpenSCAD source (code and comments) written by the model's author, imported from the web or pulled from an upstream",
     routes: ['GET /api/v1/models/{slug}/versions/{commit}/diff'],
     handler: async ({ slug, commit, base }, { backend }) =>
       json(
@@ -46,6 +50,8 @@ export const historyTools: Tool[] = [
     description: "A model's OpenSCAD source at an earlier revision.",
     input: z.object({ slug, commit }),
     risk: 'read',
+    source:
+      "OpenSCAD source (code and comments) written by the model's author, imported from the web or pulled from an upstream",
     routes: ['GET /api/v1/models/{slug}/versions/{commit}/source'],
     handler: async ({ slug, commit }, { backend }) =>
       text(
@@ -80,6 +86,8 @@ export const historyTools: Tool[] = [
       "A duplicate's upstream template: whether it has moved on, and a preview of merging its current revision.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "upstream metadata fetched from the model's upstream",
     routes: ['GET /api/v1/models/{slug}/upstream'],
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}/upstream', { params: { path: { slug } } }), `get upstream of ${slug}`)),
