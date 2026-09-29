@@ -112,6 +112,24 @@ from, returns diagnostics with line numbers and saves nothing
 parse-checks too, unless `force` is set (main spec §8). A source that fails the
 check is one the customizer cannot open, so fix it rather than forcing it.
 
+### Editing through ScadBuddy's tools
+
+The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
+
+- Read `get_model` for its `version` and `get_source` for the text, then change it
+  with `apply_patch` (a unified diff or search/replace edits) with that `version` as
+  `base`. Use `update_source` only to rewrite the whole file, and pass `base` there
+  too (`docs/ai/authoring.md` section 2).
+- If `apply_patch` answers `conflict`, someone saved since you read it. Read the
+  source again and rebuild the patch against `current`; don't force your old text
+  over theirs (`docs/ai/authoring.md` section 2).
+- Put the user's instruction, in short, in `message`: it becomes the revision's
+  subject, and the revision is authored as the agent (`docs/ai/authoring.md`
+  section 3).
+- Call `checkpoint` before a change you may want to abandon. If it does not work
+  out, `restore_version` with the checkpoint's commit undoes every edit since, as one
+  new revision (`docs/ai/authoring.md` section 4).
+
 When the template changes what the user asked for (caps a size, shrinks text to
 fit the plate), say so with a single-string echo starting `NOTE: `, e.g.
 `echo(str("NOTE: letter_size reduced from ", a, " to ", b, " mm"));`. ScadBuddy

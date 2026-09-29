@@ -85,6 +85,8 @@ export function createHarnessServer(
   tools: readonly Tool[],
   services: ToolServices,
   principal: Principal,
+  /** The session the server's calls run in, for the commits they make (authorship.ts, #252). */
+  session?: string,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -113,6 +115,7 @@ export function createHarnessServer(
           runTool(t, args, {
             ...services,
             principal,
+            session,
             progress: progressFrom(extra),
             signal: signalFrom(extra),
             lookup,

@@ -25,7 +25,7 @@ import type { Tool, ToolServices } from './registry.js'
 
 export type HarnessTools = {
   tierOf: TierResolver
-  mcpServers: (session: { owner: Owner }) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers: (session: { owner: Owner; id?: string }) => Record<string, McpSdkServerConfigWithInstance>
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
@@ -35,7 +35,8 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
     mcpServers: (session) => {
       const principal = harnessPrincipal(session.owner)
       const allowed = tools.filter((t) => hasTier(principal, t.risk))
-      return { [SERVER_NAME]: createHarnessServer(allowed, services, principal) }
+      // The session id too, so its commits name it (authorship.ts, #252).
+      return { [SERVER_NAME]: createHarnessServer(allowed, services, principal, session.id) }
     },
   }
 }

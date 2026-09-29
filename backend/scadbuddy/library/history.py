@@ -50,6 +50,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from scadbuddy.core.authorship import (
+    AGENT_AUTHOR_EMAIL,
+    AGENT_AUTHOR_NAME,
+    PRINCIPAL_TRAILER,
+    SESSION_TRAILER,
+    AgentAuthor,
+    current_author,
+)
 from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 
 logger = logging.getLogger(__name__)
@@ -93,7 +101,14 @@ EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # neither byte can occur inside a commit field.
 _RECORD = "\x1e"
 _FIELD = "\x1f"
-_LOG_FORMAT = "--format=format:%x1e%H%x1f%an%x1f%aI%x1f%s"
+# The agent's trailers (core/authorship.py, #252) sit before the subject, which has to
+# stay last: `--name-status` appends its block after it.
+_LOG_FORMAT = (
+    "--format=format:%x1e%H%x1f%an%x1f%aI"
+    f"%x1f%(trailers:key={PRINCIPAL_TRAILER},valueonly,separator=%x2c)"
+    f"%x1f%(trailers:key={SESSION_TRAILER},valueonly,separator=%x2c)"
+    "%x1f%s"
+)
 
 
 class GitError(RuntimeError):
@@ -148,6 +163,8 @@ class Revision:
     date: datetime
     message: str
     files: list[FileChange]
+    #: Who the agent committed it for (core/authorship.py), when the agent did.
+    agent: AgentAuthor | None = None
 
     @property
     def short(self) -> str:
@@ -235,6 +252,7 @@ class ModelHistory:
         *args: str,
         check: bool = True,
         text: bool = True,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         command = [
             self.git,
@@ -252,7 +270,7 @@ class ModelHistory:
             completed = subprocess.run(
                 command,
                 cwd=self.root,
-                env=git_env(),
+                env=env or git_env(),
                 capture_output=True,
                 text=text,
                 check=False,
@@ -394,7 +412,29 @@ class ModelHistory:
         # `_stage`) on the one action that most needs to work -- delete.
         if not self._has_staged():
             return None
-        self._run("commit", "--no-verify", "-m", subject_line(message))
+        author = current_author()
+        if author is None:
+            self._run("commit", "--no-verify", "-m", subject_line(message))
+            return self.head()
+        # Authored as the agent, committed as ScadBuddy, with who and where as trailers
+        # (#252, core/authorship.py). Each value was checked to be one printable token,
+        # so each trailer is exactly one line.
+        trailers = [
+            f"{name}: {value}"
+            for name, value in (
+                (PRINCIPAL_TRAILER, author.principal),
+                (SESSION_TRAILER, author.session),
+            )
+            if value
+        ]
+        env = {
+            **git_env(),
+            "GIT_AUTHOR_NAME": AGENT_AUTHOR_NAME,
+            "GIT_AUTHOR_EMAIL": AGENT_AUTHOR_EMAIL,
+        }
+        self._run(
+            "commit", "--no-verify", "-m", subject_line(message), "-m", "\n".join(trailers), env=env
+        )
         return self.head()
 
     def _touched_by(self, commit: str | None) -> list[str]:
@@ -771,9 +811,9 @@ def _parse_log(text: str) -> list[Revision]:
         if not record.strip():
             continue
         fields = record.split(_FIELD)
-        if len(fields) != 4:  # pragma: no cover - git always emits all four
+        if len(fields) != 6:  # pragma: no cover - git always emits all six
             continue
-        commit, author, date, tail = fields
+        commit, author, date, principal, session, tail = fields
         subject, _, status_block = tail.partition("\n")
         revisions.append(
             Revision(
@@ -782,6 +822,9 @@ def _parse_log(text: str) -> list[Revision]:
                 date=datetime.fromisoformat(date),
                 message=subject,
                 files=_parse_name_status(status_block),
+                agent=AgentAuthor(principal=principal or None, session=session or None)
+                if principal or session
+                else None,
             )
         )
     return revisions
