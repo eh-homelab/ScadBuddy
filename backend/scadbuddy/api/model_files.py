@@ -6,11 +6,13 @@ render already runs in the model's directory with those files present: the parse
 check copies them (``library/scad.py`` ``SIDECARS``), the render cache key hashes
 them (``render/provenance.py`` ``source_version``), and an older revision is
 exported whole. What was missing was a way to read and write them. These routes do,
-for bare ``.scad`` names at the top of the directory: ``model.scad`` itself is read
-here too, but written only through ``PUT /models/{slug}/source``, which parse-checks
-it. A sibling is not parse-checked on its own: it is often a library of modules with
-no top-level geometry, and what matters is whether the model that includes it still
-renders, which ``POST /models/check`` with the model's ``slug`` answers.
+for bare ``.scad`` names at the top of the directory; reading one is the editor's
+``GET /models/{slug}/files/{path}`` (``api/lsp.py``, #707), which already serves any
+text file in the model's directory. ``model.scad`` is written only through
+``PUT /models/{slug}/source``, which parse-checks it. A sibling is not parse-checked
+on its own: it is often a library of modules with no top-level geometry, and what
+matters is whether the model that includes it still renders, which
+``POST /models/check`` with the model's ``slug`` answers.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, status
-from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
@@ -85,25 +86,6 @@ def list_source_files(slug: SlugPath, catalogue: CatalogueDep) -> list[SourceFil
         for path in files
     ]
     return sorted(listed, key=lambda f: (not f.main, f.name))
-
-
-@router.get(
-    "/models/{slug}/files/{name}",
-    response_class=PlainTextResponse,
-    responses={200: {"content": {"text/plain": {}}}},
-    summary="One of a model's .scad files",
-)
-def get_source_file(slug: SlugPath, name: FileNamePath, catalogue: CatalogueDep) -> str:
-    require_model_exists(catalogue, slug)
-    path = catalogue.paths.model_dir(slug) / name
-    if not path.is_file() or path.is_symlink():
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no file {name!r}")
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, f"{name!r} is not UTF-8 text"
-        ) from None
 
 
 @router.put(

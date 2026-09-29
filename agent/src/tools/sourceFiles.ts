@@ -35,11 +35,12 @@ export const sourceFileTools: Tool[] = [
     input: z.object({ slug, name: fileName }),
     risk: 'read',
     source: SOURCE,
-    routes: ['GET /api/v1/models/{slug}/files/{name}'],
+    // The editor's reader (#707, backend api/lsp.py) serves every text file in the model's directory.
+    routes: ['GET /api/v1/models/{slug}/files/{path}'],
     handler: async ({ slug, name }, { backend }) =>
       text(
         await ok(
-          backend.GET('/api/v1/models/{slug}/files/{name}', { params: { path: { slug, name } }, parseAs: 'text' }),
+          backend.GET('/api/v1/models/{slug}/files/{path}', { params: { path: { slug, path: name } }, parseAs: 'text' }),
           `get ${slug}/${name}`,
         ),
       ),
