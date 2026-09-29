@@ -17,6 +17,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 | [security.md](security.md) | Reviewers, operators | The threat model as built: risk tiers, the permission seam, envelope encryption, DNS-rebinding defence, egress checks, stderr redaction, plugin vetting, event-log scrubbing, known limitations and open §3.2 items |
 | [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's LISTEN on the event bus (#264) |
 | [browser-bridge.md](browser-bridge.md) | Contributors | The tab-side agent tools, `data-agent-user-only`, and the WebMCP opt-in |
+| [agent-sessions.md](agent-sessions.md) | MCP client authors, operators | Agent-to-agent control (#300): the `sessions_*` tools, the session resources, `session.*` events, and approvals under a per-token grant |
 | [headless-browser.md](headless-browser.md) | Contributors, reviewers | The headless Chromium for sessions with no tab (#349): the pinned Playwright plugin, its tiers and guards, the backend's agent-actor gate, and what was measured |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |
 | [evals.md](evals.md) | Contributors | The eval harness (`agent/evals/`, scripted in CI, live with `pnpm evals`), the AI test and e2e coverage, and what is still planned (#259) |
@@ -37,8 +38,9 @@ for that; **no AI feature is user-visible in a production build yet**:
 - The agent sidecar is not deployed: README "The agent sidecar" says "Nothing deploys
   it yet", and there are no ingress routes for `/mcp` or `/api/v1/ai/*` yet
   ([`README.md`](../../README.md)).
-- `/mcp` and the tool registry are on `main` (#368), but no Settings route mints MCP
-  tokens yet (#251), and nothing starts a harness session over HTTP yet (#266, #300).
+- `/mcp` and the tool registry are on `main` (#368). Sessions start from the panel's
+  chat socket and the session routes (#527), and from other agents over `/mcp` through
+  the `sessions_*` tools (#300, [agent-sessions.md](agent-sessions.md)).
   When a session does run, its queries get ScadBuddy's tools in-process, with their
   tiers and approvals, but no plugin
   ([security.md](security.md#risk-tiers-and-the-permission-seam)).

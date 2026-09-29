@@ -5,7 +5,7 @@ import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
-import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
+import { approvalGrantCheck, FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
@@ -28,6 +28,7 @@ import { approvalHashKey } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { startHeartbeat } from './routes/chat.js'
+import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
@@ -183,8 +184,14 @@ const chromiumSandbox = (): Promise<boolean> =>
     return probe.available
   }))
 
+// `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
+// append is announced on `scadbuddy_events`, and this replica's LISTEN
+// consumer (below) wakes its followers for sessions other replicas write.
+const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
+
 // Sessions (#300) and their approvals (#258): started from the assistant
-// panel's socket (routes/chat.ts) and the session routes (routes/sessions.ts).
+// panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
+// and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const sessions =
@@ -202,6 +209,9 @@ const sessions =
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Other agents decide approvals only with their token's grant (spec §6, #300).
+        approvalGrants: approvalGrantCheck(tokens),
+        ...(sessionEvents ? { onAppend: sessionEvents.onAppend } : {}),
         // Every tool call a turn makes, and every approval decision (#258).
         ...(audit ? { audit } : {}),
         // Enabled plugins (#297), per turn, through the loopback forwarder.
@@ -228,6 +238,11 @@ const sessions =
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
+// The `sessions_*` tools (#300) act on the same manager, over /mcp and in-process.
+if (sessions) toolServices.sessions = sessions
+// The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
+const stopSessionWake =
+  sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
@@ -300,6 +315,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     stopSweeper?.()
     stopRetention?.()
+    stopSessionWake?.()
+    sessionEvents?.close()
     stopHeartbeat()
     // 1001 "going away": the panel reconnects to another replica or after the restart.
     for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')

@@ -205,6 +205,7 @@ describe('MCP token writes', () => {
       list: () => Promise.resolve([]),
       mint: () => Promise.reject(new Error('database down')),
       revoke: () => Promise.resolve(false),
+      approvalGrant: () => Promise.resolve(false),
     }
     const tokens = auditedTokenStore(store, audit)
     const a = app({ audit, tokens })

@@ -540,8 +540,11 @@ implements it):
   for a slug given in `context.arguments`.
 - **Not built in #264**, for want of a backend route or event source on `main`: the
   Bambuddy printers, queue, inventory, history and stats resources (print watcher,
-  #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
-  sessions (#300).
+  #268), the browser snapshot (#254), and `scadbuddy://docs/authoring` (#252).
+- **Sessions, as built in #300:** `scadbuddy://sessions` (backed by `sessions_list`)
+  and `scadbuddy://sessions/{session_id}` (`sessions_get`). A session resource also
+  checks who may see it (§6), so subscribing reads it first and refuses one the caller
+  may not see with `-32002` (`readToSubscribe` in `agent/src/resources/catalog.ts`).
 
 ## 6. Sessions (#300)
 
@@ -568,6 +571,39 @@ implements it):
 - **A2A: deferred.** Once the MCP path works, the same model can be exposed through the
   [A2A protocol][a2a] if an agent needs it. That is not planned for now.
 
+As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
+
+- **Names.** The tools are `sessions_list`, `sessions_start`, `sessions_send`,
+  `sessions_get`, `sessions_attach`, `sessions_fork`, `sessions_interrupt`,
+  `sessions_handoff`, `sessions_list_approvals`, `sessions_approve` and
+  `sessions_deny`: an underscore, not a dot, because the registry's names are also the
+  harness's and the Messages API allows only `^[a-zA-Z0-9_-]{1,64}$` in a tool name
+  ([tool use](https://docs.claude.com/en/docs/agents-and-tools/tool-use/implement-tool-use)).
+  They are registry tools, on both projections (§5.1).
+- **Tiers (§8.1).** Reads are `read`. Start, send, fork, interrupt and handoff change
+  only ScadBuddy's own session state and are `write`. Approve and deny are `outward`
+  and, like `confirm_action`, are the approval path and not gated again.
+- **Principal.** Every call acts as its caller (`ownerOf`), under the manager's rules
+  above. A turn a token sends runs its in-process tools with that token's tiers
+  (`SendOptions.tiers`, `tools/harness.ts` `turnPrincipal`); without them a
+  non-browser owner's turns are `read` only.
+- **Watching.** `sessions_get` returns status, owner, pending approvals and the
+  transcript after a seq, with streamed text joined per message; `sessions_attach`
+  long-polls the event log (at most 300 s) and returns once events pause. Start and
+  send can wait for their turn (at most 600 s), reporting MCP progress.
+- **Inside a session** the tools run as the session's owner, but deciding an approval
+  and handing off are refused there: they are the owner's decisions, and a model
+  running as the browser user would otherwise approve its own calls.
+- **The per-token grant** is `ai_mcp_tokens.approval_grant`
+  (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off by
+  default and allowed only on an `outward` token, set when the token is minted
+  (`POST /api/v1/ai/mcp-tokens` `approval_grant`). `auth/tokens.ts`
+  `approvalGrantCheck` reads it on every decision, for bearer tokens only; §8.2's
+  rules (`approvals/service.ts` `authorize`) do the rest.
+- **Not built:** a skill on `sessions_start` (session queries have no Skill tool,
+  `tools: []`); tiers for a resumed orphan approval of a token-owned session (it runs
+  `read` only); the grant's checkbox in Settings.
+
 ## 7. Events
 
 The Python backend gets a small typed event bus. Every state change publishes
@@ -588,6 +624,20 @@ Two independent consumers `LISTEN` on the channel, each on its own connection
 - **The agent service** fans them out to MCP resource subscriptions
   (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
   sockets under `/api/v1/ai/*`.
+
+As built for `session.*` (#300, `agent/src/sessions/busEvents.ts`): every batch a
+session appends to its event log is one NOTIFY on `scadbuddy_events`, after it
+commits: `{ id, at, kind, session_id, seq, status?, replica }` with the kinds
+`session.started`, `session.owner`, `session.waiting`, `session.done` and
+`session.message` (streamed text, throttled to one per 100 ms per session). They are
+not rows in the backend's `events` log (its lock and row-count pruning are the
+backend's, and a streaming turn would flood it), so they are not replayed; a
+reconnecting agent listener reports the reconnect instead (`onReconnect`,
+`agent/src/events/bus.ts`), and session followers and subscriptions re-read. Each agent
+replica's consumer calls `EventLog.wake()` for other replicas' sessions; the event
+log's poll stays as the fallback. The backend decodes them (`SessionBusEvent`,
+`backend/scadbuddy/core/events.py`) and routes them to no WebSocket topic: the UI
+follows sessions over the agent's chat socket, which checks who may see them.
 
 The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). As
 built (`agent/src/events/pgListener.ts`), the agent LISTENs on a dedicated connection
@@ -651,7 +701,8 @@ including `disabled`. Where it is enforced:
   approvals of a session cancels the others. A decision binds to the input hash (an
   HMAC under a key derived from the key-encryption key); a changed input needs a new
   approval. Only the browser user decides, or another principal with a per-token grant
-  (§6), and never for its own calls or sessions. Interrupt, handoff and a new turn
+  (§6; as built in #300, `ai_mcp_tokens.approval_grant` and the `sessions_approve` /
+  `sessions_deny` tools), and never for its own calls or sessions. Interrupt, handoff and a new turn
   cancel a pending approval and void an approved one that was not used yet, as does
   the end of the turn it belongs to; one that nobody decides expires
   (`approval_expiry_seconds` in `ai_settings`). The code is

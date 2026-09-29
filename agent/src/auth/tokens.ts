@@ -6,6 +6,13 @@ import { type Principal, type Tier, tiersUpTo } from './principal.js'
 // each with a name, a tier and an optional expiry, shown once, stored hashed,
 // revocable, with a last-used timestamp.
 //
+// The approval grant (#300; spec §6, §8.2): a token minted with
+// `approvalGrant` may decide other agents' outward approvals through the
+// `sessions_approve` / `sessions_deny` tools (src/tools/sessions.ts), never its
+// own (approvals/service.ts `authorize`). Off by default; only an `outward`
+// token can hold it (checked here, in the route, and by the table's CHECK,
+// db/migrations/20260929T0249Z_mcp_token_approval_grant.sql).
+//
 // Persistence is Postgres only (spec §9: "All AI state lives in the #241
 // database, in `ai_*` tables"): `PostgresTokenStore` over `ai_mcp_tokens`
 // (db/migrations/20260928T0734Z_mcp_tokens.sql). There is no file or in-memory
@@ -21,9 +28,18 @@ export type TokenRecord = {
   readonly expiresAt: Date | undefined
   readonly revokedAt: Date | undefined
   readonly lastUsedAt: Date | undefined
+  /** May decide other agents' outward approvals (#300, spec §6). */
+  readonly approvalGrant: boolean
 }
 
-export type MintRequest = { name: string; tier: Tier; expiresAt?: Date | undefined }
+export type MintRequest = { name: string; tier: Tier; expiresAt?: Date | undefined; approvalGrant?: boolean }
+
+/** Why a mint is refused before it reaches the store: a grant on a token below `outward`. */
+export function mintProblem(request: MintRequest): string | undefined {
+  return request.approvalGrant && request.tier !== 'outward'
+    ? 'an approval grant needs an outward token: deciding an outward action is at least as much as taking one'
+    : undefined
+}
 
 export interface TokenStore {
   /** The principal a presented token stands for, or null when it is unknown, expired or revoked. */
@@ -33,6 +49,12 @@ export interface TokenStore {
   /** True when a live token was revoked. */
   revoke(id: string): Promise<boolean>
   list(): Promise<TokenRecord[]>
+  /**
+   * Whether the live (unrevoked, unexpired) token with this id holds the
+   * approval grant (#300). Read on every decision, so revoking the token
+   * withdraws the grant at once.
+   */
+  approvalGrant(id: string, now?: Date): Promise<boolean>
 }
 
 /** Recognisable in logs and secret scanners; the rest is 256 random bits. */
@@ -52,6 +74,7 @@ type TokenRow = {
   expires_at: Date | null
   revoked_at: Date | null
   last_used_at: Date | null
+  approval_grant: boolean
 }
 
 function recordOf(row: TokenRow): TokenRecord {
@@ -63,6 +86,7 @@ function recordOf(row: TokenRow): TokenRecord {
     expiresAt: row.expires_at ?? undefined,
     revokedAt: row.revoked_at ?? undefined,
     lastUsedAt: row.last_used_at ?? undefined,
+    approvalGrant: row.approval_grant,
   }
 }
 
@@ -110,11 +134,14 @@ export class PostgresTokenStore implements TokenStore {
   }
 
   async mint(request: MintRequest): Promise<{ token: string; record: TokenRecord }> {
+    const problem = mintProblem(request)
+    if (problem) throw new Error(problem)
     const token = newToken()
     const rows = await this.#sql<TokenRow[]>`
-      INSERT INTO ai_mcp_tokens (id, name, tier, token_hash, expires_at)
-      VALUES (${randomUUID()}, ${request.name}, ${request.tier}, ${hashToken(token)}, ${request.expiresAt ?? null})
-      RETURNING id, name, tier, created_at, expires_at, revoked_at, last_used_at`
+      INSERT INTO ai_mcp_tokens (id, name, tier, token_hash, expires_at, approval_grant)
+      VALUES (${randomUUID()}, ${request.name}, ${request.tier}, ${hashToken(token)}, ${request.expiresAt ?? null},
+              ${request.approvalGrant ?? false})
+      RETURNING id, name, tier, created_at, expires_at, revoked_at, last_used_at, approval_grant`
     return { token, record: recordOf(rows[0]!) }
   }
 
@@ -127,8 +154,18 @@ export class PostgresTokenStore implements TokenStore {
 
   async list(): Promise<TokenRecord[]> {
     const rows = await this.#sql<TokenRow[]>`
-      SELECT id, name, tier, created_at, expires_at, revoked_at, last_used_at FROM ai_mcp_tokens ORDER BY created_at, id`
+      SELECT id, name, tier, created_at, expires_at, revoked_at, last_used_at, approval_grant
+      FROM ai_mcp_tokens ORDER BY created_at, id`
     return rows.map(recordOf)
+  }
+
+  async approvalGrant(id: string, now: Date = new Date()): Promise<boolean> {
+    if (!UUID.test(id)) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM ai_mcp_tokens
+       WHERE id = ${id} AND approval_grant AND tier = 'outward' AND revoked_at IS NULL
+         AND (expires_at IS NULL OR expires_at > ${now})`
+    return rows.length > 0
   }
 }
 
@@ -150,4 +187,20 @@ export class FailClosedTokenStore implements TokenStore {
   async list(): Promise<TokenRecord[]> {
     return []
   }
+  async approvalGrant(): Promise<boolean> {
+    return false
+  }
+}
+
+/**
+ * The approval grant of a principal (approvals/service.ts `GrantCheck`):
+ * only a bearer token's (`token:<id>`) can hold one. An OIDC subject has no
+ * token row to carry a grant, and `anonymous` never gets one (spec §8.3:
+ * outward actions still need a human approval in the UI).
+ */
+export function approvalGrantCheck(tokens: Pick<TokenStore, 'approvalGrant'>) {
+  return async (principal: { kind: string; id: string }): Promise<boolean> =>
+    principal.kind === 'bearer' && principal.id.startsWith('token:')
+      ? tokens.approvalGrant(principal.id.slice('token:'.length))
+      : false
 }

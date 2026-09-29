@@ -593,6 +593,7 @@ export class ApprovalService {
     // The decision and its `approval.resolved` commit together: a parked gate
     // polling the row must not see the decision (and log the session's
     // `running`) before the event that reports it is in the log.
+    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
     const approval = await this.deps.sql.begin(async (tx) => {
       const [row] = await tx.unsafe<Row[]>(
         `UPDATE ai_approvals
@@ -613,12 +614,14 @@ export class ApprovalService {
           approved: decision === 'approved',
           ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
         })
-        await this.deps.events.append(settled.sessionId, [scrubForLog(resolved, [])], tx)
+        const events = [scrubForLog(resolved, [])]
+        logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
       }
       return settled
     })
     if (!approval) return undefined
-    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
+    // Committed: wake followers, and announce it on the bus (#300).
+    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
     this.wakeWaiters(id)
     await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
     return approval

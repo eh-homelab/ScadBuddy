@@ -93,6 +93,8 @@ describe('the resource catalogue', () => {
       { kind: 'library.removed', name: 'BOSL2', commits: [] },
       { kind: 'font.installed', family: 'Lobster Two' },
       { kind: 'settings.changed', section: 'connection' },
+      { kind: 'session.started', session_id: '0e5a3c1e-1111-4222-8333-944455556666', seq: 2 },
+      { kind: 'session.message', session_id: '0e5a3c1e-1111-4222-8333-944455556666', seq: 3 },
     ]
     for (const e of events) {
       const { uris } = affectedBy({ id: 'x', ...e })
@@ -124,6 +126,19 @@ describe('event → resource mapping', () => {
     expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'o1', slug: 'k' }).uris).toEqual([
       'scadbuddy://print/outputs/o1/progress',
     ])
+  })
+
+  it("a session's events touch it, and the list only when it moves in it (#300)", () => {
+    const session_id = '0e5a3c1e-1111-4222-8333-944455556666'
+    const one = `scadbuddy://sessions/${session_id}`
+    expect(affectedBy({ id: '1', kind: 'session.message', session_id, seq: 9 })).toEqual({ uris: [one], listChanged: false })
+    for (const kind of ['session.started', 'session.owner', 'session.waiting', 'session.done']) {
+      expect(affectedBy({ id: '1', kind, session_id, seq: 9 }), kind).toEqual({
+        uris: [one, 'scadbuddy://sessions'],
+        listChanged: false,
+      })
+    }
+    expect(affectedBy({ id: '1', kind: 'session.done' })).toEqual({ uris: [], listChanged: false })
   })
 
   it('ignores kinds it does not know and events missing their ids', () => {
@@ -186,6 +201,19 @@ describe('subscriptions and coalescing', () => {
     // After a quiet window, the next event goes out at once again.
     subs.onEvent({ id: 'late', kind: 'job.done', job_id: 'j1', slug: 'k' })
     expect(sent).toHaveLength(3)
+  })
+
+  it('re-announces session resources after the bus reconnects, and nothing else (#300)', () => {
+    const { sent, notify } = recorder()
+    const source = new MemoryEventSource()
+    const hub = new ResourceHub(source)
+    const { subscriptions } = hub.attach(notify)
+    subscriptions.add('scadbuddy://jobs/j1')
+    subscriptions.add('scadbuddy://sessions/s1')
+    subscriptions.add('scadbuddy://sessions')
+    source.reconnected()
+    expect(sent.sort()).toEqual(['scadbuddy://sessions', 'scadbuddy://sessions/s1'])
+    hub.close()
   })
 
   it('coalesces per URI, not across URIs', () => {
@@ -297,7 +325,14 @@ describe('the resource list covers the catalogue', () => {
   it('has the fixed resources the issue names', () => {
     const fixed = RESOURCES.filter((d) => !isTemplate(d)).map((d) => d.template)
     expect(fixed.sort()).toEqual(
-      ['scadbuddy://fonts', 'scadbuddy://libraries', 'scadbuddy://models', 'scadbuddy://plates', 'scadbuddy://settings'].sort(),
+      [
+        'scadbuddy://fonts',
+        'scadbuddy://libraries',
+        'scadbuddy://models',
+        'scadbuddy://plates',
+        'scadbuddy://sessions',
+        'scadbuddy://settings',
+      ].sort(),
     )
   })
 })

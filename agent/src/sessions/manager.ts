@@ -7,6 +7,7 @@ import {
   type SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
+import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -34,6 +35,7 @@ import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResul
 import type { AuditLog } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
+import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
@@ -51,16 +53,19 @@ import { PostgresSessionStore } from './store.js'
 //   handoff   move ownership explicitly
 //   attach    replay the session's events, then follow them live
 //
-// SEAMS for the tools that are not merged yet:
-//   - #251 (PR #368) registers the `sessions.*` MCP tools on top of these
-//     methods: sessions.list → list, sessions.start → start (origin 'mcp'),
-//     sessions.send → send, sessions.get → get + attach, sessions.fork → fork,
-//     sessions.interrupt → interrupt, sessions.handoff → handoff. Its
-//     `authenticate()` resolves the principal, mapped to an `Owner` here
-//     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
-//     sessions.approve/deny → approvals.decide (#258, src/approvals/service.ts),
-//     with the token's approval grant as `approvalGrants`.
-//   - #251's registry supplies `tierOf` and the in-process MCP servers
+// SEAMS:
+//   - The `sessions_*` tools (#300, src/tools/sessions.ts) sit on these
+//     methods, over /mcp and in-process alike: sessions_list → list,
+//     sessions_start → start (origin 'mcp', or 'chat' for the browser user),
+//     sessions_send → send, sessions_get → get + the event log,
+//     sessions_attach → attach, sessions_fork → fork, sessions_interrupt →
+//     interrupt, sessions_handoff → handoff, and sessions_approve/deny →
+//     approvals.decide (#258, src/approvals/service.ts) with the token's
+//     approval grant as `approvalGrants` (auth/tokens.ts `approvalGrantCheck`).
+//     The caller's principal is mapped to an `Owner` by approvals/mcp.ts
+//     `ownerOf`, and a start or send passes its tiers (`tiers` below), which
+//     the turn's in-process tools run with.
+//   - The registry supplies `tierOf` and the in-process MCP servers
 //     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
 //     Tool payloads: tool.call inputs and tool.result summaries go into the
 //     durable, multi-watcher event log, scrubbed only by sdkEvents.ts
@@ -70,8 +75,8 @@ import { PostgresSessionStore } from './store.js'
 //     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
-//   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its
-//     LISTEN handler.
+//   - `onAppend` publishes `session.*` on the bus, and main.ts's LISTEN
+//     consumer calls EventLog.wake() (busEvents.ts, #300).
 //
 // Concurrency. A turn CLAIMS its session row with one conditional UPDATE
 // (status 'running', a fresh turn_id, a lease), so two sends — on one replica
@@ -191,6 +196,8 @@ export type StartOptions = {
   prompt?: string
   /** With `prompt`: see SendOptions.context. */
   context?: string
+  /** With `prompt`: see SendOptions.tiers. */
+  tiers?: readonly Tier[]
 }
 
 export type SendOptions = {
@@ -201,7 +208,17 @@ export type SendOptions = {
    * route (routes/chat.ts `renderPageContext`).
    */
   context?: string
+  /**
+   * The sender's tiers (spec §8.1), for the turn's in-process tools: an MCP
+   * token's, as `/mcp` authenticated it for this send (tools/sessions.ts).
+   * Left out, the owner's default applies (auth/principal.ts
+   * `harnessPrincipal`: everything for the browser user, `read` otherwise).
+   */
+  tiers?: readonly Tier[]
 }
+
+/** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
+export type TurnPrincipal = { tiers?: readonly Tier[] }
 
 export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
 
@@ -219,7 +236,7 @@ export type SessionManagerDeps = {
   settings?: SettingsReader
   tierOf?: TierResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
-  mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers?: (session: SessionRecord, turn: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
   /**
    * The registered, enabled remote MCP plugins for a turn (#297), registered
@@ -267,6 +284,11 @@ export type SessionManagerDeps = {
   renewMs?: number
   /** How often followers on other replicas poll the event log (EventLog). */
   pollMs?: number
+  /**
+   * Told of every event-log append once it has committed: in production the
+   * `session.*` publisher on the event bus (busEvents.ts, #300).
+   */
+  onAppend?: AppendHook
   stderr?: (line: string) => void
 }
 
@@ -391,7 +413,10 @@ export class SessionManager {
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
-    this.events = new EventLog(deps.sql, deps.pollMs === undefined ? {} : { pollMs: deps.pollMs })
+    this.events = new EventLog(deps.sql, {
+      ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
+      ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
+    })
     this.approvals = new ApprovalService({
       sql: deps.sql,
       events: this.events,
@@ -529,7 +554,10 @@ export class SessionManager {
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     if (!prompt) return { session }
-    const turn = await this.send(id, principal, prompt, options.context ? { context: options.context } : {})
+    const turn = await this.send(id, principal, prompt, {
+      ...(options.context ? { context: options.context } : {}),
+      ...(options.tiers ? { tiers: options.tiers } : {}),
+    })
     return { session: await this.get(id, principal), turn }
   }
 
@@ -552,7 +580,10 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    return this.startTurn(record(claimed), turnId, prompt, principal, options.context ? { context: options.context } : {})
+    return this.startTurn(record(claimed), turnId, prompt, principal, {
+      ...(options.context ? { context: options.context } : {}),
+      ...(options.tiers ? { tiers: options.tiers } : {}),
+    })
   }
 
   /**
@@ -610,7 +641,7 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string } = {},
+    options: { keepResumeTurn?: string; context?: string; tiers?: readonly Tier[] } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -630,7 +661,7 @@ export class SessionManager {
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
     const query = options.context ? `${prompt}\n\n${options.context}` : prompt
-    const done = this.runTurn(session, turnId, query, local)
+    const done = this.runTurn(session, turnId, query, local, options.tiers ? { tiers: options.tiers } : {})
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.
@@ -667,6 +698,7 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     local: LocalTurn,
+    principal: TurnPrincipal,
   ): Promise<TurnOutcome> {
     const { controller } = local
     const id = session.id
@@ -819,7 +851,7 @@ export class SessionManager {
         ...(this.deps.mcpServers || browser
           ? {
               mcpServers: {
-                ...(this.deps.mcpServers ? this.deps.mcpServers(session) : {}),
+                ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
                 // The one way past the backend's agent-actor gate: a human
                 // approves one exact outward request (harness/headlessGrants.ts).
                 ...(browser

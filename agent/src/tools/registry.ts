@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import type { SessionManager } from '../sessions/manager.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 
@@ -46,6 +47,8 @@ export type ToolServices = {
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
+  /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
+  sessions?: SessionManager | undefined
 }
 
 export type ToolContext = ToolServices & {

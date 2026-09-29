@@ -193,8 +193,10 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   reachable from a harness query alone, whose seam has already stopped the call.
 - **The session's principal.** The tools run as the session owner
   (`harnessPrincipal()` in [`agent/src/auth/principal.ts`](../../agent/src/auth/principal.ts)):
-  the browser user with every tier, any other owner with `read` only, until the
-  `sessions.*` MCP tools and flows pass the tiers of the token or flow behind it.
+  the browser user with every tier, any other owner with `read` only, unless the
+  turn carries its sender's tiers: a turn sent through `sessions_start` or
+  `sessions_send` runs with the calling token's tiers (`turnPrincipal()` in
+  `tools/harness.ts`, #300). Flows do not pass theirs yet.
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -325,6 +327,35 @@ the UI approval". As built:
 - **No database.** `main.ts` falls back to the in-memory `PendingActionStore`
   ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)). Nothing can approve
   its actions, so its `confirm_action` always refuses.
+
+## Agent-to-agent control and the approval grant (#300)
+
+The `sessions_*` tools ([agent-sessions.md](agent-sessions.md),
+[`agent/src/tools/sessions.ts`](../../agent/src/tools/sessions.ts)) let another agent
+drive sessions over `/mcp`. What bounds them:
+
+- **Visibility and control** are the session manager's (`canSee()` in
+  [`agent/src/sessions/protocol.ts`](../../agent/src/sessions/protocol.ts), the claim in
+  `SessionManager.send()`): a caller sees only the sessions it owns or started, and
+  anything else answers "no session". Only the owner sends or hands off.
+- **Tiers.** Reads are `read`; start, send, fork, interrupt and handoff are `write`;
+  approve and deny are `outward`. A token's session turns run with that token's tiers,
+  never more.
+- **The approval grant** is per token (`ai_mcp_tokens.approval_grant`), off by default,
+  `outward` tokens only (route check and table `CHECK`), read on every decision so a
+  revoke withdraws it. `ApprovalService.authorize` still refuses a grant holder's own
+  calls and sessions (spec §8.2: "never for its own calls or sessions"). OIDC subjects
+  and `anonymous` never hold it.
+- **Not from inside a session.** The same tools are offered to a session's model as the
+  session's owner, but deciding an approval and handing off are refused there
+  (`notInHarness()`): a model running as the browser user could otherwise approve its
+  own outward calls.
+- **Resource subscriptions** to `scadbuddy://sessions/{id}` read the session first, so
+  nobody can follow a session it may not see. Notifications carry only the URI.
+- **`session.*` events** carry ids and a seq, never content
+  ([`agent/src/sessions/busEvents.ts`](../../agent/src/sessions/busEvents.ts)). Anyone
+  who can LISTEN on the database can see that sessions are active and when; that is the
+  same exposure as every other event on the channel (spec §7).
 
 ## Envelope encryption and AAD binding
 

@@ -140,9 +140,12 @@ export function auditedTokenStore(store: TokenStore, audit: AuditSink, context: 
   return {
     verify: (token, now) => store.verify(token, now),
     list: () => store.list(),
+    approvalGrant: (id, now) => store.approvalGrant(id, now),
     async mint(request: MintRequest) {
       const startedAt = new Date()
-      const describe = `"${request.name}" (${request.tier}${request.expiresAt ? `, expires ${request.expiresAt.toISOString()}` : ''})`
+      const describe =
+        `"${request.name}" (${request.tier}${request.approvalGrant ? ', approval grant' : ''}` +
+        `${request.expiresAt ? `, expires ${request.expiresAt.toISOString()}` : ''})`
       const minted = await store.mint(request)
       await audit.record({
         ...base,
