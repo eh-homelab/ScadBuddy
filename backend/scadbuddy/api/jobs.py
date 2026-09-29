@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
@@ -35,6 +35,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
+from scadbuddy.render.inputs import InputsError, normalize_inputs
 from scadbuddy.render.job_models import (
     Job,
     JobNotFoundError,
@@ -71,7 +72,10 @@ ViewSize = Annotated[
 
 
 class RenderRequest(BaseModel):
-    params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: Template inputs (spec 2026-09-27 §4.3). Their `params` are what is rendered.
+    inputs: dict[str, Any] | None = None
+    #: The body before inputs: still accepted, and read as `{"params": …, "v": 0}`.
+    params: dict[str, ParamValue] | None = None
     # #90's "Customize this version": render an old revision without restoring it.
     # Omitted means the revision the model is currently at.
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
@@ -94,6 +98,9 @@ class JobStatus(BaseModel):
     status: JobState
     model_version: str | None = None
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: What the job was submitted with (spec §4.3); `{"params": …}` for a row written
+    #: before inputs existed.
+    inputs: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -141,6 +148,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         status=job.state,
         model_version=job.model_version,
         params=job.params,
+        inputs=job.inputs or {"params": job.params},
         created_at=job.created_at,
         started_at=job.started_at,
         finished_at=job.finished_at,
@@ -217,12 +225,17 @@ async def render_model(
         version=body.version,
         fetcher=fetcher,
     )
-    require_valid_params(schema, body.params)
+    try:
+        inputs = normalize_inputs(body.inputs, body.params)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    params = inputs["params"]
+    require_valid_params(schema, params)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
         # job that fails later or renders without it.
-        await asyncio.to_thread(file_assets, schema, body.params, assets, source.scad.parent)
+        await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
@@ -230,7 +243,11 @@ async def render_model(
     # the queue accepts every render and works through them.
     try:
         job = await render.submit(
-            slug, body.params, model_version=source.version, supersedes=body.supersedes
+            slug,
+            params,
+            inputs=inputs,
+            model_version=source.version,
+            supersedes=body.supersedes,
         )
     except QueueFullError as error:
         raise ApiError(
