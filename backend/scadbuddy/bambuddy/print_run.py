@@ -228,26 +228,35 @@ def _used_slots(store: OutputStore, meta: OutputMeta, plate_ids: list[int]) -> s
     return set().union(*(by_plate.get(plate, every) for plate in plate_ids)) & every
 
 
-async def _spool_sides(
-    client: BambuddyClient,
+async def _read_assignments(
+    client: BambuddyClient, printer_status: PrinterStatus | None
+) -> list[SpoolAssignment] | None:
+    """The spool assignments for the pre-upload side check (#469), or ``None``.
+
+    With no printer status no side can be told, so they aren't read. An unreadable
+    ``/inventory/assignments`` is also ``None``: every side is then unknown, as with an
+    unreadable status, rather than failing a run that used to succeed. ``None`` also
+    tells :func:`gather_plate_options` to read them itself, so a failure there still
+    surfaces the way it did before this check existed."""
+    if printer_status is None:
+        return None
+    try:
+        return await client.spool_assignments()
+    except (ApiError, ValueError):
+        logger.info("spool assignments unreadable; no spool's side is known")
+        return None
+
+
+def _spool_sides(
     plan: FilamentPlan,
     used: set[int],
     printer_id: int,
     printer_status: PrinterStatus | None,
+    assignments: list[SpoolAssignment] | None,
 ) -> list[SlotSide]:
-    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
-
-    With no printer status no side can be told, so the assignments aren't read; and an
-    unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
-    status does, rather than failing a run that used to succeed."""
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469)."""
     own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
-    assignments: list[SpoolAssignment] = []
-    if printer_status is not None:
-        try:
-            assignments = await client.spool_assignments()
-        except (ApiError, ValueError):
-            logger.info("spool assignments unreadable; no spool's side is known")
-    return slot_sides(own, assignments, printer_status, printer_id=printer_id)
+    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id)
 
 
 async def run_for_output(
@@ -304,7 +313,8 @@ async def run_for_output(
     # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
     used = _used_slots(store, meta, plate_ids)
-    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    assignments = await _read_assignments(client, printer_status)
+    sides = _spool_sides(request.filament_plan, used, printer_id, printer_status, assignments)
     extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
     if extruders.errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
@@ -348,6 +358,8 @@ async def run_for_output(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(meta.colors),
+        # Read once per run: the side check above already read them (#469, #480).
+        assignments=assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
