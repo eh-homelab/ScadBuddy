@@ -318,7 +318,16 @@ def test_a_pinned_library_whose_checkout_is_gone_is_a_404(
 
 
 @pytest.mark.parametrize(
-    "path", ["%2E%2E/%2E%2E/%2E%2E/secret.scad", ".git/config", "%2Fetc%2Fpasswd"]
+    "path",
+    [
+        "%2E%2E/%2E%2E/%2E%2E/secret.scad",
+        "%2E/std.scad",
+        ".git/config",
+        "sub/.hidden.scad",
+        "%2Fetc%2Fpasswd",
+        "sub//std.scad",
+        "sub%5Cstd.scad",
+    ],
 )
 def test_a_library_path_that_is_not_plain_is_refused(
     client: TestClient, model: str, library: Path, paths: DataPaths, path: str

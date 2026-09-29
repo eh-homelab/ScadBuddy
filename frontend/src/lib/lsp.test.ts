@@ -207,6 +207,23 @@ describe('definitionFile', () => {
     expect(definitionFile(`${ROOT}bad%E0.scad`, ROOT)).toBeNull()
   })
 
+  it.each([
+    '../secret.scad',
+    'parts/../../secret.scad',
+    './model.scad',
+    '%2E%2E/secret.scad',
+    'parts/%2e/helper.scad',
+    '.git/config',
+    'parts/.hidden.scad',
+    'parts%2F..%2F..%2Fsecret.scad',
+    'parts%5Chelper.scad',
+    'parts\\helper.scad',
+    'bad%00.scad',
+  ])('refuses a path that is not plain, as the backend does: %s', (path) => {
+    expect(definitionFile(`${ROOT}${path}`, ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}/${path}`, ROOT)).toBeNull()
+  })
+
   it('labels a file the way the editor names it', () => {
     expect(definitionLabel({ path: 'helper.scad' })).toBe('helper.scad')
     expect(definitionLabel({ library: 'BOSL2', path: 'shapes3d.scad' })).toBe('BOSL2/shapes3d.scad')

@@ -184,10 +184,19 @@ export interface DefinitionFile {
 /** A library's directory in its client URI: `<name>@<commit>`. */
 const LIBRARY_DIRECTORY = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63})@([0-9a-f]{40}(?:[0-9a-f]{24})?)$/
 
+/**
+ * A plain segment, as the backend's `_segments` (library/editor_files.py) takes one:
+ * not empty, no `.`/`..` or dot-file, no separator or NUL once decoded. Anything else
+ * could let the request URL's normalization move it off the `/files/` route.
+ */
+function plainSegment(segment: string): boolean {
+  return segment !== '' && !segment.startsWith('.') && !/[/\\\0]/.test(segment)
+}
+
 function decodedPath(rest: string): string | null {
   try {
     const segments = rest.split('/').map(decodeURIComponent)
-    return segments.every((segment) => segment !== '') ? segments.join('/') : null
+    return segments.every(plainSegment) ? segments.join('/') : null
   } catch {
     return null
   }
