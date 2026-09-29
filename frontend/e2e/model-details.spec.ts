@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 // Real multipart bodies through the msw worker: jsdom cannot build one, so this is
-// where the upload of a model's folder and the thumbnail PUT are exercised (#179).
+// where the upload of a model's folder and of a cover image are exercised (#179).
 const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
 
 test.describe('model details', () => {
@@ -70,9 +70,15 @@ test.describe('model details', () => {
     const dialog = page.getByRole('dialog', { name: 'Edit details' })
 
     await dialog.getByLabel('Name').fill('Gridfinity Bin 2x3')
-    await dialog
-      .getByLabel('Thumbnail (PNG)')
+    // The thumbnail comes from the template's media: uploaded in the picker, it is
+    // added to the media at once and becomes the cover.
+    await dialog.getByRole('button', { name: 'Choose…' }).click()
+    const picker = page.getByRole('dialog', { name: 'Choose the thumbnail' })
+    await picker
+      .getByLabel('Upload a file')
       .setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: PNG })
+    await expect(picker).toBeHidden()
+    await expect(dialog.getByTestId('thumbnail-state')).toContainText('cover.png becomes the cover')
     await dialog.getByLabel('README', { exact: true }).fill('# Bin\n\nPrints without supports.\n')
     await dialog.getByRole('button', { name: 'Save' }).click()
     await expect(dialog).toBeHidden()
@@ -81,8 +87,9 @@ test.describe('model details', () => {
     // One revision per change, newest first.
     const revisions = page.getByRole('button', { name: /gridfinity-bin/ })
     await expect(revisions.nth(0)).toContainText('Set gridfinity-bin README')
-    await expect(revisions.nth(1)).toContainText('Set gridfinity-bin thumbnail')
-    await expect(revisions.nth(2)).toContainText('Update gridfinity-bin metadata')
+    await expect(revisions.nth(1)).toContainText('Update gridfinity-bin metadata')
+    // The only image, so already the cover: Save had no reorder to make.
+    await expect(revisions.nth(2)).toContainText('Add media to gridfinity-bin')
 
     // In-app, not `goto`: a reload would restart the mock backend's state.
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Models' }).click()
