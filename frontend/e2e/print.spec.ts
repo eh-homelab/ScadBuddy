@@ -52,6 +52,39 @@ test.describe('print dialog', () => {
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
+  test('lists the checks with their sources, suppresses one, and still prints', async ({ page }) => {
+    const dialog = await openDialog(page)
+    const checks = dialog.getByTestId('print-checks')
+    await expect(checks.getByTestId('checks-headline')).toHaveText('2 suggestions')
+
+    const overhang = checks.getByTestId('diagnostic-SB1003')
+    await expect(overhang).toContainText('Overhangs past the support threshold')
+    await expect(overhang).toContainText('Where: a 18.0 × 8.0 × 1.0 mm region')
+    const source = overhang.getByRole('link', {
+      name: 'Bambu Studio PrintConfig.cpp: support_threshold_angle',
+    })
+    await expect(source).toHaveAttribute('target', '_blank')
+
+    // Suppressed at a scope, with the reason a suppression requires.
+    const edges = checks.getByTestId('diagnostic-SB1002:part-2')
+    await edges.getByRole('button', { name: 'Suppress…' }).click()
+    const form = edges.getByRole('form', { name: 'Suppress SB1002:part-2' })
+    await expect(form.getByRole('button', { name: 'Suppress' })).toBeDisabled()
+    await form.getByLabel('Scope').selectOption({ label: 'This template' })
+    await form.getByLabel('Reason').fill('the seam is inside the ring')
+    await form.getByRole('button', { name: 'Suppress' }).click()
+    await expect(edges).toHaveCount(0)
+    await expect(checks.getByTestId('checks-headline')).toHaveText('1 suggestion')
+    await checks.getByText('1 not shown').click()
+    await expect(checks.getByTestId('checks-set-aside')).toContainText(
+      'suppressed for This template: the seam is inside the ring',
+    )
+
+    // Advisory: Print is not held back by what the checks found.
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
   test('names a process and a slot preset in Advanced mode', async ({ page }) => {
     const dialog = await openDialog(page)
     await expect(dialog.getByLabel('Process')).toHaveCount(0)

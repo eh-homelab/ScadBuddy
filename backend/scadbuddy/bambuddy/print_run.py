@@ -9,7 +9,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -18,6 +18,12 @@ from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
+from scadbuddy.bambuddy.extruders import (
+    SlotSide,
+    plan_extruders,
+    slot_sides,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -35,6 +41,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
+from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.resolver import (
@@ -51,11 +58,11 @@ from scadbuddy.bambuddy.send import (
     resolve_print_options,
     target_for,
 )
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import plate_filaments, plates_of
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +105,9 @@ class PrintRunRequest(BaseModel):
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
-    #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
-    #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
-    #: be — a print with no project is simply one nobody filed.
+    #: The Bambuddy project this print belongs to (#79). Omitted means the remembered
+    #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
+    #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
@@ -178,11 +185,14 @@ async def filament_options_for_output(
     if printer_id is None:
         return options
     try:
-        options.nozzles = (await client.printer_status(printer_id)).nozzles
+        printer_status = await client.printer_status(printer_id)
     except (ApiError, ValueError):
         logger.info("printer status unreadable; the filament step opens with no nozzles known")
         options.nozzles = []
-    return options
+        return options
+    options.nozzles = printer_status.nozzles
+    # Each loaded spool's side, so the picker can mark one whose nozzle differs (#469).
+    return with_sides(options, printer_status)
 
 
 async def _spool_colours(
@@ -200,6 +210,66 @@ async def _spool_colours(
     ]
 
 
+class ChoosesProject(Protocol):
+    """A request body with an optional ``project_id``."""
+
+    @property
+    def project_id(self) -> int | None: ...
+
+    @property
+    def model_fields_set(self) -> set[str]: ...
+
+
+def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
+    """The request's ``project_id`` when it sent one, ``null`` included ("No project");
+    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    if "project_id" in request.model_fields_set:
+        return request.project_id
+    return settings.last_project_id
+
+
+async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
+    """The printer's live status, read once per run (#469); unreadable is ``None``."""
+    try:
+        return await client.printer_status(printer_id)
+    except (ApiError, ValueError):
+        logger.info("printer status unreadable; no nozzle or extruder is known")
+        return None
+
+
+def _used_slots(store: OutputStore, meta: OutputMeta, plate_ids: list[int]) -> set[int]:
+    """The filaments the printed plates use (#469), read from the local 3MF so the
+    check still runs before the upload. A plate the file doesn't say about counts as
+    using every filament of the model."""
+    every = set(range(1, len(meta.colors) + 1))
+    by_plate = plate_filaments(store.directory(meta.id) / MODEL_NAME)
+    return set().union(*(by_plate.get(plate, every) for plate in plate_ids)) & every
+
+
+async def _spool_sides(
+    client: BambuddyClient,
+    plan: FilamentPlan,
+    used: set[int],
+    printer_id: int,
+    printer_status: PrinterStatus | None,
+) -> tuple[list[SlotSide], list[SpoolAssignment] | None]:
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469), and
+    the assignments read for it, so the plates' read reuses them (#480).
+
+    With no printer status no side can be told, so the assignments aren't read; and an
+    unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
+    status does, rather than failing a run that used to succeed. Either way the
+    assignments are ``None``, and the plates' read tries them itself."""
+    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
+    assignments: list[SpoolAssignment] | None = None
+    if printer_status is not None:
+        try:
+            assignments = await client.spool_assignments()
+        except (ApiError, ValueError):
+            logger.info("spool assignments unreadable; no spool's side is known")
+    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
+
+
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -207,8 +277,14 @@ async def run_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    stem: str | None = None,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    ``stem`` names a copy uploaded into a project's folder (:func:`project_filename`,
+    #317). A print into a project also records its printer and nozzle for that project,
+    which is what the next Generate into it lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
@@ -250,6 +326,16 @@ async def run_for_output(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
+    # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
+    # another size pauses the printer at the first layer, so such a run is refused.
+    printer_status = await _read_status(client, printer_id)
+    used = _used_slots(store, meta, plate_ids)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
+    extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
+    if extruders.errors:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
         client,
@@ -262,10 +348,10 @@ async def run_for_output(
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # the copy is looked up by (folder, target): a project gets a copy of its own, and
     # one another project printed from is neither moved nor deleted (#316).
-    project_id = request.project_id or settings.last_project_id
+    project_id = chosen_project(request, settings)
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     library_file_id = await ensure_uploaded(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
     )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
@@ -290,6 +376,7 @@ async def run_for_output(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(meta.colors),
+        assignments=assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
@@ -323,7 +410,7 @@ async def run_for_output(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
 
     hardware = await _hardware_warnings(
-        client, printer_id, choices, printer_name=planned[0][1].printer_name
+        client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
@@ -357,6 +444,11 @@ async def run_for_output(
         )
         if warning.kind == "low-filament"
     ]
+    if project_id is not None:
+        await uploads.remember_project_target(
+            project_id,
+            ProjectTarget(printer_id=printer_id, nozzle_diameter=choices.nozzles[0].size),
+        )
     return _queued(
         client,
         outcomes,
@@ -364,19 +456,26 @@ async def run_for_output(
         project_id,
         folder_id,
         copies=copies,
-        warnings=warnings + hardware,
+        warnings=warnings + hardware + extruders.warnings,
     )
 
 
 async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
-    printer: one Bambuddy does not list, or any model but the H2C, whose presets are the
-    only ones the resolver knows (``PRINTER_MODEL``)."""
+    printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
+    offers those), or any model but the H2C, whose presets are the only ones the
+    resolver knows (``PRINTER_MODEL``)."""
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     if printer is None:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Bambuddy has no printer {printer_id}. Pick another printer.",
+        )
+    if not printer.is_active:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
+            "another printer.",
         )
     if (printer.model or "").upper() != PRINTER_MODEL:
         raise ApiError(
@@ -390,6 +489,7 @@ async def _hardware_warnings(
     client: BambuddyClient,
     printer_id: int,
     choices: PrintChoices,
+    printer_status: PrinterStatus | None,
     *,
     printer_name: str | None,
 ) -> list[FilamentWarning]:
@@ -398,11 +498,7 @@ async def _hardware_warnings(
     Advisory only: an offline printer's status and an unreadable archive list mean
     "unknown", which says nothing rather than failing the print.
     """
-    try:
-        installed = installed_nozzles(await client.printer_status(printer_id))
-    except (ApiError, ValueError):
-        logger.info("printer status unreadable; no nozzle is warned about")
-        installed = []
+    installed = installed_nozzles(printer_status)
     try:
         last = last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
     except (ApiError, ValueError):

@@ -4,7 +4,8 @@ import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
-import type { Output, PrintRunResult } from '../api/types'
+import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
+import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -39,13 +40,13 @@ async function loaded() {
   await screen.findByTestId('filament-slot-1')
 }
 
-/** Every request body of one kind, in order. */
-function watch(method: string, suffix: string) {
+/** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
+function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   const bodies: Record<string, unknown>[] = []
   const urls: string[] = []
   server.events.on('request:start', async ({ request }) => {
     const path = new URL(request.url).pathname
-    if (request.method === method && path.endsWith(suffix)) {
+    if (request.method === method && path.startsWith(prefix) && path.endsWith(suffix)) {
       urls.push(request.url)
       if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
     }
@@ -84,6 +85,49 @@ describe('PrintPicker', () => {
     expect(body.choices).toMatchObject({ nozzles: [{ size: '0.2' }, { size: '0.2' }], tier: 'fine' })
     expect(body.filament_plan.slots?.length).toBeGreaterThan(0)
     expect(body).not.toHaveProperty('pipeline_id')
+  })
+
+  /** The dialog on printer 1 as if it had no track switch, so each AMS is wired to a side. */
+  function unswitched() {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: { ...choicesView.filaments, track_switch: false },
+        }),
+      ),
+    )
+  }
+
+  it('rules out spools by the nozzle size chosen, following a change of size (#469)', async () => {
+    unswitched()
+    renderPicker()
+    const slot = await screen.findByTestId('filament-slot-2')
+    // The default 0.4: spool 9 feeds the right extruder, where the 0.2 is fitted.
+    expect(within(slot).getByTestId('spool-9')).toBeDisabled()
+    expect(within(slot).getByTestId('spool-22')).toBeEnabled()
+
+    fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+
+    await waitFor(() => expect(within(slot).getByTestId('spool-9')).toBeEnabled())
+    expect(within(slot).getByTestId('spool-22')).toBeDisabled()
+  })
+
+  it('never opens on a spool the size rules out, and swaps one a size change rules out (#469)', async () => {
+    unswitched()
+    const { user } = renderPicker()
+    // The suggestion is spool 21 (on the right's 0.2) for slot 1; at the default 0.4 it
+    // is swapped for the same blue on the shelf, which has no side to rule it out.
+    const one = await screen.findByTestId('filament-slot-1')
+    await waitFor(() => expect(within(one).getByTestId('spool-26')).toBeChecked())
+    expect(within(one).getByTestId('spool-21')).not.toBeChecked()
+
+    // Spool 22 is on the left's 0.4; at 0.2 it can't print, so the pink on the shelf
+    // takes its place rather than leaving a selection Print would be refused for.
+    const two = screen.getByTestId('filament-slot-2')
+    await user.click(within(two).getByTestId('spool-22'))
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() => expect(within(two).getByTestId('spool-27')).toBeChecked())
   })
 
   it('disables Print and names the slot when a spool has no preset for the size', async () => {
@@ -464,7 +508,7 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
   })
 
   it('reads Settings for the queue link only once a run is unanswered', async () => {
-    const { urls } = watch('GET', '/api/v1/settings')
+    const { urls } = watch('GET', '/settings', '/api/v1/')
     runAnswers(() => new HttpResponse('timeout', { status: 504 }))
     const { user } = renderPicker()
     await loaded()
@@ -1181,5 +1225,71 @@ describe('PrintPicker · Plates of a 3MF', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+  })
+})
+
+describe('PrintPicker · Checks (#284)', () => {
+  it('judges the request the dialog would print with, and again when a choice changes', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies.at(-1)).toMatchObject({
+      target: { output_id: output.id },
+      detail: 'advanced',
+      request: {
+        printer_id: 1,
+        plate_id: 1,
+        choices: { nozzles: [{ size: '0.4' }, { size: '0.4' }], bed_type: 'Textured PEI Plate' },
+        filament_plan: { force_colour_match: false },
+      },
+    })
+    expect(await screen.findByTestId('diagnostic-SB1003')).toBeVisible()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() =>
+      expect(bodies.at(-1)).toMatchObject({
+        request: { choices: { nozzles: [{ size: '0.2' }, { size: '0.2' }] } },
+      }),
+    )
+  })
+
+  it('judges an all-plates print on every plate', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { all_plates: false } }))
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+    await waitFor(() =>
+      expect(bodies.at(-1)).toMatchObject({ request: { all_plates: true, plate_id: 1 } }),
+    )
+  })
+
+  it('leaves Print enabled when a check reports a problem', async () => {
+    server.use(
+      http.post('/api/v1/analyzers/run', async ({ request }) => {
+        const body = (await request.json()) as { request: AnalysisRequest }
+        return HttpResponse.json(
+          analysisReport(output, body.request, [
+            { ...openEdgesDiagnostic, id: 'SB1001', key: 'SB1001:part-2', severity: 'error' },
+          ]),
+        )
+      }),
+    )
+    renderPicker()
+    await loaded()
+    expect(await screen.findByTestId('diagnostic-SB1001:part-2')).toHaveTextContent('Problem')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 })

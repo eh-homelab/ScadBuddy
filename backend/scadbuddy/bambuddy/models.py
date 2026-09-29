@@ -319,6 +319,12 @@ class AmsUnit(BambuddyModel):
     tray: list[AmsTray] = Field(default_factory=list)
 
 
+class FilaSwitch(BambuddyModel):
+    """``PrinterStatus.fila_switch`` — the Filament Track Switch, when one is fitted."""
+
+    installed: bool = False
+
+
 class PrinterStatus(BambuddyModel):
     """``GET /api/v1/printers/{id}/status`` — live MQTT state, 60-odd fields deep.
 
@@ -339,7 +345,11 @@ class PrinterStatus(BambuddyModel):
     nozzle_rack: list[NozzleRackSlot] = Field(default_factory=list)
     active_extruder: int = 0
     ams_mapping: list[int] = Field(default_factory=list)
+    #: ``{ams_id: extruder}`` on a printer without the Filament Track Switch; ``{}``
+    #: with one, where ``ams_switch_inlet`` names the side instead (#469).
+    ams_extruder_map: dict[str, int] = Field(default_factory=dict)
     ams_switch_inlet: dict[str, str] = Field(default_factory=dict)
+    fila_switch: FilaSwitch | None = None
     current_plate_id: int | None = None
 
 
