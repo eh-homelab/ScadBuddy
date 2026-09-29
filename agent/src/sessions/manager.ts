@@ -37,7 +37,17 @@ import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
-import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
+import {
+  canSee,
+  event,
+  type Origin,
+  type Owner,
+  ownerSeenBy,
+  publicLabel,
+  sameOwner,
+  type ServerEvent,
+  type SessionStatus,
+} from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 
@@ -50,7 +60,8 @@ import { PostgresSessionStore } from './store.js'
 //   get/list  what a principal may see
 //   fork      branch a session (SDK `forkSession`), parent recorded
 //   interrupt stop the running turn, from any replica, by any watcher
-//   handoff   move ownership explicitly
+//   handoff   move ownership explicitly: to the browser user at once, to
+//             another MCP principal as an offer only it may accept
 //   attach    replay the session's events, then follow them live
 //
 // SEAMS:
@@ -59,7 +70,8 @@ import { PostgresSessionStore } from './store.js'
 //     sessions_start → start (origin 'mcp', or 'chat' for the browser user),
 //     sessions_send → send, sessions_get → get + the event log,
 //     sessions_attach → attach, sessions_fork → fork, sessions_interrupt →
-//     interrupt, sessions_handoff → handoff, and sessions_approve/deny →
+//     interrupt, sessions_handoff → handoff, sessions_accept_handoff →
+//     acceptHandoff, sessions_cancel_handoff → cancelHandoff, and sessions_approve/deny →
 //     approvals.decide (#258, src/approvals/service.ts) with the token's
 //     approval grant as `approvalGrants` (auth/tokens.ts `approvalGrantCheck`).
 //     The caller's principal is mapped to an `Owner` by approvals/mcp.ts
@@ -114,6 +126,8 @@ function abortMessage(signal: AbortSignal): string {
 }
 
 export const DEFAULT_LEASE_MS = 60_000
+/** How long a handoff offer waits for its target (`handoff`). */
+export const HANDOFF_OFFER_TTL_MS = 60 * 60_000
 export const DEFAULT_RENEW_MS = 1_000
 
 export type SessionErrorCode =
@@ -158,11 +172,16 @@ export class SessionError extends Error {
   }
 }
 
+/** A pending handoff (`handoff`): who may accept it, and until when. */
+export type HandoffOffer = { to: Owner; until: string }
+
 export type SessionRecord = {
   id: string
   origin: Origin
   owner: Owner
   creator: Pick<Owner, 'kind' | 'id'>
+  /** The live handoff offer, if any; an expired one reads as none. */
+  offer: HandoffOffer | null
   status: SessionStatus
   title: string
   tags: string[]
@@ -278,6 +297,8 @@ export type SessionManagerDeps = {
   audit?: AuditLog
   /** How often a parked turn polls its approval for a decision made on another replica. */
   approvalPollMs?: number
+  /** How long a handoff offer lasts (HANDOFF_OFFER_TTL_MS by default). */
+  handoffOfferTtlMs?: number
   /** New sessions per owner per window (MAX_NEW_SESSIONS per NEW_SESSION_WINDOW_MS by default). */
   newSessions?: { max: number; windowMs: number }
   leaseMs?: number
@@ -300,6 +321,10 @@ type Row = {
   owner_label: string
   creator_kind: Owner['kind']
   creator_id: string
+  offer_kind: Owner['kind'] | null
+  offer_id: string | null
+  offer_label: string | null
+  offer_until: Date | null
   status: SessionStatus
   title: string
   tags: string[]
@@ -314,8 +339,15 @@ type Row = {
   updated_at: Date
 }
 
-const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, title, tags,
-  scope, parent_id, max_turns, budget_usd, cost_usd, turns,
+/** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
+const LIVE_OFFER = 'pending_owner_until > now()'
+
+const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
+  CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
+  CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
+  CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
+  CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
+  status, title, tags, scope, parent_id, max_turns, budget_usd, cost_usd, turns,
   (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
 
 function record(row: Row): SessionRecord {
@@ -324,6 +356,10 @@ function record(row: Row): SessionRecord {
     origin: row.origin,
     owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
     creator: { kind: row.creator_kind, id: row.creator_id },
+    offer:
+      row.offer_kind && row.offer_id && row.offer_label && row.offer_until
+        ? { to: { kind: row.offer_kind, id: row.offer_id, label: row.offer_label }, until: row.offer_until.toISOString() }
+        : null,
     status: row.status,
     title: row.title,
     tags: row.tags,
@@ -363,15 +399,19 @@ export function titleFrom(prompt: string): string {
 
 /**
  * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
- * creator filter is served by the ai_sessions_owner and ai_sessions_creator
- * indexes (db/migrations/20260928T0107Z_sessions.sql).
+ * creator-or-offered filter is served by the ai_sessions_owner,
+ * ai_sessions_creator (db/migrations/20260928T0107Z_sessions.sql) and
+ * ai_sessions_pending_owner (20260929T1825Z_session_handoff_offers.sql) indexes.
  */
 export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
   const where: string[] = []
   const params: (string | number)[] = []
   if (principal.kind !== 'browser') {
     params.push(principal.kind, principal.id)
-    where.push('((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2))')
+    where.push(
+      '((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2)' +
+        ` OR (pending_owner_kind = $1 AND pending_owner_id = $2 AND ${LIVE_OFFER}))`,
+    )
   }
   if (filter.status) {
     params.push(filter.status)
@@ -617,7 +657,7 @@ export class SessionManager {
         return { resumed: false, reason: 'the approval was already withdrawn, used or out of time' }
       }
       const prompt =
-        `${by.label} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
+        `${publicLabel(by)} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
         'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
         'and is used once. If you no longer need it, say so instead.'
       await this.startTurn(record(claimed), turnId, prompt, by, { keepResumeTurn: turnId })
@@ -677,7 +717,8 @@ export class SessionManager {
     if (!sameOwner(principal, now.owner)) {
       return new SessionError(
         'forbidden',
-        `session ${id} is controlled by ${now.owner.label}; only its owner can send, so take it over with a handoff first`,
+        `session ${id} is controlled by ${ownerSeenBy(principal, now.owner).label}; only its owner can send, so ` +
+          'take it over with a handoff first',
       )
     }
     if (now.status === 'done') return new SessionError('closed', `session ${id} is done`)
@@ -1010,13 +1051,13 @@ export class SessionManager {
       // finishing by itself, so this interrupt stops nothing.
       if (local.settling) return false
       // Its pending approvals are cancelled as it finishes (finish()).
-      local.controller.abort(new Error(`interrupted by ${principal.label}`))
+      local.controller.abort(new Error(`interrupted by ${publicLabel(principal)}`))
       return true
     }
     if (!session.turnActive) {
       // No turn: all an interrupt can stop is an approval left pending by a
       // turn that is gone (a restart), which would otherwise resume it.
-      return (await this.approvals.cancelPending(id, `interrupted by ${principal.label}`)) > 0
+      return (await this.approvals.cancelPending(id, `interrupted by ${publicLabel(principal)}`)) > 0
     }
     // Running on another replica: its lease renewal sees the flag.
     const rows = await this.deps.sql`
@@ -1026,31 +1067,135 @@ export class SessionManager {
   }
 
   /**
-   * Moves ownership to `to`. Explicit only (spec §6): the owner may hand the
-   * session to anyone, and the browser user may take over any session (the
-   * panel's `session.handoff`, #256). Nobody else can move it.
+   * Moves ownership explicitly (spec §6 "Handoff"). What `to` asks for:
+   *
+   *   - the actor itself: the browser user takes over any session (the panel's
+   *     `session.handoff`, #256); the owner already has it; the target of a
+   *     live offer ACCEPTS it. Nobody else can take a session.
+   *   - the browser user: the owner hands it to the human at once, who may
+   *     take any session over anyway and sees every one.
+   *   - any other principal: the owner OFFERS it (PR #715 review). Nothing
+   *     moves until that principal accepts, the way `confirm_action` completes
+   *     only for the principal that prepared the call (approvals/mcp.ts): so
+   *     no principal is made the owner, and the sole sender, of a session it
+   *     never asked for. One offer at a time (a new one replaces it); it lasts
+   *     `handoffOfferTtlMs`, and is withdrawn or declined with `cancelHandoff`.
+   *
+   * Any change of owner clears the offer, and cancels the session's pending
+   * approvals: an approval asked for the previous owner's turn is not handed
+   * on (approvals/service.ts).
    */
   async handoff(id: string, actor: Owner, to: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
     const isOwner = sameOwner(actor, session.owner)
-    const takeover = actor.kind === 'browser' && sameOwner(actor, to)
-    if (!isOwner && !takeover) {
+    if (sameOwner(actor, to)) {
+      if (actor.kind === 'browser') return this.transfer(session, to)
+      if (isOwner) return session
+      if (session.offer && sameOwner(actor, session.offer.to)) return this.transfer(session, to, { accepting: true })
       throw new SessionError(
         'forbidden',
-        `session ${id} is controlled by ${session.owner.label}; only its owner can hand it off`,
+        `session ${id} is controlled by ${ownerSeenBy(actor, session.owner).label} and was not offered to you; ` +
+          'only its owner can hand it to you',
       )
     }
-    if (sameOwner(session.owner, to) && session.owner.label === to.label) return session
-    // Conditional on the owner read above, so two concurrent handoffs cannot both apply.
+    if (!isOwner) {
+      throw new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${ownerSeenBy(actor, session.owner).label}; only its owner can hand it off`,
+      )
+    }
+    if (to.kind === 'browser') return this.transfer(session, to)
+    return this.offer(session, to)
+  }
+
+  /**
+   * Accepts the live offer of a session to `actor` (the same as
+   * `handoff(id, actor, actor)` for it). Refused when nothing is offered to it.
+   */
+  async acceptHandoff(id: string, actor: Owner): Promise<SessionRecord> {
+    const session = await this.get(id, actor)
+    if (!session.offer || !sameOwner(actor, session.offer.to)) {
+      throw new SessionError('invalid', `session ${id} is not offered to you`)
+    }
+    return this.transfer(session, actor, { accepting: true })
+  }
+
+  /**
+   * Ends the live offer of a session: its owner withdraws it, its target
+   * declines it. Resolves false when there was none.
+   */
+  async cancelHandoff(id: string, actor: Owner): Promise<boolean> {
+    const session = await this.get(id, actor)
+    if (!session.offer) return false
+    const target = sameOwner(actor, session.offer.to)
+    if (!target && !sameOwner(actor, session.owner)) {
+      throw new SessionError('forbidden', `only the owner of session ${id} or the one it is offered to can cancel the offer`)
+    }
+    const { to } = session.offer
     const rows = await this.deps.sql`
-      UPDATE ai_sessions SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label}, updated_at = now()
-      WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id}`
-    if (rows.count === 0) throw new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
+      UPDATE ai_sessions
+      SET pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
+          pending_owner_until = NULL, updated_at = now()
+      WHERE id = ${id} AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
+    if (rows.count === 0) return false
+    await this.announceOwner(id)
+    return true
+  }
+
+  private async offer(session: SessionRecord, to: Owner): Promise<SessionRecord> {
+    const ttlMs = this.deps.handoffOfferTtlMs ?? HANDOFF_OFFER_TTL_MS
+    // Conditional on the owner read above, as a transfer is.
+    const rows = await this.deps.sql`
+      UPDATE ai_sessions
+      SET pending_owner_kind = ${to.kind}, pending_owner_id = ${to.id}, pending_owner_label = ${to.label},
+          pending_owner_until = now() + (${ttlMs} * interval '1 millisecond'), updated_at = now()
+      WHERE id = ${session.id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id}`
+    if (rows.count === 0) throw new SessionError('busy', `session ${session.id} changed owner meanwhile; try again`)
+    await this.announceOwner(session.id)
+    return this.get(session.id, session.owner)
+  }
+
+  private async transfer(session: SessionRecord, to: Owner, options: { accepting?: boolean } = {}): Promise<SessionRecord> {
+    const { id } = session
+    if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
+    // Conditional on the owner read above (and, accepting, on the offer still
+    // being the live one to `to`), so two concurrent handoffs cannot both apply.
+    const offerStill = options.accepting
+      ? this.deps.sql`AND pending_owner_kind = ${to.kind} AND pending_owner_id = ${to.id} AND pending_owner_until > now()`
+      : this.deps.sql``
+    const rows = await this.deps.sql`
+      UPDATE ai_sessions
+      SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label},
+          pending_owner_kind = NULL, pending_owner_id = NULL, pending_owner_label = NULL,
+          pending_owner_until = NULL, updated_at = now()
+      WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id} ${offerStill}`
+    if (rows.count === 0) {
+      throw new SessionError(
+        options.accepting ? 'invalid' : 'busy',
+        options.accepting
+          ? `session ${id} is no longer offered to you`
+          : `session ${id} changed owner meanwhile; try again`,
+      )
+    }
+    if (sameOwner(session.owner, to)) {
+      // Only the offer went (the browser user took back its own session).
+      await this.announceOwner(id)
+      return this.get(id, to)
+    }
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
-    // An approval asked for the previous owner's turn is not handed on
-    // (approvals/service.ts): the parked call is refused.
-    await this.approvals.cancelPending(id, `the session was handed off to ${to.label}`)
+    await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     return this.get(id, to)
+  }
+
+  /**
+   * Announces a change to a session's offer as `session.owner` on the bus
+   * (busEvents.ts), so a watcher of the session or of the list re-reads it. An
+   * offer is state on the session row, not a transcript event (the panel's
+   * protocol has none for it), so nothing is appended.
+   */
+  private async announceOwner(id: string): Promise<void> {
+    const session = await this.row(id)
+    if (session) await this.events.announce(id, [event({ type: 'session.owner', sessionId: id, owner: session.owner })])
   }
 
   /**

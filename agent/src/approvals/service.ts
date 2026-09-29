@@ -339,6 +339,8 @@ function refusal(approval: ApprovalRecord): string {
 type SessionAccess = {
   owner: Owner
   creator: Pick<Owner, 'kind' | 'id'>
+  /** A live handoff offer's target, who may see the session too (sessions/protocol.ts `canSee`). */
+  offer: { to: Pick<Owner, 'kind' | 'id'> } | null
   status: string
   turnId: string | null
   turnActive: boolean
@@ -422,18 +424,24 @@ export class ApprovalService {
         owner_label: string
         creator_kind: Owner['kind']
         creator_id: string
+        offer_kind: Owner['kind'] | null
+        offer_id: string | null
         status: string
         turn_id: string | null
         turn_active: boolean
       }[]
     >`
-      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id, status, turn_id,
+      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id,
+             CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
+             CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id,
+             status, turn_id,
              (turn_id IS NOT NULL AND lease_until > now()) AS turn_active
       FROM ai_sessions WHERE id = ${id}`
     if (!row) return undefined
     return {
       owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
       creator: { kind: row.creator_kind, id: row.creator_id },
+      offer: row.offer_kind && row.offer_id ? { to: { kind: row.offer_kind, id: row.offer_id } } : null,
       status: row.status,
       turnId: row.turn_id,
       turnActive: row.turn_active,

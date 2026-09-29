@@ -85,6 +85,16 @@ export class EventLog {
     this.onAppend?.(sessionId, events, seqs.at(-1) ?? 0)
   }
 
+  /**
+   * Announces a change to the session row that is not a transcript event (a
+   * handoff offer, manager.ts) on the bus, as a batch of `events` at the log's
+   * current seq; nothing is appended, so local followers have nothing new.
+   */
+  async announce(sessionId: string, events: readonly ServerEvent[]): Promise<void> {
+    if (!this.onAppend) return
+    this.onAppend(sessionId, events, await this.lastSeq(sessionId))
+  }
+
   /** Events after `afterSeq`, oldest first. */
   async read(sessionId: string, afterSeq = 0, limit = PAGE): Promise<LoggedEvent[]> {
     const rows = await this.sql<{ seq: string; event: string }[]>`

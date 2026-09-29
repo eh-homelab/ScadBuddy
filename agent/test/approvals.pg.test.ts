@@ -297,7 +297,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await m.approvals.decide(browser, approval.id, true)
     await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
     expect(await m.interrupt(session.id, browser)).toBe(false)
-    await m.handoff(session.id, agentA, agentB)
+    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
     const turn = await m.send(session.id, agentB, 'print the box')
     await turn.done
     const [{ turn_id: none } = { turn_id: null }] = await db.sql<{ turn_id: string | null }[]>`SELECT turn_id FROM ai_sessions WHERE id = ${session.id}`
@@ -315,7 +315,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
       await db.sql`UPDATE ai_approvals SET decision = 'approved', decided_at = now(), usable_until = now() + interval '1 hour',
                    resume_turn_id = ${turnA} WHERE id = ${approval.id}`
       if (end === 'interrupt') expect(await m.interrupt(session.id, browser)).toBe(true)
-      else await m.handoff(session.id, agentA, agentB)
+      else await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
       const after = await m.approvals.get(approval.id, browser)
       expect(after.revokedAt).not.toBeNull()
       expect(await m.approvals.consume(session.id, turnA, approval.tool, approval.inputHash)).toBeUndefined()
@@ -381,8 +381,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('handing off a session cancels its pending approval', async () => {
     const { session, approval } = await orphan()
-    await m.handoff(session.id, agentA, agentB)
-    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'the session was handed off to Agent B' })
+    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
+    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'the session was handed off to another MCP token' })
   })
 
   it('lists by visibility: the browser sees all, an agent only its own sessions', async () => {

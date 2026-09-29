@@ -23,7 +23,9 @@ import type { HarnessRun } from '../src/harness/run.js'
 // on `scadbuddy_events`. The issue's tests: start from MCP → watch → hand off
 // → continue in the browser; concurrent sends are rejected; an approval from
 // an agent without the grant is refused; session events reach MCP
-// subscribers; and a watcher on another replica is woken by the bus.
+// subscribers; and a watcher on another replica is woken by the bus. And the
+// PR #715 review's: a handoff to another agent is an offer only it accepts,
+// and no caller is shown another principal's id.
 
 type Result = { isError?: boolean; content: { type: string; text?: string }[] }
 
@@ -329,6 +331,139 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await until(() => reconnects === 1, 'the reconnect')
     })
 
+    it('offers a session to another agent, which alone may accept it; A cannot force it or see B\'s id after', async () => {
+      const { agent, bus } = await setup()
+      const a = await agent('write')
+      const b = await agent('write')
+      const c = await agent('write')
+      const ownerEvents: string[] = []
+      const stop = bus.follow({
+        onEvent: (e) => {
+          if (e.kind === 'session.owner' && typeof e.session_id === 'string') ownerEvents.push(e.session_id)
+        },
+        onResync: () => {},
+        onReconnect: () => {},
+      })
+      closers.push(async () => stop())
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { prompt: 'hi', wait_seconds: 10 }))
+      const id = session.id
+
+      // A offers it to B: nothing moves yet, and the offer is announced.
+      const offered = ok<{ owner: { kind: string; id?: string }; offer: { to: { id?: string }; until: string } }>(
+        await a.call('sessions_handoff', { session_id: id, to: b.owner.id }),
+      )
+      expect(offered.owner).toEqual(a.owner)
+      expect(Date.parse(offered.offer.until)).toBeGreaterThan(Date.now())
+      // A named B, but is shown only B's kind.
+      expect(offered.offer.to).toEqual({ kind: 'bearer', label: 'another MCP token' })
+      await until(() => ownerEvents.includes(id), 'the offer on the bus')
+
+      // B sees it, flagged, and may read it before deciding; it may not send yet.
+      const listed = ok<{ id: string; offered_to_you: boolean; offer: { to: unknown }; owner: { id?: string } }[]>(
+        await b.call('sessions_list'),
+      )
+      expect(listed).toHaveLength(1)
+      expect(listed[0]).toMatchObject({ id, offered_to_you: true, offer: { to: b.owner } })
+      // B is shown A by kind only.
+      expect(listed[0]!.owner).toEqual({ kind: 'bearer', label: 'another MCP token' })
+      ok(await b.call('sessions_get', { session_id: id }))
+      expect(errorText(await b.call('sessions_send', { session_id: id, text: 'mine?' }))).toMatch(
+        /controlled by another MCP token/,
+      )
+      expect(ok<{ offered_to_you: boolean }[]>(await a.call('sessions_list'))[0]!.offered_to_you).toBe(false)
+
+      // A cannot accept on B's behalf, and a third agent cannot see it at all.
+      expect(errorText(await a.call('sessions_accept_handoff', { session_id: id }))).toMatch(/not offered to you/)
+      for (const [name, args] of [
+        ['sessions_accept_handoff', { session_id: id }],
+        ['sessions_handoff', { session_id: id, to: c.owner.id }],
+        ['sessions_cancel_handoff', { session_id: id }],
+      ] as const) {
+        expect(errorText(await c.call(name, args)), name).toMatch(new RegExp(`no session ${id}`))
+      }
+      expect(ok<unknown[]>(await c.call('sessions_list'))).toEqual([])
+
+      // B accepts: it owns the session now, and alone may send.
+      ownerEvents.length = 0
+      const accepted = ok<{ owner: unknown; offer: unknown; offered_to_you: boolean }>(
+        await b.call('sessions_accept_handoff', { session_id: id }),
+      )
+      expect(accepted).toMatchObject({ owner: b.owner, offer: null, offered_to_you: false })
+      await until(() => ownerEvents.includes(id), 'the new owner on the bus')
+      ok(await b.call('sessions_send', { session_id: id, text: 'b here', wait_seconds: 10 }))
+      expect(errorText(await a.call('sessions_send', { session_id: id, text: 'x' }))).toMatch(/controlled by another MCP token/)
+
+      // A still sees the session it started, but nowhere B's id.
+      const seen = await a.call('sessions_get', { session_id: id })
+      const asA = ok<{ session: { owner: unknown }; transcript: Record<string, unknown>[] }>(seen)
+      expect(asA.session.owner).toEqual({ kind: 'bearer', label: 'another MCP token' })
+      expect(asA.transcript).toContainEqual(
+        expect.objectContaining({ type: 'session.owner', owner: { kind: 'bearer', label: 'another MCP token' } }),
+      )
+      expect(asA.transcript).toContainEqual(
+        expect.objectContaining({ type: 'user.turn', text: 'b here', author: { kind: 'bearer', label: 'another MCP token' } }),
+      )
+      const bId = b.owner.id.slice('token:'.length)
+      expect(JSON.stringify(seen)).not.toContain(bId)
+      expect(JSON.stringify(await a.call('sessions_list'))).not.toContain(bId)
+      const resource = await a.client.readResource({ uri: `scadbuddy://sessions/${id}` })
+      expect(JSON.stringify(resource)).not.toContain(bId)
+      // And B, the owner now, does not see A's.
+      expect(JSON.stringify(await b.call('sessions_get', { session_id: id }))).not.toContain(a.owner.id.slice('token:'.length))
+    })
+
+    it('lets the owner withdraw an offer and the target decline one', async () => {
+      const { agent } = await setup()
+      const a = await agent('write')
+      const b = await agent('write')
+      for (const who of ['owner', 'target'] as const) {
+        const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: who }))
+        ok(await a.call('sessions_handoff', { session_id: session.id, to: b.owner.id }))
+        const canceller = who === 'owner' ? a : b
+        expect(ok(await canceller.call('sessions_cancel_handoff', { session_id: session.id }))).toEqual({ cancelled: true })
+        expect(ok(await a.call('sessions_cancel_handoff', { session_id: session.id }))).toEqual({ cancelled: false })
+        // The offer is gone: B no longer sees the session, nor can it accept it.
+        expect(errorText(await b.call('sessions_accept_handoff', { session_id: session.id }))).toMatch(/no session/)
+        expect(errorText(await b.call('sessions_handoff', { session_id: session.id, to: b.owner.id }))).toMatch(/no session/)
+        const kept = ok<{ session: unknown }>(await a.call('sessions_get', { session_id: session.id }))
+        expect(kept).toMatchObject({ session: { owner: a.owner, offer: null } })
+      }
+      expect(ok<unknown[]>(await b.call('sessions_list'))).toEqual([])
+    })
+
+    it('ends an offer when ownership changes or it expires; the browser still takes a session back', async () => {
+      const { agent, sessions } = await setup()
+      const a = await agent('write')
+      const b = await agent('write')
+
+      // A hands the offered session to the browser user instead: the offer goes with the change.
+      const one = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'one' })).session.id
+      ok(await a.call('sessions_handoff', { session_id: one, to: b.owner.id }))
+      ok(await a.call('sessions_handoff', { session_id: one, to: 'browser' }))
+      expect(errorText(await b.call('sessions_accept_handoff', { session_id: one }))).toMatch(/no session/)
+      expect((await sessions.get(one, BROWSER_USER)).offer).toBeNull()
+
+      // The browser user takes a session back while it is offered (the chat
+      // socket's session.handoff): it owns it, and the offer is gone.
+      const two = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'two' })).session.id
+      ok(await a.call('sessions_handoff', { session_id: two, to: b.owner.id }))
+      const taken = await sessions.handoff(two, BROWSER_USER, BROWSER_USER)
+      expect(taken).toMatchObject({ owner: BROWSER_USER, offer: null })
+      expect(errorText(await b.call('sessions_handoff', { session_id: two, to: b.owner.id }))).toMatch(/no session/)
+      await (await sessions.send(two, BROWSER_USER, 'mine again')).done
+      // Taking back a session it already owns changes nothing.
+      expect((await sessions.handoff(two, BROWSER_USER, BROWSER_USER)).owner).toEqual(BROWSER_USER)
+
+      // An offer that has run out is none: not listed, not acceptable.
+      const three = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'three' })).session.id
+      ok(await a.call('sessions_handoff', { session_id: three, to: b.owner.id }))
+      expect(ok<unknown[]>(await b.call('sessions_list'))).toHaveLength(1)
+      await db.sql`UPDATE ai_sessions SET pending_owner_until = now() - interval '1 second' WHERE id = ${three}`
+      expect(ok<unknown[]>(await b.call('sessions_list'))).toEqual([])
+      expect(errorText(await b.call('sessions_accept_handoff', { session_id: three }))).toMatch(/no session/)
+      expect(ok<{ session: { offer: unknown } }>(await a.call('sessions_get', { session_id: three })).session.offer).toBeNull()
+    })
+
     it('in the harness, refuses to decide approvals or hand a session off', async () => {
       const { sessions } = await setup()
       const svc = services({ sessions })
@@ -345,6 +480,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ['sessions_approve', { approval_id: session.id }],
         ['sessions_deny', { approval_id: session.id }],
         ['sessions_handoff', { session_id: session.id, to: 'token:0e5a3c1e-1111-4222-8333-944455556666' }],
+        ['sessions_accept_handoff', { session_id: session.id }],
+        ['sessions_cancel_handoff', { session_id: session.id }],
       ] as const) {
         const result = (await runTool(byName.get(name)!, args, ctx)) as Result
         expect(errorText(result), name).toMatch(/a session model cannot make it/)

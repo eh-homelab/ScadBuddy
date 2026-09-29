@@ -336,9 +336,27 @@ drive sessions over `/mcp`. What bounds them:
 
 - **Visibility and control** are the session manager's (`canSee()` in
   [`agent/src/sessions/protocol.ts`](../../agent/src/sessions/protocol.ts), the claim in
-  `SessionManager.send()`): a caller sees only the sessions it owns or started, and
-  anything else answers "no session". Only the owner sends or hands off.
-- **Tiers.** Reads are `read`; start, send, fork, interrupt and handoff are `write`;
+  `SessionManager.send()`): a caller sees only the sessions it owns or started, or that
+  are offered to it, and anything else answers "no session". Only the owner sends or
+  hands off.
+- **Handoff to another agent is an offer** (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715#issuecomment-5896053771)):
+  `sessions_handoff` used to make any principal it named the owner, so a `write` token
+  could make another agent the sole sender of a session that agent never asked for, a
+  prompt-injection channel across a trust boundary. Now only a handoff to the browser
+  user moves at once; to an MCP principal it records a pending offer
+  (`ai_sessions.pending_owner_*`) that only that principal can accept
+  (`sessions_accept_handoff`, as `confirm_action` completes only for the principal that
+  prepared it), that the owner can withdraw and the target decline
+  (`sessions_cancel_handoff`), and that ends after an hour or on any change of owner
+  ([agent-sessions.md §2.1](agent-sessions.md#21-handoff-to-another-agent-is-an-offer)).
+- **Principal ids are the caller's own.** The same review: a session's creator keeps
+  seeing it, and saw the new owner's id, which is what a handoff addresses. The tools
+  and the session resources show every principal but the caller by kind and a label
+  that does not name it (`ownerSeenBy()` in `protocol.ts`); only the browser user sees
+  ids ([agent-sessions.md §2.2](agent-sessions.md#22-principal-ids)).
+- **Tiers.** Reads are `read`; start, send, fork, interrupt and handoff (offer, accept,
+  withdraw, decline) are `write`;
   approve and deny are `outward`. A token's session turns run with that token's tiers,
   never more.
 - **The approval grant** is per token (`ai_mcp_tokens.approval_grant`), off by default,
@@ -347,7 +365,8 @@ drive sessions over `/mcp`. What bounds them:
   calls and sessions (spec §8.2: "never for its own calls or sessions"). OIDC subjects
   and `anonymous` never hold it.
 - **Not from inside a session.** The same tools are offered to a session's model as the
-  session's owner, but deciding an approval and handing off are refused there
+  session's owner, but deciding an approval and handing off, accepting or declining a
+  handoff are refused there
   (`notInHarness()`): a model running as the browser user could otherwise approve its
   own outward calls.
 - **Resource subscriptions** to `scadbuddy://sessions/{id}` read the session first, so

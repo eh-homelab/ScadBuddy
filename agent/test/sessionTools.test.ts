@@ -29,6 +29,8 @@ describe('the sessions_* tools', () => {
       sessions_fork: 'write',
       sessions_interrupt: 'write',
       sessions_handoff: 'write',
+      sessions_accept_handoff: 'write',
+      sessions_cancel_handoff: 'write',
       sessions_approve: 'outward',
       sessions_deny: 'outward',
     })

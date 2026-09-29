@@ -575,13 +575,13 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
 
 - **Names.** The tools are `sessions_list`, `sessions_start`, `sessions_send`,
   `sessions_get`, `sessions_attach`, `sessions_fork`, `sessions_interrupt`,
-  `sessions_handoff`, `sessions_list_approvals`, `sessions_approve` and
-  `sessions_deny`: an underscore, not a dot, because the registry's names are also the
+  `sessions_handoff`, `sessions_accept_handoff`, `sessions_cancel_handoff`,
+  `sessions_list_approvals`, `sessions_approve` and `sessions_deny`: an underscore, not a dot, because the registry's names are also the
   harness's and the Messages API allows only `^[a-zA-Z0-9_-]{1,64}$` in a tool name
   ([tool use](https://docs.claude.com/en/docs/agents-and-tools/tool-use/implement-tool-use)).
   They are registry tools, on both projections (§5.1).
-- **Tiers (§8.1).** Reads are `read`. Start, send, fork, interrupt and handoff change
-  only ScadBuddy's own session state and are `write`. Approve and deny are `outward`
+- **Tiers (§8.1).** Reads are `read`. Start, send, fork, interrupt and handoff (offer,
+  accept, withdraw, decline) change only ScadBuddy's own session state and are `write`. Approve and deny are `outward`
   and, like `confirm_action`, are the approval path and not gated again.
 - **Principal.** Every call acts as its caller (`ownerOf`), under the manager's rules
   above. A turn a token sends runs its in-process tools with that token's tiers
@@ -592,8 +592,27 @@ As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
   long-polls the event log (at most 300 s) and returns once events pause. Start and
   send can wait for their turn (at most 600 s), reporting MCP progress.
 - **Inside a session** the tools run as the session's owner, but deciding an approval
-  and handing off are refused there: they are the owner's decisions, and a model
-  running as the browser user would otherwise approve its own calls.
+  and handing off, accepting or declining a handoff are refused there: they are the
+  owner's decisions, and a model running as the browser user would otherwise approve
+  its own calls.
+- **Handoff to another agent is an offer** (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715#issuecomment-5896053771)).
+  "Explicitly" above now means the receiving principal agrees too: a handoff to the
+  browser user moves at once (it may take any session over and sees every one), but to
+  an MCP principal it records a pending offer (`ai_sessions.pending_owner_*`,
+  `agent/src/db/migrations/20260929T1825Z_session_handoff_offers.sql`) that only that
+  principal accepts, as `confirm_action` completes only for the principal that
+  prepared the call (§8.2). The owner withdraws it and the target declines it
+  (`sessions_cancel_handoff`); it expires after an hour and ends on any change of
+  owner. The target sees offered sessions in `sessions_list` (`offered_to_you`).
+  Otherwise one `write` token could make another agent the sole sender of content it
+  never asked for. The MCP tools spec asks servers to "implement proper access
+  controls" on tool calls
+  ([Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#security-considerations)).
+- **Principal ids.** Over `/mcp` a caller is shown only its own principal id: every
+  other principal in a session, its transcript or its approvals is shown by kind and a
+  label that does not name it (`agent/src/sessions/protocol.ts` `ownerSeenBy`), since
+  an id is what a handoff addresses. The browser user sees every id.
 - **The per-token grant** is `ai_mcp_tokens.approval_grant`
   (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off by
   default and allowed only on an `outward` token, set when the token is minted
