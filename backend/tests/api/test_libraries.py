@@ -26,6 +26,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import libraries as libraries_api
 from scadbuddy.api.deps import (
     INSTALL_CONCURRENCY,
     STATE_ATTR,
@@ -42,6 +43,7 @@ from scadbuddy.library.libraries import (
     LibraryStore,
     ModelLibrary,
 )
+from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
 from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream
@@ -1378,3 +1380,165 @@ def test_a_sweep_that_cannot_read_the_history_removes_nothing(
 
     assert unpinned.is_dir()
     assert "could not sweep library checkouts" in caplog.text
+
+
+# ── the upgrade flow's building blocks (#169) ────────────────────────────────
+
+
+def test_a_librarys_users_are_the_models_that_pin_it_now(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]], tmp_path: Path
+) -> None:
+    url, commits = upstream
+    other, other_commits = make_library_upstream(tmp_path / "other", {"v1": "sphere(1);\n"})
+    for slug in (SLUG, "gadget", "plain", "elsewhere", "broken", "garbled"):
+        create_model(lib_client, slug)
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", "gadget", ref="v1")
+    pin(lib_client, "BOSL2", "gadget", ref="v2")  # only the current pin counts
+    pin(lib_client, "Other", "elsewhere", url=other, ref="v1")
+    pin(lib_client, "BOSL2", "broken")
+    meta_path = paths.model_meta("broken")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["libraries"][0]["commit"] = "HEAD"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    paths.model_meta("garbled").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
+
+    users = lib_client.get("/api/v1/libraries/BOSL2/users")
+    others = lib_client.get("/api/v1/libraries/Other/users")
+    nobody = lib_client.get("/api/v1/libraries/MCAD/users")
+
+    assert users.status_code == 200, users.text
+    assert sorted(users.json(), key=lambda user: user["slug"]) == [
+        # A hand-edited entry is still a user, as a removal would count it.
+        {"slug": "broken", "url": None, "ref": None, "commit": None},
+        {"slug": "gadget", "url": url, "ref": "v2", "commit": commits["v2"]},
+        # So is a model.json that is not JSON but names the library.
+        {"slug": "garbled", "url": None, "ref": None, "commit": None},
+        {"slug": SLUG, "url": url, "ref": "v1", "commit": commits["v1"]},
+    ]
+    assert others.json() == [
+        {"slug": "elsewhere", "url": other, "ref": "v1", "commit": other_commits["v1"]}
+    ]
+    assert nobody.status_code == 200
+    assert nobody.json() == []
+
+
+def check_candidate(client: TestClient, name: str, slug: str = SLUG, **body: Any) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/models/{slug}/libraries/{name}/check", json=body
+    )
+    return response
+
+
+def test_a_candidate_is_checked_without_moving_the_pin(
+    lib_client: TestClient,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    before = lib_client.get(f"/api/v1/models/{SLUG}").json()
+    meta_before = paths.model_meta(SLUG).read_bytes()
+    log = tmp_path / "openscadpath.log"
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
+
+    response = check_candidate(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 200, response.text
+    checked = response.json()
+    assert (checked["ref"], checked["commit"]) == ("v2", commits["v2"])
+    assert checked["ok"] is True
+    assert set(checked) >= {"ok", "checked", "timed_out", "diagnostics", "log_tail", "parameters"}
+    # OpenSCAD saw the candidate, not the pin.
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(paths.libraries / "BOSL2" / commits["v2"])
+    ]
+    # Nothing recorded: the same pin, the same revision, the same model.json.
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json() == before
+    assert paths.model_meta(SLUG).read_bytes() == meta_before
+
+
+def test_a_candidate_defaults_to_the_catalogue_ref(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2", ref="v2")
+
+    response = lib_client.post(f"/api/v1/models/{SLUG}/libraries/BOSL2/check")
+
+    assert response.status_code == 200, response.text
+    assert (response.json()["ref"], response.json()["commit"]) == ("v1", commits["v1"])
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"][0]["ref"] == "v2"
+
+
+def test_a_candidate_ref_that_does_not_exist_is_the_pin_routes_502(
+    lib_client: TestClient,
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+
+    checked = check_candidate(lib_client, "BOSL2", ref="v9")
+    pinned = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"})
+
+    assert checked.status_code == pinned.status_code == 502
+    assert checked.json()["detail"] == pinned.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"][0]["ref"] == "v1"
+
+
+def test_a_candidate_check_is_refused_before_a_clone(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        unknown = check_candidate(lib_client, "BOSL2", "nothing-here", ref="v2")
+        undeclared = check_candidate(lib_client, "BOSL2", ref="v2")
+        dot_dot = check_candidate(lib_client, "BOSL2", ref="v1..v2")
+
+    assert unknown.status_code == 404
+    assert "no model named" in unknown.json()["detail"]
+    assert undeclared.status_code == 404
+    assert "does not declare" in undeclared.json()["detail"]
+    assert dot_dot.status_code == 422
+
+
+def test_a_built_in_can_be_checked_against_a_candidate(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    builtin = "builtin:gizmo"
+    pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
+    paths.model_dir(builtin).mkdir(parents=True)
+    paths.model_source(builtin).write_text(SOURCE, encoding="utf-8")
+    meta = json.dumps({"name": "Gizmo", "libraries": [pinned]})
+    paths.model_meta(builtin).write_text(meta, encoding="utf-8")
+
+    response = check_candidate(lib_client, "BOSL2", builtin, ref="v2")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["commit"] == commits["v2"]
+    assert paths.model_meta(builtin).read_text(encoding="utf-8") == meta
+
+
+def test_a_candidate_check_holds_off_removals(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    held: list[int] = []
+    real = check_source
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        held.append(state.checkouts._pins)
+        return await real(*args, **kwargs)
+
+    with patch.object(libraries_api, "check_source", spy):
+        response = check_candidate(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 200, response.text
+    assert held == [1]
+    assert state.checkouts._pins == 0

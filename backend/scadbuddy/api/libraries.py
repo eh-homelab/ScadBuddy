@@ -15,6 +15,7 @@ removes the ones no revision of any model pins (``sweep_library_checkouts``).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from functools import partial
 from typing import Annotated
 
@@ -25,13 +26,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.api.deps import (
     CatalogueDep,
     CheckoutsDep,
+    ChecksDep,
+    ConfigDep,
     EventsDep,
+    FetcherDep,
     InstallsDep,
     LibrariesDep,
     PathsDep,
     SlugPath,
 )
 from scadbuddy.api.library_pins import resolve_pin
+from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
 from scadbuddy.api.models import require_mine, require_model_exists
 from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
@@ -56,7 +61,10 @@ from scadbuddy.library.libraries import (
     LibraryStore,
     ModelLibrary,
     declared_libraries,
+    resolve_search_path,
+    search_path,
 )
+from scadbuddy.library.scad import SourceCheck, check_source
 
 router = APIRouter(tags=["libraries"])
 
@@ -276,6 +284,89 @@ def unpin_library(
     return record
 
 
+class LibraryCheckRequest(BaseModel):
+    model_config = ConfigDict(regex_engine="python-re")
+
+    ref: str | None = Field(
+        default=None,
+        pattern=REF_PATTERN,
+        description="The tag or branch to check against; the catalogue's when omitted",
+    )
+
+
+class LibraryCheck(SourceCheck):
+    """``POST /models/check``'s verdict, and the candidate it was reached with."""
+
+    ref: str = Field(description="The ref the candidate was fetched at")
+    commit: str = Field(description="The commit that ref resolved to")
+
+
+@router.post(
+    "/models/{slug}/libraries/{name}/check",
+    response_model=LibraryCheck,
+    summary="Parse-check a model against another ref of a library it pins",
+    description=(
+        "A dry run of re-pinning (#169): clones the library at `ref` from the URL this "
+        "model's pin records, exactly as `PATCH` would -- the same checks, size cap and "
+        "errors -- then runs `POST /models/check`'s parse check (the customizer-schema "
+        "export) on the model's source with that checkout on `OPENSCADPATH` in place of "
+        "the pinned one, and its other pins as they are. Nothing is recorded: "
+        "`model.json` and the history are unchanged, and the checkout stays on the "
+        "volume until the boot sweep finds nothing pins it. A built-in can be checked "
+        "too. A 404 when the model does not declare the library."
+    ),
+)
+async def check_library_candidate(
+    request: Request,
+    slug: SlugPath,
+    name: LibraryName,
+    catalogue: CatalogueDep,
+    libraries: LibrariesDep,
+    installs: InstallsDep,
+    checkouts: CheckoutsDep,
+    fetcher: FetcherDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    checks: ChecksDep,
+    body: LibraryCheckRequest | None = None,
+) -> LibraryCheck:
+    require_model_exists(catalogue, slug)
+    model_dir = paths.model_dir(slug)
+    # A malformed declaration is the 409 every other reader of it gives.
+    declared = await asyncio.to_thread(declared_libraries, model_dir)
+    current = next((entry for entry in declared if entry.name == name), None)
+    if current is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
+        )
+    try:
+        source = await asyncio.to_thread(paths.model_source(slug).read_text, encoding="utf-8")
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    ref = body.ref if body is not None else None
+    # Held until the check is done, so no removal deletes the candidate (or any
+    # other checkout this resolves) while OpenSCAD reads it.
+    async with checkouts.pinning():
+        candidate = await resolve_pin(
+            name, url=current.url, ref=ref, libraries=libraries, installs=installs
+        )
+        pins = [candidate if entry.name == name else entry for entry in declared]
+        library_path = await resolve_search_path(fetcher, partial(search_path, paths, pins))
+        try:
+            checked = await unless_the_client_leaves(
+                request,
+                check_source(
+                    source,
+                    config=replace(config, library_path=library_path),
+                    limit=checks,
+                    context=model_dir,
+                ),
+            )
+        except ClientGoneError as error:
+            raise ApiError(499, str(error)) from None
+    return LibraryCheck(**checked.model_dump(), ref=candidate.ref, commit=candidate.commit)
+
+
 def _library_changed(events: EventBus, slug: str, name: str) -> None:
     emit(events, LibraryChanged(slug=slug, name=name))
     emit(events, ModelEvent(kind="model.updated", slug=slug))
@@ -301,6 +392,37 @@ async def list_installed_libraries(
 
     # Walks the volume and reads every model.json; off the loop.
     return await asyncio.to_thread(collect)
+
+
+class LibraryUser(BaseModel):
+    """A model whose live ``model.json`` pins a library, and what it pins."""
+
+    slug: str
+    url: str | None = Field(description="Null when the model's entry cannot be read as a pin")
+    ref: str | None = Field(description="Null when the model's entry cannot be read as a pin")
+    commit: str | None = Field(description="Null when the model's entry cannot be read as a pin")
+
+
+@router.get(
+    "/libraries/{name}/users",
+    response_model=list[LibraryUser],
+    summary="The models that pin a library",
+    description=(
+        "Every model, mine and built-in, whose current `model.json` pins `name`, with "
+        "the URL, ref and commit it pins. Older revisions are not counted. The same "
+        "models a removal of the library would name; one whose entry is not a readable "
+        "pin (a hand edit) is listed with nulls. Empty for a library no model pins."
+    ),
+)
+async def list_library_users(name: LibraryName, catalogue: CatalogueDep) -> list[LibraryUser]:
+    # Reads every model.json; off the loop.
+    pins = await asyncio.to_thread(catalogue.library_pins, name)
+    return [
+        LibraryUser(slug=slug, url=None, ref=None, commit=None)
+        if pin is None
+        else LibraryUser(slug=slug, url=pin.url, ref=pin.ref, commit=pin.commit)
+        for slug, pin in pins
+    ]
 
 
 @router.delete(

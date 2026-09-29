@@ -96,7 +96,7 @@ const state = {
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
-  settings: { ...fixtures.settings } as Settings,
+  settings: structuredClone(fixtures.settings) as Settings,
   /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
@@ -218,7 +218,7 @@ export function resetMockState(): void {
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
-  state.settings = { ...fixtures.settings }
+  state.settings = structuredClone(fixtures.settings)
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -292,9 +292,18 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
-/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+/** #274 — the upload limit in effect (#322: Settings can change it too). */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #322 — seeds what the print dialog remembers, for the Remembered choices table. */
+export function setMockRemembered(remembered: {
+  modelChoices?: Record<string, ModelPrintChoices>
+  printerBedTypes?: Record<string, string>
+}): void {
+  if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
+  if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
 }
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
@@ -487,8 +496,12 @@ function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: 
   return view(updated)
 }
 
-/** Job and output ids are 32 hex characters — the routes reject anything else. */
-function nextHexId(): string {
+/**
+ * Job and output ids are 32 hex characters — the routes reject anything else. One
+ * counter for every mock, feature modules (`features/`) included, reset by
+ * `resetMockState`.
+ */
+export function nextHexId(): string {
   state.seq += 1
   return state.seq.toString(16).padStart(32, '0')
 }
@@ -606,6 +619,43 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * #322 — what the print dialog remembers, as `GET /settings/remembered` answers it. The
+ * route is in `features/settings.ts`; the state is the print routes' own, so it is read here.
+ */
+export function mockRemembered() {
+  const dropEmpty = (options: PrintOptions | undefined) =>
+    Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== null && value !== undefined))
+  return {
+    model_print_choices: structuredClone(state.modelChoices),
+    printer_bed_types: { ...state.printerBedTypes },
+    print_options: dropEmpty(state.printOptions.global_options),
+    printer_print_options: structuredClone(state.printOptions.printers ?? {}),
+    model_print_options: structuredClone(state.printOptions.models ?? {}),
+  }
+}
+
+/** #322 — "Forget all": every remembered choice, and none of the settings. */
+export function forgetMockRemembered(): void {
+  state.modelChoices = {}
+  state.printerBedTypes = {}
+  state.printOptions.global_options = {}
+  state.printOptions.printers = {}
+  state.printOptions.models = {}
+}
+
+/**
+ * #322 — the settings the mock holds. Their routes are in `features/settings.ts`; the
+ * state stays here because the send, plate and upload routes read it too.
+ */
+export function mockSettings(): Settings {
+  return state.settings
+}
+
+export function setMockSettings(settings: Settings): void {
+  state.settings = settings
+}
+
 export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
@@ -619,9 +669,9 @@ export function problem(status: number, title: string, detail?: string, extensio
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -2588,8 +2638,6 @@ export const handlers = [
     return HttpResponse.json(view(updated))
   }),
 
-  http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
-
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
@@ -2602,31 +2650,6 @@ export const handlers = [
     }
     state.headlessBrowser = body.enabled
     return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
-  http.put(`${base}/settings`, async ({ request }) => {
-    const body = (await request.json()) as {
-      bambuddy_url?: string | null
-      bambuddy_api_key?: string
-      public_url?: string | null
-      library_folder_id?: number | null
-      printer_id?: number | null
-      display_unit?: Settings['display_unit'] | null
-    }
-    state.settings = {
-      ...state.settings,
-      ...body,
-      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
-      media_upload_max_bytes: state.settings.media_upload_max_bytes,
-      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
-      has_api_key:
-        body.bambuddy_api_key === undefined
-          ? state.settings.has_api_key
-          : body.bambuddy_api_key.length > 0,
-    }
-    delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
-    await delay(120)
-    return HttpResponse.json(state.settings)
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
@@ -2691,25 +2714,6 @@ export const handlers = [
     // result pass in tests and break in the browser.
     const { defaults, global_options, printers, models } = state.printOptions
     return HttpResponse.json({ defaults, global_options, printers, models })
-  }),
-
-  http.post(`${base}/settings/test`, async () => {
-    await delay(200)
-    if (!state.settings.bambuddy_url?.startsWith('http')) {
-      return problem(409, 'Conflict', 'no Bambuddy URL is configured')
-    }
-    if (!state.settings.has_api_key) {
-      return HttpResponse.json({
-        ok: false,
-        detail: "Bambuddy refused the API key when asked to list the printers. The key needs the 'Read Status' scope",
-        printers: [],
-      })
-    }
-    return HttpResponse.json({
-      ok: true,
-      detail: 'Connected. Bambuddy reports 3DP-31B-598.',
-      printers: fixtures.targets.printers,
-    })
   }),
 
   http.get(`${base}/settings/targets`, () => {
