@@ -138,14 +138,27 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'unpin_library',
-    description: 'Remove a library from a model, as a revision in its history.',
-    input: z.object({ slug, name: libraryName }),
+    description:
+      'Remove a library from a model, as a revision in its history: every entry of that name, or with ' +
+      "`index` only the invalid entry at that position (the model record's `invalid_libraries[].index`).",
+    input: z.object({
+      slug,
+      name: libraryName,
+      index: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe('Only the invalid entry at this position of `libraries`; a 409 if it is no longer one of that name'),
+    }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/libraries/{name}'],
-    handler: async ({ slug, name }, { backend }) =>
+    handler: async ({ slug, name, index }, { backend }) =>
       json(
         await ok(
-          backend.DELETE('/api/v1/models/{slug}/libraries/{name}', { params: { path: { slug, name } } }),
+          backend.DELETE('/api/v1/models/{slug}/libraries/{name}', {
+            params: { path: { slug, name }, ...(index === undefined ? {} : { query: { index } }) },
+          }),
           `unpin ${name} from ${slug}`,
         ),
       ),
