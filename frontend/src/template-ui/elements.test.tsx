@@ -104,4 +104,92 @@ describe('host custom elements', () => {
     const full = render(page({ params: {} }, vi.fn(), 'page'))
     await waitFor(() => expect(shadowOf(full.container).querySelector('[data-testid="the-preview"]')).not.toBeNull())
   })
+
+  it('mounts the preview into the first sb-preview only, and says so in the others', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-preview></sb-preview><sb-preview></sb-preview>'
+      },
+    }))
+    const { container } = render(page({ params: {} }, vi.fn(), 'page'))
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('Only the first <sb-preview>'))
+    expect(shadowOf(container).querySelectorAll('[data-testid="the-preview"]')).toHaveLength(1)
+    expect(shadowOf(container).querySelector('sb-preview')?.querySelector('[data-testid="the-preview"]')).not.toBeNull()
+  })
+
+  it('says why sb-preview is empty in the panel slot', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-preview></sb-preview>'
+      },
+    }))
+    const { container } = render(page({ params: {} }, vi.fn(), 'panel'))
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('beside the panel'))
+  })
+
+  it('falls back to the default when a bound value has the wrong type, and says so', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="padding" bind="style.padding"></sb-param>'
+      },
+    }))
+    const { container } = render(page({ params: {}, style: { padding: 'wide' } }, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).querySelector('input')).not.toBeNull())
+    expect(shadowOf(container).querySelector('input')?.value).toBe('6')
+    expect(shadowOf(container).textContent).toContain('style.padding')
+  })
+
+  it('numbers extruders from the bound values, not params alone', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="text_color" bind="style.text"></sb-param>'
+      },
+    }))
+    const inputs = { params: { body_color: '#111111', text_color: '#222222' }, style: { text: '#111111' } }
+    const { container } = render(page(inputs, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder'))
+    expect(shadowOf(container).textContent).toContain('extruder 1')
+  })
+
+  it('renders again into an element that is removed and added back', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="name"></sb-param>'
+      },
+    }))
+    const { container } = render(page({ params: { name: 'Hi' } }, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).querySelector('input')?.value).toBe('Hi'))
+    const root = shadowOf(container)
+    const el = root.querySelector('sb-param')!
+    el.remove()
+    await waitFor(() => expect(el.querySelector('input')).toBeNull())
+    root.append(el)
+    await waitFor(() => expect(el.querySelector('input')?.value).toBe('Hi'))
+  })
+
+  it('follows a name changed after mount', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="name"></sb-param>'
+      },
+    }))
+    const { container } = render(page({ params: { name: 'Hi' } }, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).querySelector('input')?.value).toBe('Hi'))
+    shadowOf(container).querySelector('sb-param')!.setAttribute('name', 'nope')
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('model.scad has no parameter “nope”'))
+    expect(shadowOf(container).querySelector('input')).toBeNull()
+  })
+
+  it('removes what it rendered into the elements on unmount', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="name"></sb-param>'
+      },
+    }))
+    const { container, unmount } = render(page({ params: { name: 'Hi' } }, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).querySelector('input')?.value).toBe('Hi'))
+    const el = shadowOf(container).querySelector('sb-param')!
+    unmount()
+    expect(el.childNodes.length).toBe(0)
+  })
 })

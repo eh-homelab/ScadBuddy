@@ -5,6 +5,7 @@ import type { JsonObject } from '../lib/inputs'
 import { useLatest } from '../lib/useLatest'
 import { defineHostElements, provideRegistry, type HostElement } from './elements'
 import { createHost, type HostDeps, type HostHandle } from './host'
+import { effectiveValues } from './bindings'
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
@@ -51,6 +52,8 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
   const slot = ui.slot ?? 'panel'
   const [elements, setElements] = useState<readonly HostElement[]>([])
   const [, setRevision] = useState(0)
+  const firstPreview = elements.find((el) => el.localName === 'sb-preview')
+  const values = elementContext ? effectiveValues(elements, elementContext) : {}
 
   useEffect(() => {
     const el = element.current
@@ -130,7 +133,16 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
       />
       {elementContext &&
         elements.map((el) =>
-          createPortal(<HostElementContent element={el} context={{ ...elementContext, slot }} />, el, keyOf(el)),
+          createPortal(
+            <HostElementContent
+              element={el}
+              context={{ ...elementContext, slot }}
+              values={values}
+              firstPreview={firstPreview}
+            />,
+            el,
+            keyOf(el),
+          ),
         )}
     </>
   )
