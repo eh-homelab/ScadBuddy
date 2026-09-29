@@ -5,8 +5,9 @@ import { defineTool, json, type Tool } from './registry.js'
 
 // Settings (issue #251): read settings with secrets redacted, test the
 // Bambuddy connection, and read targets and remembered print options.
-// Writing the connection (URL, API key) and registering the sidebar link stay
-// in the Settings UI; see the coverage allowlist in coverage.ts.
+// Writing any setting (the connection, the keys, the runtime settings) and
+// registering the sidebar link stay in the Settings UI; see the coverage
+// allowlist in coverage.ts.
 // Routes: backend/scadbuddy/api/settings.py.
 
 const SECRET_KEY = /key|secret|token|password|credential/i
