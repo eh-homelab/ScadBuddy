@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, printRunPoll } from '../api/client'
 import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
@@ -25,8 +25,7 @@ function renderPicker(
   return renderPage(
     <PrintPicker
       open
-      slug="name-keychain"
-      output={{ ...output, library_files: [] }}
+      source={{ kind: 'output', output }}
       onClose={props.onClose ?? vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
@@ -185,6 +184,7 @@ describe('PrintPicker', () => {
       all_plates: false,
       project_id: null,
       options: {},
+      request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
 
@@ -230,7 +230,7 @@ describe('PrintPicker', () => {
     const second = fixtures.outputs[1] as Output
     const { bodies } = watch('POST', '/run')
     const { user, rerender } = renderPage(
-      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+      <PrintPicker open source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await loaded()
 
@@ -239,7 +239,7 @@ describe('PrintPicker', () => {
 
     rerender(
       <MemoryRouter>
-        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
       </MemoryRouter>,
     )
     await loaded()
@@ -291,6 +291,30 @@ describe('PrintPicker', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+  })
+
+  it('reads the choices again on Retry after a failed read (#482)', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () => {
+        reads += 1
+        // Returning nothing falls through to the default handler, so the retry reads
+        // real choices.
+        if (reads > 1) return undefined
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Gateway Timeout', status: 504, detail: 'Bambuddy did not answer' },
+          { status: 504, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPicker()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await loaded()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(reads).toBe(2)
   })
 })
 
@@ -356,10 +380,66 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(run).toHaveBeenCalledTimes(2)
+    // #470: each press is its own print, so the server does not answer the second with
+    // the first's run.
+    const ids = run.mock.calls.map(([, body]) => body.request_id)
+    expect(ids[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[1]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[0]).not.toBe(ids[1])
+  })
+
+  it('offers no Print after a failed run that had tried to queue (#470)', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Internal Server Error',
+        status: 500,
+        detail: 'Plate 2 failed to slice after plate 1 was queued.',
+        may_have_queued: true,
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Plate 2 failed to slice after plate 1 was queued.')
+    expect(alert).toHaveTextContent(
+      "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice.",
+    )
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+  })
+
+  it('keeps Print after a failed run that never tried to queue, even a Bambuddy timeout', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+        title: 'Gateway Timeout',
+        status: 504,
+        detail: 'could not reach Bambuddy to slice the plate: ReadTimeout',
+        may_have_queued: false,
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('could not reach Bambuddy to slice the plate: ReadTimeout')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 })
 
 describe('PrintPicker · A run that got no answer (#470)', () => {
+  // runPrint re-sends an unanswered press (same request_id) before it gives up.
+  beforeEach(() => {
+    printRunPoll.intervalMs = 1
+  })
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
   function runAnswers(answer: () => Response) {
     const calls = watch('POST', '/run')
     server.use(http.post('/api/v1/print/outputs/:id/run', answer))
@@ -394,7 +474,9 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       expect.any(String),
       'noopener',
     )
-    expect(bodies).toHaveLength(1)
+    // One press, re-sent while unanswered: every try is the same run on the server.
+    expect(bodies).toHaveLength(1 + printRunPoll.reattempts)
+    expect(new Set(bodies.map((body) => body['request_id'])).size).toBe(1)
     expect(onRan).not.toHaveBeenCalled()
   })
 
@@ -445,8 +527,7 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
     const { user } = renderPage(
       <PrintPicker
         open
-        slug="name-keychain"
-        output={{ ...output, library_files: [] }}
+        source={{ kind: 'output', output }}
         onClose={onClose}
         onRan={vi.fn()}
       />,
@@ -468,7 +549,21 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       http.post('/api/v1/print/outputs/:id/run', async () => {
         calls += 1
         await new Promise<void>((resolve) => (release = resolve))
-        return HttpResponse.json(queuedResult)
+        // #470: the route answers with the run, here one already finished.
+        return HttpResponse.json(
+          {
+            id: 'run-1',
+            output_id: output.id,
+            status: 'succeeded',
+            created_at: '2026-09-28T10:00:00Z',
+            finished_at: '2026-09-28T10:00:01Z',
+            result: queuedResult,
+            error: null,
+            may_have_queued: false,
+            repeated: false,
+          },
+          { status: 202 },
+        )
       }),
     )
     const onClose = vi.fn()
@@ -867,8 +962,7 @@ describe('PrintPicker · Remembered choices', () => {
           </button>
           <PrintPicker
             open={open}
-            slug="name-keychain"
-            output={target}
+            source={{ kind: 'output', output: target }}
             onClose={() => setOpen(false)}
             onRan={vi.fn()}
           />
@@ -1215,13 +1309,13 @@ describe('PrintPicker · Plates of a 3MF', () => {
       }),
     )
     const { rerender } = renderPage(
-      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+      <PrintPicker open source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await screen.findByTestId('plate-choice')
 
     rerender(
       <MemoryRouter>
-        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+        <PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
@@ -1291,5 +1385,112 @@ describe('PrintPicker · Checks (#284)', () => {
     await loaded()
     expect(await screen.findByTestId('diagnostic-SB1001:part-2')).toHaveTextContent('Problem')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+})
+
+describe('PrintPicker · A library file (#313)', () => {
+  const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
+
+  it('prints a library file through the library run and remembers per file', async () => {
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const remember = vi.spyOn(api, 'putLibraryChoices')
+    const outputRun = vi.spyOn(api, 'runPrint')
+    const modelRemember = vi.spyOn(api, 'putModelChoices')
+    const { user } = renderPage(
+      <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    // A library file is no model, so its options cannot be remembered per model.
+    await user.click(screen.getByText('Options'))
+    expect(await screen.findByLabelText('Remember for')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'This model' })).toBeNull()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/ }))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(run).toHaveBeenCalledWith(
+      89,
+      expect.objectContaining({ printer_id: expect.any(Number) }),
+      expect.any(AbortSignal),
+    )
+    await waitFor(() =>
+      expect(remember).toHaveBeenCalledWith(89, expect.objectContaining({ nozzles: expect.any(Array) })),
+    )
+    expect(outputRun).not.toHaveBeenCalled()
+    expect(modelRemember).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('print-progress')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
+  })
+
+  it('reopens on the spools this file last printed with', async () => {
+    server.use(
+      http.get('/api/v1/print/library/89/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          model_choices: {
+            printer_id: 1,
+            // Slot 2's suggestion is 27; 22 is in the inventory, 99999 is not.
+            filament_plan: [
+              { slot_id: 1, spool_id: 99999 },
+              { slot_id: 2, spool_id: 22 },
+            ],
+          },
+        }),
+      ),
+    )
+    renderPage(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')).toBeChecked()
+    // A remembered spool that is no longer in the inventory falls back to the suggestion.
+    const suggested = choicesView.filaments.suggested?.find((c) => c.slot_id === 1)?.spool_id
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${suggested}`)).toBeChecked()
+  })
+
+  it('carries nothing of an output over when the source becomes a library file', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const reads = watch('GET', '/choices')
+    const { bodies, urls } = watch('POST', '/run')
+    const first = fixtures.outputs[0] as Output
+    const { user, rerender } = renderPage(
+      <PrintPicker open source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+
+    // A changed spool, a plate, a preset override and an option, all for the output.
+    await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    // Plate 2 uses only slot 2 (#480's mock), so the override is slot 2's.
+    await user.selectOptions(await screen.findByLabelText('Preset for slot 2'), 'cloud:GFSB00_22')
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
+
+    rerender(
+      <MemoryRouter>
+        <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(reads.urls.at(-1)).toContain('/print/library/89/choices'))
+    await loaded()
+    await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(urls).toEqual([expect.stringContaining('/print/library/89/run')])
+    expect(bodies[0]).toMatchObject({
+      plate_id: 1,
+      all_plates: false,
+      options: {},
+      choices: { filament_overrides: {} },
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 27 }]) },
+    })
   })
 })

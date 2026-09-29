@@ -171,7 +171,16 @@ jobs:
           # One manifest, one Deployment: every guard below is per file.
           pin() { # manifest deployment
             local target=$1 deployment=$2
-            expect_one "$target" "^\s*image: ${IMAGE//./\\.}[^[:space:]]*$" "image"
+            # `[:@]` ends the repository name, so the pattern matches this image
+            # and never a sibling package that shares its prefix: the agent
+            # sidecar, ghcr.io/eh-homelab/scadbuddy-agent, runs in the same pod
+            # and has its own image line in the same manifest.
+            # A bare `image: ghcr.io/eh-homelab/scadbuddy` with no tag or digest
+            # therefore no longer matches, and the run fails "found 0". That is
+            # deliberate: clusters pins by digest (an untagged ref would pull
+            # the Nexus proxy's day-old `latest`), and deploy-pin.test.sh pins it.
+            local image_line="^(\s*)image: ${IMAGE//./\\.}[:@][^[:space:]]*\$"
+            expect_one "$target" "$image_line" "image"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/version: ' "version annotation"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/revision: ' "revision annotation"
             expect_one "$target" '^\s*scadbuddy\.eh-homelab\.io/source: ' "source annotation"
@@ -183,7 +192,7 @@ jobs:
             # writes a full-SHA revision, so a leftover one would make every
             # later verify run warn about a pin that no longer exists. Drop it.
             sed -i -E \
-              -e "s|^(\s*)image: ${IMAGE//./\\.}[^[:space:]]*\$|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
+              -e "s|${image_line}|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/version: .*\$|\1scadbuddy.eh-homelab.io/version: \"${VERSION}\"|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/revision: .*\$|\1scadbuddy.eh-homelab.io/revision: \"${REVISION}\"|" \
               -e "s|^(\s*)scadbuddy\.eh-homelab\.io/source: .*\$|\1scadbuddy.eh-homelab.io/source: \"${SOURCE_URL}\"|" \

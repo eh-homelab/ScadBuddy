@@ -100,6 +100,9 @@ async def _proxy(store: SettingsStore, request: Request, path: str, *, what: str
     headers = {
         name: upstream.headers[name] for name in FORWARDED_HEADERS if name in upstream.headers
     }
+    # Bambuddy's bytes are served from ScadBuddy's origin, so a mislabeled response
+    # must never be sniffed into HTML here (#608).
+    headers["x-content-type-options"] = "nosniff"
     if request.method == "HEAD":
         await stack.aclose()
         return Response(status_code=upstream.status_code, headers=headers)

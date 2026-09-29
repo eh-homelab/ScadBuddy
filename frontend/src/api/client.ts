@@ -20,6 +20,7 @@ import type {
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  LibraryListing,
   LibraryPinRequest,
   MediaView,
   ModelPatch,
@@ -40,6 +41,7 @@ import type {
   PlateFit,
   PrinterBedType,
   PrintProgress,
+  PrintRun,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -71,6 +73,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { DefinitionFile } from '../lib/lsp'
 
 export const API_BASE = '/api/v1'
 
@@ -251,10 +254,12 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
  * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
  * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
  * browser all mean it did not. For a request with a physical effect (a print), retrying
- * one of these blind can do it twice.
+ * one of these blind can do it twice. A failed print run (#470) says so itself: its
+ * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
  */
 export function mayHaveRun(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
+  if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
   return [0, 502, 504, 524].includes(error.status)
@@ -273,6 +278,65 @@ function bambuddyUnanswered(problem: Problem): boolean {
 }
 
 const seg = encodeURIComponent
+
+/**
+ * How often `runPrint` reads a running print run (#470), and how many times it tries a
+ * request no ScadBuddy answer described again before giving up; tests shorten it.
+ */
+export const printRunPoll = { intervalMs: 1000, reattempts: 3 }
+
+/**
+ * A new `request_id` for one deliberate Print (#470): the server keys the run on it, so
+ * a retry of that press re-attaches to its run and the next press is a new print.
+ * `getRandomValues`, not `randomUUID`, which only secure contexts have.
+ */
+export function newRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
+ * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
+ */
+function unanswered(caught: unknown): boolean {
+  return (
+    caught instanceof ApiError &&
+    caught.problem.type === UNANSWERED &&
+    [0, 502, 503, 504, 524].includes(caught.status)
+  )
+}
+
+/** `ms` of waiting that `signal` cuts short, rejecting with its reason. */
+function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason)
+      return
+    }
+    const abort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
+/** `attempt`, tried again while it goes unanswered: safe only for a request keyed to its run. */
+async function reattach<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    try {
+      return await attempt()
+    } catch (caught) {
+      if (signal?.aborted || !unanswered(caught) || tries >= printRunPoll.reattempts) throw caught
+      await wait(printRunPoll.intervalMs, signal)
+    }
+  }
+}
 
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
@@ -514,6 +578,17 @@ export const api = {
       body: JSON.stringify({ ids }),
     }),
 
+  /**
+   * #722 — makes `id` the cover: a template of mine's is moved to the front; a
+   * built-in's is a choice of its own (`media_cover`), and null goes back to the one
+   * it ships.
+   */
+  setMediaCover: (slug: string, id: string | null) =>
+    request<ModelSummary>(`/models/${seg(slug)}/media/cover`, {
+      method: 'PUT',
+      body: JSON.stringify({ id }),
+    }),
+
   deleteMedia: (slug: string, id: string) =>
     request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
@@ -546,6 +621,18 @@ export const api = {
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
     slug ? `${API_BASE}/models/${seg(slug)}/lsp` : `${API_BASE}/lsp`,
+
+  /**
+   * #185 — the text of a file a go-to-definition lands in: beside the model, or in a
+   * library it pins (`GET /models/{slug}/files/{path}`, `…/libraries/{name}/files/{path}`).
+   */
+  getDefinitionFile: (slug: string, file: DefinitionFile) => {
+    const path = file.path.split('/').map(seg).join('/')
+    const base = `/models/${seg(slug)}`
+    if (!file.library) return requestText(`${base}/files/${path}`)
+    const commit = file.commit ? `?commit=${seg(file.commit)}` : ''
+    return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
+  },
 
   /** A `version` reads that revision's schema instead of the model's current one. */
   getSchema: (slug: string, version?: string) =>
@@ -690,12 +777,49 @@ export const api = {
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
+   * `signal` stops following the run (the dialog went away); the run itself goes on.
    */
-  runPrint: (outputId: string, body: PrintRunRequest) =>
-    request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+  runPrint: async (
+    outputId: string,
+    body: PrintRunRequest,
+    signal?: AbortSignal,
+  ): Promise<PrintRunResult> => {
+    // #470: the server answers 202 with a run and slices and queues in the background,
+    // since that takes longer than the proxies in front wait. A repeat of the same
+    // request (the same `request_id`) is the same run, so re-sending it after an
+    // answer that never arrived re-attaches to that run and never queues a second print.
+    let run = await reattach(
+      () =>
+        request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+          signal,
+        }),
+      signal,
+    )
+    while (run.status === 'running') {
+      await wait(printRunPoll.intervalMs, signal)
+      const id = run.id
+      run = await reattach(() => request<PrintRun>(`/print/runs/${seg(id)}`, { signal }), signal)
+    }
+    if (run.status === 'failed' || !run.result) {
+      const error = run.error
+      const detail = error?.detail ?? 'The print run ended without a result.'
+      throw new ApiError({
+        ...error?.extensions,
+        // The problem's type, so the failure reads as a synchronous answer would have.
+        type: error?.type,
+        title: error?.title ?? 'Print failed',
+        status: error?.status ?? 500,
+        detail,
+        // Whether the run had already tried to queue (a queue call that timed out, a
+        // later plate failing after an earlier one was queued, or a run lost while
+        // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
+        may_have_queued: run.may_have_queued,
+      })
+    }
+    return run.result
+  },
 
   /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
@@ -768,6 +892,57 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
+  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+    const search = new URLSearchParams()
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.all) search.set('all', 'true')
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<LibraryListing>(`/print/library${suffix}`)
+  },
+
+  libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+
+  libraryPlateThumbnailUrl: (fileId: number, index: number) =>
+    `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
+
+  getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
+
+  getLibraryChoices: (fileId: number, printerId?: number | null) => {
+    const search = new URLSearchParams()
+    if (printerId !== null && printerId !== undefined) search.set('printer_id', String(printerId))
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<ChoicesView>(`/print/library/${fileId}/choices${suffix}`)
+  },
+
+  getLibraryFilaments: (
+    fileId: number,
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
+  ) => {
+    const search = new URLSearchParams()
+    if (query.printerId !== null && query.printerId !== undefined) {
+      search.set('printer_id', String(query.printerId))
+    }
+    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+    if (query.allPlates) search.set('all_plates', 'true')
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<FilamentOptions>(`/print/library/${fileId}/filaments${suffix}`)
+  },
+
+  /** Still answered in one request (#470 moved only an output's run to a 202). */
+  runLibraryPrint: (fileId: number, body: PrintRunRequest, signal?: AbortSignal) =>
+    request<PrintRunResult>(`/print/library/${fileId}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    }),
+
+  putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
+    request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

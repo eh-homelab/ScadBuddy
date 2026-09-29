@@ -102,6 +102,7 @@ export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
+export type PrintRun = Schemas['PrintRun']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
@@ -130,6 +131,11 @@ export type ModelPrintChoices = Schemas['ModelPrintChoices']
 /** #83 — the plate remembered per printer, and an output's plates. */
 export type PrinterBedType = Schemas['PrinterBedType']
 export type OutputPlate = Schemas['OutputPlate']
+
+/** #313 — the Library page's listing, and one row of it. */
+export type LibraryListing = Schemas['LibraryListing']
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFolderView = Schemas['LibraryFolderView']
 
 /**
  * #89 — run tracking.
