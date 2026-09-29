@@ -72,6 +72,8 @@ interface Props {
     onChange: (projectId: number | null) => void
     /** The page's project list, so the dialog does not fetch it a second time. */
     list?: ProjectList
+    /** #665 — frozen while the page's Generate is filing into the chosen project. */
+    disabled?: boolean
   }
 }
 
@@ -406,7 +408,12 @@ export function PrintPicker({
 
               {/* #79 — a send to a project uploads into that project's folder. */}
               {project ? (
-                <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
+                <ProjectPicker
+                  value={project.value}
+                  onChange={project.onChange}
+                  list={project.list}
+                  disabled={project.disabled}
+                />
               ) : (
                 <ProjectPicker
                   value={ownProjectId}

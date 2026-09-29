@@ -63,6 +63,11 @@ interface Props {
   testId?: string
   /** The label beside the select rather than above it, for the Customize page's bar. */
   inline?: boolean
+  /**
+   * #665 — frozen while a request that already carries the chosen project is in flight
+   * (Generate filing its file), so what is on screen matches where it was filed.
+   */
+  disabled?: boolean
 }
 
 export function ProjectPicker({
@@ -74,6 +79,7 @@ export function ProjectPicker({
   id = 'print-project',
   testId = 'project-select',
   inline = false,
+  disabled = false,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
   const { choices, loading, error: listError, rereadFor, add } = list ?? own
@@ -148,6 +154,7 @@ export function ProjectPicker({
       <select
         id={id}
         data-testid={testId}
+        disabled={disabled}
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
@@ -235,7 +242,7 @@ export function ProjectPicker({
               variant="primary"
               size="sm"
               onClick={() => void create()}
-              disabled={name.trim() === '' || saving}
+              disabled={name.trim() === '' || saving || disabled}
               aria-busy={saving}
               data-testid="create-project"
               {...USER_ONLY}

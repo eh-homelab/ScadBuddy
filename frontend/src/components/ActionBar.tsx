@@ -256,6 +256,7 @@ export function ActionBar({
             onChange={chooseProject}
             list={projects}
             onProject={setProject}
+            disabled={generating}
           />
           <div className="flex">
             <Button
@@ -315,7 +316,7 @@ export function ActionBar({
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
-        project={{ value: projectId, onChange: chooseProject, list: projects }}
+        project={{ value: projectId, onChange: chooseProject, list: projects, disabled: generating }}
       />
     </>
   )
