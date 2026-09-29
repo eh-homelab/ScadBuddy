@@ -122,6 +122,13 @@ export function ActionBar({
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
+  /**
+   * #709 — only reserve the wider basis (see the footer below) when there is
+   * something in the status area to protect from truncation. A fixed 16rem would
+   * otherwise force the button row to wrap even while this area is empty (the
+   * debounced gap between an edit and the next settled render).
+   */
+  const hasStatus = Boolean((job?.colors && job.colors.length > 0) || error || (output && !stale))
 
   async function generate(): Promise<Output | null> {
     if (!job) return null
@@ -209,8 +216,12 @@ export function ActionBar({
     <>
       <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
         {/* A real basis, not flex-1's 0: when the buttons and this can't share a line,
-            the footer wraps the buttons below instead of squeezing the status to 0 px. */}
-        <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
+            the footer wraps the buttons below instead of squeezing the status to 0 px.
+            Only reserved while there is a status to protect (#709), or an empty area
+            would force the same wrap for no benefit. */}
+        <div
+          className={`flex min-w-0 items-center gap-3 ${hasStatus ? 'flex-[1_1_16rem]' : 'flex-1'}`}
+        >
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
