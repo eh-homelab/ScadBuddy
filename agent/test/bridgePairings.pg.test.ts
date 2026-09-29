@@ -134,6 +134,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
     expect(labels).toContain('An MCP client without a token at 10.1.2.3')
   })
 
+  it('holds the per-principal cap under concurrent requests (#731 review)', async () => {
+    const results = await Promise.allSettled(
+      Array.from({ length: MAX_PENDING_PER_PRINCIPAL + 4 }, () => store.request(anonymous)),
+    )
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(MAX_PENDING_PER_PRINCIPAL)
+    for (const r of results) if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(PairingError)
+  })
+
   it('never pairs the browser user by code, and ignores ids that are not uuids', async () => {
     await expect(store.request({ id: 'browser', kind: 'browser', tiers: ['read'] })).rejects.toBeInstanceOf(PairingError)
     expect(await store.accept('not-a-uuid', 'x', TAB)).toEqual({ ok: false, reason: 'gone' })

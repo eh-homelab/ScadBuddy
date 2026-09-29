@@ -34,6 +34,8 @@ export const REQUEST_TTL_MS = 5 * 60_000
 export const PAIRED_TTL_MS = 8 * 60 * 60_000
 /** Wrong codes before a request is denied. */
 export const MAX_ATTEMPTS = 5
+/** The advisory-lock key `request()` serialises its cap check and insert on. */
+const REQUEST_LOCK = 'scadbuddy.ai_browser_pairings.request'
 /** Pending requests one principal may have at once, and everyone together. */
 export const MAX_PENDING_PER_PRINCIPAL = 3
 export const MAX_PENDING = 20
@@ -133,27 +135,34 @@ export class PostgresPairingStore implements PairingStore {
       DELETE FROM ai_browser_pairings
        WHERE expires_at < now() - interval '1 day'
           OR (status IN ('denied', 'ended') AND COALESCE(ended_at, created_at) < now() - interval '1 day')`
-    const [counts] = await sql<{ mine: number; all: number }[]>`
-      SELECT count(*) FILTER (WHERE principal_kind = ${principal.kind} AND principal_id = ${principal.id})::int AS mine,
-             count(*)::int AS all
-        FROM ai_browser_pairings
-       WHERE status = 'pending' AND expires_at > now()`
-    if ((counts?.mine ?? 0) >= MAX_PENDING_PER_PRINCIPAL) {
-      throw new PairingError(
-        `this caller already has ${MAX_PENDING_PER_PRINCIPAL} pairing requests waiting; ask the user to answer one, or wait for them to expire`,
-      )
-    }
-    if ((counts?.all ?? 0) >= MAX_PENDING) {
-      throw new PairingError('too many pairing requests are waiting for the user; try again in a few minutes')
-    }
     const label = await this.#label(principal)
     const code = newPairingCode()
-    const [row] = await sql<Row[]>`
-      INSERT INTO ai_browser_pairings (id, principal_kind, principal_id, principal_label, code_hash, status, expires_at)
-      VALUES (${randomUUID()}, ${principal.kind}, ${principal.id}, ${label}, ${hashCode(code)}, 'pending',
-              now() + (${REQUEST_TTL_MS} * interval '1 millisecond'))
-      RETURNING id, principal_label, expires_at`
-    return { id: row!.id, code, label, expiresAt: row!.expires_at }
+    // Count and insert under one transaction-scoped advisory lock, so two
+    // concurrent requests cannot both read the counts below a cap and both
+    // insert (#731 review); the lock is held only for these two statements.
+    const row = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${REQUEST_LOCK}, 0))`
+      const [counts] = await tx<{ mine: number; all: number }[]>`
+        SELECT count(*) FILTER (WHERE principal_kind = ${principal.kind} AND principal_id = ${principal.id})::int AS mine,
+               count(*)::int AS all
+          FROM ai_browser_pairings
+         WHERE status = 'pending' AND expires_at > now()`
+      if ((counts?.mine ?? 0) >= MAX_PENDING_PER_PRINCIPAL) {
+        throw new PairingError(
+          `this caller already has ${MAX_PENDING_PER_PRINCIPAL} pairing requests waiting; ask the user to answer one, or wait for them to expire`,
+        )
+      }
+      if ((counts?.all ?? 0) >= MAX_PENDING) {
+        throw new PairingError('too many pairing requests are waiting for the user; try again in a few minutes')
+      }
+      const [inserted] = await tx<Row[]>`
+        INSERT INTO ai_browser_pairings (id, principal_kind, principal_id, principal_label, code_hash, status, expires_at)
+        VALUES (${randomUUID()}, ${principal.kind}, ${principal.id}, ${label}, ${hashCode(code)}, 'pending',
+                now() + (${REQUEST_TTL_MS} * interval '1 millisecond'))
+        RETURNING id, principal_label, expires_at`
+      return inserted!
+    })
+    return { id: row.id, code, label, expiresAt: row.expires_at }
   }
 
   /** A bearer principal is named after its token (`token:<uuid>`, auth/tokens.ts `principalFor`). */
