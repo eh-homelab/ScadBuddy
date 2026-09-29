@@ -36,6 +36,7 @@ from scadbuddy.render.pg_store import TransactionalEvents, migrate
 logger = logging.getLogger(__name__)
 
 CANCELLED_ERROR = "cancelled: every request for it was withdrawn"
+LEGACY_RUNNING_ERROR = "failed: the upgrade to Temporal-backed rendering left it unfinished"
 
 PROJECTION_COLUMNS = (
     "id",
@@ -224,6 +225,20 @@ class JobProjection:
                     (workflow_id_for(job_id), job_id),
                 )
         return ids
+
+    def fail_legacy_running(self) -> list[Job]:
+        """At start-up: fail the rows a pre-Temporal release's queue left running (no
+        workflow), which nothing will finish. Its pending rows are
+        `adopt_legacy_pending`'s."""
+        with self._pool.connection() as conn, conn.transaction():
+            rows = conn.execute(
+                "UPDATE render_jobs SET state = 'failed', finished_at = now(), error = %s"
+                " WHERE state = 'running' AND workflow_id IS NULL RETURNING *",
+                (LEGACY_RUNNING_ERROR,),
+            ).fetchall()
+            for row in rows:
+                self._announce(conn, row["id"], row["slug"], "job.failed")
+        return [_job(row) for row in rows]
 
     # -- the workflow's writes (each guarded by the state it expects) -----------
 

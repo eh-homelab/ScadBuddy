@@ -23,6 +23,7 @@ from scadbuddy.render.job_models import (
 )
 from scadbuddy.render.projection import (
     CANCELLED_ERROR,
+    LEGACY_RUNNING_ERROR,
     JobProjection,
     workflow_id_for,
 )
@@ -358,3 +359,33 @@ def test_boot_adopts_the_legacy_queues_pending_rows(
     # The reconciler starts it like any row of this path.
     assert waiting.id in [job.id for job in projection.stale_pending(older_than=0)]
     assert projection.adopt_legacy_pending() == []
+
+
+def test_start_up_fails_the_rows_a_legacy_queue_left_running_only(
+    announcing: JobProjection, pg_conninfo: str
+) -> None:
+    legacy_running, legacy_pending, on_temporal = _job(n=1), _job(n=2), _job(n=3)
+    for job in (legacy_running, legacy_pending, on_temporal):
+        announcing.submit(job, render_key("demo", job.params, None))
+    assert announcing.mark_started(on_temporal.id) is not None
+    # What the legacy queue left: rows with no workflow, one of them claimed.
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_id = NULL WHERE id = ANY(%s)",
+            ([legacy_running.id, legacy_pending.id],),
+        )
+        conn.execute(
+            "UPDATE render_jobs SET state = 'running', started_at = now() WHERE id = %s",
+            (legacy_running.id,),
+        )
+
+    failed = announcing.fail_legacy_running()
+
+    assert [job.id for job in failed] == [legacy_running.id]
+    stored = announcing.read(legacy_running.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_RUNNING_ERROR)
+    assert stored.finished_at is not None
+    # A legacy pending row is the reconciler's to start; a workflow's row is its own.
+    assert announcing.read(legacy_pending.id).state == "pending"
+    assert announcing.read(on_temporal.id).state == "running"
+    assert "job.failed" in _kinds(pg_conninfo)

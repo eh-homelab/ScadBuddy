@@ -334,6 +334,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.
+- **Upgrading from a release that still had the legacy queue** (before #546): its
+  pods render in-process and renew a lease in `render_jobs.heartbeat_at`, which this
+  release's first start drops. Do not let one overlap a new pod: stop the old pods
+  (or use a `Recreate` rollout) before the new API starts, and start the API before
+  the render workers. At start the API fails every render the old queue left
+  `running` (no workflow; nothing would finish it), with an error naming the
+  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
+  nothing to do.
 
 ### The agent sidecar (AI, #261)
 

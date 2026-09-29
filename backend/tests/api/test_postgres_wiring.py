@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
@@ -115,3 +116,26 @@ def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()
     assert row is not None and row[0] == "ignore"
+
+
+@pytest.mark.requires_postgres
+def test_start_up_fails_what_a_legacy_queue_left_running(
+    settings: Settings, pg_conninfo: str
+) -> None:
+    """#546: a row a pre-Temporal release was running (no workflow) is failed before
+    the reconciler starts; nothing else would ever settle it."""
+    job_id = uuid.uuid4().hex
+    with TestClient(create_app(settings)):
+        pass  # the first start migrates the schema
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO render_jobs (id, slug, params, render_key, state, created_at,"
+            " started_at) VALUES (%s, 'widget', '{}', 'k', 'running', now(), now())",
+            (job_id,),
+        )
+
+    with TestClient(create_app(settings)) as client:
+        job = client.get(f"/api/v1/jobs/{job_id}").json()
+
+    assert job["status"] == "failed"
+    assert "upgrade to Temporal" in job["error"]
