@@ -98,6 +98,8 @@ export const printTools: Tool[] = [
       'remembered choices. What print_output fills omitted choices from.',
     input: z.object({ output_id: outputId, printer_id: z.number().int().optional() }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     // Printers, status and archives (Read Status); slicer presets and the 3MF's
     // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
     bambuddyScope: ['Read Status', 'Manage Library'],
@@ -126,6 +128,8 @@ export const printTools: Tool[] = [
       all_plates: z.boolean().optional(),
     }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/print/outputs/{output_id}/filaments'],
     handler: async ({ output_id, printer_id, plate_id, all_plates }, { backend }) =>
@@ -146,6 +150,8 @@ export const printTools: Tool[] = [
       '`settled` is true.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Queue'],
     routes: ['GET /api/v1/print/outputs/{output_id}/progress'],
     handler: async ({ output_id }, { backend }) =>
@@ -162,6 +168,8 @@ export const printTools: Tool[] = [
     description: "Bambuddy's projects, to file prints under.",
     input: z.object({}),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/print/projects'), 'list projects')),

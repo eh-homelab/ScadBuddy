@@ -129,6 +129,7 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
     try {
       const decided = await approvals.decide(BROWSER_USER, c.req.param('id'), c.req.param('verb') === 'approve', {
         ...(body.input_hash === undefined ? {} : { inputHash: body.input_hash }),
+        clientIp: deps.remoteAddress(c),
       })
       return c.json(approvalView(decided))
     } catch (err) {

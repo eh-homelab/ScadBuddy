@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
+import type { AuditRepo } from './audit/log.js'
+import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
@@ -61,6 +63,36 @@ export interface AppDeps {
    * says so). Shared by routes/chat.ts and routes/status.ts.
    */
   upgradeWebSocket?: UpgradeWebSocket | undefined
+  /**
+   * The audit log (#258, audit/log.ts): GET /api/v1/ai/audit reads it (503
+   * without it; routes/audit.ts), and credential, MCP token and plugin writes
+   * are recorded in it (the middleware in `createApp`). Here because several
+   * route groups use it.
+   */
+  audit?: AuditRepo | undefined
+}
+
+/** Which credential requests are writes, by method (audit/writes.ts). */
+function credentialVerb(method: string, path: string): string | undefined {
+  if (path !== '/api/v1/ai/credentials') return undefined
+  return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+}
+
+/** MCP token mint and revoke (routes/mcpTokens.ts). */
+function tokenVerb(method: string, path: string): string | undefined {
+  if (method === 'POST' && path === '/api/v1/ai/mcp-tokens') return 'mint'
+  if (method === 'DELETE' && path.startsWith('/api/v1/ai/mcp-tokens/')) return 'revoke'
+  return undefined
+}
+
+/** Which plugin requests are writes; connection tests are not. */
+function pluginVerb(method: string, path: string): string | undefined {
+  if (path.endsWith('/test')) return undefined
+  const one = path.startsWith('/api/v1/ai/plugins/')
+  if (method === 'POST' && !one) return 'create'
+  if (method === 'PATCH' && one) return 'update'
+  if (method === 'DELETE' && one) return 'delete'
+  return undefined
 }
 
 export { type AiStatus, DEFAULT_HEALTH_TIMEOUT_MS } from './aiStatus.js'
@@ -112,6 +144,23 @@ export function createApp(deps: AppDeps): AgentApp {
     }
     return c.json(body)
   })
+
+  // Credential, MCP token and plugin writes, refused attempts included, go in the
+  // audit log (#258). App-wide, like the service header, and mounted before the
+  // route groups so it runs around them.
+  if (deps.audit) {
+    const audit = deps.audit
+    // Refusals need no authentication, so they are coalesced per peer and
+    // action rather than written one row per request (audit/writes.ts).
+    const refusals = new RefusalCoalescer(audit)
+    const writes = { audit, remoteAddress: deps.remoteAddress, refusals }
+    app.use('/api/v1/ai/credentials', auditWrites({ ...writes, kind: 'credential', verb: credentialVerb }))
+    // Refused or failed token writes; successful ones are recorded by the
+    // token store itself (audit/writes.ts auditedTokenStore), with the token's id.
+    app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
+    // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
+    app.use('/api/v1/ai/plugins/*', auditWrites({ ...writes, kind: 'plugin', verb: pluginVerb }))
+  }
 
   const shutdown = new AbortController()
   for (const { route } of ROUTES) route.register(app, deps, shutdown.signal)

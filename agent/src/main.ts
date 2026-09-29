@@ -25,6 +25,8 @@ import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
+import { AuditLog } from './audit/log.js'
+import { auditedTokenStore } from './audit/writes.js'
 import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
@@ -39,6 +41,8 @@ import type { ToolServices } from './tools/registry.js'
 const PORT = 8081
 /** How often approvals nobody is waiting on are expired (approvals/service.ts). */
 const APPROVAL_SWEEP_MS = 30_000
+/** How often audit rows past their retention are deleted (audit/log.ts). */
+const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
 
 const config = loadConfig()
 
@@ -102,7 +106,21 @@ const database = config.databaseUrl
 // by the next /healthz or API call instead of stopping the pod.
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
-const settings = database ? new SettingsStore(database.sql) : undefined
+// The audit log of AI actions (#258, audit/log.ts). Its input hashes use the
+// approvals' key, so a tool call's row carries the same hash as its approval.
+// The settings store audits its own writes into it, so it comes second; the
+// log reads its retention through the thunk.
+
+const audit = database
+  ? new AuditLog({
+      sql: database.sql,
+      settings: (): SettingsStore | undefined => settings,
+      ...(kek.ok ? { hashKey: approvalHashKey(kek.kek) } : {}),
+      onError: (err, entry) =>
+        console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
+    })
+  : undefined
+const settings: SettingsStore | undefined = database ? new SettingsStore(database.sql, audit) : undefined
 // OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
 // its metadata and JWKS caches for the process.
 const oidcRepo = settings
@@ -144,8 +162,10 @@ const toolServices: ToolServices = {
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
 
-// One store for Settings (routes/mcpTokens.ts) and /mcp.
-const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
+// One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
+// recorded in the audit log (#258), whichever of the two makes them.
+const tokens =
+  database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
 
 // Whether the headless browser's Chromium can keep its sandbox in this pod
 // (harness/headlessSandbox.ts): probed once, on the first turn that uses the
@@ -182,6 +202,8 @@ const sessions =
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Every tool call a turn makes, and every approval decision (#258).
+        ...(audit ? { audit } : {}),
         // Enabled plugins (#297), per turn, through the loopback forwarder.
         ...(plugins
           ? {
@@ -210,6 +232,11 @@ const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
 })
+// Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
+const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('audit retention sweep failed:', (err as Error).message),
+})
 
 const app = createApp({
   database,
@@ -229,6 +256,7 @@ const app = createApp({
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
+  ...(audit ? { audit } : {}),
   upgradeWebSocket,
   remoteAddress: (c) => {
     try {
@@ -245,6 +273,7 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
+    ...(audit ? { audit } : {}),
     authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
@@ -270,6 +299,7 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websoc
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     stopSweeper?.()
+    stopRetention?.()
     stopHeartbeat()
     // 1001 "going away": the panel reconnects to another replica or after the restart.
     for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')

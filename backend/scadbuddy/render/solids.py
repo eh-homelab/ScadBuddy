@@ -73,7 +73,12 @@ def _vector_literal(values: Sequence[str]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
-def _solid_mesh(path: Path) -> trimesh.Trimesh | None:
+def solid_file(work_dir: Path, index: int) -> Path:
+    """Where the wrapper render of the ``index``-th colour (1-based) is written."""
+    return work_dir / f"solid_{index}.3mf"
+
+
+def solid_mesh(path: Path) -> trimesh.Trimesh | None:
     """The wrapper render's geometry as one mesh, or None when it drew nothing."""
     meshes = [part.mesh for part in split_by_material(path)]
     if not meshes:
@@ -112,7 +117,7 @@ async def render_solids(
     async def solid(index: int, colour: str) -> trimesh.Trimesh | str:
         """The colour's solid, or the warning that says why it has none."""
         nonlocal stopping
-        out_path = work_dir / f"solid_{index}.3mf"
+        out_path = solid_file(work_dir, index)
         targets = _vector_literal(targets_for(colour))
         async with slots:
             # A failing sibling frees its slot before the group's cancellation
@@ -131,7 +136,7 @@ async def render_solids(
                 # Parsing and joining the mesh is CPU work: off the loop, which every
                 # other job's drain, the queue and /healthz share -- and several colours
                 # can now finish their `openscad` at nearly the same moment.
-                mesh = await asyncio.to_thread(_solid_mesh, out_path)
+                mesh = await asyncio.to_thread(solid_mesh, out_path)
             except OpenSCADError as error:
                 return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
             except BaseException:

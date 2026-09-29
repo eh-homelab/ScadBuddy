@@ -36,6 +36,7 @@ describe('route groups', () => {
     expect(ROUTES.map((r) => r.file)).toEqual(
       expect.arrayContaining([
         'approvals.ts',
+        'audit.ts',
         'chat.ts',
         'credentials.ts',
         'mcpTokens.ts',
@@ -60,7 +61,7 @@ describe('route groups', () => {
     }
   })
 
-  it('the app serves the status, session and chat routes (#527) through their groups', async () => {
+  it('the app serves the status, session, chat (#527) and audit (#258) routes through their groups', async () => {
     const app = createApp(deps)
     const served = new Set(app.routes.filter((r) => r.method !== 'ALL').map((r) => `${r.method} ${r.path}`))
     for (const endpoint of [
@@ -74,6 +75,8 @@ describe('route groups', () => {
       'POST /api/v1/ai/sessions/:id/interrupt',
       'POST /api/v1/ai/sessions/:id/handoff',
       'POST /api/v1/ai/approvals/:id/:verb{approve|deny}',
+      'GET /api/v1/ai/audit',
+      'PUT /api/v1/ai/audit/settings',
     ]) {
       expect(served, endpoint).toContain(endpoint)
     }

@@ -30,7 +30,8 @@ export async function ok<T>(pending: Promise<FetchResult<T>>, what: string): Pro
   const { data, error, response } = await pending
   if (!response.ok) {
     const reason = describe(error)
-    throw new ToolError(`${what} failed (HTTP ${response.status})${reason ? `: ${reason}` : ''}`, response.status)
+    // The reason is the backend's (or, relayed, Bambuddy's) text: untrusted (#258).
+    throw new ToolError(`${what} failed (HTTP ${response.status})`, response.status, reason || undefined)
   }
   // 204 responses have no body; openapi-fetch gives `{}` or undefined.
   return data as T

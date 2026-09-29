@@ -26,7 +26,7 @@ test.describe('catalogue card mode (#277)', () => {
     await card.getByRole('button', { name: 'Next slide' }).click()
 
     await expect(position).toHaveText('2 of 4')
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
@@ -50,7 +50,7 @@ test.describe('catalogue card mode (#277)', () => {
     await page.keyboard.press('Enter')
     await expect(card.getByTestId('carousel-position')).toHaveText('3 of 4')
 
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
@@ -62,7 +62,7 @@ test.describe('catalogue card mode (#277)', () => {
     const lightbox = page.getByRole('dialog')
     await expect(lightbox).toBeVisible()
     await expect(lightbox).toContainText('The raised rim')
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
 
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
