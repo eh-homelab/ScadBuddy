@@ -18,8 +18,14 @@ const files = readdirSync(here)
   .filter((file) => /\.(ts|js)$/.test(file) && !/\.(d|test)\.(ts|js)$/.test(file) && file !== self)
   .sort()
 
-export const ROUTES: RouteEntry[] = []
-for (const file of files) {
-  const module = (await import(pathToFileURL(join(here, file)).href)) as { route?: RouteModule }
-  if (module.route) ROUTES.push({ file, route: module.route })
-}
+// Imported together, then kept in file-name order.
+const modules = await Promise.all(
+  files.map(async (file) => ({
+    file,
+    module: (await import(pathToFileURL(join(here, file)).href)) as { route?: RouteModule },
+  })),
+)
+
+export const ROUTES: RouteEntry[] = modules.flatMap(({ file, module }) =>
+  module.route ? [{ file, route: module.route }] : [],
+)

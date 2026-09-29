@@ -48,7 +48,9 @@ describe('route groups', () => {
         'status.ts',
       ]),
     )
-    expect(ROUTES.map((r) => r.file)).not.toContain('guard.ts')
+    for (const helper of ['guard.ts', 'module.ts', 'index.ts']) {
+      expect(ROUTES.map((r) => r.file)).not.toContain(helper)
+    }
   })
 
   it('never has two groups answer the same request, so their order does not matter', () => {

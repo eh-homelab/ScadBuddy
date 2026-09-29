@@ -1,11 +1,11 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
-import { DEFAULT_MCP_AUTH, type McpAuthMode, type McpAuthSettings } from '../auth/authenticate.js'
+import type { McpAuthMode, McpAuthSettings } from '../auth/authenticate.js'
 import { TIERS } from '../auth/principal.js'
 import type { TokenRecord, TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import { ready, type RouteModule } from './module.js'
+import { mcpAuthOf, ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp-tokens (#251, spec §8.1 "minted in Settings, stored hashed",
 // §8.3): Settings mints, lists and revokes the bearer tokens `/mcp` accepts.
@@ -194,7 +194,7 @@ export const route: RouteModule = {
     registerMcpTokenRoutes(app, {
       tokens: deps.database ? deps.tokens : undefined,
       ready: ready(deps),
-      authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+      authSettings: mcpAuthOf(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
     })

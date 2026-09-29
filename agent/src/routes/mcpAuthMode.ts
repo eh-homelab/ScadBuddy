@@ -1,7 +1,6 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import {
-  DEFAULT_MCP_AUTH,
   type McpAuthMode,
   type McpAuthSettings,
   mcpAuthSettings,
@@ -12,7 +11,7 @@ import {
 import { type Tier, TIERS } from '../auth/principal.js'
 import { forwardedClient, type OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
-import { ready, type RouteModule } from './module.js'
+import { mcpAuthOf, ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/auth (#251, spec §8.3): Settings reads and changes the `/mcp`
 // auth mode and the cap on what an anonymous caller may do. Both are
@@ -210,7 +209,7 @@ export const route: RouteModule = {
   register(app, deps) {
     registerMcpAuthModeRoutes(app, {
       settings: deps.database ? deps.aiSettings : undefined,
-      authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+      authSettings: mcpAuthOf(deps),
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

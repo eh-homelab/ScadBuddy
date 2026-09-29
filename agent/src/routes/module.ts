@@ -1,5 +1,6 @@
 import type { Hono } from 'hono'
 import type { AppDeps, Probe } from '../app.js'
+import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../auth/authenticate.js'
 
 /**
  * A group of HTTP routes. Each `routes/<name>.ts` that exports `route` is registered by
@@ -20,4 +21,9 @@ export type RouteModule = {
 /** The database's `ready`, or always-false with no database: the routes then answer 503. */
 export function ready(deps: AppDeps): Probe {
   return deps.database ? deps.database.ready : () => Promise.resolve(false)
+}
+
+/** How /mcp is authenticated, read per request; the default with no /mcp endpoint. */
+export function mcpAuthOf(deps: AppDeps): () => McpAuthSettings | Promise<McpAuthSettings> {
+  return deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH)
 }
