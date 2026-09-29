@@ -9,7 +9,7 @@ test.describe('catalogue filters (#276)', () => {
   test('a card tag chip filters, and the URL and count follow', async ({ page }) => {
     await page.goto('/')
     const count = page.getByTestId('result-count')
-    await expect(count).toHaveText('6 of 6')
+    await expect(count).toHaveText('7 of 7')
 
     const coaster = page
       .getByRole('listitem')
@@ -17,16 +17,16 @@ test.describe('catalogue filters (#276)', () => {
     await coaster.getByRole('button', { name: 'Filter by Tea & Coffee' }).click()
 
     await expect(page).toHaveURL(/\/\?tag=Tea\+%26\+Coffee$/)
-    await expect(count).toHaveText('1 of 6')
+    await expect(count).toHaveText('1 of 7')
     await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Crème Coaster'])
 
     // Back undoes the filter; forward and a reload restore it from the URL.
     await page.goBack()
-    await expect(count).toHaveText('6 of 6')
+    await expect(count).toHaveText('7 of 7')
     await page.goForward()
-    await expect(count).toHaveText('1 of 6')
+    await expect(count).toHaveText('1 of 7')
     await page.reload()
-    await expect(count).toHaveText('1 of 6')
+    await expect(count).toHaveText('1 of 7')
     await expect(page.getByRole('button', { name: 'Tea & Coffee 1' })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -35,7 +35,7 @@ test.describe('catalogue filters (#276)', () => {
 
   test('"/" focuses the search, which matches without accents', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByTestId('result-count')).toHaveText('6 of 6')
+    await expect(page.getByTestId('result-count')).toHaveText('7 of 7')
 
     await page.keyboard.press('/')
     const search = page.getByRole('searchbox', { name: 'Search models' })
@@ -43,6 +43,6 @@ test.describe('catalogue filters (#276)', () => {
     await search.pressSequentially('creme')
 
     await expect(page).toHaveURL(/\/\?q=creme$/)
-    await expect(page.getByTestId('result-count')).toHaveText('1 of 6')
+    await expect(page.getByTestId('result-count')).toHaveText('1 of 7')
   })
 })

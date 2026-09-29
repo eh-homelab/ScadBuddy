@@ -37,7 +37,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
     expect(names()).toEqual(['Crème Coaster'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 6')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 7')
   })
 
   it('adds a card tag to the filter from the URL-encoded chip', async () => {
@@ -63,7 +63,7 @@ describe('CataloguePage filters (#276)', () => {
     renderCatalogue('/?tag=keychain&origin=builtin')
     expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
     expect(names()).toEqual(['Keychain Template'])
-    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 6')
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 7')
   })
 
   it('sorts by name', async () => {
@@ -74,6 +74,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(names()).toEqual([
+      'Ball Maze',
       'Crème Coaster',
       'Gridfinity Bin',
       'Keychain Template',
@@ -91,7 +92,7 @@ describe('CataloguePage filters (#276)', () => {
     await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
     expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
     expect(screen.getByRole('searchbox')).toHaveValue('')
-    expect(names()).toHaveLength(6)
+    expect(names()).toHaveLength(7)
   })
 
   it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {

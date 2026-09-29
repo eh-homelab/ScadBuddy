@@ -121,6 +121,28 @@ export const keychainSchema: CustomizerSchema = {
   ],
 }
 
+/** #425 — maze-puzzle's parameters that its own panel shows (models/maze-puzzle/model.scad). */
+export const mazeSchema: CustomizerSchema = {
+  title: 'Ball Maze',
+  source_sha256: 'e'.repeat(64),
+  groups: ['Play', 'Colours'],
+  parameters: [
+    param('Play', {
+      name: 'mode',
+      type: 'select',
+      initial: 'open_tray',
+      caption: 'Play mode',
+      options: [
+        { name: 'Open tray', value: 'open_tray' },
+        { name: 'Ball with snap-on lid', value: 'ball_lid' },
+      ],
+    }),
+    param('Play', { name: 'ball_d', type: 'slider', initial: 6, caption: 'Ball diameter', min: 4, max: 12, step: 0.5 }),
+    param('Colours', { name: 'wall_color', type: 'color', initial: '#006064', caption: 'Maze walls and border' }),
+    param('Colours', { name: 'lid_color', type: 'color', initial: '#FFFFFF', caption: 'Lid, ball_lid mode only' }),
+  ],
+}
+
 export const gridfinitySchema: CustomizerSchema = {
   title: 'Gridfinity Bin',
   source_sha256: 'a'.repeat(64),
@@ -202,6 +224,8 @@ export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
 /** The commit `ui-demo`'s record is at: its UI loads pinned, from `/versions/{commit}/ui/`. */
 export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
+/** #425 — the bundled maze-puzzle, whose own panel hides the lid colour without a lid. */
+export const MAZE_SLUG = 'builtin:maze-puzzle'
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -325,6 +349,20 @@ export const models: ModelSummary[] = [
     upstream: null,
     has_readme: false,
     origin: 'mine',
+    ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
+  },
+  {
+    slug: MAZE_SLUG,
+    name: 'Ball Maze',
+    description: 'A tilt-and-roll ball maze with an optional snap-on lid.',
+    tags: ['custom-ui'],
+    updated_at: '2026-09-01T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'builtin',
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
 ]
@@ -471,6 +509,7 @@ export const schemas: Record<string, CustomizerSchema> = {
   [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
   [UI_DEMO_SLUG]: keychainSchema,
   [UI_BROKEN_SLUG]: keychainSchema,
+  [MAZE_SLUG]: mazeSchema,
 }
 
 export const fonts: FontFamily[] = [
