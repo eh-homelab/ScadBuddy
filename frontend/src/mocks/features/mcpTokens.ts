@@ -8,7 +8,7 @@ import type {
   McpTokenCreate,
   McpTokenTier,
   MintedMcpToken,
-} from '../api/mcpTokens'
+} from '../../api/mcpTokens'
 
 /**
  * The agent service's `/api/v1/ai/mcp-tokens` (#251, `agent/src/routes/mcpTokens.ts`)
@@ -55,7 +55,7 @@ const state = {
   anonymousCap: 'outward' as McpTokenTier,
 }
 
-export function resetMcpTokens(): void {
+export function reset(): void {
   state.tokens = seed()
   state.authMode = 'bearer'
   state.configuredMode = 'bearer'
@@ -135,7 +135,7 @@ function authProblems(body: Record<string, unknown>): string | undefined {
   return settingProblems(body, '') ?? settingProblems(body.expected, 'expected.')
 }
 
-export const mcpTokenHandlers = [
+export const handlers = [
   http.get(authBase, () =>
     HttpResponse.json(authView(), { headers: { 'Cache-Control': 'no-store' } }),
   ),
