@@ -38,7 +38,13 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import (
+    InvalidLibraryEntry,
+    ModelLibrary,
+    entry_name,
+    entry_problem,
+    invalid_entries,
+)
 from scadbuddy.library.media import (
     LEGACY_ID,
     MAX_MEDIA_ITEMS,
@@ -319,6 +325,9 @@ class ModelRecord(ModelMeta):
     #: As stored, plus what the disk says of each file. A template with only a
     #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+    #: The entries of ``libraries`` in model.json that are not pins, which
+    #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
+    invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
 
 
 class Catalogue:
@@ -605,6 +614,7 @@ class Catalogue:
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
             upstream_state=upstream_state,
+            invalid_libraries=invalid_entries(raw.get("libraries")),
         )
 
     @property
@@ -626,14 +636,32 @@ class Catalogue:
         ``model.json`` that is not JSON counts when its text mentions the name at
         all.
         """
-        users: list[str] = []
+        return [slug for slug, _ in self._library_entries(name, commit)]
+
+    def library_pins(self, name: str) -> list[tuple[str, ModelLibrary | None]]:
+        """Each of :meth:`library_users` with the pin its live ``model.json`` records
+        for ``name`` -- ``None`` where that entry cannot be read as one (a hand edit,
+        or a ``model.json`` that is not JSON), so every model a removal would name
+        is listed here too."""
+        pins: list[tuple[str, ModelLibrary | None]] = []
+        for slug, entry in self._library_entries(name):
+            pin: ModelLibrary | None = None
+            with contextlib.suppress(ValidationError):
+                pin = ModelLibrary.model_validate(entry)
+            pins.append((slug, pin))
+        return pins
+
+    def _library_entries(self, name: str, commit: str | None = None) -> list[tuple[str, Any]]:
+        """:meth:`library_users` with the entry that made each one a user, reading
+        each ``model.json`` once: ``None`` for one that is not JSON."""
+        found: list[tuple[str, Any]] = []
         for slug in self.slugs():
             try:
                 raw = self.read_raw_meta(slug)
             except InvalidModelMetaError:
                 with contextlib.suppress(OSError):
                     if name in self.paths.model_meta(slug).read_text(errors="replace"):
-                        users.append(slug)
+                        found.append((slug, None))
                 continue
             entries = raw.get("libraries")
             if not isinstance(entries, list):
@@ -643,9 +671,9 @@ class Catalogue:
                     continue
                 pinned = entry.get("commit") if isinstance(entry, dict) else None
                 if commit is None or not isinstance(pinned, str) or pinned == commit:
-                    users.append(slug)
+                    found.append((slug, entry))
                     break
-        return users
+        return found
 
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
@@ -870,15 +898,30 @@ class Catalogue:
         self._commit_change(message, change, slug)
         return self.record(slug)
 
-    def unpin_library(self, slug: str, name: str) -> ModelRecord:
+    def unpin_library(self, slug: str, name: str, *, index: int | None = None) -> ModelRecord:
         """Take ``name`` off this model's libraries. :class:`KeyError` when the
-        model does not declare it."""
+        model does not declare it.
+
+        With ``index``, only the invalid entry at that position of ``libraries``
+        (#217), which may share its name with a pin or another entry; checked in
+        the same read-modify-write, and :class:`LibraryPinChangedError` when that
+        entry is no longer an invalid one of that name."""
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if index is not None:
+                if not (
+                    0 <= index < len(entries)
+                    and entry_name(entries[index]) == name
+                    and entry_problem(entries[index]) is not None
+                ):
+                    raise LibraryPinChangedError(name)
+                raw["libraries"] = entries[:index] + entries[index + 1 :]
+                self.write_raw_meta(slug, raw)
+                return
             kept = [entry for entry in entries if entry_name(entry) != name]
             if len(kept) == len(entries):
                 raise LibraryNotDeclaredError(name)

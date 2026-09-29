@@ -547,16 +547,19 @@ export class ApprovalService {
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
     const summary = summariseInput(request.tool, request.input, secrets)
-    const row = await this.insert(this.deps.sql, request, summary)
-    if (!row) throw new Error('approval vanished after insert')
-    const approval = record(row)
-    const id = approval.id
-    if (approval.sessionId !== null) {
+    // The row and its `approval.required` commit together: a decision can only
+    // see the row once it has committed, so its `approval.resolved` cannot be
+    // logged before the event that asked for it.
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const row = await this.insert(tx, request, summary)
+      if (!row) throw new Error('approval vanished after insert')
+      const created = record(row)
+      if (created.sessionId === null) return created
       const tail: ServerEvent[] = [
         event({
           type: 'approval.required',
-          sessionId: approval.sessionId,
-          id,
+          sessionId: created.sessionId,
+          id: created.id,
           tool: request.toolUseId,
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
@@ -564,15 +567,21 @@ export class ApprovalService {
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
-        const moved = await this.deps.sql`
+        const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_approval', updated_at = now()
-          WHERE id = ${approval.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
+          WHERE id = ${created.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
         if (moved.count > 0) {
-          tail.push(event({ type: 'session.status', sessionId: approval.sessionId, status: 'waiting_approval' }))
+          tail.push(event({ type: 'session.status', sessionId: created.sessionId, status: 'waiting_approval' }))
         }
       }
-      await this.append(approval.sessionId, tail, secrets)
-    }
+      await this.deps.events.append(
+        created.sessionId,
+        tail.map((e) => scrubForLog(e, secrets)),
+        tx,
+      )
+      return created
+    })
+    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
     return approval
   }
 
@@ -590,26 +599,35 @@ export class ApprovalService {
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    const [row] = await this.deps.sql.unsafe<Row[]>(
-      `UPDATE ai_approvals
-       SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-           decided_at = now(), reason = $6,
-           usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-       WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-       RETURNING ${COLUMNS}`,
-      [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-    )
-    if (!row) return undefined
-    const approval = record(row)
-    await this.append(approval.sessionId, [
-      event({
-        type: 'approval.resolved',
-        sessionId: approval.sessionId ?? '-',
-        id,
-        approved: decision === 'approved',
-        ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-      }),
-    ])
+    // The decision and its `approval.resolved` commit together: a parked gate
+    // polling the row must not see the decision (and log the session's
+    // `running`) before the event that reports it is in the log.
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const [row] = await tx.unsafe<Row[]>(
+        `UPDATE ai_approvals
+         SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
+             decided_at = now(), reason = $6,
+             usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
+         WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
+         RETURNING ${COLUMNS}`,
+        [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
+      )
+      if (!row) return undefined
+      const settled = record(row)
+      if (settled.sessionId !== null) {
+        const resolved = event({
+          type: 'approval.resolved',
+          sessionId: settled.sessionId,
+          id,
+          approved: decision === 'approved',
+          ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+        })
+        await this.deps.events.append(settled.sessionId, [scrubForLog(resolved, [])], tx)
+      }
+      return settled
+    })
+    if (!approval) return undefined
+    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
     this.wakeWaiters(id)
     await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
     return approval

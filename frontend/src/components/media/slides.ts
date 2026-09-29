@@ -17,6 +17,9 @@ export type Slide = {
   contentType?: string
 }
 
+/** Where the media leads: the card's template, from the catalogue. */
+export type SlideLink = { to: string; label: string }
+
 /** A template's media as slides, in order. An item whose file is missing is skipped. */
 export function toSlides(slug: string, media: MediaView[]): Slide[] {
   const shown = media.filter((item) => !item.missing)

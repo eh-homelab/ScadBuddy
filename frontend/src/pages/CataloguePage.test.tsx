@@ -7,6 +7,7 @@ import { toSlides } from '../components/media/slides'
 import { BUILTIN_SLUG, GALLERY_SLUG, media, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { intersect } from '../test/intersection'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
@@ -476,10 +477,13 @@ describe('CataloguePage cards (#277)', () => {
     )
   }
 
+  /** The coaster's card, scrolled near enough to have mounted its carousel. */
   async function coasterCard() {
-    return (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+    const card = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
       'li',
     ) as HTMLElement
+    intersect(card)
+    return card
   }
 
   it('browses a card inline: next changes the slide, stays here and opens nothing', async () => {
@@ -494,19 +498,31 @@ describe('CataloguePage cards (#277)', () => {
     expect(within(carousel).getByTestId('carousel-position')).toHaveTextContent('3 of 4')
     // An uncaptioned slide is named after the template.
     expect(
-      within(card).getByRole('button', { name: 'Open Crème Coaster, image 3 of 4' }),
-    ).toHaveAttribute('tabindex', '0')
+      within(card).getByRole('button', { name: 'View Crème Coaster, image 3 of 4 full size' }),
+    ).toBeInTheDocument()
     expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
     expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('opens the lightbox at the media clicked', async () => {
+  it('opens the template from a click on the media', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    await user.click(
+      within(card).getByRole('img', { name: 'Printed in blue and orange' }),
+    )
+
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens the lightbox at the slide shown from its expand button', async () => {
     const { user } = renderWithRoutes()
     const card = await coasterCard()
 
     await user.click(within(card).getByRole('button', { name: 'Next slide' }))
-    await user.click(within(card).getByRole('button', { name: 'Open The raised rim' }))
+    await user.click(within(card).getByRole('button', { name: 'View The raised rim full size' }))
 
     const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
     await waitFor(() =>
@@ -517,6 +533,22 @@ describe('CataloguePage cards (#277)', () => {
     )
     expect(dialog).toHaveTextContent('The raised rim')
     expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
+  })
+
+  it('opens the template from the lightbox without closing it first', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    await user.click(
+      within(card).getByRole('button', { name: 'View Printed in blue and orange full size' }),
+    )
+    const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const open = within(dialog).getByRole('link', { name: 'Open template' })
+    expect(open).toHaveAttribute('href', `/m/${GALLERY_SLUG}`)
+
+    await user.click(open)
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('links the title, with the media outside the link', async () => {
@@ -551,7 +583,7 @@ describe('CataloguePage cards (#277)', () => {
     // not one stop per slide.
     expect(stops).toEqual([
       'Crème Coaster',
-      'Open Printed in blue and orange',
+      'View Printed in blue and orange full size',
       'Next slide',
       'Go to slide 1',
       'Crème Coaster',
@@ -572,7 +604,9 @@ describe('CataloguePage cards (#277)', () => {
       within(bin).getByRole('img', { name: 'Gridfinity Bin — not generated yet' }),
     ).toBeInTheDocument()
     expect(within(bin).queryByRole('region')).not.toBeInTheDocument()
-    expect(within(bin).queryByRole('button', { name: /slide|^Open / })).not.toBeInTheDocument()
+    expect(
+      within(bin).queryByRole('button', { name: /slide|^View .* full size$/ }),
+    ).not.toBeInTheDocument()
 
     // The built-in has no media, so its default-render preview stands in.
     const builtin = screen.getByRole('heading', { name: 'Keychain Template' }).closest(
@@ -584,14 +618,14 @@ describe('CataloguePage cards (#277)', () => {
     )
   })
 
-  it('shows a legacy thumbnail as the one slide, which opens the lightbox', async () => {
+  it('shows a legacy thumbnail as the one slide, which expands into the lightbox', async () => {
     const { user } = renderWithRoutes()
     const keychain = (await screen.findByRole('heading', { name: 'Name Keychain' })).closest(
       'li',
     ) as HTMLElement
     expect(within(keychain).queryByRole('button', { name: 'Next slide' })).not.toBeInTheDocument()
 
-    await user.click(within(keychain).getByRole('button', { name: 'Open Name Keychain' }))
+    await user.click(within(keychain).getByRole('button', { name: 'View Name Keychain full size' }))
     expect(await screen.findByRole('dialog', {}, { timeout: 3000 })).toBeInTheDocument()
   })
 })
