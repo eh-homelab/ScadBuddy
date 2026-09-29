@@ -225,7 +225,8 @@ export function ActionBar({
   return (
     <>
       <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+        {/* A basis, so a crowded bar wraps its buttons below rather than squeezing "Saved …" to nothing. */}
+        <div className="flex min-w-0 grow basis-64 items-center gap-3">
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
