@@ -15,7 +15,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print import pipelines_route, presets_routes
+from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 
@@ -87,7 +87,6 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
 ) -> None:
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes()
     nozzle_routes()
@@ -113,7 +112,6 @@ def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model
     """The inventory does not need a printer; only the reconciled weights do."""
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes(printer_id=None)
 
@@ -142,7 +140,6 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     """
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     local = respx.get(f"{API}/local-presets/")
     pipeline = respx.get(f"{API}/slicer-pipelines/1")
     inventory_routes()
@@ -150,6 +147,8 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
     assert [nozzle["nozzle_diameter"] for nozzle in body["nozzles"]] == ["0.2", "0.4"]
+    # The rack's spares (ids 17-21), not the mounted pair (rack ids 0 and 1).
+    assert [nozzle["nozzle_diameter"] for nozzle in body["rack"]] == ["0.4"] * 5
     assert "pipeline_nozzle_diameter" not in body
     assert not local.called
     assert not pipeline.called
@@ -191,7 +190,6 @@ def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     """No printer, no mounted nozzles to compare against — not an error."""
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes(printer_id=None)
     status = nozzle_routes()

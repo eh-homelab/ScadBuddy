@@ -17,6 +17,7 @@ import asyncio
 import logging
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from scadbuddy.analyzers.context import (
     AnalysisContext,
@@ -26,12 +27,13 @@ from scadbuddy.analyzers.context import (
     base_profile,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.filaments import gather_options
+from scadbuddy.bambuddy.filaments import every_plate, gather_plate_options
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.schema import ParamValue
@@ -151,14 +153,30 @@ async def _read_bambuddy(
     if library_file_id is None:
         context.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
         return
+    # An all-plates print needs each slot's total over every plate, as the filament
+    # step reads it (`pipelines.filament_options_for_output`). A 3MF whose plates
+    # cannot be listed makes the inventory unavailable, as `_read_geometry` treats the
+    # same file, rather than failing the run.
+    plate_ids = [request.plate_id]
     try:
-        context.filament_options = await gather_options(
+        if request.all_plates and context.model_3mf is not None:
+            plates = await asyncio.to_thread(plates_of, context.model_3mf)
+            plate_ids = [plate.index for plate in plates] or [1]
+    except (KeyError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
+        context.unavailable["inventory"] = f"the 3MF's plates cannot be read: {error}"
+        return
+    try:
+        # The spools, where they are loaded and the printer's remaining weights are the
+        # same for every plate, so `gather_plate_options` reads them once (#480); then
+        # each plate's own slots, concurrently.
+        read = await gather_plate_options(
             client,
             library_file_id=library_file_id,
             printer_id=context.printer.id if context.printer else None,
-            plate_id=request.plate_id,
+            plate_ids=plate_ids,
             fallback_colours=list(meta.colors) if meta is not None else None,
         )
+        context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:
         context.unavailable["inventory"] = error.detail
 

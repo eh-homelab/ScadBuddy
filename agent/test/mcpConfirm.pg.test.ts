@@ -34,6 +34,24 @@ describe('ownerOf', () => {
     expect(ownerOf({ id: 'anonymous:other', kind: 'anonymous', tiers: ['read'] }).id).not.toBe(owner.id)
     expect(ownerOf(principalA)).toMatchObject({ kind: 'bearer', id: 'token:a' })
   })
+
+  it('records an OIDC caller as itself, by subject and client, never as the browser user', () => {
+    const owner = ownerOf({
+      id: 'oidc:https://idp.example/#alice',
+      kind: 'oidc',
+      tiers: tiersUpTo('outward'),
+      subject: 'alice',
+      clientId: 'claude-code',
+    })
+    expect(owner).toEqual({ kind: 'oidc', id: 'oidc:https://idp.example/#alice', label: 'MCP OIDC alice via claude-code' })
+    expect(ownerOf({ id: 'oidc:https://idp.example/#bob', kind: 'oidc', tiers: ['read'], subject: 'bob' }).label).toBe(
+      'MCP OIDC bob',
+    )
+  })
+
+  it('refuses a principal kind it does not know rather than calling it the browser user', () => {
+    expect(() => ownerOf({ id: 'x', kind: 'future' as never, tiers: ['read'] })).toThrow(/unknown principal kind/)
+  })
 })
 
 describe.skipIf(!TEST_DATABASE_URL)(
@@ -158,6 +176,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const principalC: Principal = { id: 'token:c', kind: 'bearer', tiers: tiersUpTo('outward') }
       await prepare(principalC)
       await expect(prepare({ ...principalC, id: 'token:d' })).rejects.toThrow('too many actions')
+    })
+
+    it('an evicted action leaves no pending approval behind, and an action outlives a restart', async () => {
+      const first = await prepare(principalA, { output_id: '0'.repeat(32) })
+      const kept = await prepare(principalA, { output_id: '1'.repeat(32) })
+      for (let i = 2; i < 4; i++) await prepare(principalA, { output_id: `${i}`.repeat(32) })
+      // The UI no longer offers the evicted one, and it cannot be decided or confirmed.
+      expect((await approvals.list(browser, { pending: true })).map((a) => a.id)).not.toContain(first.id)
+      await expect(approvals.decide(browser, first.id, true)).rejects.toBeDefined()
+      const evicted = await actions.claim(first.id, principalA, { output_id: '0'.repeat(32) })
+      expect(evicted.status === 'refused' && evicted.reason).toContain('cancelled')
+      // Nothing is held in memory: a new store on the same table (a restarted
+      // process) confirms what the old one prepared.
+      await approvals.decide(browser, kept.id, true)
+      const restarted = new ApprovalActions(approvals, { perPrincipal: 3, total: 5 })
+      expect(await restarted.claim(kept.id, principalA, { output_id: '1'.repeat(32) })).toMatchObject({
+        status: 'approved',
+      })
     })
 
     it('holds both bounds under concurrent prepares (one transaction under an advisory lock)', async () => {
@@ -340,7 +376,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const ran = await confirm(a, id)
       expect(ran.isError).toBeFalsy()
       expect(firstText(ran)).toMatchObject({ status: 'sent' })
-      expect(sent).toEqual([{ id: OUTPUT, body: { mode: 'library', copies: null, options: {} } }])
+      expect(sent).toEqual([{ id: OUTPUT, body: { mode: 'library' } }])
 
       // Replay: refused, nothing more sent.
       const replay = await confirm(a, id)

@@ -1,8 +1,11 @@
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
-import { sessionWorkDir } from '../src/harness/stateDirs.js'
+import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
   SessionError,
@@ -65,8 +68,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
     }
 
     it('serves a principal’s list from the owner and creator indexes, not a table scan', async () => {
+      // Only this test's schema: test files run in parallel, each in a throwaway
+      // schema, and describing another one's index while it is dropped fails with
+      // "could not open relation with OID".
       const indexes = await db.sql<{ indexname: string; indexdef: string }[]>`
-        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ai_sessions'`
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = current_schema() AND tablename = 'ai_sessions'`
       const defs = Object.fromEntries(indexes.map((i) => [i.indexname, i.indexdef]))
       expect(defs.ai_sessions_owner).toMatch(/\(owner_kind, owner_id, updated_at DESC\)/)
       expect(defs.ai_sessions_creator).toMatch(/\(creator_kind, creator_id, updated_at DESC\)/)
@@ -338,6 +345,45 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(runs2[0]!.maxBudgetUsd).toBeCloseTo(0.02)
       expect((await m2.get(session.id, agentA)).costUsd).toBeCloseTo(0.06)
       await expect(m2.send(session.id, agentA, 'three')).rejects.toMatchObject({ code: 'budget_exhausted' })
+    })
+
+    it('gives a turn the headless browser only when the setting is on (#349, off by default)', async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      // Stands in for the server writing a screenshot and Chromium its profile.
+      const { runner, runs } = scriptedRunner((run) => {
+        for (const dir of [run.headlessBrowser?.dir, run.headlessBrowser?.tmpDir]) {
+          if (!dir) continue
+          mkdirSync(path.join(dir, 'output'), { recursive: true })
+          writeFileSync(path.join(dir, 'output', 'page.png'), 'png')
+        }
+        return { reply: 'ok' }
+      })
+      const backendUrl = 'http://127.0.0.1:8000'
+      const m = manager({ sql: db.sql, paths, run: runner, settings, headlessBrowser: { backendUrl } })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      await turn!.done
+      expect(runs[0]!.headlessBrowser).toBeUndefined()
+
+      await settings.set(SETTING_HEADLESS_BROWSER, true)
+      await (await m.send(session.id, agentA, 'look again')).done
+      expect(runs[1]!.headlessBrowser).toEqual({
+        sessionId: session.id,
+        backendUrl,
+        dir: sessionBrowserDir(paths, session.id),
+        tmpDir: sessionBrowserTmpDir(session.id),
+      })
+      // Its directory is not the session's cwd, where named output files land.
+      expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)
+      // Both are removed when the turn ends (review of #518), so screenshots and
+      // profiles do not pile up turn after turn.
+      expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
+      expect(existsSync(sessionBrowserTmpDir(session.id))).toBe(false)
+
+      // Without the dependency (no backend URL wired), the setting alone does nothing.
+      const bare = manager({ sql: db.sql, paths, run: runner, settings })
+      await (await bare.send(session.id, agentA, 'once more')).done
+      expect(runs[2]!.headlessBrowser).toBeUndefined()
     })
 
     describe('ownership and handoff', () => {

@@ -11,6 +11,7 @@ import {
   nozzleMismatch,
   seedPlan,
   slotNeed,
+  spareNozzles,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -326,6 +327,25 @@ describe('extruders (#469)', () => {
     expect(fittingSides(wired, '0.4')).toEqual([1])
     expect(fittingSides(wired, '0.6')).toEqual([])
     expect(fittingSides({ nozzles: [nozzles[0]!, nozzles[0]!] }, '0.2')).toEqual([0, 1])
+  })
+
+  // #469 local review — a spare of the size in the H2C's rack: the printer swaps it onto
+  // a side whose nozzle differs, one spare per side.
+  const spare02 = { nozzle_type: 'HS00', nozzle_diameter: '0.2' }
+
+  it('counts a spare in the rack as fitting one more side', () => {
+    expect(fittingSides({ ...wired, rack: [spare02] }, '0.2')).toEqual([0, 1])
+    const both04 = { nozzles: [nozzles[1]!, nozzles[1]!], rack: [spare02] }
+    expect(fittingSides(both04, '0.2')).toEqual([0])
+    expect(fittingSides({ ...both04, rack: [spare02, spare02] }, '0.2')).toEqual([0, 1])
+    // A spare fits no side the printer does not report, and none of another size.
+    expect(fittingSides({ nozzles: nozzles.slice(1), rack: [spare02] }, '0.2')).toEqual([0])
+    expect(fittingSides({ ...both04, rack: [spare02] }, '0.6')).toEqual([])
+    expect(spareNozzles(wired, '0.2')).toBe(0)
+  })
+
+  it('rules no spool out when a spare could go on its side', () => {
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), { ...wired, rack: [spare02] }, '0.2')).toBeNull()
   })
 
   describe('fitPlan', () => {

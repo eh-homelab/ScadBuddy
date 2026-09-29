@@ -6,6 +6,7 @@ import {
   type CatalogueOrigin,
   type CatalogueQuery,
   type CatalogueSort,
+  type CatalogueView,
 } from '../lib/catalogueQuery'
 import { Button } from './ui/Button'
 
@@ -15,6 +16,11 @@ const ORIGINS: Array<{ value: CatalogueOrigin; label: string }> = [
   { value: 'all', label: 'All' },
   { value: 'builtin', label: 'Built-in' },
   { value: 'mine', label: 'Mine' },
+]
+
+const VIEWS: Array<{ value: CatalogueView; label: string }> = [
+  { value: 'cards', label: 'Cards' },
+  { value: 'list', label: 'List' },
 ]
 
 const SORTS: Array<{ value: CatalogueSort; label: string }> = [
@@ -42,7 +48,7 @@ function chipClass(selected: boolean): string {
   }`
 }
 
-/** #276 — search, tag chips, origin and sort above the catalogue. */
+/** #276 — search, tag chips, origin and sort above the catalogue; #278 — the view. */
 export function CatalogueFilters({ query, onChange, tags, shown, total }: Props) {
   const [text, setText] = useState(query.q)
   const sent = useRef(query.q)
@@ -127,27 +133,12 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
           onChange={(event) => search(event.target.value)}
           className="sb-field h-8 min-w-48 flex-1"
         />
-        <div
-          role="group"
-          aria-label="Origin"
-          className="flex rounded-[6px] border border-line bg-surface p-0.5"
-        >
-          {ORIGINS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={query.origin === option.value}
-              onClick={() => commit({ ...query, q: text, origin: option.value })}
-              className={`h-6 rounded-[4px] px-2.5 text-[12px] transition-colors ${
-                query.origin === option.value
-                  ? 'bg-surface-3 text-ink'
-                  : 'text-muted hover:text-ink'
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        <SegmentedGroup
+          label="Origin"
+          options={ORIGINS}
+          value={query.origin}
+          onChange={(origin) => commit({ ...query, q: text, origin })}
+        />
         <label className="flex items-center gap-1.5 text-[12px] text-muted">
           Sort
           <select
@@ -164,6 +155,12 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
             ))}
           </select>
         </label>
+        <SegmentedGroup
+          label="View"
+          options={VIEWS}
+          value={query.view}
+          onChange={(view) => commit({ ...query, q: text, view })}
+        />
       </div>
 
       {tags.length > 0 && (
@@ -199,6 +196,41 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
           </Button>
         )}
       </div>
+    </div>
+  )
+}
+
+/** A row of toggle buttons, one pressed: the origin filter and the view. */
+function SegmentedGroup<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string
+  options: Array<{ value: T; label: string }>
+  value: T
+  onChange: (value: T) => void
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={label}
+      className="flex rounded-[6px] border border-line bg-surface p-0.5"
+    >
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          aria-pressed={value === option.value}
+          onClick={() => onChange(option.value)}
+          className={`h-6 rounded-[4px] px-2.5 text-[12px] transition-colors ${
+            value === option.value ? 'bg-surface-3 text-ink' : 'text-muted hover:text-ink'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   )
 }

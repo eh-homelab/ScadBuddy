@@ -4,7 +4,8 @@ import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
-import type { Output, PrintRunResult } from '../api/types'
+import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
+import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -16,6 +17,7 @@ const output = fixtures.outputs[0] as Output
 
 function renderPicker(
   props: {
+    onClose?: () => void
     onRan?: (result: PrintRunResult) => void
     onPrinterModel?: (model: string | null) => void
   } = {},
@@ -24,8 +26,8 @@ function renderPicker(
     <PrintPicker
       open
       slug="name-keychain"
-      output={{ ...output, library_files: [], pipeline_run_id: undefined }}
-      onClose={vi.fn()}
+      output={{ ...output, library_files: [] }}
+      onClose={props.onClose ?? vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
     />,
@@ -38,13 +40,13 @@ async function loaded() {
   await screen.findByTestId('filament-slot-1')
 }
 
-/** Every request body of one kind, in order. */
-function watch(method: string, suffix: string) {
+/** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
+function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   const bodies: Record<string, unknown>[] = []
   const urls: string[] = []
   server.events.on('request:start', async ({ request }) => {
     const path = new URL(request.url).pathname
-    if (request.method === method && path.endsWith(suffix)) {
+    if (request.method === method && path.startsWith(prefix) && path.endsWith(suffix)) {
       urls.push(request.url)
       if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
     }
@@ -342,18 +344,237 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
   it('leaves Print enabled to retry after a refusal that is not a 422', async () => {
     const run = vi
       .spyOn(api, 'runPrint')
-      .mockRejectedValueOnce(new ApiError(502, 'Bambuddy did not answer in time.'))
+      .mockRejectedValueOnce(new ApiError(409, 'Bambuddy refused the API key.'))
       .mockResolvedValueOnce(queuedResult)
     const { user } = renderPicker()
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer in time.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key.')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(run).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('PrintPicker · A run that got no answer (#470)', () => {
+  function runAnswers(answer: () => Response) {
+    const calls = watch('POST', '/run')
+    server.use(http.post('/api/v1/print/outputs/:id/run', answer))
+    return calls
+  }
+
+  it('says a proxy timeout may still have queued the print, and points at the queue', async () => {
+    const opened = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { bodies } = runAnswers(
+      () =>
+        new HttpResponse('<html>upstream request timeout</html>', {
+          status: 504,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    )
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The server took too long to answer (HTTP 504).')
+    expect(alert).toHaveTextContent(
+      "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice.",
+    )
+    expect(alert).not.toHaveTextContent('Request failed')
+    // No Print to press again: the way back to it is closing and reopening the dialog.
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    await user.click(await screen.findByRole('button', { name: "Open Bambuddy's queue" }))
+    expect(opened).toHaveBeenCalledWith(
+      `${fixtures.settings.bambuddy_url}/queue`,
+      expect.any(String),
+      'noopener',
+    )
+    expect(bodies).toHaveLength(1)
+    expect(onRan).not.toHaveBeenCalled()
+  })
+
+  it('says the same when the connection drops after sending', async () => {
+    runAnswers(() => HttpResponse.error())
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+    )
+    expect(alert).toHaveTextContent('The print may still have been queued.')
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+  })
+
+  it('says the same when the backend timed out on Bambuddy, which may have queued it', async () => {
+    const { bodies } = runAnswers(() =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+          title: 'Gateway Timeout',
+          status: 504,
+          detail: 'could not reach Bambuddy to queue the print: ReadTimeout',
+        },
+        { status: 504, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('could not reach Bambuddy to queue the print: ReadTimeout')
+    expect(alert).toHaveTextContent('The print may still have been queued.')
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+    expect(bodies).toHaveLength(1)
+    expect(onRan).not.toHaveBeenCalled()
+  })
+
+  it('offers Print again once the dialog is reopened', async () => {
+    runAnswers(() => new HttpResponse('timeout', { status: 524 }))
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        slug="name-keychain"
+        output={{ ...output, library_files: [] }}
+        onClose={onClose}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByRole('button', { name: "Open Bambuddy's queue" })
+
+    await user.click(screen.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('stays open through a run, so a reopened dialog cannot print it twice', async () => {
+    let release: () => void = () => undefined
+    let calls = 0
+    server.use(
+      http.post('/api/v1/print/outputs/:id/run', async () => {
+        calls += 1
+        await new Promise<void>((resolve) => (release = resolve))
+        return HttpResponse.json(queuedResult)
+      }),
+    )
+    const onClose = vi.fn()
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onClose, onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(calls).toBe(1))
+
+    // Escape while the print waits on a slow proxy: the dialog keeps it.
+    await user.keyboard('{Escape}')
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
+
+    release()
+    await waitFor(() => expect(onRan).toHaveBeenCalledTimes(1))
+    expect(calls).toBe(1)
+  })
+
+  it('opens the queue without a double slash when Settings has a trailing one', async () => {
+    const opened = vi.spyOn(window, 'open').mockReturnValue(null)
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...fixtures.settings, bambuddy_url: 'https://bambuddy.example/' }),
+      ),
+    )
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await user.click(await screen.findByRole('button', { name: "Open Bambuddy's queue" }))
+    expect(opened).toHaveBeenCalledWith(
+      'https://bambuddy.example/queue',
+      expect.any(String),
+      'noopener',
+    )
+  })
+
+  it('reads Settings for the queue link only once a run is unanswered', async () => {
+    const { urls } = watch('GET', '/settings', '/api/v1/')
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    expect(urls).toHaveLength(0)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByRole('button', { name: "Open Bambuddy's queue" })
+    expect(urls).toHaveLength(1)
+  })
+
+  it('offers to read the queue link again when Settings could not be read', async () => {
+    let settingsFail = true
+    server.use(
+      http.get('/api/v1/settings', () =>
+        settingsFail
+          ? HttpResponse.error()
+          : HttpResponse.json(fixtures.settings),
+      ),
+    )
+    runAnswers(() => new HttpResponse('timeout', { status: 504 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('may still have been queued')
+    const retry = await screen.findByRole('button', { name: "Find Bambuddy's queue" })
+    expect(screen.queryByRole('button', { name: "Open Bambuddy's queue" })).toBeNull()
+
+    settingsFail = false
+    await user.click(retry)
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: "Find Bambuddy's queue" })).toBeNull()
+  })
+
+  it('keeps Print when Bambuddy answered an error, which queued nothing', async () => {
+    runAnswers(() =>
+      HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+          title: 'Bad Gateway',
+          status: 502,
+          detail: 'Bambuddy answered 500 when asked to queue the print',
+          bambuddy_status: 500,
+        },
+        { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Bambuddy answered 500 when asked to queue the print')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+  })
+
+  it('keeps Print for a 503, which nothing upstream took', async () => {
+    runAnswers(() => new HttpResponse('no healthy upstream', { status: 503 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The server is not answering right now (HTTP 503).')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: "Open Bambuddy's queue" })).toBeNull()
   })
 })
 
@@ -636,7 +857,7 @@ describe('PrintPicker · Remembered choices', () => {
       process_name: null,
     })
     // ActionBar's shape: one PrintPicker stays mounted and `open` toggles.
-    const target = { ...output, library_file_id: undefined, pipeline_run_id: undefined }
+    const target = { ...output, library_file_id: undefined }
     function Harness() {
       const [open, setOpen] = useState(true)
       return (
@@ -853,6 +1074,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
+  it('never GETs /filaments for plate 1 without all plates', async () => {
+    // #525 finding 3: the msw mock's per-plate filtering in `handlers.ts` is only
+    // safe because plate 1 without `all_plates` is seeded from the bulk
+    // `choices.filaments` payload and never hits this route. Pin that directly.
+    const reads = watch('GET', '/filaments')
+    renderPicker()
+    await loaded()
+    expect(reads.urls).toHaveLength(0)
+  })
+
   it('offers each plate of a multi-plate output, reading that plate’s slots', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>
@@ -900,6 +1131,31 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
+  })
+
+  it('reads every plate for all plates, not plate 1 alone', async () => {
+    // #480: the default mock gives plate N only slot N and `all_plates` the union, so a
+    // read that dropped `all_plates` would come back with slot 1 alone.
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument())
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+
+    expect(await screen.findByTestId('filament-slot-1')).toBeInTheDocument()
+    expect(screen.getByTestId('filament-slot-2')).toBeInTheDocument()
+    expect(reads.urls.at(-1)).toContain('all_plates=true')
   })
 
   it('offers a row for a slot only a later plate uses when printing all plates', async () => {
@@ -969,5 +1225,71 @@ describe('PrintPicker · Plates of a 3MF', () => {
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+  })
+})
+
+describe('PrintPicker · Checks (#284)', () => {
+  it('judges the request the dialog would print with, and again when a choice changes', async () => {
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(bodies.length).toBeGreaterThan(0))
+    expect(bodies.at(-1)).toMatchObject({
+      target: { output_id: output.id },
+      detail: 'advanced',
+      request: {
+        printer_id: 1,
+        plate_id: 1,
+        choices: { nozzles: [{ size: '0.4' }, { size: '0.4' }], bed_type: 'Textured PEI Plate' },
+        filament_plan: { force_colour_match: false },
+      },
+    })
+    expect(await screen.findByTestId('diagnostic-SB1003')).toBeVisible()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await waitFor(() =>
+      expect(bodies.at(-1)).toMatchObject({
+        request: { choices: { nozzles: [{ size: '0.2' }, { size: '0.2' }] } },
+      }),
+    )
+  })
+
+  it('judges an all-plates print on every plate', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { all_plates: false } }))
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+    await waitFor(() =>
+      expect(bodies.at(-1)).toMatchObject({ request: { all_plates: true, plate_id: 1 } }),
+    )
+  })
+
+  it('leaves Print enabled when a check reports a problem', async () => {
+    server.use(
+      http.post('/api/v1/analyzers/run', async ({ request }) => {
+        const body = (await request.json()) as { request: AnalysisRequest }
+        return HttpResponse.json(
+          analysisReport(output, body.request, [
+            { ...openEdgesDiagnostic, id: 'SB1001', key: 'SB1001:part-2', severity: 'error' },
+          ]),
+        )
+      }),
+    )
+    renderPicker()
+    await loaded()
+    expect(await screen.findByTestId('diagnostic-SB1001:part-2')).toHaveTextContent('Problem')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 })

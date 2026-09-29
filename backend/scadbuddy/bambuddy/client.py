@@ -6,7 +6,7 @@ than read off the design spec:
 * ``/api/v1/printers`` **404s** — only ``/api/v1/printers/`` exists, and it answers
   with a bare list whose ``id`` is an integer.
 * ``/api/v1/library/folders`` and ``/api/v1/external-links/`` also answer with bare
-  lists, while ``/api/v1/slicer-pipelines/`` wraps its rows in ``{"pipelines": [...]}``.
+  lists.
 * **Reading** folders is that slashless path; **creating** one is
   ``/api/v1/library/folders/`` **with** the slash. Both routes are real here.
 * ``/api/v1/printers/available-filaments`` takes a *required* ``model`` query
@@ -45,11 +45,6 @@ from scadbuddy.bambuddy.models import (
     InventoryRemain,
     LibraryFile,
     LocalPresetCatalogue,
-    Pipeline,
-    PipelineList,
-    PipelineRun,
-    PipelineRunList,
-    PipelineRunRequest,
     PresetCatalogue,
     Printer,
     PrinterMedia,
@@ -225,30 +220,6 @@ class BambuddyClient:
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
 
-    async def pipelines(self) -> list[Pipeline]:
-        response = await self._send(
-            "GET",
-            "/slicer-pipelines/",
-            scope=Scope.MANAGE_QUEUE,
-            what="list the slicer pipelines",
-        )
-        return PipelineList.model_validate(response.json()).pipelines
-
-    async def pipeline(self, pipeline_id: int) -> Pipeline:
-        """``GET /api/v1/slicer-pipelines/{id}`` — the presets and target of one pipeline.
-
-        Needed by the send path, not just for display: a send that carries print options
-        has to slice and queue itself, and this is where it reads the presets, bed type
-        and target to do that with.
-        """
-        response = await self._send(
-            "GET",
-            f"/slicer-pipelines/{pipeline_id}",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"read slicer pipeline {pipeline_id}",
-        )
-        return Pipeline.model_validate(response.json())
-
     async def presets(self) -> PresetCatalogue:
         response = await self._send(
             "GET", "/slicer/presets", scope=Scope.MANAGE_LIBRARY, what="list the slicer presets"
@@ -346,17 +317,20 @@ class BambuddyClient:
     async def archives(
         self,
         *,
-        printer_id: int,
+        printer_id: int | None = None,
         limit: int = 20,
         offset: int = 0,
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> list[Archive]:
-        """This printer's archives, optionally within a date window. Bambuddy's order is
+        """Archives, of one printer or all, optionally within a date window (on
+        ``created_at``, which is when the print was dispatched). Bambuddy's order is
         not documented, so callers sort; ``limit`` keeps the read small. There is no
         filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
-        params: dict[str, Any] = {"printer_id": printer_id, "limit": limit}
+        params: dict[str, Any] = {"limit": limit}
+        if printer_id is not None:
+            params["printer_id"] = printer_id
         if offset:
             params["offset"] = offset
         if date_from is not None:
@@ -607,38 +581,7 @@ class BambuddyClient:
                 )
             await asyncio.sleep(self.config.slice_poll_interval)
 
-    # --- pipelines and queue -------------------------------------------------
-
-    async def run_pipeline(self, pipeline_id: int, request: PipelineRunRequest) -> PipelineRun:
-        """Slice and queue ``copies`` prints.
-
-        A blocking eligibility issue answers 409 with Bambuddy's eligibility report;
-        ``map_response`` passes that body through verbatim. ``request.force`` runs anyway.
-        """
-        response = await self._send(
-            "POST",
-            f"/slicer-pipelines/{pipeline_id}/run",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"run slicer pipeline {pipeline_id}",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
-        return PipelineRun.model_validate(response.json())
-
-    async def pipeline_run(self, run_id: int) -> PipelineRun:
-        """``GET /api/v1/pipeline-runs/{run_id}`` — the single-run read.
-
-        Not ``/slicer-pipelines/{id}/runs``: that is a list, and following one run
-        through it would mean paging past every other run of the same pipeline. This
-        route also needs no pipeline id, which matters because an output records the
-        run it produced and not the pipeline it came from.
-        """
-        response = await self._send(
-            "GET",
-            f"/pipeline-runs/{run_id}",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"read pipeline run {run_id}",
-        )
-        return PipelineRun.model_validate(response.json())
+    # --- queue ---------------------------------------------------------------
 
     async def queue_item(self, item_id: int) -> QueueItem:
         response = await self._send(
@@ -648,16 +591,6 @@ class BambuddyClient:
             what=f"read queue item {item_id}",
         )
         return QueueItem.model_validate(response.json())
-
-    async def pipeline_runs(self, pipeline_id: int, *, limit: int = 10) -> PipelineRunList:
-        response = await self._send(
-            "GET",
-            f"/slicer-pipelines/{pipeline_id}/runs",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"list the runs of slicer pipeline {pipeline_id}",
-            params={"limit": limit},
-        )
-        return PipelineRunList.model_validate(response.json())
 
     async def enqueue(self, item: QueueItemCreate) -> QueueItem:
         """``POST /api/v1/queue/`` with the whole ``PrintQueueItemCreate``.

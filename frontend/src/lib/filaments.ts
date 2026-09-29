@@ -54,16 +54,29 @@ export function loadedLabel(spool: SpoolOption, printerId?: number | null): stri
   return where
 }
 
-type Hardware = Partial<Pick<FilamentOptions, 'nozzles' | 'track_switch'>>
+type Hardware = Partial<Pick<FilamentOptions, 'nozzles' | 'track_switch' | 'rack'>>
+
+/** How many spare hotends of `size` the rack holds (#469): each can go on one side. */
+export function spareNozzles(options: Hardware, size: string | undefined): number {
+  return (options.rack ?? []).filter((slot) => size && slot.nozzle_diameter === size).length
+}
 
 /**
- * The extruders — 0 right, 1 left, as `nozzles` is indexed — whose fitted nozzle is
- * `size` (#469). With none the run is refused; with one of two reported, so is a
- * multi-color print.
+ * The extruders — 0 right, 1 left, as `nozzles` is indexed — that can print at `size`
+ * (#469): the nozzle mounted there is that size, or the rack holds a spare of it the
+ * printer swaps on (one spare per side, the right first). With none the run is refused;
+ * with one of two reported, so is a multi-color print. Mirrors the backend's
+ * `plan_extruders`.
  */
 export function fittingSides(options: Hardware, size: string | undefined): (0 | 1)[] {
   const nozzles = options.nozzles ?? []
-  return ([0, 1] as const).filter((extruder) => size && nozzles[extruder]?.nozzle_diameter === size)
+  const mounted = (extruder: 0 | 1) => nozzles[extruder]?.nozzle_diameter
+  const swappable = ([0, 1] as const)
+    .filter((extruder) => size && mounted(extruder) && mounted(extruder) !== size)
+    .slice(0, spareNozzles(options, size))
+  return ([0, 1] as const).filter(
+    (extruder) => (size && mounted(extruder) === size) || swappable.includes(extruder),
+  )
 }
 
 /**
@@ -73,7 +86,8 @@ export function fittingSides(options: Hardware, size: string | undefined): (0 | 
  * Only without the Filament Track Switch: there each AMS is wired to one side, so a
  * spool on the side with another nozzle fitted can't print. With the switch any AMS
  * reaches either nozzle, and a spool's side is only where it rests. An unknown side or
- * an unreported nozzle is not a mismatch.
+ * an unreported nozzle is not a mismatch, and nor is a side the printer can swap a
+ * spare of `size` from the rack onto.
  */
 export function nozzleMismatch(
   spool: SpoolOption,
@@ -84,7 +98,7 @@ export function nozzleMismatch(
   const extruder = spool.extruder
   if (extruder === null || extruder === undefined || !size || !spool.side) return null
   const fitted = (options.nozzles ?? [])[extruder]?.nozzle_diameter
-  if (!fitted || fitted === size) return null
+  if (!fitted || fitted === size || spareNozzles(options, size) > 0) return null
   return `${spool.side} · ${fitted} fitted`
 }
 

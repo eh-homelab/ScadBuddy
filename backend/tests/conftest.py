@@ -16,12 +16,21 @@ from typing import Any
 import numpy as np
 import psycopg
 import pytest
+from psycopg import Connection
 from psycopg.conninfo import make_conninfo
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import load_config
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render.pg_store import migrate
+from tests.support.temporal import (
+    TEST_TEMPORAL_ADDRESS_ENV,
+    TEST_TEMPORAL_DEV_SERVER_ENV,
+    temporal_available,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -119,6 +128,15 @@ def _skip_without_postgres(request: pytest.FixtureRequest) -> None:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
 
 
+@pytest.fixture(autouse=True)
+def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_temporal") and not temporal_available():
+        pytest.skip(
+            f"no Temporal: set {TEST_TEMPORAL_ADDRESS_ENV} (a running server) or"
+            f" {TEST_TEMPORAL_DEV_SERVER_ENV} (a temporal CLI), or put `temporal` on PATH"
+        )
+
+
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
 #: nothing is dialled until the lifespan opens the stores.
 UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
@@ -142,6 +160,36 @@ def pg_conninfo() -> Iterator[str]:
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+
+
+PgPool = ConnectionPool[Connection[DictRow]]
+
+
+def open_pg_pool(conninfo: str, *, size: int = 4) -> PgPool:
+    """A migrated pool on ``conninfo``, shaped as the render queue's (autocommit, dict
+    rows): what the stores that keep no pool of their own are given."""
+    pool: PgPool = ConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=size,
+        open=False,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    pool.open(wait=True, timeout=30)
+    with pool.connection() as conn:
+        migrate(conn)
+    return pool
+
+
+@pytest.fixture
+def pg_pool(pg_conninfo: str) -> Iterator[PgPool]:
+    """`open_pg_pool` on the test's throwaway schema, closed afterwards."""
+    pool = open_pg_pool(pg_conninfo)
+    try:
+        yield pool
+    finally:
+        pool.close()
 
 
 @pytest.fixture(autouse=True)

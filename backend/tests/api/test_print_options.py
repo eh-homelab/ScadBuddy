@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import httpx
 import respx
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored
-from tests.bambuddy.conftest import recording
 
 ROUTE = "/api/v1/settings/print-options"
 
@@ -129,22 +125,6 @@ def _unset() -> dict[str, None]:
     }
 
 
-@respx.mock
-def test_the_printer_the_scope_keys_on_comes_from_the_pipeline_when_no_printer_is_set(
-    client: TestClient,
-) -> None:
-    """Otherwise the UI would save "off for this printer" under a key the send never reads."""
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipeline.json"))
-    )
-
-    assert client.get(ROUTE).json()["printer_id"] == 1
-
-
 def test_a_configured_printer_is_used_directly_without_asking_bambuddy(
     client: TestClient,
 ) -> None:
@@ -153,104 +133,16 @@ def test_a_configured_printer_is_used_directly_without_asking_bambuddy(
 
 
 @respx.mock
-def test_remembering_an_option_never_needs_a_reachable_bambuddy(client: TestClient) -> None:
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
-        side_effect=httpx.ConnectError("no route to host")
-    )
+def test_the_options_never_touch_bambuddy(client: TestClient) -> None:
+    """Both halves are the stored settings alone (#312: no pipeline to resolve a printer
+    from). No Bambuddy route is mocked, so any call would fail this test."""
+    client.put("/api/v1/settings", json={"bambuddy_url": "https://bambuddy.test"})
 
-    response = client.put(ROUTE, json={"scope": "global", "options": {"timelapse": False}})
+    saved = client.put(ROUTE, json={"scope": "global", "options": {"timelapse": False}})
+    read = client.get(ROUTE)
 
-    assert response.status_code == 200
-    assert response.json()["global_options"]["timelapse"] is False
-
-
-@respx.mock
-def test_a_models_stored_pipeline_no_longer_decides_the_printer_the_scope_keys_on(
-    client: TestClient, app: FastAPI, model: str
-) -> None:
-    """Final review 3: the send runs the Settings pipeline only, so the scope keys on
-    that pipeline's printer even when a legacy per-model pipeline is still stored."""
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    getattr(app.state, STATE_ATTR).settings_store.set_model_pipeline(model, 9)
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
-        return_value=httpx.Response(
-            200, json={**recording("slicer-pipeline.json"), "id": 4, "target_printer_id": 2}
-        )
-    )
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/9").mock(
-        return_value=httpx.Response(
-            200, json={**recording("slicer-pipeline.json"), "id": 9, "target_printer_id": 3}
-        )
-    )
-
-    assert client.get(ROUTE, params={"slug": model}).json()["printer_id"] == 2
-
-
-@respx.mock
-def test_an_unreachable_bambuddy_still_serves_what_needs_no_bambuddy(
-    client: TestClient,
-) -> None:
-    """Only ``printer_id`` needs the network; losing it must not blank the whole panel.
-
-    The read side now has the property the write side was built and tested for. Without
-    it a transient outage — or a pipeline deleted on Bambuddy's side, which ScadBuddy
-    cannot notice because it stores only the id — disabled Remember and blanked the global
-    and per-model rows that were sitting in the database all along.
-    """
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    client.put(ROUTE, json={"scope": "global", "options": {"timelapse": False}})
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
-        side_effect=httpx.ConnectError("no route to host")
-    )
-
-    response = client.get(ROUTE)
-
-    assert response.status_code == 200
-    body = response.json()
+    assert saved.status_code == 200
+    body = read.json()
     assert body["printer_id"] is None
     assert body["global_options"]["timelapse"] is False
     assert body["defaults"]["bed_levelling"] == "auto"
-
-
-@respx.mock
-def test_a_pipeline_that_no_longer_exists_is_not_fatal_either(client: TestClient) -> None:
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
-        return_value=httpx.Response(404, json={"detail": "Not found"})
-    )
-
-    assert client.get(ROUTE).json()["printer_id"] is None
-
-
-@respx.mock
-def test_the_pipeline_about_to_run_decides_the_printer_the_scope_keys_on(
-    client: TestClient, model: str
-) -> None:
-    """#145: the picker can pick a pipeline other than the model's default, and the run
-    then keys the per-printer scope on *that* pipeline's target."""
-    client.put(
-        "/api/v1/settings",
-        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
-    )
-    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/9").mock(
-        return_value=httpx.Response(
-            200, json={**recording("slicer-pipeline.json"), "id": 9, "target_printer_id": 3}
-        )
-    )
-
-    body = client.get(ROUTE, params={"slug": model, "pipeline_id": 9}).json()
-
-    assert body["printer_id"] == 3

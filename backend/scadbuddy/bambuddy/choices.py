@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.hardware import (
     plate_warning,
 )
 from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
-from scadbuddy.bambuddy.pipelines import BED_TYPES, filament_options_for_output
+from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options_for_output
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 SIZES = ["0.2", "0.4", "0.6", "0.8"]
 
 #: Re-exported: the helpers moved to ``hardware`` so the run can use them without an
-#: import cycle through ``pipelines``.
+#: import cycle through ``print_run``.
 __all__ = [
     "ChoicesView",
     "InstalledNozzle",

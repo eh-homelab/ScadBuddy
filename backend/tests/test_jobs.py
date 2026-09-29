@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import psycopg
 import pytest
 import pytest_asyncio
 import trimesh
@@ -21,11 +22,16 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
+from scadbuddy.render import solids as solids_module
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
+    LAYOUT_NAME,
     MISSING_FILE_FAILED_WARNING,
+    MODEL_NAME,
+    PREVIEW_NAME,
+    RAW_RENDER_NAME,
     THUMBNAIL_FAILED_WARNING,
     THUMBNAIL_TIMEOUT_WARNING,
     UNCOLOURED_WARNING,
@@ -33,17 +39,23 @@ from scadbuddy.render.jobs import (
     JobResult,
     JobStore,
     PartInfo,
+    PlateLayout,
+    Prepared,
     RenderQueue,
     extruder_order,
+    finish_piece_stage,
     plate_thumbnails,
+    prepare_source,
+    render_main,
+    render_solids_stage,
     solid_parts,
     unreadable_colour_warnings,
 )
-from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender
 from scadbuddy.render.split import ColourPart
-from tests.conftest import write_openscad_3mf
+from tests.conftest import PgPool, write_openscad_3mf
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -530,13 +542,54 @@ def _file_schema() -> CustomizerSchema:
     )
 
 
+async def test_staging_looks_the_upload_up_off_the_event_loop(
+    paths: DataPaths, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """Marking an upload used is a database round trip (#591) that waits on a row the
+    sweep has locked; the render must wait in a thread, not stall the whole loop."""
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
+    held = psycopg.connect(pg_conninfo)  # a transaction: the sweep's re-check, row locked
+    held.execute("SELECT 1 FROM assets WHERE id = %s FOR UPDATE", (asset.id,))
+    release = threading.Timer(1.0, held.commit)
+    release.start()
+
+    async def stage() -> dict[str, ParamValue]:
+        async with jobs.staged_assets(
+            _file_schema(), {"overlay": asset.id}, model_dir, store
+        ) as params:
+            return params
+
+    try:
+        staging = asyncio.create_task(stage())
+        loop = asyncio.get_running_loop()
+        gaps: list[float] = []
+        last = loop.time()
+        while not staging.done():
+            await asyncio.sleep(0.05)
+            gaps.append(loop.time() - last)
+            last = loop.time()
+        params = await staging
+    finally:
+        release.join()
+        held.close()
+    assert isinstance(params["overlay"], str)
+    assert params["overlay"].startswith(STAGED_ASSET_PREFIX)
+    # The row lock was held for a second; the loop never stopped for it.
+    assert sum(gaps) >= 0.9
+    assert max(gaps) < 0.5, f"the event loop stalled for {max(gaps):.2f}s"
+
+
 async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
-    paths: DataPaths,
+    paths: DataPaths, pg_pool: PgPool
 ) -> None:
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
     seen: dict[str, tuple[str, bytes]] = {}
 
     def staged(label: str, params: object) -> None:
@@ -577,11 +630,9 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(
-            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
-        )
+        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths, assets=store)
 
-    stored = AssetStore(paths.assets).blob_path(asset).read_bytes()
+    stored = store.blob_path(asset).read_bytes()
     assert seen["main"] == seen["solids"]
     assert seen["main"][1] == stored
     # Gone once the render is: the model directory is the versioned one.
@@ -591,11 +642,12 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
     assert result.warnings == []
 
 
-async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None:
+async def test_staging_is_undone_when_the_render_fails(paths: DataPaths, pg_pool: PgPool) -> None:
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
 
     async def render(*args: object, **kwargs: object) -> object:
         raise OpenSCADError("openscad exited with 1", [])
@@ -612,7 +664,7 @@ async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None
             _job("f", params={"overlay": asset.id}),
             config=CONFIG,
             paths=paths,
-            assets=AssetStore(paths.assets),
+            assets=store,
         )
 
     assert [p.name for p in model_dir.iterdir()] == ["model.scad"]
@@ -1163,3 +1215,245 @@ async def test_too_many_plates_fails_the_job(paths: DataPaths) -> None:
 async def test_an_empty_plate_fails_the_job_naming_it(paths: DataPaths) -> None:
     with pytest.raises(OpenSCADError, match="plate 2 of 2 rendered no geometry"):
         await _render_plated(paths, {0: [TRAY, LID], 1: [TRAY], 2: []}, plates=2)
+
+
+# ── #424: the stages the render activities run, each from what is on disk ─────
+
+
+def _stage_openscad(
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    hollow: frozenset[str] = frozenset(),
+) -> object:
+    """A stand-in `render_3mf` for the main, plate and wrapper renders alike: a
+    wrapper render draws only its target colour, or nothing for one in ``hollow``."""
+
+    async def render(*args: object, **kwargs: object) -> ProcessOutput:
+        out = args[3]
+        assert isinstance(out, Path)
+        extra = kwargs.get("extra_defines")
+        defines = [str(define) for define in extra] if isinstance(extra, list | tuple) else []
+        parts = drawn[_plate_of(defines)]
+        targets = next((d for d in defines if d.startswith("_sb_targets=")), None)
+        if targets is not None:
+            parts = [
+                part
+                for part in parts
+                if part[1][:7] not in hollow and f'"{part[1][:7]}"' in targets
+            ]
+        write_openscad_3mf(out, parts)
+        return ProcessOutput(
+            returncode=0,
+            log_tail=["rendered"],
+            duration_s=0.0,
+            missing_files=("pic.svg",),
+            diagnostics=(WARNING,),
+            notes=("a note",),
+            plates=plates,
+        )
+
+    return render
+
+
+STAGE_CASES = [
+    pytest.param({0: [TRAY, WALL]}, None, frozenset({"#FF1493"}), id="one-plate"),
+    pytest.param({0: [TRAY, WALL, LID], 1: [TRAY, WALL], 2: [LID]}, 2, frozenset(), id="plates"),
+]
+
+
+def _stage_patches(
+    render: object,
+) -> ExitStack:
+    schema = _colour_schema(
+        ("floor_color", "#0047BB"), ("wall_color", "#FF1493"), ("lid_color", "#FFFFFF")
+    )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    stack = ExitStack()
+    stack.enter_context(mock.patch.object(jobs, "render_3mf", render))
+    stack.enter_context(mock.patch.object(solids_module, "render_3mf", render))
+    stack.enter_context(mock.patch.object(jobs, "cached_schema", cached_schema))
+    return stack
+
+
+def _entries(model: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(model) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+@pytest.mark.parametrize(("drawn", "plates", "hollow"), STAGE_CASES)
+async def test_the_four_stages_give_what_render_job_gives(
+    paths: DataPaths,
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    hollow: frozenset[str],
+) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    params: dict[str, ParamValue] = {"lid_color": "not-a-colour"}
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+
+    with _stage_patches(_stage_openscad(drawn, plates, hollow)):
+        expected, log_tail = await jobs.render_job(
+            _job("j", params=params), config=CONFIG, paths=paths, assets=assets
+        )
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, params, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        await render_solids_stage(
+            prepared,
+            params,
+            work,
+            output,
+            config=config,
+            assets=assets,
+            checkouts=None,
+            holder="piece",
+        )
+        result = await finish_piece_stage(
+            prepared,
+            params,
+            work,
+            output,
+            config=config,
+            paths=paths,
+            slug="demo",
+            thumbnail_executor=None,
+        )
+
+    assert {RAW_RENDER_NAME, PREVIEW_NAME, LAYOUT_NAME, MODEL_NAME} <= {
+        path.name for path in work.iterdir()
+    }
+    assert result.model_3mf == "blob/model.3mf"
+    assert result.preview_glb == "blob/preview.glb"
+    fields = set(JobResult.model_fields) - {"model_3mf", "preview_glb"}
+    assert result.model_dump(include=fields) == expected.model_dump(include=fields)
+    assert expected.warnings  # the missing file and the unreadable colour, at least
+    assert output.log_tail == log_tail
+    assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
+
+
+@pytest.mark.parametrize(("drawn", "plates", "hollow"), STAGE_CASES)
+async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
+    paths: DataPaths,
+    drawn: dict[int, list[tuple[str, str, trimesh.Trimesh]]],
+    plates: int | None,
+    hollow: frozenset[str],
+) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    params: dict[str, ParamValue] = {"lid_color": "not-a-colour"}
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+
+    with _stage_patches(_stage_openscad(drawn, plates, hollow)):
+        expected, _ = await jobs.render_job(
+            _job("j", params=params), config=CONFIG, paths=paths, assets=assets
+        )
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, params, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        layout = await render_solids_stage(
+            prepared,
+            params,
+            work,
+            output,
+            config=config,
+            assets=assets,
+            checkouts=None,
+            holder="piece",
+        )
+
+        loaded = PlateLayout.load(work / LAYOUT_NAME)
+        assert loaded.colours == layout.colours
+        assert loaded.warnings == layout.warnings
+        assert loaded.bbox == layout.bbox
+        assert loaded.sources == layout.sources
+        assert [plate.extruders for plate in loaded.plates] == [
+            plate.extruders for plate in layout.plates
+        ]
+        for got, want in zip(loaded.plates, layout.plates, strict=True):
+            for part, original in zip(got.parts, want.parts, strict=True):
+                assert (part.material_index, part.name, part.colour) == (
+                    original.material_index,
+                    original.name,
+                    original.colour,
+                )
+                assert (part.mesh.vertices == original.mesh.vertices).all()
+                assert (part.mesh.faces == original.mesh.faces).all()
+        # Every file the layout names is under the piece's directory.
+        named = [source.file for plate in layout.sources for source in plate]
+        assert all((work / name).is_file() for name in named)
+        if plates is None:
+            assert {source.solid for source in layout.sources[0]} == {True, False}
+        else:
+            assert named[0].startswith("plate-1/")
+
+        # As another process would: nothing carried over but plain values.
+        fresh = Prepared(
+            Path(str(prepared.scad)),
+            str(prepared.version),
+            tuple(Path(str(p)) for p in prepared.library_path),
+            Path(str(prepared.schema_cache)),
+        )
+        plain = ProcessOutput(
+            returncode=0,
+            log_tail=list(output.log_tail),
+            duration_s=0.0,
+            missing_files=tuple(output.missing_files),
+            diagnostics=tuple(
+                Diagnostic.model_validate(d.model_dump()) for d in output.diagnostics
+            ),
+            diagnostics_dropped=output.diagnostics_dropped,
+            notes=tuple(output.notes),
+            plates=output.plates,
+        )
+        result = await finish_piece_stage(
+            fresh,
+            dict(params),
+            Path(str(work)),
+            plain,
+            config=config,
+            paths=paths,
+            slug="demo",
+            thumbnail_executor=None,
+        )
+
+    fields = set(JobResult.model_fields) - {"model_3mf", "preview_glb"}
+    assert result.model_dump(include=fields) == expected.model_dump(include=fields)
+    assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
+
+
+async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:
+    """The colour warnings come from the schema the render used, derived while the
+    checkouts were held (#253), not from a second read once the lease is gone."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    schema = _colour_schema(("base_color", "#0047BB"))
+    leased: list[list[str]] = []
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        leased.append(gate.leased(checkout))
+        return schema
+
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)) as stack:
+        stack.enter_context(mock.patch.object(jobs, "cached_schema", cached_schema))
+        result, _ = await jobs.render_job(
+            _job("s", params={"base_color": "not-a-colour"}),
+            config=CONFIG,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+            checkouts=gate,
+        )
+
+    assert leased == [["s"]]
+    assert unreadable_colour_warnings(schema, {"base_color": "not-a-colour"})[0] in result.warnings
