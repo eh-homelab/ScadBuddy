@@ -147,6 +147,18 @@ def test_the_last_assignment_of_a_spool_wins() -> None:
     assert side.extruder == LEFT
 
 
+def test_a_spool_moved_to_another_printer_is_not_loaded_here() -> None:
+    """Its last row is on printer 2, as the picker reads it; printer 1's stale row
+    is history, not where the spool is."""
+    [side] = slot_sides(
+        plan((1, 9)),
+        [assignment(9, 2, 0), assignment(9, 0, 1, printer_id=2)],
+        fts_status(),
+        printer_id=1,
+    )
+    assert (side.extruder, side.unknown) == (None, "not-loaded")
+
+
 def test_each_unknown_side_says_why() -> None:
     sides = slot_sides(plan((1, 5), (2, 9)), [assignment(9, 3, 0)], fts_status(), printer_id=1)
     assert [side.unknown for side in sides] == ["not-loaded", "no-side"]
@@ -257,6 +269,12 @@ SINGLE = [
     {"nozzle_type": "HS00", "nozzle_diameter": "0.4"},
     {"nozzle_type": "", "nozzle_diameter": ""},
 ]
+
+
+@pytest.mark.parametrize("tray_id", [0, 1])
+def test_a_single_nozzle_printers_external_holder_feeds_its_one_nozzle(tray_id: int) -> None:
+    status = mapped_status(nozzles=SINGLE, ams_extruder_map={"0": 0}, fila_switch=None)
+    assert extruder_of(255, tray_id, status) == RIGHT
 
 
 @pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])

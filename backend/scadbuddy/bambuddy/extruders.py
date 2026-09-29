@@ -30,7 +30,7 @@ Extruder numbers are the printer's **physical** ones: 0 is the right (main) extr
 side comes from, in order (mirroring upstream Bambuddy's ``utils/fts_routing.py``):
 
 * the external holder, assignment ``ams_id`` 255, whose tray names the side: tray 0 is
-  Ext-L, tray 1 Ext-R;
+  Ext-L, tray 1 Ext-R (on a printer without a left extruder it feeds the one nozzle);
 * ``ams_extruder_map``, which a printer without the switch reports;
 * ``ams_switch_inlet`` with the switch fitted: inlet A rests on the left extruder, B on
   the right.
@@ -70,6 +70,8 @@ def extruder_of(ams_id: int, tray_id: int, status: PrinterStatus | None) -> int 
     if status is None:
         return None
     if ams_id == EXTERNAL_AMS_ID:
+        if not two_nozzles(status):
+            return RIGHT
         return 1 - tray_id if tray_id in (0, 1) else None
     mapped = status.ams_extruder_map.get(str(ams_id))
     if mapped is not None:
@@ -151,7 +153,8 @@ def slot_sides(
     """One row per planned slot, in slot order. A spool not loaded in *this* printer
     has no side here. The last assignment of a spool wins, as in the picker: Bambuddy
     keeps history rows."""
-    here = {row.spool_id: row for row in assignments if row.printer_id == printer_id}
+    latest = {row.spool_id: row for row in assignments}
+    here = {spool: row for spool, row in latest.items() if row.printer_id == printer_id}
     sides: list[SlotSide] = []
     for slot in sorted(plan.slots, key=lambda choice: choice.slot_id):
         row = here.get(slot.spool_id)
