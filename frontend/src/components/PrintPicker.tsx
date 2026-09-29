@@ -296,9 +296,20 @@ export function PrintPicker({
           )}
 
           {loadError && (
-            <p role="alert" className="text-[13px] text-warn">
-              {loadError}
-            </p>
+            <div className="flex items-baseline gap-3">
+              <p role="alert" className="text-[13px] text-warn">
+                {loadError}
+              </p>
+              {/* #482: a Bambuddy blip or timeout should not need the dialog reopened. */}
+              <button
+                type="button"
+                onClick={picker.reload}
+                disabled={loading}
+                className="text-[12px] text-muted underline decoration-dotted underline-offset-2 hover:text-ink"
+              >
+                Retry
+              </button>
+            </div>
           )}
 
           {choices && (
