@@ -25,10 +25,10 @@ from tests.api.conftest import read_stored
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_routes
+from tests.api.test_print_options_picker import queue_route
 from tests.api.test_print_run_choices import body as choices_body
 from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route
 from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 

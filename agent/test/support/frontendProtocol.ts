@@ -25,6 +25,25 @@ export async function frontendClientMessages(): Promise<{
   return (await import(modulePath)) as Awaited<ReturnType<typeof frontendClientMessages>>
 }
 
+export type PanelChatState = {
+  sessions: Record<string, { status: string; owner: { kind: string }; items: Record<string, unknown>[] }>
+  activeId: string | null
+  awaitingStart: boolean
+  notice: string | null
+}
+
+/**
+ * The panel's own stream reducer (frontend/src/agent/chat/state.ts), to replay
+ * what a socket delivered and assert on what the panel would show.
+ */
+export async function frontendChatReducer(): Promise<{
+  chatReducer: (state: PanelChatState, action: Record<string, unknown>) => PanelChatState
+  initialChatState: PanelChatState
+}> {
+  const statePath = path.resolve(here, '../../../frontend/src/agent/chat/state.ts')
+  return (await import(statePath)) as Awaited<ReturnType<typeof frontendChatReducer>>
+}
+
 /** Throws, naming the event, when the panel would drop it. */
 export async function expectPanelAccepts(events: readonly unknown[]): Promise<void> {
   const parse = await frontendParseServerEvent()

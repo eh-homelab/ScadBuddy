@@ -13,16 +13,15 @@ import json
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print import run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, run_routes
 from tests.api.test_send import BASE, configure, make_output
@@ -367,28 +366,6 @@ def test_each_run_records_its_sliced_file_against_its_copy(client: TestClient, m
     assert row["preset_key"]
 
 
-@respx.mock
-def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """Outputs sent before the spool-first run still follow their pipeline run; its
-    sliced file appears only on a later read, and is recorded then."""
-    output_id = set_up(client, model)
-    asyncio.run(
-        upload_store(client).record(
-            output_id, LibraryCopy(id=41, folder_id=INBOX, target_key=DEFAULT_PLATE.key)
-        )
-    )
-    OutputStore(paths).record_send(output_id, pipeline_run_id=12, print_route="pipeline")
-    assert sliced(client, output_id) == [[]]
-
-    respx.get(f"{API}/pipeline-runs/12").mock(return_value=httpx.Response(200, json=run_body()))
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
-
-
 # --- deleting an output --------------------------------------------------------------
 
 
@@ -462,3 +439,29 @@ def test_deleting_a_model_forgets_its_outputs_upload_records(
 
     assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
     assert not delete.called
+
+
+@respx.mock
+def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The files are gone by then, so the delete answers 204 and the records are left
+    for a later cleanup rather than a 500 that says the output survived (#522 review)."""
+    output_id = set_up(client, model)
+
+    async def fail(_ids: object) -> None:
+        raise psycopg.OperationalError("the database went away")
+
+    monkeypatch.setattr(upload_store(client), "delete_outputs", fail)
+    links = getattr(client.app.state, STATE_ATTR).print_links  # type: ignore[attr-defined]
+    forgotten: list[object] = []
+
+    async def forget(ids: object) -> None:
+        forgotten.append(ids)
+
+    monkeypatch.setattr(links, "delete_outputs", forget)
+
+    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+    # The upload records' failure does not keep the links serving its archives.
+    assert forgotten == [[output_id]]

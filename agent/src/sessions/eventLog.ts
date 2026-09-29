@@ -72,6 +72,16 @@ export class EventLog {
   }
 
   /**
+   * The last seq handed out for a session (0 when it has none), to follow it
+   * from "now". `sessionId` must be a session's id (a UUID).
+   */
+  async lastSeq(sessionId: string): Promise<number> {
+    const [row] = await this.sql<{ event_seq: string }[]>`
+      SELECT event_seq FROM ai_sessions WHERE id = ${sessionId}`
+    return row ? Number(row.event_seq) : 0
+  }
+
+  /**
    * Replays the log after `afterSeq`, then follows it until `signal` aborts
    * (or the consumer stops iterating).
    */

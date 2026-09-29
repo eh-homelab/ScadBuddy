@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import {
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
@@ -20,6 +21,7 @@ import {
 import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { PackagesForRun } from '../plugins/packages/install.js'
 import {
   ensureSessionDir,
   isUuid,
@@ -29,6 +31,9 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
+import type { AuditLog } from '../audit/log.js'
+import { TurnAuditor } from '../audit/turn.js'
+import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
@@ -55,14 +60,14 @@ import { PostgresSessionStore } from './store.js'
 //     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
 //     sessions.approve/deny → approvals.decide (#258, src/approvals/service.ts),
 //     with the token's approval grant as `approvalGrants`.
-//   - #251's registry also supplies `tierOf` and the in-process MCP servers
-//     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
-//     tools, settle how tool payloads are redacted: tool.call inputs and
-//     tool.result summaries go into the durable, multi-watcher event log,
-//     scrubbed only by sdkEvents.ts `scrubForLog` (the turn's credential,
-//     arguments named like secrets, a size cap). A tool that takes a secret
-//     under another name must declare it to the registry, and scrubForLog must
-//     read that declaration.
+//   - #251's registry supplies `tierOf` and the in-process MCP servers
+//     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
+//     Tool payloads: tool.call inputs and tool.result summaries go into the
+//     durable, multi-watcher event log, scrubbed only by sdkEvents.ts
+//     `scrubForLog` (the turn's credential, arguments named like secrets, a
+//     size cap). No registry tool takes a secret argument; one that takes a
+//     secret under another name must declare it to the registry, and
+//     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
 //   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its
@@ -106,22 +111,41 @@ function abortMessage(signal: AbortSignal): string {
 export const DEFAULT_LEASE_MS = 60_000
 export const DEFAULT_RENEW_MS = 1_000
 
-export type SessionErrorCode = 'not_found' | 'forbidden' | 'busy' | 'budget_exhausted' | 'closed' | 'invalid'
+export type SessionErrorCode =
+  | 'not_found'
+  | 'forbidden'
+  | 'busy'
+  | 'budget_exhausted'
+  | 'closed'
+  | 'invalid'
+  | 'rate_limited'
 
-const STATUS_OF: Record<SessionErrorCode, 400 | 403 | 404 | 409> = {
+type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
+
+const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   not_found: 404,
   forbidden: 403,
   busy: 409,
   budget_exhausted: 409,
   closed: 409,
   invalid: 400,
+  rate_limited: 429,
 }
+
+/**
+ * New sessions one owner may start per window, across every route (the chat
+ * socket and POST /api/v1/ai/sessions), every connection and every replica:
+ * counted from `ai_sessions.created_at`. Each session has its own budget, so
+ * this is what bounds how many an owner can have spending at once.
+ */
+export const MAX_NEW_SESSIONS = 10
+export const NEW_SESSION_WINDOW_MS = 60_000
 
 /** A refused session operation; `status` is the HTTP status a route would answer with. */
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
-  readonly status: 400 | 403 | 404 | 409
+  readonly status: SessionErrorStatus
   constructor(code: SessionErrorCode, message: string) {
     super(message)
     this.code = code
@@ -165,6 +189,18 @@ export type StartOptions = {
   scope?: Record<string, unknown>
   /** Sent as the first turn when given. */
   prompt?: string
+  /** With `prompt`: see SendOptions.context. */
+  context?: string
+}
+
+export type SendOptions = {
+  /**
+   * Text the model gets after the user's message in this turn only, and that
+   * the transcript's `user.turn` event does not show: the panel's page context
+   * (route, open model, what the page reports, #256), rendered by the chat
+   * route (routes/chat.ts `renderPageContext`).
+   */
+  context?: string
 }
 
 export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
@@ -194,6 +230,13 @@ export type SessionManagerDeps = {
    */
   remotePlugins?: () => Promise<PluginsForRun>
   /**
+   * The enabled plugin packages for a turn (#297), each materialised from its
+   * pin and verified: in production
+   * `loadPackagesForRun(packageStore, installer)`. Read once per turn; a
+   * package that cannot be loaded is reported in the session and left out.
+   */
+  packagePlugins?: () => Promise<PackagesForRun>
+  /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
    * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
@@ -211,8 +254,15 @@ export type SessionManagerDeps = {
   approvalGrants?: GrantCheck
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
+  /**
+   * The audit log (#258, audit/log.ts): every tool call a turn makes
+   * (audit/turn.ts), and every approval decision.
+   */
+  audit?: AuditLog
   /** How often a parked turn polls its approval for a decision made on another replica. */
   approvalPollMs?: number
+  /** New sessions per owner per window (MAX_NEW_SESSIONS per NEW_SESSION_WINDOW_MS by default). */
+  newSessions?: { max: number; windowMs: number }
   leaseMs?: number
   renewMs?: number
   /** How often followers on other replicas poll the event log (EventLog). */
@@ -348,6 +398,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
       ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
@@ -426,15 +477,37 @@ export class SessionManager {
     id: string,
     principal: Owner,
     fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+    options: { rateLimited?: boolean } = {},
   ): Promise<SessionRecord> {
     const { maxTurns, budgetUsd } = await this.limits()
-    const sql = this.deps.sql
-    await sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                               status, title, tags, scope, parent_id, max_turns, budget_usd)
-      VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
-              ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-              ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+    const insert = async (sql: Sql) => {
+      await sql`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
+                                 status, title, tags, scope, parent_id, max_turns, budget_usd)
+        VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
+                ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+    }
+    if (options.rateLimited) {
+      const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
+      await this.deps.sql.begin(async (tx) => {
+        // Per owner, held until commit, so concurrent starts count each other.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
+        const [recent] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM ai_sessions
+          WHERE owner_kind = ${principal.kind} AND owner_id = ${principal.id}
+            AND created_at > now() - (${windowMs} * interval '1 millisecond')`
+        if ((recent?.n ?? 0) >= max) {
+          throw new SessionError(
+            'rate_limited',
+            `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`,
+          )
+        }
+        await insert(tx as unknown as Sql)
+      })
+    } else {
+      await insert(this.deps.sql)
+    }
     const session = await this.row(id)
     if (!session) throw new Error(`session ${id} vanished after insert`)
     return session
@@ -450,13 +523,13 @@ export class SessionManager {
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
-    })
+    }, { rateLimited: true })
     await this.events.append(id, [
       event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     if (!prompt) return { session }
-    const turn = await this.send(id, principal, prompt)
+    const turn = await this.send(id, principal, prompt, options.context ? { context: options.context } : {})
     return { session: await this.get(id, principal), turn }
   }
 
@@ -464,7 +537,7 @@ export class SessionManager {
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
-  async send(id: string, principal: Owner, text: string): Promise<Turn> {
+  async send(id: string, principal: Owner, text: string, options: SendOptions = {}): Promise<Turn> {
     const prompt = text.trim()
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     const before = await this.get(id, principal)
@@ -479,7 +552,7 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    return this.startTurn(record(claimed), turnId, prompt, principal)
+    return this.startTurn(record(claimed), turnId, prompt, principal, options.context ? { context: options.context } : {})
   }
 
   /**
@@ -537,14 +610,18 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string } = {},
+    options: { keepResumeTurn?: string; context?: string } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
     // by one that is gone (claiming proved no turn is live): their calls can
     // no longer run. A resumed turn keeps the approval bound to it; its
     // sibling orphans are cancelled with the rest (approvals/service.ts).
-    await this.approvals.cancelPending(id, 'superseded by a new turn', options)
+    await this.approvals.cancelPending(
+      id,
+      'superseded by a new turn',
+      options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
+    )
     await this.events.append(id, [
       event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
@@ -552,7 +629,8 @@ export class SessionManager {
     const controller = new AbortController()
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
-    const done = this.runTurn(session, turnId, prompt, local)
+    const query = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const done = this.runTurn(session, turnId, query, local)
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.
@@ -600,6 +678,18 @@ export class SessionManager {
     let eventTierOf: TierResolver = (name) => browserTierOf(name) ?? tierOf(name)
     const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
+    /** Redacted from everything this turn writes to the durable event log. */
+    let secrets: string[] = []
+    // One audit row per tool call of this turn (#258, audit/turn.ts).
+    const auditor = this.deps.audit
+      ? new TurnAuditor(this.deps.audit, {
+          sessionId: id,
+          turnId,
+          actor: session.owner,
+          tierOf: (name) => eventTierOf(name),
+          secrets: () => secrets,
+        })
+      : undefined
 
     // Lease renewal, and the interrupt flag from other replicas.
     let renewing: Promise<unknown> = Promise.resolve()
@@ -623,9 +713,8 @@ export class SessionManager {
 
     let result: SDKResultMessage | undefined
     let failure: string | undefined
-    /** Redacted from everything this turn writes to the durable event log. */
-    let secrets: string[] = []
     let forwarded: PluginsForRun | undefined
+    let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
     /** Whether this turn wrote headless-browser folders, removed when it ends. */
     let browserDirs = false
@@ -651,8 +740,23 @@ export class SessionManager {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
+      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+      for (const problem of packages?.problems ?? []) {
+        this.deps.stderr?.(`${problem}\n`)
+        await unavailable(problem)
+      }
+      const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
       pluginCheck = async (message: SDKMessage) => {
         if (message.type !== 'system' || message.subtype !== 'init') return
+        // The SDK skips a plugin it cannot load; the init message lists what it did load
+        // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
+        const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
+        const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+        for (const dir of packages?.paths ?? []) {
+          if (!loaded.has(path.resolve(dir))) {
+            await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+          }
+        }
         for (const plugin of remotePlugins) {
           const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
           if (status !== 'connected') {
@@ -668,6 +772,13 @@ export class SessionManager {
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const gate = this.approvals.gate({
+        sessionId: id,
+        turnId,
+        requestedBy: session.owner,
+        secrets: () => secrets,
+        signal: controller.signal,
+      })
       const sandbox =
         this.deps.headlessBrowser?.sandbox && browserSetting === true
           ? await this.deps.headlessBrowser.sandbox()
@@ -697,13 +808,10 @@ export class SessionManager {
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
         signal: controller.signal,
         tierOf,
-        approvalGate: this.approvals.gate({
-          sessionId: id,
-          turnId,
-          requestedBy: session.owner,
-          secrets: () => secrets,
-          signal: controller.signal,
-        }),
+        approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+        // The data/instruction boundary (#258, safety/untrusted.ts): only the
+        // user's messages are instructions; tool results are data.
+        systemPromptAppend: UNTRUSTED_CONTENT_POLICY,
         ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
@@ -727,7 +835,7 @@ export class SessionManager {
               },
             }
           : {}),
-        ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
@@ -739,6 +847,7 @@ export class SessionManager {
         await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        if (auditor) for (const e of events) await auditor.observe(e)
       }
     } catch (err) {
       // For an error result the SDK yields the result and then throws
@@ -747,9 +856,13 @@ export class SessionManager {
       if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
       forwarded?.release()
+      packages?.release()
       local.settling = true
       clearInterval(renew)
       await renewing
+      await auditor?.finish(
+        controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
+      )
       // The query has ended, and with it the playwright server and Chromium:
       // its screenshots and profile go now, not when the volume fills.
       if (browserDirs) {

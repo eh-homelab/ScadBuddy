@@ -6,11 +6,11 @@ to [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers
 The README's "The agent sidecar (AI, #261)" section in [`README.md`](../../README.md)
 covers the same ground more briefly.
 
-> **Status.** Nothing deploys the sidecar yet, and there are no ingress routes for
-> `/mcp` or `/api/v1/ai/*` (README, "The agent sidecar"). The assistant panel is
-> hidden in production builds (`useAiAvailability()`,
+> **Status.** This repository has no cluster manifests; the ScadBuddy pod and its
+> ingress live in eh-homelab/clusters. §1.1 is what that ingress must route for the
+> assistant to appear. With the routes missing, the UI hides the assistant and says the
+> agent is unreachable (`useAiAvailability()`,
 > [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)).
-> This page is for operators who stand the service up ahead of that.
 
 ## 1. Layout
 
@@ -24,10 +24,10 @@ covers the same ground more briefly.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.
-- **Ingress routing (planned, spec §4.2).** `/mcp` and `/api/v1/ai/*` go to the agent,
+- **Ingress routing (spec §4.2).** `/mcp` and `/api/v1/ai/*` go to the agent,
   and everything else, including `/api/v1/ws`, goes to the backend. `/api/v1/ai/*` is
   under the backend's `/api/v1/*`, so the agent's rules must take precedence
-  (longest-prefix match or explicit priority).
+  (longest-prefix match or explicit priority). Details and a check are in §1.1.
 - **Runtime user and filesystem.** The image runs as uid 10001 with
   `HOME=/var/lib/scadbuddy-agent` and `CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude`
   ([`Dockerfile`](../../Dockerfile), `agent` stage). It writes only under
@@ -36,7 +36,8 @@ covers the same ground more briefly.
   `emptyDir` there and run the root filesystem read-only (spec §4.4). At start,
   `ensureStateDirs()` in
   [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) recreates
-  `claude/` and `work/` and checks both are writable. If it cannot, the process exits 1
+  `claude/`, `work/` and `plugins/` (the plugin package cache) and checks all three are
+  writable. If it cannot, the process exits 1
   with a message naming the directory (`main.ts`).
 - **Pinned Claude Code.** The build runs `node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"`
   (currently `2.1.283`) and fails when the SDK's bundled binary differs
@@ -47,6 +48,98 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
+
+### 1.1 Routing the UI's origin to the agent
+
+Spec §4.2 decides this: **the ingress** splits one origin between the two containers,
+and neither container proxies for the other. That is what makes the assistant work
+inside Bambuddy's iframe. The SPA, the backend API, the agent's routes and the
+assistant's WebSocket (`/api/v1/ai/chat`) are then all on ScadBuddy's one public
+origin:
+
+- Bambuddy frames ScadBuddy with `allow-same-origin` in its sandbox (CLAUDE.md,
+  "Bambuddy iframe facts"), so the page keeps that origin.
+- The browser sends it as `Origin` on every write and on the WebSocket handshake.
+- That value is the one the agent's allowlist accepts (`SCADBUDDY_PUBLIC_URL`, §6).
+
+A second origin for the agent would need CORS and a second allowlisted origin. A
+backend passthrough is the other alternative, and the spec rejects it because a
+uvicorn hop risks buffering the SSE and WebSocket streams.
+
+What the ingress must do:
+
+| Path | Service | Notes |
+|---|---|---|
+| `/api/v1/ai` (prefix) | agent `:8081` | REST, SSE (`/api/v1/ai/sessions/{id}/events`) and the WebSocket `/api/v1/ai/chat` |
+| `/mcp` (prefix) | agent `:8081` | MCP Streamable HTTP (SSE) |
+| `/` (prefix) | backend `:8080` | everything else, including the backend's WebSocket `/api/v1/ws` |
+
+- **Precedence.** With a Kubernetes `Ingress`, the longest matching path wins,
+  whatever order the rules are listed in, and on a tie `Exact` beats `Prefix`
+  ([Ingress, "Multiple matches"](https://kubernetes.io/docs/concepts/services-networking/ingress/#multiple-matches)).
+  Other routers (Traefik `IngressRoute`, Gateway API) have their own ordering; check
+  it with the requests below instead of assuming.
+- **WebSockets and SSE.** For ingress-nginx, "Support for websockets is provided by
+  NGINX out of the box. No special configuration required." Its default
+  `proxy-read-timeout` is 60 s
+  ([ingress-nginx, WebSockets](https://kubernetes.github.io/ingress-nginx/user-guide/miscellaneous/#websockets)).
+  The agent pings each chat socket every 25 s (`HEARTBEAT_MS`, `startHeartbeat`,
+  [`agent/src/routes/chat.ts`](../../agent/src/routes/chat.ts)), and the session event
+  stream sends a comment every 20 s with `X-Accel-Buffering: no` (`SSE_KEEPALIVE_MS`,
+  [`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)). Both
+  therefore stay open under that default. The rule: both intervals must stay under
+  the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
+  either constant above it, closes idle assistant sockets and streams.
+- **Forwarded headers.** The ingress must append `X-Forwarded-Proto` and
+  `X-Forwarded-Host`, and its pod range goes in `SCADBUDDY_AGENT_TRUSTED_PROXIES`
+  (§6). Otherwise every chat and session write is refused with 403.
+
+An `Ingress` for ingress-nginx, as an example. It is not the clusters manifest, whose
+names and TLS settings are its own:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scadbuddy
+  namespace: scadbuddy
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [scadbuddy.example]
+      secretName: scadbuddy-tls
+  rules:
+    - host: scadbuddy.example
+      http:
+        paths:
+          - path: /api/v1/ai
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
+          - path: /mcp
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: http } } }      # 8080
+```
+
+**Checking it.** Every agent response carries `X-ScadBuddy-Service: agent`
+(`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)); the backend's
+responses do not. One request per agent path, through the public URL:
+
+```bash
+base=https://scadbuddy.example
+curl -sSI "$base/api/v1/ai/status" | grep -i '^x-scadbuddy-service: agent'   # agent
+curl -sS  "$base/api/v1/ai/status"                                           # {"available":…,"state":…,"ai":…}
+curl -sSI -X POST "$base/mcp" | grep -i '^x-scadbuddy-service: agent'        # agent (401/403/503 is fine)
+curl -sSI "$base/api/v1/settings" | grep -ci '^x-scadbuddy-service'          # 0: the backend
+```
+
+The same checks as a Playwright spec are `frontend/e2e/real-agent.spec.ts`, added in
+#533, run with `E2E_BASE_URL` pointing at the deployment and
+`E2E_AGENT=1`. With the frontend's dev or
+preview server, `frontend/vite.config.ts` routes the same way on one local origin
+(`SCADBUDDY_BACKEND_URL` and `SCADBUDDY_AGENT_URL` override the two targets).
 
 ## 2. Environment variables
 
@@ -403,15 +496,22 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credential.
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
-  The keys read today are `model` (`main.ts`), and `session_max_turns` and
+  The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
-  and `mcp_oidc`, the OIDC configuration for `/mcp` (#262; see
-  [§6a](#6a-mcp-sign-in-with-oidc)), which `PUT /api/v1/ai/mcp/oidc` writes.
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts));
+  `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); and `mcp_oidc`, the
+  OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
+  `PUT /api/v1/ai/mcp/oidc` writes.
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
-  "HTTP routes").
+  `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
+  through the chat socket and the session routes (README, "Sessions and the
+  assistant's chat").
+- `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
+  prepares (#471, `20260928T0734Z_approvals.sql`; see
+  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
   name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
@@ -419,6 +519,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
   in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
   (§4.1) answer 503. Settings writes this table through §4.1's routes.
+
+- `ai_plugin_packages`: installed Claude plugin packages (#297,
+  `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
+  hash, the review, the approval and the enabled flag. See §9.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
@@ -431,3 +535,118 @@ Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 U
 them "placeholders until Settings stores per-session caps". Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
 #377 body, "Budget and turns").
+
+## 9. Plugin packages (#297)
+
+A plugin package is a Claude plugin (skills, subagents, hooks, `.mcp.json`) fetched from
+a git repository, or from an entry of a marketplace repository, at a pinned commit. The
+Agent SDK loads plugins by local path only: "To use a plugin distributed through a
+marketplace or remote repository, download it first and provide the local directory
+path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
+
+- **Postgres is the record.** `ai_plugin_packages` holds the pin (commit SHA and content
+  hash) and everything the admin reviewed
+  ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
+- **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
+  (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
+  Before each load, every file is hashed and compared with the pin. A missing, partial
+  or altered copy is deleted and fetched again at the pinned commit. If the new files do
+  not hash to the pin, the package is not loaded (`materialise()` in
+  [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
+  The cache can be the same `emptyDir` as the rest of the state directory.
+- **git in the image.** The `agent` stage installs `git` and `ca-certificates`
+  ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
+  [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
+  never sees the service's own environment. It passes through only the proxy and CA
+  variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, their lower-case forms,
+  `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `SSL_CERT_DIR`).
+- **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
+  and every URL a package declares, go through the same egress check as the gateway
+  (see [security.md](security.md#plugin-packages)).
+
+### The routes
+
+These routes sit under `/api/v1/ai/plugin-packages` and use the same UI guard as the
+other Settings writes
+([`agent/src/routes/pluginPackages.ts`](../../agent/src/routes/pluginPackages.ts)):
+
+| Route | What it does |
+|---|---|
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201). A refused package gets 422 with every problem. |
+| `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
+| `POST /:name/approve` with `{ "commit_sha", "content_hash" }` | Approves exactly the pin the review showed. A mismatch is a 409. |
+| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
+| `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
+
+Plugins are never updated automatically (issue #297). At most two fetches run at a
+time, and one per package; another request gets 429.
+
+### Status
+
+The session manager reads the enabled packages at the start of each turn
+(`packagePlugins` in `SessionManagerDeps`,
+[`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)). A package that
+cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
+turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
+`SessionManager`, but nothing starts a session over HTTP yet (the comment on `sessions`
+in `main.ts`).
+
+Settings has an "Assistant plugins" area with two sections: "Plugin packages"
+([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
+and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+You install, review, approve and re-pin packages there. The approval dialog shows the
+full commit SHA and content hash, and you must tick a confirmation before it sends
+exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
+in-page agent's `click` and `fill` refuse it. The area follows the assistant's
+availability (`useAiAvailability()`), so it is hidden in production builds until the
+agent service is deployed.
+
+## 10. MCP auth mode
+
+The `/mcp` auth mode and the anonymous cap are `ai_settings` keys, never environment
+variables (spec §8.3, §9). They are read on every `/mcp` request by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
+so a change applies to the next request on every replica, with no restart:
+
+| Key | Values | Unset |
+|---|---|---|
+| `mcp_auth_mode` | `"bearer"`, `"disabled"` | `"bearer"` |
+| `mcp_anonymous_cap` | `"read"`, `"write"`, `"outward"` (used in `disabled` mode only) | `"outward"` |
+
+`oidc` is not chosen with this key: it is on while the OIDC configuration (`mcp_oidc`,
+[§6a](#6a-mcp-sign-in-with-oidc)) is enabled, and then it wins over `mcp_auth_mode`, even
+over `"disabled"`. A stored `"oidc"` without an enabled configuration reads as `bearer`.
+
+A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
+`disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
+this once, and again after any change to either key.
+
+Change them in Settings → **MCP authentication** (shown where AI is available, beside
+the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
+choice is "Require an access token" (`bearer`) or "Allow calls without a token"
+(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
+or raising the anonymous access while they are allowed, asks for a confirmation first.
+While OIDC is enabled the section says so: OIDC applies whatever is stored here, and the
+stored choice (still confirmed) applies once OIDC is turned off.
+That confirmation is in the UI only; the route does not require it (a server-side
+approval for settings writes is #258). `PUT` writes both keys in one transaction, only if
+they still hold what the page showed (otherwise `409`, and the page reloads them), logs
+`mcp auth: mcp_auth_mode set to … (was …; from <client> via <ingress>)` as soon as it
+commits, and is guarded like the other Settings
+writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
+switched on with its own configuration once the discovery check passes (#262). The
+database still works when the UI does not, e.g. to recover. Each value is a JSON
+string:
+
+```sql
+INSERT INTO ai_settings (key, value) VALUES ('mcp_auth_mode', '"disabled"')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- back to the default:
+DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
+```
+
+Outward tools still need a human approval in the UI in every mode (spec §8.2; see
+[security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
