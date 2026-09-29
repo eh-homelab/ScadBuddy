@@ -868,6 +868,7 @@ describe('get_output_preview (#308)', () => {
     )
     const result = await runTool(tool('get_output_preview'), { output_id: id }, ctx({ maxInlineBytes: 16 }))
     expect(result.content).toEqual([
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
       {
         type: 'resource',
         resource: { uri: `scadbuddy://outputs/${id}/preview.glb`, mimeType: 'model/gltf-binary', blob: 'AQIDBA==' },
