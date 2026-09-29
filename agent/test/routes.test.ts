@@ -6,7 +6,10 @@ import { OidcProvider } from '../src/auth/oidc.js'
 import { ROUTES } from '../src/routes/index.js'
 import { baseDeps } from './helpers/mcp.js'
 
-// Every optional dependency given, so each route group registers all it can.
+// Only the optional dependencies a group needs before it registers anything:
+// `mcpOidc` (routes/mcpAuth.ts) and `upgradeWebSocket` (the chat socket), plus a
+// stand-in `sessions` for the socket. Every other group registers its routes without
+// its optional dependencies (they answer 503), so leaving those out hides no route.
 const deps = baseDeps({
   mcpOidc: { repo: undefined, provider: new OidcProvider(), publicUrl: undefined },
   // Never called: registering reads only that they are there.
