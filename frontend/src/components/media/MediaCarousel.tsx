@@ -1,5 +1,5 @@
 import useEmblaCarousel from 'embla-carousel-react'
-import { useCallback, useEffect, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { useHref, useNavigate } from 'react-router'
 import { useReducedMotion } from '../../lib/useReducedMotion'
 import { carouselOptions, type Slide } from './slides'
@@ -21,6 +21,11 @@ interface Props {
   className?: string
   /** What the carousel is of, for assistive technology: the template's name. */
   label: string
+  /**
+   * Mount the carousel only once it nears the viewport, showing its first slide until
+   * then (#558): a catalogue has one per card, and renders them all.
+   */
+  lazy?: boolean
 }
 
 /**
@@ -28,17 +33,83 @@ interface Props {
  * is its poster with a play badge, and plays in the lightbox. Its controls keep their
  * clicks to themselves, so inside a card (#277) they never follow the card's link.
  */
-export function MediaCarousel({ slides, onOpen, to, fallback, className, label }: Props) {
+export function MediaCarousel({ slides, onOpen, to, fallback, className, label, lazy }: Props) {
   if (slides.length === 0) return <>{fallback}</>
-  if (slides.length === 1) {
-    return (
-      <div className={`relative ${className ?? ''}`}>
-        <SlideMedia slide={slides[0]!} index={0} onOpen={onOpen} to={to} focusable eager />
-        {to && onOpen && <ExpandButton slide={slides[0]!} onClick={() => onOpen(0)} />}
-      </div>
-    )
-  }
+  if (slides.length === 1) return <Cover slide={slides[0]!} onOpen={onOpen} to={to} className={className} />
+  if (lazy) return <LazyCarousel slides={slides} onOpen={onOpen} to={to} className={className} label={label} />
   return <Carousel slides={slides} onOpen={onOpen} to={to} className={className} label={label} />
+}
+
+/** One slide on its own: a template with one picture, or a carousel's first until it mounts. */
+function Cover({
+  slide,
+  onOpen,
+  to,
+  className,
+}: {
+  slide: Slide
+  onOpen?: (index: number) => void
+  to?: string
+  className?: string
+}) {
+  return (
+    <div className={`relative ${className ?? ''}`}>
+      <SlideMedia slide={slide} index={0} onOpen={onOpen} to={to} focusable eager />
+      {to && onOpen && <ExpandButton slide={slide} onClick={() => onOpen(0)} />}
+    </div>
+  )
+}
+
+/** How far outside the viewport a card starts to mount its carousel. */
+const NEAR_VIEWPORT = '200px'
+
+/**
+ * The first slide until the card nears the viewport, then the carousel, which stays
+ * mounted. The two are the same height, so nothing moves. Without IntersectionObserver
+ * it mounts at once.
+ */
+function LazyCarousel(props: Omit<Props, 'fallback' | 'lazy'>) {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+  const wrapper = useRef<HTMLDivElement>(null)
+  // Focus on the cover (a Tab that scrolled it in) moves to the carousel's first slide.
+  const refocus = useRef(false)
+
+  useEffect(() => {
+    const element = wrapper.current
+    if (near || !element) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return
+        refocus.current = element.contains(document.activeElement)
+        setNear(true)
+      },
+      { rootMargin: NEAR_VIEWPORT },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [near])
+
+  // Before paint, so focus never shows on <body> between the cover and the carousel.
+  useLayoutEffect(() => {
+    if (!near || !refocus.current) return
+    // The cover's control in the carousel, named rather than found by render order: the
+    // first slide's button, or with a link the expand button. A cover with neither has
+    // nothing to focus, so refocus is never set for it.
+    wrapper.current
+      ?.querySelector<HTMLElement>('[aria-roledescription="carousel"]')
+      ?.querySelector<HTMLElement>('[data-slide-open="0"], [data-carousel-expand]')
+      ?.focus()
+  }, [near])
+
+  return (
+    <div ref={wrapper}>
+      {near ? (
+        <Carousel {...props} />
+      ) : (
+        <Cover slide={props.slides[0]!} onOpen={props.onOpen} to={props.to} className={props.className} />
+      )}
+    </div>
+  )
 }
 
 /** A click that must not reach a link or a click handler the carousel sits in. */
@@ -172,6 +243,7 @@ function ExpandButton({ slide, onClick }: { slide: Slide; onClick: () => void })
     <button
       type="button"
       aria-label={`View ${slide.alt} full size`}
+      data-carousel-expand=""
       onClick={(event) => {
         contained(event)
         onClick()
@@ -279,6 +351,7 @@ function SlideMedia({
     <button
       type="button"
       aria-label={`Open ${slide.alt}`}
+      data-slide-open={index}
       tabIndex={focusable ? 0 : -1}
       onClick={(event) => {
         contained(event)
