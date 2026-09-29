@@ -882,6 +882,47 @@ function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   return undefined
 }
 
+/**
+ * A preset's tags as the server keeps them (#327, `_clean_tags`): trimmed, inner
+ * whitespace collapsed, blanks dropped, each kept once ignoring case, in order.
+ */
+export function cleanTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+  for (const raw of tags) {
+    const tag = raw.trim().replace(/\s+/g, ' ')
+    // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
+    const key = tag.toUpperCase().toLowerCase()
+    if (tag && !seen.has(key)) {
+      seen.add(key)
+      cleaned.push(tag)
+    }
+  }
+  return cleaned
+}
+
+/**
+ * A preset's description and tags past their bounds, refused as FastAPI refuses a
+ * body it cannot parse (`shapeRefusal`), or undefined. The description is trimmed and
+ * the tags cleaned first, as pydantic does before it checks the bounds.
+ */
+function detailsRefusal(description: string | null | undefined, tags: string[] | null | undefined) {
+  // Lengths in code points, as Python counts them.
+  if ([...(description ?? '').trim()].length > MAX_PRESET_DESCRIPTION) {
+    return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
+  }
+  const cleaned = cleanTags(tags ?? [])
+  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
+    return shapeRefusal(
+      `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+    )
+  }
+  if (cleaned.some((tag) => tag.includes(','))) {
+    return shapeRefusal('a preset tag cannot contain a comma')
+  }
+  return undefined
+}
+
 /** Why a preset save is refused, as the server words it, or undefined. */
 function presetRefusal(
   slug: string,
@@ -1393,18 +1434,14 @@ export const handlers = [
         ) {
           return shapeRefusal(`'${preset.id}' is not a preset id`)
         }
-        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
-          return shapeRefusal(
-            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
-          )
-        }
-        const tags = preset.tags ?? []
-        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
-          return shapeRefusal(
-            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
-          )
-        }
-        cleaned.push({ ...preset, name })
+        const details = detailsRefusal(preset.description, preset.tags)
+        if (details) return details
+        cleaned.push({
+          ...preset,
+          name,
+          description: (preset.description ?? '').trim(),
+          tags: cleanTags(preset.tags ?? []),
+        })
       }
       if (cleaned.length > MAX_PRESETS) {
         return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
@@ -1454,6 +1491,8 @@ export const handlers = [
         name: preset.name,
         origin: 'template',
         params: preset.params ?? {},
+        description: preset.description ?? '',
+        tags: preset.tags ?? [],
       }))
       state.presets[slug] = [...shipped, ...saved]
     }
@@ -1833,8 +1872,12 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const body = (await request.json()) as ParamPresetCreate
+    // The details' bounds are the body's shape: refused before the route looks up
+    // the model, as FastAPI parses the body first.
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, body.params ?? {}, null)
     if (refused) return refused
@@ -1843,6 +1886,8 @@ export const handlers = [
       name,
       origin: 'mine',
       params: body.params ?? {},
+      description: (body.description ?? '').trim(),
+      tags: cleanTags(body.tags ?? []),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -1860,11 +1905,14 @@ export const handlers = [
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
+    // Everything but the name is the original's, its description and tags too.
     const copy: ParamPreset = {
       id: nextHexId(),
       name,
       origin: 'mine',
       params: { ...source.params },
+      description: source.description,
+      tags: [...source.tags],
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
@@ -1875,10 +1923,12 @@ export const handlers = [
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
+    const body = (await request.json()) as ParamPresetUpdate
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
     if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Preset not found')
-    const body = (await request.json()) as ParamPresetUpdate
     const name = body.name?.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
     if (refused) return refused
@@ -1886,6 +1936,12 @@ export const handlers = [
       ...existing,
       name: name ?? existing.name,
       params: body.params ?? existing.params,
+      // Each detail given replaces the old one; an empty one clears it.
+      description:
+        body.description === undefined || body.description === null
+          ? existing.description
+          : body.description.trim(),
+      tags: body.tags === undefined || body.tags === null ? existing.tags : cleanTags(body.tags),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -2174,9 +2230,38 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true'
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),

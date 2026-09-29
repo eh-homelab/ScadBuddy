@@ -1,5 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { TierResolver } from '../harness/permissions.js'
+import { isPreamble, unwrapUntrusted } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
 import { event, type ServerEvent } from './protocol.js'
 
@@ -92,12 +93,18 @@ function blocks(content: unknown): Block[] {
   return Array.isArray(content) ? (content as Block[]).filter((b) => typeof b?.type === 'string') : []
 }
 
+/**
+ * The panel's one-line view of a result. ScadBuddy's untrusted-data envelope
+ * (safety/untrusted.ts, #258) is for the model; the panel shows what is in it.
+ */
 function summarise(content: unknown): string {
   let text: string
-  if (typeof content === 'string') text = content
+  if (typeof content === 'string') text = unwrapUntrusted(content)
   else
     text = blocks(content)
-      .map((b) => (b.type === 'text' && typeof b.text === 'string' ? b.text : `[${b.type}]`))
+      // A preamble only announces the image after it, which shows as [image].
+      .filter((b) => !(b.type === 'text' && typeof b.text === 'string' && isPreamble(b.text)))
+      .map((b) => (b.type === 'text' && typeof b.text === 'string' ? unwrapUntrusted(b.text) : `[${b.type}]`))
       .join('\n')
   return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text
 }
