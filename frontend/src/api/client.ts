@@ -1,6 +1,8 @@
 import type {
   AnalysisReport,
   AnalysisRun,
+  AnalyzerDecision,
+  DecisionCreate,
   Asset,
   AssetUsage,
   AttachResult,
@@ -720,6 +722,21 @@ export const api = {
    */
   runAnalyzers: (body: AnalysisRun) =>
     request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
+
+  /**
+   * #284 — ignore or suppress a finding at a scope; a suppression needs a reason. It
+   * replaces an earlier decision about the same rule and instance at that scope
+   * (`post_decision`, backend/scadbuddy/api/analyzers.py).
+   */
+  createDecision: (body: DecisionCreate) =>
+    request<AnalyzerDecision>('/analyzers/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
+  deleteDecision: (id: string) =>
+    request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus

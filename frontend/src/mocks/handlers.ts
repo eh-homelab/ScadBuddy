@@ -488,8 +488,12 @@ function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: 
   return view(updated)
 }
 
-/** Job and output ids are 32 hex characters — the routes reject anything else. */
-function nextHexId(): string {
+/**
+ * Job and output ids are 32 hex characters — the routes reject anything else. One
+ * counter for every mock, feature modules (`features/`) included, reset by
+ * `resetMockState`.
+ */
+export function nextHexId(): string {
   state.seq += 1
   return state.seq.toString(16).padStart(32, '0')
 }
@@ -620,9 +624,9 @@ export function problem(status: number, title: string, detail?: string, extensio
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 

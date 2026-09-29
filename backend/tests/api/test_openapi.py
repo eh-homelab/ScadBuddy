@@ -81,6 +81,8 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/libraries/{name}",
     "/api/v1/libraries/installed",
     "/api/v1/libraries/{name}",
+    "/api/v1/libraries/{name}/users",
+    "/api/v1/models/{slug}/libraries/{name}/check",
     "/api/v1/models/{slug}/diagnostics",
     "/api/v1/jobs/{job_id}/views/{view}.png",
     "/api/v1/outputs/{output_id}/views/{view}.png",

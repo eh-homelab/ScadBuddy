@@ -25,7 +25,6 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
-    ArchiveCacheDep,
     ConfigDep,
     FetcherDep,
     HistoryDep,
@@ -38,6 +37,7 @@ from scadbuddy.api.params import schema_of
 from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRun,
