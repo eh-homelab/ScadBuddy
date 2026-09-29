@@ -280,6 +280,19 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
     return defines
 
 
+def params_problem(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> str | None:
+    """What is wrong with ``params`` for ``schema``, or None (#432): the message half of
+    the API's `require_valid_params`, for the worker, which must not import the API."""
+    unknown = sorted(set(params) - {p.name for p in schema.parameters})
+    if unknown:
+        return f"unknown parameters: {', '.join(unknown)}"
+    try:
+        build_defines(schema, params)
+    except ValueError as error:  # UnknownParameterError, ParameterValueError, a wrong type
+        return str(error)
+    return None
+
+
 async def _drain(
     stream: asyncio.StreamReader,
     tail: deque[str],

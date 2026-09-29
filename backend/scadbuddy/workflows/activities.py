@@ -4,8 +4,10 @@ reads and writes the piece's directory in the blob store (spec §3.4)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import sys
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
@@ -34,7 +36,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.render.runner import OpenSCADError, ProcessOutput
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
@@ -71,6 +73,11 @@ class WorkerDeps:
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
     remote_assets: RemoteAssets | None = None
+    #: `SCADBUDDY_REVISION` and `openscad --version` of this worker, for the record (§8.4).
+    revision: str = ""
+    openscad_version: str = ""
+    #: The interpreter template activities run under: this worker's own (§5.2).
+    template_python: str = sys.executable
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -152,8 +159,33 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
 
 
 def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
-    """Where the piece's blob goes: its template's folder, named by `model.json`."""
-    return BlobScope(slug=req.slug, title=template_title(Path(prepared.scad).parent, req.slug))
+    """Where the piece's blob goes: its template's folder, named by `model.json`; the
+    template's root even for a piece in a subdirectory (`parts/roof.scad`)."""
+    root = model_dir(Path(prepared.scad), req.file)
+    return BlobScope(slug=req.slug, title=template_title(root, req.slug))
+
+
+def _parameter_error(message: str) -> ApplicationError:
+    """Non-retryable: the same file and parameters are refused on every attempt."""
+    return ApplicationError(
+        message, Failure(error=message), type="ParameterError", non_retryable=True
+    )
+
+
+def _render_file(prepared: Prepared, file: str) -> Prepared:
+    """``prepared`` for the template's file ``file`` rather than `model.scad`: a
+    `.scad` file inside the template's directory, with a schema cache of its own."""
+    if file == "model.scad":
+        return prepared
+    root = prepared.scad.parent.resolve()
+    scad = (root / file).resolve()
+    if not scad.is_relative_to(root) or scad.suffix != ".scad" or not scad.is_file():
+        raise _parameter_error(f"{file} is not a file of the template")
+    cache = prepared.schema_cache
+    digest = hashlib.sha256(file.encode()).hexdigest()[:12]
+    return replace(
+        prepared, scad=scad, schema_cache=cache.with_name(f"{cache.stem}.{digest}{cache.suffix}")
+    )
 
 
 async def _checkout(blobs: BlobStore, key: str) -> str | None:
@@ -285,18 +317,36 @@ class RenderActivities:
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
+        prepared = _render_file(prepared, req.file)
+        result = PrepareResult(
+            version=prepared.version,
+            scad=str(prepared.scad),
+            library_path=[str(path) for path in prepared.library_path],
+            schema_cache=str(prepared.schema_cache),
+        )
         if d.fonts_mirror is not None:
             # Only the families this template could name: a fresh worker does not
             # download the whole font library for its first piece.
             source = model_dir(prepared.scad, req.file)
             families = await asyncio.to_thread(wanted_families, source, req.params)
             await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
-        return PrepareResult(
-            version=prepared.version,
-            scad=str(prepared.scad),
-            library_path=[str(path) for path in prepared.library_path],
-            schema_cache=str(prepared.schema_cache),
-        )
+        # The parameters are checked here, against the file's own schema: the API checked
+        # them against model.scad's, and a pipeline's `ctx.render` passes any (#432).
+        try:
+            async with library_lease(d.checkouts, f"piece:{req.piece_key}", prepared.library_path):
+                schema = await _heartbeating(
+                    asyncio.create_task(
+                        cached_schema(
+                            prepared.scad, prepared.schema_cache, config=self._config(result)
+                        )
+                    )
+                )
+        except OpenSCADError as error:
+            raise _failure(error) from None
+        problem = params_problem(schema, req.params)
+        if problem is not None:
+            raise _parameter_error(problem)
+        return result
 
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:

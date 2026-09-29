@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field, model_validator
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import JobResult, StepInfo
+from scadbuddy.render.job_models import BomEntry, JobResult, OutputRecord, StepInfo
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.template import Blob as Blob
+from scadbuddy.template import Part as Part
 
 
 def piece_key(slug: str, revision: str | None, file: str, params: Mapping[str, ParamValue]) -> str:
@@ -114,3 +116,62 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+
+
+class PlateSize(BaseModel):
+    """The plate a pipeline packs onto (spec §5.2). Task 2's `load_pipeline` reads it
+    from the template; the fields are the plan's."""
+
+    key: str
+    width: float
+    depth: float
+
+
+class PackItem(BaseModel):
+    part: Part
+    count: int = Field(default=1, ge=1)
+
+
+class Placed(BaseModel):
+    """Where one copy of a piece goes: its box's min corner, relative to the plate's
+    content (the writer then centres the plate as it does today)."""
+
+    piece_key: str
+    x: float
+    y: float
+
+
+class LayoutPlate(BaseModel):
+    items: list[Placed]
+
+
+class Layout(BaseModel):
+    """What `pack`/`plate_of` yield (§5.2). ``own``: one part alone, on the plates it
+    laid out itself, written exactly as it rendered (§5.3)."""
+
+    plates: list[LayoutPlate] = Field(default_factory=list)
+    own: str | None = None
+
+
+class PackRequest(BaseModel):
+    items: list[PackItem]
+    plate: PlateSize
+    goal: str = "fewest_plates"
+
+
+class OutputRequest(BaseModel):
+    job_id: str
+    index: int
+    slug: str
+    layout: Layout
+    parts: list[Part]
+    name: str | None
+    bom: list[BomEntry]
+    files: dict[str, str | Blob]
+    plate_model: str | None = None
+    record: OutputRecord
+
+
+class OutputRef(BaseModel):
+    index: int
+    name: str | None

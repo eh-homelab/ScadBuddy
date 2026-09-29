@@ -18,7 +18,6 @@ import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -57,7 +56,8 @@ from scadbuddy.workflows.models import (
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad, write_openscad_3mf
+from tests.conftest import write_openscad_3mf
+from tests.support.openscad import install_fake_openscad
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
 
@@ -81,10 +81,6 @@ def _paths(tmp_path: Path, source: str = "cube();\n") -> DataPaths:
     return paths
 
 
-def _config(tmp_path: Path, paths: DataPaths) -> Config:
-    return Config(openscad=fake_3mf_openscad(tmp_path / "bin"), data_dir=paths.root)
-
-
 def _deps(
     tmp_path: Path,
     paths: DataPaths,
@@ -93,7 +89,7 @@ def _deps(
     refs: BlobRefs | None = None,
 ) -> WorkerDeps:
     return WorkerDeps(
-        config=_config(tmp_path, paths),
+        config=install_fake_openscad(tmp_path, paths),
         paths=paths,
         assets=AssetStore(paths.assets),
         blobs=LocalBlobStore(paths.blobs),
@@ -272,10 +268,11 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     acts = RenderActivities(_deps(tmp_path, paths))
     env = ActivityEnvironment()
     req = _request()
-    prepared = await env.run(acts.prepare, req)
 
+    # `prepare` derives the schema to check the parameters (phase 4), so a source that
+    # does not parse fails there, before any render.
     with pytest.raises(ApplicationError) as raised:
-        await env.run(acts.render_main, req, prepared)
+        await env.run(acts.prepare, req)
 
     assert raised.value.type == "OpenSCADError"
     assert raised.value.non_retryable
@@ -650,6 +647,8 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
 
     monkeypatch.setattr(activities_module, "render_main", refuses)
     monkeypatch.setattr(activities_module, "render_solids_stage", refuses)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     paths = _paths(tmp_path)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(

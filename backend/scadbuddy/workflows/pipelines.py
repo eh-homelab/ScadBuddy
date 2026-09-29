@@ -122,12 +122,22 @@ def _target_gone(error: FailureError) -> bool:
     return isinstance(error, ApplicationError) and error.type == EXTERNAL_NOT_FOUND
 
 
+#: The failure types whose first detail is a `Failure` (the job's error, log tail and
+#: diagnostics): openscad's own, a refused file or parameter, a template activity's.
+FAILURE_TYPES = ("OpenSCADError", "ParameterError", "TemplateActivityError")
+
+
 def _failure_of(error: BaseException) -> Failure:
     cause: BaseException | None = error
     while cause is not None:
-        if isinstance(cause, ApplicationError) and cause.type == "OpenSCADError" and cause.details:
+        if isinstance(cause, ApplicationError) and cause.type in FAILURE_TYPES and cause.details:
             detail = cause.details[0]
             return detail if isinstance(detail, Failure) else Failure.model_validate(detail)
+        cause = cause.__cause__
+    cause = error
+    while cause is not None:
+        if isinstance(cause, ApplicationError):
+            return Failure(error=cause.message)
         cause = cause.__cause__
     return Failure(error=f"{type(error).__name__}: {error}")
 
