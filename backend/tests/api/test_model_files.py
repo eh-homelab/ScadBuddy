@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.model_files import MAX_SOURCE_FILES
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import TooManySourceFilesError
 from scadbuddy.render.provenance import source_version
 
 pytestmark = pytest.mark.requires_git
@@ -118,3 +121,32 @@ def test_a_built_in_is_read_only_and_an_unknown_model_is_a_404(client: TestClien
 
 def put_to(client: TestClient, slug: str) -> Any:
     return client.put(f"/api/v1/models/{slug}/files/parts.scad", json={"content": PARTS})
+
+
+def test_two_new_files_at_once_cannot_both_pass_the_cap(
+    client: TestClient, paths: DataPaths
+) -> None:
+    # The count is taken under the write lock (PR #752 review), so of two new files
+    # racing for the last place exactly one lands.
+    upload(client)
+    for index in range(MAX_SOURCE_FILES - 2):
+        (paths.model_dir(SLUG) / f"f{index}.scad").write_text("x = 1;\n")
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def write(name: str) -> None:
+        barrier.wait()
+        try:
+            state.catalogue.write_file(SLUG, name, "x = 1;\n", max_files=MAX_SOURCE_FILES)
+            outcomes.append("written")
+        except TooManySourceFilesError:
+            outcomes.append("refused")
+
+    threads = [threading.Thread(target=write, args=(name,)) for name in ("a.scad", "b.scad")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["refused", "written"]
+    assert len(list(paths.model_dir(SLUG).glob("*.scad"))) == MAX_SOURCE_FILES

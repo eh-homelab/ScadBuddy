@@ -7,24 +7,34 @@ import { ToolError } from './registry.js'
 // dragging a slider from an agent in a loop, so the agent bounds its own
 // callers, per principal (auth/principal.ts), before a render reaches the queue:
 //
-//   - at most `concurrent` of its renders in flight at once, since render_model
-//     waits for each to settle (a second one while the first runs is fine, a
-//     fleet of them is a queue nobody else gets into);
+//   - at most `concurrent` of its renders in flight at once, counted until the
+//     backend job settles (a second one while the first runs is fine, a fleet
+//     of them is a queue nobody else gets into). A render handed back still
+//     running keeps its slot while render_model polls it in the background, for
+//     at most `holdMs` (PR #752 review);
 //   - at most `perWindow` started in any `windowMs`, so an edit/render loop that
 //     never converges stops and says so instead of rendering all night.
 //
 // A refusal is a ToolError naming the limit and when to try again, which the
 // model reads as any other failed call. The counts are in memory: they bound
 // a burst, not a total, so there is nothing to keep across a restart and no
-// new state in Postgres. The numbers are ScadBuddy's defaults, not settings.
+// new state in Postgres. A principal with nothing in flight and nothing in the
+// window is dropped (anonymous MCP principals are one per session), so the maps
+// hold only recent callers. The numbers are ScadBuddy's defaults, not settings.
 
-export type RenderLimits = { concurrent: number; perWindow: number; windowMs: number }
+export type RenderLimits = { concurrent: number; perWindow: number; windowMs: number; holdMs: number }
 
-export const RENDER_LIMITS: RenderLimits = { concurrent: 2, perWindow: 30, windowMs: 10 * 60_000 }
+export const RENDER_LIMITS: RenderLimits = {
+  concurrent: 2,
+  perWindow: 30,
+  windowMs: 10 * 60_000,
+  holdMs: 30 * 60_000,
+}
 
 export class RenderLimiter {
   private readonly inFlight = new Map<string, number>()
   private readonly started = new Map<string, number[]>()
+  private lastSweep = 0
 
   readonly limits: RenderLimits
   private readonly now: () => number
@@ -37,6 +47,7 @@ export class RenderLimiter {
   /** Counts a render for `principal`, or throws; call the returned function when it settles. */
   acquire(principal: string): () => void {
     const now = this.now()
+    this.sweep(now)
     const recent = (this.started.get(principal) ?? []).filter((t) => t > now - this.limits.windowMs)
     const running = this.inFlight.get(principal) ?? 0
     if (running >= this.limits.concurrent) {
@@ -63,6 +74,22 @@ export class RenderLimiter {
       const left = (this.inFlight.get(principal) ?? 1) - 1
       if (left > 0) this.inFlight.set(principal, left)
       else this.inFlight.delete(principal)
+    }
+  }
+
+  /** The principals the limiter holds counts for. */
+  get tracked(): number {
+    return new Set([...this.inFlight.keys(), ...this.started.keys()]).size
+  }
+
+  /** Drops, at most once a window, every principal with nothing in flight and nothing started in the window. */
+  private sweep(now: number): void {
+    if (now - this.lastSweep < this.limits.windowMs) return
+    this.lastSweep = now
+    for (const [principal, times] of this.started) {
+      if (!this.inFlight.has(principal) && (times.at(-1) ?? 0) <= now - this.limits.windowMs) {
+        this.started.delete(principal)
+      }
     }
   }
 }

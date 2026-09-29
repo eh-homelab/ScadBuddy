@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -110,7 +110,7 @@ describe('create_from_template', () => {
 describe('render limits', () => {
   it('bounds renders in flight and per window, per principal', () => {
     let now = 0
-    const limiter = new RenderLimiter({ concurrent: 2, perWindow: 3, windowMs: 1000 }, () => now)
+    const limiter = new RenderLimiter({ concurrent: 2, perWindow: 3, windowMs: 1000, holdMs: 1000 }, () => now)
     const a = limiter.acquire('p')
     const b = limiter.acquire('p')
     expect(() => limiter.acquire('p')).toThrow(/still running, the most at once \(2\)/)
@@ -125,13 +125,53 @@ describe('render limits', () => {
     expect(() => limiter.acquire('p')()).not.toThrow()
   })
 
+  it('drops a principal once nothing is in flight or in its window', () => {
+    let now = 0
+    const limiter = new RenderLimiter({ concurrent: 2, perWindow: 3, windowMs: 1000, holdMs: 1000 }, () => now)
+    limiter.acquire('anonymous:s1')()
+    const held = limiter.acquire('anonymous:s2')
+    expect(limiter.tracked).toBe(2)
+    now = 1500
+    limiter.acquire('anonymous:s3')()
+    // s1 has nothing left; s2 is still in flight.
+    expect(limiter.tracked).toBe(2)
+    held()
+    now = 3000
+    limiter.acquire('anonymous:s4')()
+    expect(limiter.tracked).toBe(1)
+  })
+
+  it('a render handed back still running keeps its slot until the job settles', async () => {
+    const schema = { groups: [], parameters: [] }
+    const id = 'e'.repeat(32)
+    let status = 'running'
+    const { client, seen } = backend((s) =>
+      s.path.endsWith('/schema')
+        ? Response.json(schema)
+        : s.path.endsWith('/render')
+          ? Response.json({ job_id: id }, { status: 202 })
+          : Response.json({ id, status, log_tail: [] }),
+    )
+    const limiter = new RenderLimiter({ concurrent: 1, perWindow: 10, windowMs: 60_000, holdMs: 60_000 })
+    const c = ctx(client, { renderLimiter: limiter, renderWaitMs: 0, pollIntervalMs: 1 })
+    const first = await runTool(tool('render_model'), { slug: 'plate' }, c)
+    expect(firstText(first)).toMatchObject({ status: 'running', note: expect.stringContaining('still rendering') })
+    const second = await runTool(tool('render_model'), { slug: 'plate' }, c)
+    expect(second.isError).toBe(true)
+    expect(String(firstText(second))).toContain('still running, the most at once (1)')
+    expect(seen.filter((s) => s.path.endsWith('/render'))).toHaveLength(1)
+    // The background poll sees the job settle and frees the slot.
+    status = 'done'
+    await vi.waitFor(() => limiter.acquire('token:t1')())
+  })
+
   it('render_model refuses past the bound without calling the backend, and releases after a render', async () => {
     const schema = { groups: [], parameters: [] }
     const job = { id: 'd'.repeat(32), status: 'done', log_tail: [] }
     const { client, seen } = backend((s) =>
       s.path.endsWith('/schema') ? Response.json(schema) : s.path.endsWith('/render') ? Response.json({ job_id: job.id }, { status: 202 }) : Response.json(job),
     )
-    const limiter = new RenderLimiter({ concurrent: 1, perWindow: 1, windowMs: 60_000 })
+    const limiter = new RenderLimiter({ concurrent: 1, perWindow: 1, windowMs: 60_000, holdMs: 60_000 })
     const c = ctx(client, { renderLimiter: limiter })
     const first = await runTool(tool('render_model'), { slug: 'plate' }, c)
     expect(first.isError, JSON.stringify(first)).toBeFalsy()

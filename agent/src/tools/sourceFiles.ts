@@ -55,6 +55,8 @@ export const sourceFileTools: Tool[] = [
     input: z.object({
       slug,
       name: fileName,
+      // MAX_SOURCE_CHARS in backend/scadbuddy/api/models.py (SourceFileUpdate in
+      // model_files.py); change both together (PR #752 review).
       content: z.string().max(1_000_000),
       message: z.string().max(200).optional().describe("What the revision is called in the history: the user's instruction, in short"),
     }),

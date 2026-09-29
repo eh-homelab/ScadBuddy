@@ -32,7 +32,12 @@ from scadbuddy.api.models import (
 )
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import ModelNotFoundError, ModelRecord, SidecarNotFoundError
+from scadbuddy.library.catalogue import (
+    ModelNotFoundError,
+    ModelRecord,
+    SidecarNotFoundError,
+    TooManySourceFilesError,
+)
 from scadbuddy.library.history import MAX_SUBJECT, GitError
 
 router = APIRouter(tags=["models"])
@@ -53,6 +58,8 @@ class SourceFile(BaseModel):
 
 
 class SourceFileUpdate(BaseModel):
+    # MAX_SOURCE_CHARS is also the agent's bound, in agent/src/tools/sourceFiles.ts
+    # (`content`'s Zod max); change both together (PR #752 review).
     content: str = Field(max_length=MAX_SOURCE_CHARS, description="The file's OpenSCAD text")
     message: str | None = Field(
         default=None,
@@ -115,18 +122,22 @@ async def put_source_file(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the file contains a NUL byte, so it is binary, not OpenSCAD text",
         )
-    present = {path.name for path in await asyncio.to_thread(catalogue.source_files, slug)}
-    if name not in present and len(present) >= MAX_SOURCE_FILES:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"{slug!r} already has {len(present)} .scad files, the most a model may hold",
-        )
     try:
         record = await asyncio.to_thread(
-            catalogue.write_file, slug, name, body.content, message=body.message
+            catalogue.write_file,
+            slug,
+            name,
+            body.content,
+            message=body.message,
+            max_files=MAX_SOURCE_FILES,
         )
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except TooManySourceFilesError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{slug!r} already has {error.count} .scad files, the most a model may hold",
+        ) from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     announce_source_change(events, slug)

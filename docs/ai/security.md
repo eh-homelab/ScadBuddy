@@ -796,13 +796,17 @@ agent bounds its own callers before a render reaches the queue
 
 - per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
   or the browser user, whose harness sessions share one count);
-- at most **2** of its renders in flight at once, counted while `render_model` waits
-  for each to settle (a render handed back still running no longer counts);
+- at most **2** of its renders in flight at once, counted until the backend job
+  settles (done, failed or cancelled). A render `render_model` hands back still
+  running keeps its slot while the agent polls the job in the background, for at most
+  **30 minutes**, or until the backend stops answering for it (PR #752 review);
 - at most **30** started in any **10 minutes**.
 
 A refusal is an error result that names the limit and when to try again, and nothing is
 sent to the backend. The counts are in memory. They bound a burst, not a total, so a
-restart clears them, and there is no new state or setting.
+restart clears them, and there is no new state or setting. A principal with nothing in
+flight and nothing started in the window is dropped, so the counts hold only recent
+callers (anonymous MCP principals are one per session).
 
 ## Known limitations
 

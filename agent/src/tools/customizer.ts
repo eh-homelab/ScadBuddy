@@ -55,9 +55,34 @@ export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatu
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled' || Date.now() >= deadline)
-      return job
+    if (settled(job.status) || Date.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+  }
+}
+
+function settled(status: JobStatus['status']): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * Polls a render that render_model handed back unsettled (or whose wait was
+ * aborted) until it settles, fails to answer, or `holdMs` passes, so its
+ * render-limit slot is held while the backend still runs it (PR #752 review).
+ * It outlives the call, so it uses no call signal, and it never rejects.
+ */
+async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
+  const deadline = Date.now() + holdMs
+  try {
+    while (Date.now() < deadline) {
+      await sleep(ctx.pollIntervalMs)
+      const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
+        params: { path: { job_id: id } },
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      })
+      if (!data || settled(data.status)) return
+    }
+  } catch {
+    // An unreachable backend or the deadline: stop holding.
   }
 }
 
@@ -127,9 +152,12 @@ export const customizerTools: Tool[] = [
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      // Per-principal render bounds (renderLimits.ts, #252), held while this call waits.
-      const release = (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).acquire(ctx.principal.id)
-      let job: JobStatus
+      // Per-principal render bounds (renderLimits.ts, #252), held until the
+      // backend job settles, past this call when it hands the job back running.
+      const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
+      const release = limiter.acquire(ctx.principal.id)
+      let submitted: string | undefined
+      let job: JobStatus | undefined
       try {
         const accepted = await ok(
           ctx.backend.POST('/api/v1/models/{slug}/render', {
@@ -139,10 +167,15 @@ export const customizerTools: Tool[] = [
           }),
           `render ${slug}`,
         )
+        submitted = accepted.job_id
         await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
         job = await waitForJob(ctx, accepted.job_id)
       } finally {
-        release()
+        if (submitted !== undefined && (job === undefined || !settled(job.status))) {
+          void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
+        } else {
+          release()
+        }
       }
       const summary = jobSummary(job)
       if (job.status === 'failed' || job.status === 'cancelled') {

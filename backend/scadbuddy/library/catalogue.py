@@ -151,6 +151,14 @@ class SidecarNotFoundError(KeyError):
     """The model exists, but the thumbnail or README being removed does not."""
 
 
+class TooManySourceFilesError(ValueError):
+    """A new ``.scad`` file for a model that already holds the most it may (#252)."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
+
+
 class MediaNotFoundError(KeyError):
     """The model exists, but has no media item (or poster) of that id."""
 
@@ -1648,7 +1656,13 @@ class Catalogue:
         )
 
     def write_file(
-        self, slug: str, name: str, content: str | None, *, message: str | None = None
+        self,
+        slug: str,
+        name: str,
+        content: str | None,
+        *,
+        message: str | None = None,
+        max_files: int | None = None,
     ) -> ModelRecord:
         """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
         as one revision. ``name`` is a bare ``.scad`` file name other than the model's
@@ -1657,6 +1671,9 @@ class Catalogue:
         The schema derived from ``model.scad`` is dropped too: an ``include`` can
         bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
         removal of a file that is not there, with nothing committed.
+        :class:`TooManySourceFilesError` for a new file when the model already holds
+        ``max_files``, counted under the write lock so two new files at once cannot
+        both pass (PR #752 review).
         """
         self._require(slug)
         path = self.paths.model_dir(slug) / name
@@ -1667,6 +1684,10 @@ class Catalogue:
                     raise SidecarNotFoundError(name)
                 path.unlink()
             else:
+                if max_files is not None and not path.is_file():
+                    count = len(self.source_files(slug))
+                    if count >= max_files:
+                        raise TooManySourceFilesError(count)
                 try:
                     write_atomic(path, content.encode())
                 except FileNotFoundError:
