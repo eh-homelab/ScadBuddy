@@ -1007,3 +1007,36 @@ describe('the prints mock', () => {
     expect((await fetch('/api/v1/prints/99')).status).toBe(404)
   })
 })
+
+/** #311 — the print detail page's writes and the Range-capable timelapse. */
+describe('the print detail mock', () => {
+  beforeEach(() => resetMockState())
+
+  it('queues a print again, but not one deleted in Bambuddy', async () => {
+    const again = await fetch('/api/v1/prints/35/reprint', { method: 'POST' })
+    expect(again.status).toBe(201)
+    expect(((await again.json()) as { queue_item_id: number }).queue_item_id).toBe(200)
+    expect((await fetch('/api/v1/prints/38/reprint', { method: 'POST' })).status).toBe(409)
+  })
+
+  it('pulls only a timelapse the printer has, and the print then has it', async () => {
+    const pull = (filename: string) =>
+      fetch('/api/v1/prints/36/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename }) })
+    expect((await pull('nope.mp4')).status).toBe(404)
+    expect((await pull('video_2026-09-26_20-01-00.mp4')).status).toBe(204)
+    const detail = (await (await fetch('/api/v1/prints/36')).json()) as { media: { timelapse: { url: string } } }
+    expect(detail.media.timelapse.url).toBe('/api/v1/prints/36/timelapse')
+  })
+
+  it('refuses to pull a timelapse onto a print deleted in Bambuddy', async () => {
+    const pulled = await fetch('/api/v1/prints/38/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename: 'x.mp4' }) })
+    expect(pulled.status).toBe(409)
+  })
+
+  it('answers a timelapse Range with a 206', async () => {
+    const part = await fetch('/api/v1/prints/35/timelapse', { headers: { Range: 'bytes=4-7' } })
+    expect(part.status).toBe(206)
+    expect(part.headers.get('Content-Range')).toMatch(/^bytes 4-7\/\d+$/)
+    expect((await part.arrayBuffer()).byteLength).toBe(4)
+  })
+})

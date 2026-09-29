@@ -395,7 +395,7 @@ describe('waiting for Bambuddy, with more pages to load (#310)', () => {
   })
 })
 
-describe('the print route in the app (#310, until #311)', () => {
+describe('the print route in the app (#310, #311)', () => {
   it('a row click lands on the print, not back on the catalogue', async () => {
     const { user } = renderPage(
       <>
@@ -408,8 +408,9 @@ describe('the print route in the app (#310, until #311)', () => {
     await user.click(within(failed).getByRole('link'))
     expect(await screen.findByRole('heading', { name: 'Reagan' })).toBeInTheDocument()
     expect(location()).toBe('/prints/36')
-    expect(screen.getByRole('link', { name: 'Print history' })).toHaveAttribute('href', '/prints')
-    expect(screen.getByText('Failed')).toBeInTheDocument()
+    // The detail page's (#311) own way back, not the app's nav link of the same name.
+    expect(within(screen.getByRole('main')).getByRole('link', { name: 'Prints' })).toHaveAttribute('href', '/prints')
+    expect(screen.getAllByText('Failed').length).toBeGreaterThan(0)
   })
 
   it('says so for a print ScadBuddy does not know', async () => {

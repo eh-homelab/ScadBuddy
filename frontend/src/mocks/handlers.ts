@@ -26,6 +26,7 @@ import type {
   ParamValue,
   Plate,
   PlateFit,
+  PrintAgain,
   PrintDetail,
   PrintPage,
   PrintProgress,
@@ -122,6 +123,10 @@ const state = {
   plates: {} as Record<string, NonNullable<Job['plates']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
+  /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
+  pulledTimelapses: new Map<number, string>(),
+  /** #311 — the queue items "Print again" made, newest last. */
+  reprints: [] as { archive_id: number; queue_item_id: number }[],
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -234,6 +239,8 @@ export function resetMockState(): void {
   state.mergeFiles = {}
   state.plates = {}
   state.mediaFiles.clear()
+  state.pulledTimelapses.clear()
+  state.reprints = []
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -2147,14 +2154,99 @@ export const handlers = [
     const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
     if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
     const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
+    const pulled = state.pulledTimelapses.get(print.archive_id)
+    const remote = (fixtures.printerFiles[print.archive_id] ?? []).filter((file) => file.name !== pulled)
     return HttpResponse.json({
       ...print,
+      has_timelapse: print.has_timelapse || pulled !== undefined,
+      media:
+        pulled === undefined
+          ? print.media
+          : {
+              ...print.media,
+              timelapse: { url: `/api/v1/prints/${print.archive_id}/timelapse`, info: null, poster_frames: [] },
+            },
       printer_media:
         wantsPrinter && print.status !== 'deleted_in_bambuddy'
-          ? { archive_id: print.archive_id, printer_id: print.printer_id, local_timelapse: null, remote_files: [], warnings: [] }
+          ? { archive_id: print.archive_id, printer_id: print.printer_id, local_timelapse: null, remote_files: remote, warnings: [] }
           : null,
     } satisfies PrintDetail)
   }),
+
+  // #311 — "Print again": `POST /queue/` with the archive, on its printer.
+  http.post(`${base}/prints/:archiveId/reprint`, ({ params }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so it cannot be printed again`)
+    }
+    const queued = { archive_id: print.archive_id, queue_item_id: 200 + state.reprints.length }
+    state.reprints.push(queued)
+    return HttpResponse.json(
+      {
+        queue_item_id: queued.queue_item_id,
+        printer_id: print.printer_id ?? 1,
+        bambuddy_url: 'https://bambuddy.example/queue',
+      } satisfies PrintAgain,
+      { status: 201 },
+    )
+  }),
+
+  // #311 — "Pull timelapse from printer": `timelapse/select`, 404 for a name the printer lacks.
+  http.post(`${base}/prints/:archiveId/timelapse/pull`, async ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so no timelapse can be attached to it`)
+    }
+    const { filename } = (await request.json()) as { filename: string }
+    if (!(fixtures.printerFiles[print.archive_id] ?? []).some((file) => file.name === filename)) {
+      return problem(404, 'Not Found', `Bambuddy has no such resource when asked to attach a timelapse: Timelapse '${filename}' not found on printer`)
+    }
+    state.pulledTimelapses.set(print.archive_id, filename)
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // #307 — the timelapse, with Range as Bambuddy's FileResponse answers it.
+  http.get(`${base}/prints/:archiveId/timelapse`, ({ params, request }) => {
+    const id = Number(params['archiveId'])
+    const print = fixtures.prints.find((p) => p.archive_id === id)
+    if (!print || (print.media.timelapse === null && !state.pulledTimelapses.has(id))) {
+      return problem(404, 'Not Found', `archive ${String(params['archiveId'])} has no timelapse`)
+    }
+    const bytes = new Uint8Array(mediaBytes('', '', 'video'))
+    const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.get('Range') ?? '')
+    if (!range) {
+      return HttpResponse.arrayBuffer(bytes.buffer, {
+        headers: { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' },
+      })
+    }
+    const start = Number(range[1])
+    const end = Math.min(range[2] ? Number(range[2]) : bytes.length - 1, bytes.length - 1)
+    if (start >= bytes.length) {
+      return new HttpResponse(null, { status: 416, headers: { 'Content-Range': `bytes */${bytes.length}` } })
+    }
+    return HttpResponse.arrayBuffer(bytes.slice(start, end + 1).buffer, {
+      status: 206,
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+      },
+    })
+  }),
+
+  // #307 — the sliced file and slicer project Bambuddy kept.
+  ...['files/sliced', 'files/source'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer, {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      })
+    }),
+  ),
 
   ...['thumbnail', 'photos/:name', 'plates/:index/thumbnail'].map((path) =>
     http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {

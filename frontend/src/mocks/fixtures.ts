@@ -1134,6 +1134,63 @@ export const prints: PrintDetail[] = [
 ]
 
 /**
+ * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
+ * print 36 left a timelapse and a camera recording on the printer; the others nothing.
+ */
+export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
+  36: [
+    {
+      name: 'video_2026-09-26_20-01-00.mp4',
+      path: '/timelapse/video_2026-09-26_20-01-00.mp4',
+      size: 1843200,
+      mtime: '2026-09-26T20:44:00',
+      kind: 'timelapse',
+    },
+    {
+      name: 'ipcam-record.2026-09-26_20-01-10.101.mp4',
+      path: '/ipcam/ipcam-record.2026-09-26_20-01-10.101.mp4',
+      size: 251931635,
+      mtime: '2026-09-26T20:30:00',
+      kind: 'ipcam',
+    },
+  ],
+}
+
+// #311 — print 35 printed twice: the first run was cancelled, the second completed.
+const reprinted = prints.find((print) => print.archive_id === 35)
+if (reprinted) {
+  reprinted.provenance.model_version = versionIds.edited
+  reprinted.outcome.runs = [
+    {
+      id: 71,
+      archive_id: 35,
+      status: 'cancelled',
+      started_at: '2026-09-27T03:40:00',
+      completed_at: '2026-09-27T03:52:00',
+      duration_seconds: 720,
+      filament_used_grams: 1.9,
+      cost: 0.05,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+    {
+      id: 72,
+      archive_id: 35,
+      status: 'completed',
+      started_at: '2026-09-27T04:09:36.529201',
+      completed_at: '2026-09-27T05:56:53.660315',
+      duration_seconds: 6437,
+      filament_used_grams: 16.36,
+      cost: 0.43,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+  ]
+}
+
+/**
  * What the backend's list filters read that a print does not carry (#609 review):
  * Bambuddy's `print_name`, which `q` also matches, and when ScadBuddy first saw the
  * link (`first_seen`), which dates a print with no start, such as a deleted archive.
