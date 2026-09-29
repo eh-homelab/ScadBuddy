@@ -457,13 +457,20 @@ async def run_for_output(
 
 async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
-    printer: one Bambuddy does not list, or any model but the H2C, whose presets are the
-    only ones the resolver knows (``PRINTER_MODEL``)."""
+    printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
+    offers those), or any model but the H2C, whose presets are the only ones the
+    resolver knows (``PRINTER_MODEL``)."""
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     if printer is None:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Bambuddy has no printer {printer_id}. Pick another printer.",
+        )
+    if not printer.is_active:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
+            "another printer.",
         )
     if (printer.model or "").upper() != PRINTER_MODEL:
         raise ApiError(
