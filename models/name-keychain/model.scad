@@ -103,11 +103,13 @@ module name_2d() {
     else glyphs_2d();
 }
 
-// Teardrop tab carrying the keyring hole, necked into the base's border.
+// Tab carrying the keyring hole. Its neck is as tall as the ring and runs into the
+// first letter, so the ring hangs off solid base rather than a pinch where a script
+// capital's outline only grazes the text origin.
 module ring_tab_2d() {
     hull() {
         translate(ring_centre()) circle(r = ring_radius());
-        circle(r = outline * 0.6);
+        translate([outline / 2, 0]) circle(r = ring_radius());
     }
 }
 

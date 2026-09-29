@@ -112,6 +112,8 @@ def test_each_archive_file_is_proxied(client: TestClient, path: str, upstream: s
     assert route.called
     assert response.status_code == 200
     assert response.content == b"bytes"
+    # #608: served from ScadBuddy's origin, so a mislabeled file is never sniffed as HTML.
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(
@@ -133,6 +135,7 @@ def test_each_library_file_image_is_proxied(client: TestClient, path: str, upstr
     assert response.status_code == 200
     assert response.content == b"bytes"
     assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize("path", ["thumbnail", "plates/2/thumbnail"])

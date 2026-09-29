@@ -5,6 +5,13 @@ Images are committed with the template, as ``thumbnail.png`` always was; videos 
 not (``history._gitignore_body``), so the models repository stays small. The entry
 is committed either way, which is how a restore can bring back an entry whose video
 file is gone: it is listed ``missing`` rather than dropped.
+
+A built-in's media (#722) is an overlay: what it ships (its bundled ``model.json``,
+read-only, ``readonly`` in the API) followed by what people added to it, kept outside
+the models repository in ``builtin-media/<slug>/`` with `template_media` rows, so an
+addition never moves the built-in's revision. Since the shipped items come first,
+its cover is a choice of its own (`template_media_cover`): the chosen item, shipped
+or added, is listed first; with none chosen the first shipped item is the cover.
 """
 
 from __future__ import annotations
@@ -80,6 +87,9 @@ class MediaView(MediaItem):
 
     #: The entry is there and its file is not: a video after a history restore.
     missing: bool = False
+    #: Shipped with a built-in template (#722): it cannot be captioned, moved or
+    #: removed. The media added to a built-in, and all of a template of mine's, is not.
+    readonly: bool = False
     content_type: str
     #: Bytes; None when missing.
     size: int | None

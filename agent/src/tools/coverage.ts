@@ -61,13 +61,27 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'PATCH /api/v1/models/{slug}/media/{item_id}',
       'PUT /api/v1/models/{slug}/media/order',
+      'PUT /api/v1/models/{slug}/media/cover',
       'DELETE /api/v1/models/{slug}/media/{item_id}',
     ] as const
   ).map((operation) => ({
     operation,
     reason:
-      "Captioning, reordering and removing a template's media happen on the edit page (#279); the plan " +
-      'adds no agent tools in the gallery epic (#273, decision 7).',
+      "Captioning, reordering, choosing the cover of and removing a template's media happen on the edit page " +
+      '(#279, #722); the plan adds no agent tools in the gallery epic (#273, decision 7).',
+  })),
+  // #185: the source editor's go-to-definition opens the file a definition is in.
+  ...(
+    [
+      'GET /api/v1/models/{slug}/files/{path}',
+      'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
+      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
+      "model's own source through get_source.",
   })),
   {
     operation: 'GET /api/v1/analyzers',

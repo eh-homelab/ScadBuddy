@@ -115,6 +115,7 @@ def test_a_legacy_thumbnail_is_listed_as_one_image(
             "caption": "",
             "poster": None,
             "missing": False,
+            "readonly": False,
             "content_type": "image/png",
             "size": len(PNG),
         }
@@ -424,15 +425,13 @@ def test_a_restore_brings_back_a_file_but_not_its_row(
     assert _media(client, model) == []
 
 
-def test_a_built_ins_media_is_served_and_read_only(client: TestClient) -> None:
+def test_a_built_ins_shipped_media_is_served_and_read_only(client: TestClient) -> None:
     [item] = _media(client, BUILTIN)
-    assert item["id"] == "front"
+    assert (item["id"], item["readonly"]) == ("front", True)
     assert client.get(f"/api/v1/models/{BUILTIN}/media/front").content == PNG
 
     writes = [
-        _upload(client, BUILTIN, PNG),
         client.patch(f"/api/v1/models/{BUILTIN}/media/front", json={"caption": "x"}),
-        client.put(f"/api/v1/models/{BUILTIN}/media/order", json={"ids": ["front"]}),
         client.delete(f"/api/v1/models/{BUILTIN}/media/front"),
     ]
 
@@ -440,6 +439,95 @@ def test_a_built_ins_media_is_served_and_read_only(client: TestClient) -> None:
         assert response.status_code == 403, response.text
         assert "built-in" in response.json()["detail"]
     assert _media(client, BUILTIN) == [item]
+
+
+def test_media_is_added_to_a_built_in_without_moving_its_revision(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#722: an overlay in the data directory, not a change to the image's mirror."""
+    before = client.get(f"/api/v1/models/{BUILTIN}").json()
+    tracked = _tracked(paths)
+
+    response = _upload(client, BUILTIN, PNG, caption="On my keys")
+
+    assert response.status_code == 200, response.text
+    record = response.json()
+    front, added = record["media"]
+    assert (front["id"], front["readonly"]) == ("front", True)
+    assert (added["caption"], added["readonly"]) == ("On my keys", False)
+    assert record["version"] == before["version"]
+    assert _tracked(paths) == tracked
+    assert not (paths.model_dir(BUILTIN) / "media" / added["file"]).exists()
+    assert (paths.builtin_media_dir(BUILTIN) / added["file"]).read_bytes() == PNG
+    served = client.get(f"/api/v1/models/{BUILTIN}/media/{added['id']}")
+    assert served.status_code == 200
+    assert served.content == PNG
+
+    video = _upload(client, BUILTIN, MP4, poster=JPEG).json()["media"][2]
+    poster = client.get(f"/api/v1/models/{BUILTIN}/media/{video['id']}/poster")
+    assert poster.content == JPEG
+
+    caption = client.patch(
+        f"/api/v1/models/{BUILTIN}/media/{added['id']}", json={"caption": "Keys"}
+    )
+    assert caption.status_code == 200, caption.text
+    order = client.put(
+        f"/api/v1/models/{BUILTIN}/media/order", json={"ids": [video["id"], added["id"]]}
+    )
+    assert order.status_code == 200, order.text
+    assert [item["id"] for item in order.json()["media"]] == ["front", video["id"], added["id"]]
+    removed = client.delete(f"/api/v1/models/{BUILTIN}/media/{video['id']}")
+    assert removed.status_code == 200, removed.text
+    assert [item["caption"] for item in removed.json()["media"]] == ["", "Keys"]
+    assert client.get(f"/api/v1/models/{BUILTIN}").json()["version"] == before["version"]
+
+
+def test_a_built_ins_cover_is_chosen_not_ordered(client: TestClient) -> None:
+    added = _upload(client, BUILTIN, JPEG).json()["media"][1]
+
+    response = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
+
+    assert response.status_code == 200, response.text
+    record = response.json()
+    assert record["media_cover"] == added["id"]
+    assert [item["id"] for item in record["media"]] == [added["id"], "front"]
+    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == JPEG
+    listed = {model["slug"]: model for model in client.get("/api/v1/models").json()}
+    assert listed[BUILTIN]["media_cover"] == added["id"]
+
+    reset = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": None})
+    assert reset.json()["media_cover"] is None
+    assert [item["id"] for item in reset.json()["media"]] == ["front", added["id"]]
+    unknown = client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": "abcdefabcdef"})
+    assert unknown.status_code == 404
+
+
+def test_a_cover_of_mine_is_its_first_item(client: TestClient, model: str) -> None:
+    first = _upload(client, model, PNG).json()["media"][0]
+    second = _upload(client, model, JPEG).json()["media"][1]
+
+    response = client.put(f"/api/v1/models/{model}/media/cover", json={"id": second["id"]})
+
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["media"]] == [second["id"], first["id"]]
+    none = client.put(f"/api/v1/models/{model}/media/cover", json={"id": None})
+    assert none.status_code == 422
+
+
+def test_a_duplicate_of_a_built_in_takes_what_was_added_to_it(client: TestClient) -> None:
+    added = _upload(client, BUILTIN, JPEG, caption="Mine").json()["media"][1]
+    client.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added["id"]})
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+    copy = response.json()
+    assert [(item["id"], item["readonly"]) for item in copy["media"]] == [
+        (added["id"], False),
+        ("front", False),
+    ]
+    served = client.get(f"/api/v1/models/{copy['slug']}/media/{added['id']}")
+    assert served.content == JPEG
 
 
 def test_a_duplicate_copies_its_media_videos_included(
@@ -625,3 +713,19 @@ def test_the_limit_comes_from_the_environment(
 
     assert response.status_code == 413, response.text
     assert "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("media/order", {"ids": ["../escape"]}),
+        ("media/cover", {"id": "../escape"}),
+        ("media/cover", {"id": ""}),
+    ],
+)
+def test_an_id_that_is_not_a_media_id_is_refused(
+    client: TestClient, model: str, path: str, body: dict[str, object]
+) -> None:
+    response = client.put(f"/api/v1/models/{model}/{path}", json=body)
+
+    assert response.status_code == 422

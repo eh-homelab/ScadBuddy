@@ -291,6 +291,30 @@ describe('PrintPicker', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key')
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
   })
+
+  it('reads the choices again on Retry after a failed read (#482)', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () => {
+        reads += 1
+        // Returning nothing falls through to the default handler, so the retry reads
+        // real choices.
+        if (reads > 1) return undefined
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Gateway Timeout', status: 504, detail: 'Bambuddy did not answer' },
+          { status: 504, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+    const { user } = renderPicker()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer')
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+
+    await loaded()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(reads).toBe(2)
+  })
 })
 
 describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
