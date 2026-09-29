@@ -173,6 +173,21 @@ class Config:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be more than 0, not {value}")
+        # #322: bounds a value saved in Settings meets too, so they are said here once.
+        for name, value in (
+            ("SCADBUDDY_RENDER_TIMEOUT", self.render_timeout),
+            ("SCADBUDDY_JOB_TTL", self.job_ttl),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be more than 0, not {value}")
+        if self.check_concurrency < 1:
+            raise ValueError(
+                f"SCADBUDDY_CHECK_CONCURRENCY must be at least 1, not {self.check_concurrency}"
+            )
+        if self.fonts_catalogue_ttl < 0:
+            raise ValueError(
+                f"SCADBUDDY_FONTS_CATALOGUE_TTL must be at least 0, not {self.fonts_catalogue_ttl}"
+            )
         if self.render_max_attempts < 1:
             raise ValueError(
                 f"SCADBUDDY_RENDER_MAX_ATTEMPTS must be at least 1, not {self.render_max_attempts}"
