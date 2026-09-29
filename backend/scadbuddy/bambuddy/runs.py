@@ -20,6 +20,8 @@ older client sends none, and then the output and choices alone are the key. A se
 POST with the same key returns the run it repeats, instead of starting another, while
 that run is in flight or for ``REPEAT_WINDOW`` after it succeeded. The key is looked
 up and the new row inserted under one advisory lock, so two POSTs that race get one run.
+The route's cheap refusals run before that lock; one that refuses re-reads the key
+first, so a racer whose own Bambuddy read refused still answers with the winner's run.
 
 A run that failed before it tried to queue anything holds nothing: repeating it tries
 again. Once it has tried (``enqueue_attempted``, set by :meth:`PrintRunStore.
@@ -200,8 +202,9 @@ class PrintRunStore:
         self.repeat_window = repeat_window
         self.retention = retention
         #: The runs this process is running (:class:`PrintRuns` keeps it): never
-        #: expired here, however late their heartbeat.
-        self.live: set[str] = set()
+        #: expired here, however late their heartbeat. Replaced, never mutated: the
+        #: loop changes it while a worker thread reads it in :meth:`_expire_lost`.
+        self.live: frozenset[str] = frozenset()
 
     @property
     def available(self) -> bool:
@@ -375,11 +378,11 @@ class PrintRuns:
     def start(self, run: PrintRun, slug: str, work: Work) -> None:
         task = asyncio.create_task(self._run(run, slug, work), name=f"print-run-{run.id}")
         self._tasks[run.id] = task
-        self.store.live.add(run.id)
+        self.store.live = self.store.live | {run.id}
 
         def done(_: asyncio.Task[None]) -> None:
             self._tasks.pop(run.id, None)
-            self.store.live.discard(run.id)
+            self.store.live = self.store.live - {run.id}
 
         task.add_done_callback(done)
 
