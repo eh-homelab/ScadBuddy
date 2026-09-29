@@ -2,8 +2,7 @@
 
 Kept out of ``outputs.py`` because these routes are about the print dialog rather
 than about an output, and only some of them are output-scoped at all. ``POST
-/outputs/{id}/send`` stays where it was: it is the send bar's one-click path and
-still runs a Bambuddy slicer pipeline, unrelated to the dialog's own run.
+/outputs/{id}/send`` stays in ``outputs.py``: it only uploads (#312).
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
-from scadbuddy.bambuddy.pipelines import (
+from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     PrintRunResult,
     filament_options_for_output,
@@ -66,9 +65,8 @@ class PrinterBedType(BaseModel):
 class ProjectAttach(BaseModel):
     """Which of this output's queue entries to file under the project.
 
-    The ids come from the progress read (#89): a pipeline run's
-    ``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the
-    only one that knows them, and only once it has polled.
+    The ids come from the progress read (#89): a plate's queue item only exists once it
+    has sliced, so the caller learns them by polling.
     """
 
     project_id: int | None = None
@@ -222,16 +220,12 @@ async def get_progress(
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
 ) -> PrintProgress | None:
-    """Follow whichever of Bambuddy's two routes this output last took (#89).
+    """Follow this output's last print, slice then queue (#89).
 
     ``null`` means this output has never been printed — that is an answer, not an
     error, and the send bar shows nothing rather than a failure.
 
-    The poll is needed rather than optional on the pipeline route: ``run`` answers 202
-    and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
-    still null when the run response arrives. ``settled`` is what says the polling can
-    stop; it is computed from the copies, because a run can report a terminal status
-    while a copy is still being dispatched.
+    ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
@@ -288,10 +282,10 @@ async def post_attach_project(
 ) -> AttachResult:
     """``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
 
-    Separate from the run because neither id exists when a print starts: a pipeline
-    run's queue entries are created by a background task, and an archive only exists
-    once a print has finished. Calling this again later is how the archives eventually
-    land on the project's page, and attaching the same id twice is Bambuddy's to dedupe.
+    Separate from the run because neither id exists when a print starts: a plate's
+    queue item only exists once it has sliced, and an archive only exists once a print
+    has finished. Calling this again later is how the archives eventually land on the
+    project's page, and attaching the same id twice is Bambuddy's to dedupe.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()

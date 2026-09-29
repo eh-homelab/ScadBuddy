@@ -15,8 +15,8 @@ import { defineTool, json, type Tool } from './registry.js'
 //   are chosen, and the backend's resolver derives Bambu's printer, process and
 //   filament presets from them. There are no pipelines, presets or eligibility
 //   tools any more: their routes went with the pipeline picker (that spec §7,
-//   "Removed from the dialog"). The send bar alone still runs the Settings
-//   pipeline (send_to_bambuddy; spool-first there is #312).
+//   "Removed from the dialog"). send_to_bambuddy only uploads to the library
+//   (#312).
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
 //   per-slot remaining grams (get_print_filaments), and print progress. The
@@ -98,6 +98,8 @@ export const printTools: Tool[] = [
       'remembered choices. What print_output fills omitted choices from.',
     input: z.object({ output_id: outputId, printer_id: z.number().int().optional() }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     // Printers, status and archives (Read Status); slicer presets and the 3MF's
     // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
     bambuddyScope: ['Read Status', 'Manage Library'],
@@ -126,6 +128,8 @@ export const printTools: Tool[] = [
       all_plates: z.boolean().optional(),
     }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/print/outputs/{output_id}/filaments'],
     handler: async ({ output_id, printer_id, plate_id, all_plates }, { backend }) =>
@@ -146,6 +150,8 @@ export const printTools: Tool[] = [
       '`settled` is true.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Queue'],
     routes: ['GET /api/v1/print/outputs/{output_id}/progress'],
     handler: async ({ output_id }, { backend }) =>
@@ -162,6 +168,8 @@ export const printTools: Tool[] = [
     description: "Bambuddy's projects, to file prints under.",
     input: z.object({}),
     risk: 'read',
+    source:
+      'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/print/projects'), 'list projects')),
@@ -221,27 +229,21 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'send_to_bambuddy',
     description:
-      "Send an output's 3MF to Bambuddy's library folder, or in `queue` mode also run the Settings slicer " +
-      'pipeline to queue it (the send bar; print_output is the spool-first print).',
-    input: z.object({
-      output_id: outputId,
-      mode: z.enum(['library', 'queue']).default('library'),
-      copies: z.number().int().min(1).max(1000).optional(),
-      options: printOptions,
-    }),
+      "Upload an output's 3MF to Bambuddy's library folder. Nothing is sliced or queued: printing is " +
+      'print_output.',
+    // Strict, so an older client still asking for `mode: 'queue'` or `copies` is refused
+    // rather than silently given a library upload (the HTTP route 422s the same, #312).
+    input: z.object({ output_id: outputId }).strict(),
     risk: 'outward',
-    bambuddyScope: ['Manage Library', 'Manage Queue'],
+    bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],
-    summarize: ({ output_id, mode, copies }) =>
-      mode === 'queue'
-        ? `Send output ${output_id} to Bambuddy and queue ${copies ?? 1} cop${copies === 1 || !copies ? 'y' : 'ies'}`
-        : `Send output ${output_id} to Bambuddy's library`,
-    handler: async ({ output_id, mode, copies, options }, { backend }) =>
+    summarize: ({ output_id }) => `Send output ${output_id} to Bambuddy's library`,
+    handler: async ({ output_id }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/outputs/{output_id}/send', {
             params: { path: { output_id } },
-            body: { mode, copies: copies ?? null, options },
+            body: { mode: 'library' },
           }),
           `send ${output_id}`,
         ),

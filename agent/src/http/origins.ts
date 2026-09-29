@@ -165,6 +165,15 @@ export function effectiveRequest(req: RequestFacts, policy: OriginPolicy): Effec
   return { scheme: 'http', host: req.header('host'), viaTrustedProxy: false }
 }
 
+/**
+ * The client a trusted proxy names: the last `X-Forwarded-For` value, the one
+ * the nearest proxy appended. Undefined from any other peer, whose header is
+ * not believed.
+ */
+export function forwardedClient(req: RequestFacts, policy: OriginPolicy): string | undefined {
+  return inBlockList(policy.trustedProxies, req.peer) ? lastValue(req.header('x-forwarded-for')) : undefined
+}
+
 export type OriginVerdict =
   | { ok: true; origin: string; via: 'public' | 'loopback' }
   | { ok: false; reason: 'no-origin' | 'malformed-origin' | 'not-allowed' }
