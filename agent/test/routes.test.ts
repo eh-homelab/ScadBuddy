@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs'
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
@@ -35,22 +36,15 @@ function pattern(path: string): RegExp {
 }
 
 describe('route groups', () => {
-  it('finds every routes/ file that exports `route`', () => {
-    expect(ROUTES.map((r) => r.file)).toEqual(
-      expect.arrayContaining([
-        'approvals.ts',
-        'audit.ts',
-        'chat.ts',
-        'credentials.ts',
-        'mcpTokens.ts',
-        'plugins.ts',
-        'sessions.ts',
-        'status.ts',
-      ]),
-    )
-    for (const helper of ['guard.ts', 'module.ts', 'index.ts']) {
-      expect(ROUTES.map((r) => r.file)).not.toContain(helper)
-    }
+  it('registers every routes/ file except the helpers', () => {
+    // Every file in routes/ is a route group unless it is one of these, so a group
+    // whose `route` export goes missing (a rename, a typo) fails here, not as a 404.
+    const helpers = ['guard.ts', 'index.ts', 'module.ts']
+    const files = readdirSync(new URL('../src/routes/', import.meta.url))
+      .filter((file) => file.endsWith('.ts') && !helpers.includes(file))
+      .sort()
+    expect(files.length).toBeGreaterThan(0)
+    expect(ROUTES.map((r) => r.file)).toEqual(files)
   })
 
   it('never has two groups answer the same request, so their order does not matter', () => {

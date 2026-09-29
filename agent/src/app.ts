@@ -45,8 +45,6 @@ export interface AppDeps {
   resolveHost?: Resolver
   /** Upper bound on each database step of /healthz (migrations, credential read). */
   healthTimeoutMs?: number
-  /** Clock for the connection-test cooldown; Date.now when omitted. */
-  now?: () => number
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the

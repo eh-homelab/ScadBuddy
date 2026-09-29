@@ -199,6 +199,8 @@ declare module '../app.js' {
     testConnection: (credential: Credential) => Promise<ConnectionTest>
     /** Connection-test cooldown; this file's default when omitted. */
     testCooldownMs?: number
+    /** Clock for the connection-test cooldown; Date.now when omitted. */
+    now?: () => number
   }
 }
 
