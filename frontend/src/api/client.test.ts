@@ -336,3 +336,32 @@ describe('failures the server did not describe (#470)', () => {
     })
   })
 })
+
+describe('definition files (#185)', () => {
+  it('reads a file beside the model and one in a pinned library', async () => {
+    await expect(api.getDefinitionFile('name-keychain', { path: 'helper.scad' })).resolves.toContain(
+      'module rounded_plate',
+    )
+    await expect(
+      api.getDefinitionFile('name-keychain', { library: 'BOSL2', path: 'shapes3d.scad' }),
+    ).resolves.toContain('module cuboid')
+  })
+
+  it('encodes each segment of the path, and keeps its slashes', async () => {
+    let asked = ''
+    server.use(
+      http.get('/api/v1/models/:slug/files/*', ({ request }) => {
+        asked = new URL(request.url).pathname
+        return new HttpResponse('x', { headers: { 'Content-Type': 'text/plain' } })
+      }),
+    )
+    await api.getDefinitionFile('builtin:keychain', { path: 'my parts/a#b.scad' })
+    expect(asked).toBe('/api/v1/models/builtin%3Akeychain/files/my%20parts/a%23b.scad')
+  })
+
+  it('is an ApiError for a file that is not there', async () => {
+    await expect(api.getDefinitionFile('name-keychain', { path: 'nope.scad' })).rejects.toMatchObject({
+      status: 404,
+    })
+  })
+})

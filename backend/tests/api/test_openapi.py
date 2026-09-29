@@ -76,6 +76,8 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/assets/{asset_id}/content",
     "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
+    "/api/v1/models/{slug}/libraries/{name}/files/{path}",
+    "/api/v1/models/{slug}/files/{path}",
     "/api/v1/libraries/installed",
     "/api/v1/libraries/{name}",
     "/api/v1/models/{slug}/diagnostics",

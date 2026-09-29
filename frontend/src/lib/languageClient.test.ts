@@ -12,11 +12,45 @@ function register(name: string) {
   })
 }
 
+interface FakeTextModel {
+  uri: { toString(): string }
+  text: string
+  language: string
+  isDisposed(): boolean
+  dispose(): void
+}
+
+/** Text models the client created, by URI: Monaco's model registry, in miniature. */
+const models = new Map<string, FakeTextModel>()
+
+function createModel(text: string, language: string, resource: { toString(): string }): FakeTextModel {
+  const key = resource.toString()
+  if (models.has(key)) throw new Error(`a model already exists for ${key}`)
+  let disposed = false
+  const model = {
+    uri: resource,
+    text,
+    language,
+    isDisposed: () => disposed,
+    dispose: () => {
+      disposed = true
+      models.delete(key)
+    },
+  }
+  models.set(key, model)
+  return model
+}
+
 // The editor needs layout and workers jsdom does not have; what is under test is the
 // protocol this module speaks and the providers it hands Monaco.
 vi.mock('./monaco', () => ({
   OPENSCAD_LANGUAGE_ID: 'openscad',
   monaco: {
+    Uri: { parse: (value: string) => ({ toString: () => value }) },
+    editor: {
+      getModel: (resource: { toString(): string }) => models.get(resource.toString()) ?? null,
+      createModel,
+    },
     languages: {
       registerCompletionItemProvider: register('completion'),
       registerHoverProvider: register('hover'),
@@ -102,8 +136,12 @@ const CAPABILITIES = {
   documentFormattingProvider: true,
 }
 
-async function started(model = fakeModel(), capabilities: object = CAPABILITIES) {
-  const client = connectLanguageServer(model as never, '/api/v1/models/name-keychain/lsp')
+async function started(
+  model = fakeModel(),
+  capabilities: object = CAPABILITIES,
+  readFile?: (file: { library?: string; path: string }) => Promise<string>,
+) {
+  const client = connectLanguageServer(model as never, '/api/v1/models/name-keychain/lsp', readFile)
   const socket = FakeSocket.last
   socket.onopen?.()
   socket.receive({ id: socket.lastRequest('initialize').id, result: { capabilities } })
@@ -190,23 +228,93 @@ describe('connectLanguageServer', () => {
     expect(socket.sent).toHaveLength(sent)
   })
 
-  it('jumps to definitions in this file only', async () => {
-    const { socket, model } = await started()
-    const pending = call('definition', 'provideDefinition', model, { lineNumber: 1, column: 1 }) as Promise<
-      { uri: { toString(): string } }[]
-    >
-    const range = { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }
-    socket.receive({
-      id: socket.lastRequest('textDocument/definition').id,
-      result: [
-        { uri: URI, range },
-        { uri: 'file:///models/name-keychain/helper.scad', range },
-      ],
+  describe('definitions', () => {
+    const range = { start: { line: 2, character: 7 }, end: { line: 2, character: 13 } }
+    const SIBLING = 'file:///models/name-keychain/parts/helper.scad'
+    const LIBRARY = 'file:///libraries/BOSL2/shapes3d.scad'
+    const ELSEWHERE = 'file:///usr/share/openscad/libraries/MCAD/units.scad'
+
+    beforeEach(() => {
+      for (const model of [...models.values()]) model.dispose()
     })
 
-    const locations = await pending
-    expect(locations).toHaveLength(1)
-    expect(locations[0]?.uri).toBe(model.uri)
+    async function definitions(
+      locations: object[],
+      readFile?: (file: { library?: string; path: string }) => Promise<string>,
+    ) {
+      const { socket, model, client } = await started(fakeModel(), CAPABILITIES, readFile)
+      const pending = call('definition', 'provideDefinition', model, { lineNumber: 1, column: 1 }) as Promise<
+        { uri: { toString(): string }; range: object }[]
+      >
+      socket.receive({ id: socket.lastRequest('textDocument/definition').id, result: locations })
+      return { found: await pending, model, client }
+    }
+
+    it('follow only this file without a way to read others', async () => {
+      const { found, model } = await definitions([
+        { uri: URI, range },
+        { uri: SIBLING, range },
+        { uri: LIBRARY, range },
+      ])
+      expect(found).toHaveLength(1)
+      expect(found[0]?.uri).toBe(model.uri)
+    })
+
+    it('open a sibling file and a library file read-only, under the URI the server named', async () => {
+      const readFile = vi.fn((file: { library?: string; path: string }) =>
+        Promise.resolve(`// ${file.library ?? 'model'}:${file.path}\n`),
+      )
+      const { found } = await definitions(
+        [
+          { uri: SIBLING, range },
+          { targetUri: LIBRARY, targetRange: range, targetSelectionRange: range },
+        ],
+        readFile,
+      )
+
+      expect(readFile.mock.calls.map(([file]) => file)).toEqual([
+        { path: 'parts/helper.scad' },
+        { library: 'BOSL2', path: 'shapes3d.scad' },
+      ])
+      expect(found.map((location) => location.uri.toString())).toEqual([SIBLING, LIBRARY])
+      expect(found[1]?.range).toEqual({ startLineNumber: 3, startColumn: 8, endLineNumber: 3, endColumn: 14 })
+      expect(models.get(SIBLING)?.text).toBe('// model:parts/helper.scad\n')
+      expect(models.get(LIBRARY)).toMatchObject({ text: '// BOSL2:shapes3d.scad\n', language: 'openscad' })
+    })
+
+    it('fetch a file once per session', async () => {
+      const readFile = vi.fn(() => Promise.resolve('module cuboid() {}\n'))
+      const { socket, model } = await started(fakeModel(), CAPABILITIES, readFile)
+      for (let turn = 0; turn < 2; turn++) {
+        const pending = call('definition', 'provideDefinition', model, { lineNumber: 1, column: 1 }) as Promise<
+          unknown[]
+        >
+        socket.receive({ id: socket.lastRequest('textDocument/definition').id, result: { uri: LIBRARY, range } })
+        expect(await pending).toHaveLength(1)
+      }
+      expect(readFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('drop a location outside the model and its libraries, and one that cannot be read', async () => {
+      const readFile = vi.fn(() => Promise.reject(new Error('404')))
+      const { found } = await definitions(
+        [
+          { uri: ELSEWHERE, range },
+          { uri: SIBLING, range },
+        ],
+        readFile,
+      )
+      expect(found).toEqual([])
+      expect(readFile).toHaveBeenCalledTimes(1)
+      expect(models.size).toBe(0)
+    })
+
+    it('dispose the files it opened with the session', async () => {
+      const { client } = await definitions([{ uri: LIBRARY, range }], () => Promise.resolve('x'))
+      const opened = models.get(LIBRARY)
+      client.dispose()
+      await vi.waitFor(() => expect(opened?.isDisposed()).toBe(true))
+    })
   })
 
   it('answers what the server asks of it, so the server is never left waiting', async () => {

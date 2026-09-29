@@ -161,3 +161,50 @@ export function socketUrl(path: string, page: string = window.location.href): st
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }
+
+/**
+ * Where the backend's bridge shows the model's pinned libraries (`LIBRARY_CLIENT_ROOT`
+ * in backend/scadbuddy/library/lsp.py): `file:///libraries/<name>/<path>`.
+ */
+export const LIBRARY_ROOT = 'file:///libraries/'
+
+/**
+ * A file a definition can land in outside the open one (#185): beside the model
+ * (`library` absent) or in one of its pinned libraries. `path` is decoded and
+ * relative, `/`-separated, as the backend's file routes take it.
+ */
+export interface DefinitionFile {
+  library?: string
+  path: string
+}
+
+function decodedPath(rest: string): string | null {
+  try {
+    const segments = rest.split('/').map(decodeURIComponent)
+    return segments.every((segment) => segment !== '') ? segments.join('/') : null
+  } catch {
+    return null
+  }
+}
+
+/** The file `uri` names under the model's `root` or a library, or null for anywhere else. */
+export function definitionFile(uri: string, root: string): DefinitionFile | null {
+  if (uri.startsWith(root)) {
+    const path = decodedPath(uri.slice(root.length))
+    return path === null ? null : { path }
+  }
+  if (uri.startsWith(LIBRARY_ROOT)) {
+    const rest = uri.slice(LIBRARY_ROOT.length)
+    const slash = rest.indexOf('/')
+    if (slash <= 0) return null
+    const library = decodedPath(rest.slice(0, slash))
+    const path = decodedPath(rest.slice(slash + 1))
+    return library === null || path === null ? null : { library, path }
+  }
+  return null
+}
+
+/** How the editor names a definition's file: `helper.scad`, `BOSL2/shapes3d.scad`. */
+export function definitionLabel(file: DefinitionFile): string {
+  return file.library ? `${file.library}/${file.path}` : file.path
+}

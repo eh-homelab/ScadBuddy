@@ -63,6 +63,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { DefinitionFile } from '../lib/lsp'
 
 export const API_BASE = '/api/v1'
 
@@ -538,6 +539,18 @@ export const api = {
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
     slug ? `${API_BASE}/models/${seg(slug)}/lsp` : `${API_BASE}/lsp`,
+
+  /**
+   * #185 — the text of a file a go-to-definition lands in: beside the model, or in a
+   * library it pins (`GET /models/{slug}/files/{path}`, `…/libraries/{name}/files/{path}`).
+   */
+  getDefinitionFile: (slug: string, file: DefinitionFile) => {
+    const path = file.path.split('/').map(seg).join('/')
+    const base = `/models/${seg(slug)}`
+    return requestText(
+      file.library ? `${base}/libraries/${seg(file.library)}/files/${path}` : `${base}/files/${path}`,
+    )
+  },
 
   /** A `version` reads that revision's schema instead of the model's current one. */
   getSchema: (slug: string, version?: string) =>

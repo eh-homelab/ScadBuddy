@@ -1,6 +1,8 @@
 import { CompletionItemKind } from 'monaco-editor/editor/common/standalone/standaloneEnums.js'
 import { describe, expect, it } from 'vitest'
 import {
+  definitionFile,
+  definitionLabel,
   directoryOf,
   socketUrl,
   toCompletion,
@@ -168,5 +170,39 @@ describe('socketUrl', () => {
     expect(socketUrl('/api/v1/models/a/lsp', 'https://scadbuddy.example/m/a/source')).toBe(
       'wss://scadbuddy.example/api/v1/models/a/lsp',
     )
+  })
+})
+
+describe('definitionFile', () => {
+  const ROOT = 'file:///models/name-keychain/'
+
+  it('names a file beside the model by its path under the model directory', () => {
+    expect(definitionFile(`${ROOT}parts/helper.scad`, ROOT)).toEqual({ path: 'parts/helper.scad' })
+    expect(definitionFile(`${ROOT}my%20part.scad`, ROOT)).toEqual({ path: 'my part.scad' })
+  })
+
+  it('names a library file by the library and its path in it', () => {
+    expect(definitionFile('file:///libraries/BOSL2/shapes3d.scad', ROOT)).toEqual({
+      library: 'BOSL2',
+      path: 'shapes3d.scad',
+    })
+    expect(definitionFile('file:///libraries/NopSCADlib/vitamins/screw.scad', ROOT)).toEqual({
+      library: 'NopSCADlib',
+      path: 'vitamins/screw.scad',
+    })
+  })
+
+  it('is null anywhere else, and for a URI with no file in it', () => {
+    expect(definitionFile('file:///usr/share/openscad/libraries/MCAD/units.scad', ROOT)).toBeNull()
+    expect(definitionFile('file:///models/other/helper.scad', ROOT)).toBeNull()
+    expect(definitionFile('file:///libraries/BOSL2', ROOT)).toBeNull()
+    expect(definitionFile('file:///libraries//std.scad', ROOT)).toBeNull()
+    expect(definitionFile(`${ROOT}parts//helper.scad`, ROOT)).toBeNull()
+    expect(definitionFile(`${ROOT}bad%E0.scad`, ROOT)).toBeNull()
+  })
+
+  it('labels a file the way the editor names it', () => {
+    expect(definitionLabel({ path: 'helper.scad' })).toBe('helper.scad')
+    expect(definitionLabel({ library: 'BOSL2', path: 'shapes3d.scad' })).toBe('BOSL2/shapes3d.scad')
   })
 })
