@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -88,7 +89,11 @@ class PipelineActivities:
             raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
         except (OSError, ValueError) as error:
             raise _refuse(f"model.json could not be read: {error}") from None
-        meta = ModelMeta.model_validate(raw)
+        try:
+            meta = ModelMeta.model_validate(raw)
+        except ValidationError as error:
+            # The template's own data: a retry reads the same file.
+            raise _refuse(f"model.json is not a template's: {error}") from None
         ui_api = meta.ui.api if meta.ui is not None else None
         plate = plate_size(None)
         if meta.pipeline_error is not None:
@@ -109,14 +114,27 @@ class PipelineActivities:
                 f"{meta.pipeline.module} declares pipeline api {meta.pipeline.api}; "
                 f"this ScadBuddy supports majors {majors}"
             )
-        path = directory / meta.pipeline.module
+        module = meta.pipeline.module
+        try:
+            # Resolved, as api/template_ui.py resolves ui/ files: a symlink out of the
+            # template would put another file's contents into the workflow history.
+            base = directory.resolve()
+            path = (directory / module).resolve()
+        except (OSError, RuntimeError) as error:  # a symlink loop is a RuntimeError
+            raise _refuse(f"{module} could not be read: {error}") from None
+        if not path.is_relative_to(base):
+            raise _refuse(f"{module} points outside the template")
         try:
             source = await asyncio.to_thread(path.read_text, "utf-8")
         except FileNotFoundError:
-            raise _refuse(f"{meta.pipeline.module} is missing from the template") from None
+            raise _refuse(f"{module} is missing from the template") from None
+        except (OSError, UnicodeDecodeError) as error:
+            # A directory with the module's name, or a file that is not UTF-8: the
+            # template's fault, which a retry would only repeat.
+            raise _refuse(f"{module} could not be read: {error}") from None
         return LoadedPipeline(
             source=source,
-            file=meta.pipeline.module,
+            file=module,
             api=meta.pipeline.api,
             version=pipeline_version_of(source),
             inputs_version=inputs_version_of(source),

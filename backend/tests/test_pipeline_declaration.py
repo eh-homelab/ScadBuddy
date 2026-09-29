@@ -17,6 +17,7 @@ from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.pipelines import (
     DEFAULT_PIPELINE_FILE,
     DEFAULT_PIPELINE_SOURCE,
+    INPUTS_VERSION_PARSE_LIMIT,
     inputs_version_of,
     pipeline_version_of,
 )
@@ -58,6 +59,25 @@ def test_inputs_version_is_read_without_running_the_source() -> None:
     assert inputs_version_of("import os\nos.system('false')\n") == 0
     assert inputs_version_of("INPUTS_VERSION = 'two'\n") == 0
     assert inputs_version_of("def (:\n") == 0
+    # Measured on 3.12: ast.parse's own failures on deeply nested source, under the cap.
+    assert inputs_version_of("-" * 200_000 + "1") == 0  # MemoryError: parser stack overflowed
+    assert inputs_version_of("x" + ".y" * 100_000) == 0  # RecursionError during ast construction
+    assert inputs_version_of("x = 1\0\n") == 0  # a NUL byte
+
+
+def test_a_pipeline_past_the_cap_is_not_parsed() -> None:
+    padding = "#" * INPUTS_VERSION_PARSE_LIMIT
+    assert inputs_version_of("INPUTS_VERSION = 4\n" + padding) == 0
+    assert inputs_version_of("INPUTS_VERSION = 4\n" + padding[:-100]) == 4
+
+
+def test_inputs_version_is_what_the_module_ends_up_with() -> None:
+    assert inputs_version_of("INPUTS_VERSION: int = 3\n") == 3
+    assert inputs_version_of("INPUTS_VERSION = 1\nINPUTS_VERSION = 2\n") == 2
+    assert inputs_version_of("INPUTS_VERSION = 5\nINPUTS_VERSION: int = 6\n") == 6
+    assert inputs_version_of("INPUTS_VERSION: int\n") == 0  # annotated, never assigned
+    # A last assignment that is not a literal int is what the module holds: not a version.
+    assert inputs_version_of("INPUTS_VERSION = 2\nINPUTS_VERSION = 1 + 1\n") == 0
 
 
 def test_a_malformed_pipeline_costs_only_the_pipeline() -> None:
@@ -152,3 +172,60 @@ async def test_an_unusable_pipeline_fails_the_job_at_load(
     assert raised.value.type == "PipelineApiError"
     assert raised.value.non_retryable
     assert message in raised.value.message
+
+
+async def _refused(paths: DataPaths) -> ApplicationError:
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(
+            _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
+        )
+    assert raised.value.type == "PipelineApiError"
+    assert raised.value.non_retryable
+    return raised.value
+
+
+DECLARED: dict[str, object] = {"pipeline": {"module": "pipeline/pipeline.py", "api": 1}}
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [("[]", "model.json"), ('{"description": "no name"}', "model.json")],
+)
+async def test_a_model_json_that_is_no_template_is_refused(
+    tmp_path: Path, raw: str, message: str
+) -> None:
+    paths = _template(tmp_path, {}, {})
+    paths.model_meta("demo").write_text(raw, encoding="utf-8")
+    assert message in (await _refused(paths)).message
+
+
+async def test_a_pipeline_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
+    paths = _template(tmp_path, DECLARED, {"pipeline/pipeline.py": ""})
+    (paths.model_dir("demo") / "pipeline" / "pipeline.py").write_bytes(b"x = '\xff'\n")
+    assert "pipeline/pipeline.py could not be read" in (await _refused(paths)).message
+
+
+async def test_a_directory_where_the_pipeline_should_be_is_refused(tmp_path: Path) -> None:
+    paths = _template(tmp_path, DECLARED, {})
+    (paths.model_dir("demo") / "pipeline" / "pipeline.py").mkdir(parents=True)
+    assert "pipeline/pipeline.py could not be read" in (await _refused(paths)).message
+
+
+async def test_a_pipeline_symlinked_out_of_the_template_is_refused(tmp_path: Path) -> None:
+    outside = tmp_path / "secret.py"
+    outside.write_text("TOKEN = 'do not record me'\n", encoding="utf-8")
+    paths = _template(tmp_path, DECLARED, {})
+    (paths.model_dir("demo") / "pipeline").mkdir()
+    (paths.model_dir("demo") / "pipeline" / "pipeline.py").symlink_to(outside)
+    error = await _refused(paths)
+    assert "outside the template" in error.message
+    assert "do not record me" not in error.message
+
+
+async def test_a_pipeline_symlinked_within_the_template_loads(tmp_path: Path) -> None:
+    paths = _template(tmp_path, DECLARED, {"pipeline/real.py": PIPELINE})
+    (paths.model_dir("demo") / "pipeline" / "pipeline.py").symlink_to("real.py")
+    loaded = await ActivityEnvironment().run(
+        _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
+    )
+    assert loaded.source == PIPELINE and loaded.file == "pipeline/pipeline.py"

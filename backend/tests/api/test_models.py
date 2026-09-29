@@ -966,3 +966,49 @@ def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "too large" in response.json()["detail"]
+
+
+def _declare_pipeline(paths: DataPaths, slug: str, declaration: object, source: str | None) -> None:
+    meta = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    paths.model_meta(slug).write_text(
+        json.dumps({**meta, "pipeline": declaration}), encoding="utf-8"
+    )
+    if source is not None:
+        (paths.model_dir(slug) / "pipeline").mkdir(exist_ok=True)
+        (paths.model_dir(slug) / "pipeline" / "p.py").write_text(source, encoding="utf-8")
+
+
+def test_a_template_shows_its_pipelines_inputs_version(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "INPUTS_VERSION = 2\n")
+    body = client.get(f"/api/v1/models/{model}").json()
+    assert body["inputs_version"] == 2
+    assert body["pipeline"] == {"module": "pipeline/p.py", "api": 1}
+    assert body["pipeline_error"] is None
+
+
+def test_a_malformed_pipeline_declaration_shows_its_error(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _declare_pipeline(paths, model, {"module": "../p.py", "api": 1}, None)
+    detail = client.get(f"/api/v1/models/{model}").json()
+    assert detail["pipeline"] is None and "module" in detail["pipeline_error"]
+    [listed] = [row for row in client.get("/api/v1/models").json() if row["slug"] == model]
+    assert listed["pipeline_error"] == detail["pipeline_error"]
+
+
+def test_a_pipeline_the_parser_chokes_on_never_breaks_the_listing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """ast.parse raises MemoryError on this (measured); the API only parses template code."""
+    other = paths.model_dir("other")
+    other.mkdir(parents=True)
+    paths.model_source("other").write_text("cube();\n", encoding="utf-8")
+    paths.model_meta("other").write_text(json.dumps({"name": "Other"}), encoding="utf-8")
+    _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "-" * 200_000 + "1")
+    listing = client.get("/api/v1/models")
+    assert listing.status_code == 200
+    assert {row["slug"] for row in listing.json()} >= {model, "other"}
+    detail = client.get(f"/api/v1/models/{model}")
+    assert detail.status_code == 200 and detail.json()["inputs_version"] == 0
