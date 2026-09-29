@@ -95,11 +95,18 @@ export type ApprovalRequest = {
   signal: AbortSignal
 }
 
+/** Which approval a verdict came from, for the audit log (#258); absent when none was recorded. */
+export type VerdictSource = {
+  approvalId?: string
+  /** The approval's decision; `undefined` when it was never decided (the turn stopped). */
+  decision?: 'approved' | 'denied' | 'expired' | 'cancelled' | undefined
+}
+
 export type ApprovalVerdict =
   /** Run the tool with exactly this input: the one that was approved. */
-  | { approved: true; input: Record<string, unknown> }
+  | ({ approved: true; input: Record<string, unknown> } & VerdictSource)
   /** Refused; `message` is what the model reads as the tool's error result. */
-  | { approved: false; message: string }
+  | ({ approved: false; message: string } & VerdictSource)
 
 /**
  * Parks an outward call until it is decided. It may take as long as it needs

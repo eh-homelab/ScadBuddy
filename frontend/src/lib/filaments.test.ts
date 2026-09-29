@@ -6,8 +6,12 @@ import {
   facets,
   filterSpools,
   loadedLabel,
+  fitPlan,
+  fittingSides,
+  nozzleMismatch,
   seedPlan,
   slotNeed,
+  spareNozzles,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -213,6 +217,7 @@ describe('checkPlan', () => {
   function options(rest: Partial<FilamentOptions> = {}): FilamentOptions {
     return {
       library_file_id: 1,
+      track_switch: false,
       printer_id: 1,
       printer_name: 'Printer A',
       slots: [{ slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 100 }],
@@ -264,6 +269,7 @@ describe('checkPlan', () => {
 describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
+    track_switch: false,
     slots: [slot({ slot_id: 1 }), slot({ slot_id: 2, colour: '#FF1493' })],
     spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
     suggested: [
@@ -286,5 +292,95 @@ describe('seedPlan', () => {
 
   it('ignores a remembered slot this plate does not have', () => {
     expect(seedPlan(options, [{ slot_id: 3, spool_id: 3 }])).toEqual(options.suggested)
+  })
+})
+
+describe('extruders (#469)', () => {
+  // printers/1/status: nozzles[0] is the right extruder, nozzles[1] the left.
+  const nozzles = [
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+    { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
+  ]
+  const wired = { nozzles, track_switch: false }
+  const switched = { nozzles, track_switch: true }
+
+  it('names the side and the nozzle fitted there when it is not the chosen size', () => {
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), wired, '0.2')).toBe('L · 0.4 fitted')
+    expect(nozzleMismatch(spool({ extruder: 0, side: 'R' }), wired, '0.4')).toBe('R · 0.2 fitted')
+  })
+
+  it('says nothing when the side fits, is unknown, or the nozzle is unreported', () => {
+    expect(nozzleMismatch(spool({ extruder: 0, side: 'R' }), wired, '0.2')).toBeNull()
+    expect(nozzleMismatch(spool({ extruder: null, side: null }), wired, '0.2')).toBeNull()
+    expect(
+      nozzleMismatch(spool({ extruder: 1, side: 'L' }), { nozzles: nozzles.slice(0, 1) }, '0.2'),
+    ).toBeNull()
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), wired, undefined)).toBeNull()
+  })
+
+  it('never rules a spool out with the track switch, which feeds either nozzle', () => {
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), switched, '0.2')).toBeNull()
+  })
+
+  it('lists the sides fitted with the chosen size', () => {
+    expect(fittingSides(wired, '0.2')).toEqual([0])
+    expect(fittingSides(wired, '0.4')).toEqual([1])
+    expect(fittingSides(wired, '0.6')).toEqual([])
+    expect(fittingSides({ nozzles: [nozzles[0]!, nozzles[0]!] }, '0.2')).toEqual([0, 1])
+  })
+
+  // #469 local review — a spare of the size in the H2C's rack: the printer swaps it onto
+  // a side whose nozzle differs, one spare per side.
+  const spare02 = { nozzle_type: 'HS00', nozzle_diameter: '0.2' }
+
+  it('counts a spare in the rack as fitting one more side', () => {
+    expect(fittingSides({ ...wired, rack: [spare02] }, '0.2')).toEqual([0, 1])
+    const both04 = { nozzles: [nozzles[1]!, nozzles[1]!], rack: [spare02] }
+    expect(fittingSides(both04, '0.2')).toEqual([0])
+    expect(fittingSides({ ...both04, rack: [spare02, spare02] }, '0.2')).toEqual([0, 1])
+    // A spare fits no side the printer does not report, and none of another size.
+    expect(fittingSides({ nozzles: nozzles.slice(1), rack: [spare02] }, '0.2')).toEqual([0])
+    expect(fittingSides({ ...both04, rack: [spare02] }, '0.6')).toEqual([])
+    expect(spareNozzles(wired, '0.2')).toBe(0)
+  })
+
+  it('rules no spool out when a spare could go on its side', () => {
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), { ...wired, rack: [spare02] }, '0.2')).toBeNull()
+  })
+
+  describe('fitPlan', () => {
+    const options: FilamentOptions = {
+      library_file_id: 1,
+      printer_id: 1,
+      nozzles,
+      track_switch: false,
+      slots: [{ slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: null }],
+      spools: [
+        spool({ spool_id: 1, colour: '#0047BB', extruder: 0, side: 'R' }),
+        spool({ spool_id: 2, colour: '#0A4FC0', extruder: 1, side: 'L' }),
+        spool({ spool_id: 3, colour: '#FF1493', extruder: 1, side: 'L' }),
+        spool({ spool_id: 4, colour: '#0047BB', material: 'PETG', extruder: 1, side: 'L' }),
+      ],
+      suggested: [],
+      warnings: [],
+    }
+
+    it('swaps a spool the size rules out for the closest one that prints', () => {
+      // At 0.4 only the left prints: spool 2 is the near blue there, 3 is pink and 4 PETG.
+      expect(fitPlan(options, [{ slot_id: 1, spool_id: 1 }], '0.4')).toEqual([
+        { slot_id: 1, spool_id: 2 },
+      ])
+    })
+
+    it('leaves a slot empty rather than keep a spool that will be refused', () => {
+      const lone = { ...options, spools: [options.spools![0]!, options.spools![2]!] }
+      expect(fitPlan(lone, [{ slot_id: 1, spool_id: 1 }], '0.4')).toEqual([])
+    })
+
+    it('keeps the same plan when nothing is ruled out, or with the track switch', () => {
+      const plan = [{ slot_id: 1, spool_id: 1 }]
+      expect(fitPlan(options, plan, '0.2')).toBe(plan)
+      expect(fitPlan({ ...options, track_switch: true }, plan, '0.4')).toBe(plan)
+    })
   })
 })

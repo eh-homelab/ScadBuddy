@@ -15,7 +15,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print import pipelines_route, presets_routes
+from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 
@@ -87,7 +87,6 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
 ) -> None:
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes()
     nozzle_routes()
@@ -113,7 +112,6 @@ def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model
     """The inventory does not need a printer; only the reconciled weights do."""
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes(printer_id=None)
 
@@ -142,7 +140,6 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     """
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     local = respx.get(f"{API}/local-presets/")
     pipeline = respx.get(f"{API}/slicer-pipelines/1")
     inventory_routes()
@@ -150,9 +147,31 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
     assert [nozzle["nozzle_diameter"] for nozzle in body["nozzles"]] == ["0.2", "0.4"]
+    # The rack's spares (ids 17-21), not the mounted pair (rack ids 0 and 1).
+    assert [nozzle["nozzle_diameter"] for nozzle in body["rack"]] == ["0.4"] * 5
     assert "pipeline_nozzle_diameter" not in body
     assert not local.called
     assert not pipeline.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, model: str) -> None:
+    """#469 — the recorded H2C has the Filament Track Switch: AMS 0/1 on inlet B (the
+    right extruder), AMS 2 on inlet A (the left). A shelf spool has no side."""
+    output_id = prepared(client, model)
+    upload_route()
+    inventory_routes()
+    nozzle_routes()
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    sides = {spool["spool_id"]: (spool["extruder"], spool["side"]) for spool in body["spools"]}
+    assert sides[9] == (0, "R")  # AMS 0 tray 1
+    assert sides[7] == (0, "R")  # AMS 1 tray 0
+    assert sides[10] == (1, "L")  # AMS 2 tray 0
+    assert sides[5] == (None, None)  # on the shelf
+    # With the switch any AMS reaches either nozzle, so those sides are where each rests.
+    assert body["track_switch"] is True
 
 
 def test_the_filament_step_takes_no_nozzle_diameter(client: TestClient) -> None:
@@ -171,7 +190,6 @@ def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     """No printer, no mounted nozzles to compare against — not an error."""
     output_id = prepared(client, model)
     upload_route()
-    pipelines_route()
     presets_routes()
     inventory_routes(printer_id=None)
     status = nozzle_routes()

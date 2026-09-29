@@ -330,9 +330,9 @@ def _cover_metadata(plate_index: int) -> str:
 #: names that could be mistaken for real ones — it owns no slicer settings.
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
-#: measured to slice identically on a two-extruder H2C. The send path replaces it
-#: with the target pipeline's real nozzle when it can name one (#126): slicing never
-#: reads it, but a person deciding whether to start a print does.
+#: measured to slice identically on a two-extruder H2C. The print run replaces it
+#: with the nozzle it chose (#126): slicing never reads it, but a person deciding
+#: whether to start a print does.
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
 
 
@@ -489,6 +489,23 @@ def plates_of(path: Path) -> list[PlateEntry]:
         cover = plate.metadata.get("thumbnail_file")
         plates.append(PlateEntry(plate.index, cover if cover in names else None))
     return sorted(plates, key=lambda plate: plate.index)
+
+
+def plate_filaments(path: Path) -> dict[int, set[int]]:
+    """The filaments (1-based extruder numbers) each plate's parts are assigned in
+    ``model_settings.config``, by plate index (#469). A plate whose object names no
+    part extruder is left out: the caller can't tell what it uses."""
+    with zipfile.ZipFile(path) as archive:
+        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    used: dict[str, set[int]] = {}
+    for obj in config.iter("object"):
+        numbers = {_metadata(part).get("extruder", "") for part in obj.findall("part")}
+        used[obj.get("id", "")] = {int(number) for number in numbers if number.isdigit()}
+    return {
+        plate.index: used[plate.object_id]
+        for plate in plate_settings(config)
+        if plate.object_id is not None and used.get(plate.object_id)
+    }
 
 
 def write_bambu_3mf(

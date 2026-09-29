@@ -66,7 +66,9 @@ describe('/mcp: tools over Streamable HTTP', () => {
     const result = await client.callTool({ name: 'get_model', arguments: { slug: 'nope' } })
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('HTTP 404')
-    expect(firstText(result)).toContain('no model "nope"')
+    // The backend's detail reaches the model inside the untrusted-data envelope (#258).
+    expect(firstText(result)).toContain('"untrusted_data"')
+    expect(firstText(result)).toContain('"content": "no model \\"nope\\""')
   })
 
   it('streams progress notifications for a render before the call completes', async () => {

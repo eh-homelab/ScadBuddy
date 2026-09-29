@@ -43,14 +43,14 @@ export function parseQuery(params: URLSearchParams): CatalogueQuery {
   }
 }
 
-/** The query as URL parameters, leaving out every default. */
+/** The query as URL parameters, leaving out every default but `view`, which is always named (#278). */
 export function toParams(query: CatalogueQuery): URLSearchParams {
   const params = new URLSearchParams()
   if (query.q.trim()) params.set('q', query.q)
   for (const tag of query.tags) params.append('tag', tag)
   if (query.origin !== DEFAULT_QUERY.origin) params.set('origin', query.origin)
   if (query.sort !== DEFAULT_QUERY.sort) params.set('sort', query.sort)
-  if (query.view !== DEFAULT_QUERY.view) params.set('view', query.view)
+  params.set('view', query.view)
   return params
 }
 
