@@ -16,7 +16,9 @@ CREATE TABLE ai_browser_pairings (
   principal_label text NOT NULL,
   code_hash       text NOT NULL,
   status          text NOT NULL CHECK (status IN ('pending', 'paired', 'denied', 'ended')),
-  -- The tab (frontend src/agent/link.ts TAB_ID) a paired row drives.
+  -- The tab (frontend src/agent/link.ts TAB_ID) a paired row drives. The CHECK
+  -- reads: `paired` has a tab; `pending` and `denied` have none; `ended` may
+  -- have one or not (a pairing ends whether or not it was ever accepted).
   tab_id          text CHECK ((status = 'paired') = (tab_id IS NOT NULL) OR status = 'ended'),
   attempts        integer NOT NULL DEFAULT 0,
   created_at      timestamptz NOT NULL DEFAULT now(),

@@ -320,8 +320,10 @@ export class ChatConnection {
             this.follow(session.id, 0)
             return
           }
+          // Ownership first, every time (get() refuses another owner's session):
+          // pairing this tab must never outrun the check that send() repeats.
+          await this.sessions.get(message.sessionId, this.principal)
           if (!this.follows.has(message.sessionId)) {
-            await this.sessions.get(message.sessionId, this.principal)
             this.follow(message.sessionId, await this.sessions.events.lastSeq(message.sessionId))
           }
           // Before the turn starts, so its first browser_* call already finds this tab.
