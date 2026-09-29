@@ -1,5 +1,6 @@
 import { fireEvent, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Job, Output } from '../api/types'
 import { renderPage } from '../test/utils'
 import { ActionBar } from './ActionBar'
@@ -87,6 +88,8 @@ describe("Generate's menu", () => {
 // #709 — the status area reserves a 16rem basis only while it shows something, so the
 // buttons wrap below a status instead of truncating it, and never wrap for an empty one.
 describe('the status area', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   it('reserves no basis while it is empty', () => {
     setup(false, { ...job, colors: [] })
     expect(screen.getByTestId('action-status')).toHaveClass('flex-1')
@@ -101,6 +104,16 @@ describe('the status area', () => {
   it('reserves the basis while it shows the saved output', () => {
     setup(false, { ...job, colors: [] }, { id: 'b'.repeat(32), name: 'Keychain' } as Output)
     expect(screen.getByText('Saved Keychain')).toBeInTheDocument()
+    expect(screen.getByTestId('action-status')).toHaveClass('flex-[1_1_16rem]')
+  })
+
+  it('reserves the basis while it shows only an error', async () => {
+    vi.spyOn(api, 'createOutput').mockRejectedValue(new Error('down'))
+    const { user } = setup(false, { ...job, colors: [] })
+    expect(screen.getByTestId('action-status')).toHaveClass('flex-1')
+
+    await user.click(screen.getByTestId('generate'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save this output.')
     expect(screen.getByTestId('action-status')).toHaveClass('flex-[1_1_16rem]')
   })
 })
