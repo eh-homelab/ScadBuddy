@@ -310,9 +310,7 @@ def _build_core(settings: Settings) -> AppState:
             prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
-        print_runs=PrintRuns(
-            PrintRunStore(store.pool if isinstance(store, PostgresJobStore) else None), events
-        ),
+        print_runs=PrintRuns(PrintRunStore(pool), events),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
