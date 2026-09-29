@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import SettingsStoreDep
@@ -67,7 +67,7 @@ async def get_library_plates(file_id: FileIdPath, store: SettingsStoreDep) -> li
 )
 async def get_library_thumbnail(
     file_id: FileIdPath, request: Request, store: SettingsStoreDep
-) -> StreamingResponse:
+) -> Response:
     return await _proxy(
         store, request, f"/library/files/{file_id}/thumbnail", what="show the file's thumbnail"
     )
@@ -84,7 +84,7 @@ async def get_library_plate_thumbnail(
     index: Annotated[int, Path(ge=1)],
     request: Request,
     store: SettingsStoreDep,
-) -> StreamingResponse:
+) -> Response:
     return await _proxy(
         store,
         request,

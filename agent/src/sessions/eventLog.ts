@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import type { ServerEvent } from './protocol.js'
 
 // Each session's panel-protocol events, in order, in `ai_session_events`
@@ -43,11 +43,16 @@ export class EventLog {
     this.emitter.setMaxListeners(0)
   }
 
-  /** Appends events to a session's log; returns their seqs. The session row must exist. */
-  async append(sessionId: string, events: readonly ServerEvent[]): Promise<number[]> {
+  /**
+   * Appends events to a session's log; returns their seqs. The session row must exist.
+   * With `tx`, the events are written in that transaction, so they commit with the
+   * change they report; the caller then calls `wake` once it has committed.
+   */
+  async append(sessionId: string, events: readonly ServerEvent[], tx?: TransactionSql): Promise<number[]> {
     if (events.length === 0) return []
     const texts = events.map((e) => JSON.stringify(e))
-    const rows = await this.sql<{ seq: string }[]>`
+    const db = tx ?? this.sql
+    const rows = await db<{ seq: string }[]>`
       WITH s AS (
         UPDATE ai_sessions SET event_seq = event_seq + ${texts.length}, updated_at = now()
         WHERE id = ${sessionId}
@@ -58,7 +63,7 @@ export class EventLog {
       FROM s, unnest(${this.sql.array(texts)}::text[]) WITH ORDINALITY AS e(event, ord)
       RETURNING seq`
     if (rows.length !== texts.length) throw new Error(`session ${sessionId} does not exist`)
-    this.wake(sessionId)
+    if (!tx) this.wake(sessionId)
     return rows.map((r) => Number(r.seq)).sort((a, b) => a - b)
   }
 
@@ -69,6 +74,16 @@ export class EventLog {
       WHERE session_id = ${sessionId} AND seq > ${afterSeq}
       ORDER BY seq LIMIT ${limit}`
     return rows.map((r) => ({ seq: Number(r.seq), event: JSON.parse(r.event) as ServerEvent }))
+  }
+
+  /**
+   * The last seq handed out for a session (0 when it has none), to follow it
+   * from "now". `sessionId` must be a session's id (a UUID).
+   */
+  async lastSeq(sessionId: string): Promise<number> {
+    const [row] = await this.sql<{ event_seq: string }[]>`
+      SELECT event_seq FROM ai_sessions WHERE id = ${sessionId}`
+    return row ? Number(row.event_seq) : 0
   }
 
   /**

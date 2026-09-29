@@ -35,6 +35,8 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
+    DEFAULT_TEMPORAL_NAMESPACE,
+    DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     Config,
 )
 
@@ -99,6 +101,14 @@ class Settings(BaseSettings):
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
+    # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
+    # besides the public URL's — the LAN hostname when the public URL is an SSO
+    # proxy, say. A browser's `Origin` on the realtime socket must be one of them
+    # (`api/realtime.py`, #266); with only the public URL, whichever other hostname
+    # the same deployment answers on shows "Live updates unavailable". Not a stored
+    # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
+    # pages may reach the server, so it belongs to the deployment.
+    allowed_origins: str = ""
     # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
@@ -127,6 +137,29 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
         return value
 
+    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Empty (for now)
+    # keeps renders on the legacy queue; set, they run on Temporal. The final phase-1
+    # PR makes it required and removes the legacy queue.
+    temporal_address: str = ""
+    temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
+    temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API
+    # process (one replica, dev and tests). Production runs `python -m
+    # scadbuddy.worker` as its own Deployment and leaves this off.
+    temporal_worker_inprocess: bool = False
+
+    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @classmethod
+    def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
+        # As `database_url`: a value that is only whitespace would read as "set" (the
+        # Temporal path) with a garbage address. Only the address may be empty.
+        name = f"SCADBUDDY_{(info.field_name or '').upper()}"
+        if value != value.strip():
+            raise ValueError(f"{name} must not start or end with whitespace: {value!r}")
+        if not value and info.field_name != "temporal_address":
+            raise ValueError(f"{name} must not be empty")
+        return value
+
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.
@@ -150,6 +183,11 @@ class Settings(BaseSettings):
     # pinned is the one serving — see docs in README.md, "Deploying".
     revision: str = "unknown"
     version: str = "dev"
+
+    @property
+    def allowed_origin_list(self) -> list[str]:
+        """`SCADBUDDY_ALLOWED_ORIGINS` split on commas, blanks dropped."""
+        return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
 
     def to_config(self) -> Config:
         return Config(
@@ -179,6 +217,9 @@ class Settings(BaseSettings):
             asset_sweep_grace=self.asset_sweep_grace,
             asset_sweep_interval=self.asset_sweep_interval,
             duplicate_staging_max_age=self.duplicate_staging_max_age,
+            temporal_address=self.temporal_address,
+            temporal_namespace=self.temporal_namespace,
+            temporal_task_queue_render=self.temporal_task_queue_render,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:

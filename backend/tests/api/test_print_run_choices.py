@@ -694,6 +694,26 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
+def test_the_all_plates_filament_read_reads_the_spools_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Two plates, one spool inventory: the spools are the same for every plate, so an
+    all-plates read asks for them once (#480)."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+    before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    response = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    )
+    assert response.status_code == 200, response.text
+    assert [slot["slot_id"] for slot in response.json()["slots"]] == [1, 2]
+    reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
+    assert reads - before == 1
+
+
+@respx.mock
 def test_all_plates_with_no_spool_for_a_later_plates_slot_is_a_422_naming_it(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -742,6 +762,35 @@ def test_all_plates_with_every_slot_chosen_slices_each_plate(
     assert [slice_body["plate"] for slice_body in bodies] == [1, 2]
 
 
+@respx.mock
+def test_an_all_plates_run_reads_the_assignments_and_printer_once(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The run's filament read shares what every plate has in common, as the dialog's
+    does: only each plate's slots are read per plate (#480)."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    slice_routes()
+    queue_route()
+
+    def reads(suffix: str) -> int:
+        return sum(1 for call in respx.calls if call.request.url.path.endswith(suffix))
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
+    )
+
+    assert response.status_code == 200, response.text
+    assert reads("/inventory/assignments") == 1
+    assert reads("/printers/1/inventory-remain") == 1
+    assert reads("/filament-requirements") == 2
+
+
 # --- final review 2: the run refuses a printer it cannot resolve presets for ----------
 
 
@@ -758,6 +807,32 @@ def test_a_printer_bambuddy_does_not_know_is_a_422_before_anything_is_uploaded(
 
     assert response.status_code == 422, response.text
     assert "printer 7" in response.json()["detail"]
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_deactivated_printer_is_a_422_before_anything_is_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """#479: Bambuddy still lists a deactivated printer, and the dialog never offers
+    one, so a run naming it is refused before the upload rather than failing after."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 1, "name": "Workshop", "model": "H2C", "is_active": False}]
+        )
+    )
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Workshop is deactivated in Bambuddy. Activate it there, or pick another printer."
+    )
     assert not upload.called
     assert not sliced.called
 
@@ -843,6 +918,14 @@ WIRED = {
     "ams_switch_inlet": {},
     "fila_switch": {"installed": False},
 }
+#: Printer 1 as a single-nozzle printer (X1C, P1S, A1): no left nozzle, no switch, and
+#: every AMS wired to the one (right) extruder.
+NO_LEFT = {
+    "nozzles": [{"nozzle_type": "HS00", "nozzle_diameter": "0.4"}],
+    "ams_extruder_map": {"0": 0, "1": 0, "2": 0, "128": 0},
+    "ams_switch_inlet": {},
+    "fila_switch": {"installed": False},
+}
 
 
 @respx.mock
@@ -911,6 +994,32 @@ def test_a_size_neither_nozzle_has_is_a_422_before_anything_is_uploaded(
     assert response.json()["detail"] == (
         "Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm. Choose 0.2 or "
         "0.4, or fit a 0.6 mm nozzle."
+    )
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_single_nozzle_printers_known_wrong_size_is_a_422_before_upload(
+    client: TestClient, model: str
+) -> None:
+    """Review of #538: a single-nozzle printer's one mounted nozzle is known and the
+    wrong size — the printer has no left side at all, so this must refuse the same way
+    a two-nozzle mismatch does, not just warn and let the doomed print through."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    _status(**NO_LEFT)
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json=on_spool(9, nozzles=[{"size": "0.2"}], tier="standard"),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
     )
     assert not upload.called
     assert not sliced.called

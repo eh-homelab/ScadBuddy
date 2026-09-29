@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,7 +36,15 @@ pytestmark = pytest.mark.requires_postgres
 
 BUILTIN = "builtin:keychain"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
-SHIPPED = [{"id": "wide", "name": "Wide", "params": {"width": 40}}]
+SHIPPED = [
+    {
+        "id": "wide",
+        "name": "Wide",
+        "params": {"width": 40},
+        "description": "For a wide label.",
+        "tags": ["wide", "bags"],
+    }
+]
 
 
 @pytest.fixture
@@ -295,16 +301,18 @@ def test_the_orphan_sweep_forgets_a_gone_template_s_presets(
 
 
 def test_an_upload_a_saved_preset_names_is_kept_by_the_sweep(
-    client: TestClient, app: FastAPI, model: str
+    client: TestClient, app: FastAPI, model: str, pg_conninfo: str
 ) -> None:
     state = app.state.scadbuddy
     kept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "kept.svg")
     swept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg' width='2'/>", "gone.svg")
     _save(client, model, "Logo", {"label": kept.id})
-    then = time.time() - 10 * state.config.asset_sweep_grace
-    for meta in (kept, swept):
-        for path in (state.assets.blob_path(meta), state.assets.root / f"{meta.id}.json"):
-            os.utime(path, (then, then))
+    # Last used long ago: the upload store's rows (#591).
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = now() - make_interval(secs => %s)",
+            (10 * state.config.asset_sweep_grace,),
+        )
     assert sweep_assets(state) == [swept.id]
 
 
@@ -553,8 +561,151 @@ def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, 
     assert _patch_presets(client, model, many_tags).status_code == 422
     long_tag = [{"name": "X", "tags": ["t" * (MAX_PRESET_TAG + 1)]}]
     assert _patch_presets(client, model, long_tag).status_code == 422
+    comma_tag = [{"name": "X", "tags": ["M3, M4"]}]
+    assert _patch_presets(client, model, comma_tag).status_code == 422
     fine = [{"name": "X", "description": "d" * MAX_PRESET_DESCRIPTION, "tags": ["a", "b"]}]
     assert _patch_presets(client, model, fine).status_code == 200
+
+
+def test_a_template_tag_written_with_a_comma_still_loads(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Until #327 a model.json tag could hold a comma. Such a file keeps loading, the
+    tag read as the tags it lists (cleaned, and the list cut at the bound), rather than
+    costing the template every preset it defines. A save still refuses one (422)."""
+    full = [f"t{n}" for n in range(MAX_PRESET_TAGS - 1)]
+    _define(
+        paths,
+        model,
+        [
+            {"name": "Bits", "tags": ["M3, M4", "m3", "x"], "description": "Hex bits"},
+            {"name": "Full", "tags": [*full, "a , b"]},
+            {"name": "Plain", "tags": ["a"]},
+        ],
+    )
+    listed = client.get(_url(model)).json()
+    assert [(p["name"], p["tags"]) for p in listed] == [
+        ("Bits", ["M3", "M4", "x"]),
+        ("Full", [*full, "a"]),
+        ("Plain", ["a"]),
+    ]
+    assert listed[0]["description"] == "Hex bits"
+    assert _patch_presets(client, model, [{"name": "X", "tags": ["M3, M4"]}]).status_code == 422
+
+
+def test_a_template_preset_with_null_details_still_loads(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A model.json written by hand, or by a tool that writes every key, says ``null``
+    for a description or tags a preset has none of. That reads as none, rather than
+    failing the whole list and costing the template every preset it defines. A save's
+    body still refuses a null description (422)."""
+    _define(
+        paths,
+        model,
+        [
+            {"name": "Bare", "description": None, "tags": None},
+            {"name": "Plain", "tags": ["a"], "description": "Plain."},
+        ],
+    )
+    listed = client.get(_url(model)).json()
+    assert [(p["name"], p["description"], p["tags"]) for p in listed] == [
+        ("Bare", "", []),
+        ("Plain", "Plain.", ["a"]),
+    ]
+    null_description = client.post(_url(model), json={"name": "X", "description": None})
+    assert null_description.status_code == 422
+
+
+def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model: str) -> None:
+    response = client.post(
+        _url(model),
+        json={
+            "name": "Big",
+            "params": {"width": 25},
+            "description": "  For **bags**.  ",
+            "tags": [" big ", "Big", "", "kids  size", "big"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    saved = response.json()
+    # Trimmed, blanks dropped, each tag kept once ignoring case, in the order given.
+    assert saved["description"] == "For **bags**."
+    assert saved["tags"] == ["big", "kids size"]
+    listed = client.get(_url(model)).json()
+    assert [(p["description"], p["tags"]) for p in listed] == [
+        ("For **bags**.", ["big", "kids size"])
+    ]
+    # Without them, a preset has none.
+    plain = _save(client, model, "Plain", {})
+    assert (plain["description"], plain["tags"]) == ("", [])
+
+
+def test_a_saved_preset_s_details_are_edited_and_cleared(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    url = _url(model, saved["id"])
+    edited = client.patch(url, json={"description": "Wide", "tags": ["a", "b"]})
+    assert edited.status_code == 200, edited.text
+    assert (edited.json()["description"], edited.json()["tags"]) == ("Wide", ["a", "b"])
+    # A field left out stays as it was.
+    renamed = client.patch(url, json={"name": "Bigger"}).json()
+    assert (renamed["name"], renamed["description"], renamed["tags"]) == (
+        "Bigger",
+        "Wide",
+        ["a", "b"],
+    )
+    assert renamed["params"] == {"width": 25}
+    # An empty one clears it.
+    cleared = client.patch(url, json={"description": "", "tags": []}).json()
+    assert (cleared["description"], cleared["tags"]) == ("", [])
+
+
+def test_a_saved_preset_s_details_are_bounded(client: TestClient, model: str) -> None:
+    def refused(body: dict[str, Any]) -> bool:
+        status: int = client.post(_url(model), json={"name": "X", **body}).status_code
+        return status == 422
+
+    assert refused({"description": "d" * (MAX_PRESET_DESCRIPTION + 1)})
+    assert refused({"tags": [f"t{n}" for n in range(MAX_PRESET_TAGS + 1)]})
+    assert refused({"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    # A comma would split the tag in two when the UI edits tags as one line.
+    assert refused({"tags": ["M3, M4"]})
+    # The length is counted in code points, not UTF-16 units.
+    assert not refused({"tags": ["\U0001f600" * MAX_PRESET_TAG]})
+    # Repeats count once: they are dropped before the bound is checked.
+    repeated = [f"t{n % MAX_PRESET_TAGS}" for n in range(MAX_PRESET_TAGS * 2)]
+    assert not refused({"tags": repeated, "description": "d" * MAX_PRESET_DESCRIPTION})
+    saved = client.get(_url(model)).json()[0]
+    too_long = client.patch(_url(model, saved["id"]), json={"tags": ["t" * (MAX_PRESET_TAG + 1)]})
+    assert too_long.status_code == 422
+    comma = client.patch(_url(model, saved["id"]), json={"tags": ["a,b"]})
+    assert comma.status_code == 422
+
+
+@pytest.mark.requires_git
+def test_a_shipped_preset_s_details_come_from_model_json_and_survive_a_duplicate(
+    client: TestClient,
+) -> None:
+    shipped = client.get(_url(BUILTIN)).json()[0]
+    assert (shipped["description"], shipped["tags"]) == ("For a wide label.", ["wide", "bags"])
+    copy = _duplicate(client, BUILTIN, shipped["id"], "Wide copy")
+    assert copy.status_code == 201, copy.text
+    assert (copy.json()["description"], copy.json()["tags"]) == (
+        "For a wide label.",
+        ["wide", "bags"],
+    )
+
+
+@pytest.mark.requires_git
+def test_a_template_duplicate_copies_its_saved_presets_details(client: TestClient) -> None:
+    client.post(
+        _url(BUILTIN),
+        json={"name": "Mine", "params": {}, "description": "Mine", "tags": ["x"]},
+    )
+    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    assert created.status_code == 201, created.text
+    copied = client.get(_url(created.json()["slug"])).json()[1]
+    assert (copied["name"], copied["description"], copied["tags"]) == ("Mine", "Mine", ["x"])
 
 
 @pytest.mark.requires_git

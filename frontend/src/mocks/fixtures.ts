@@ -408,12 +408,16 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
+      description: 'A small tag for a **zip pull**, without the keyring hole.',
+      tags: ['small', 'zip pull'],
     },
     {
       id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
       name: 'Mum',
       origin: 'mine',
       params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      description: '',
+      tags: ['gift'],
       updated_at: '2026-09-20T10:00:00Z',
     },
     {
@@ -421,11 +425,20 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Old engraving',
       origin: 'mine',
       params: { name: 'Ada', engrave_depth: 2 },
+      description: '',
+      tags: [],
       updated_at: '2026-09-19T10:00:00Z',
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    {
+      id: 'template-tiny',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10 },
+      description: '',
+      tags: [],
+    },
   ],
 }
 
@@ -757,6 +770,14 @@ export const queuedSliceProgress: PrintProgress = {
 }
 
 export const FAILING_NAME = 'boom'
+
+/** A name the mock ends `cancelled` instead of `failed`, the way a job superseded by a newer request while running does. */
+export const CANCELLED_NAME = 'superseded'
+
+/** The backend's own wording (`render/projection.py` `CANCELLED_ERROR`), so the mock's `error`/`log_tail` match what a real cancelled job carries. */
+export const CANCELLED_ERROR = 'cancelled: every request for it was withdrawn'
+
+export const CANCELLED_LOG_TAIL = [CANCELLED_ERROR]
 
 /** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
 export const NOTED_NAME = 'alexandra'

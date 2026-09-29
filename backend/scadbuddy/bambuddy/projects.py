@@ -24,12 +24,17 @@ Three details of Bambuddy's shape are load-bearing:
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 
+import psycopg
 from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.linking import link_item
 from scadbuddy.bambuddy.models import Folder, FolderCreate, Project, ProjectCreate
+from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -140,7 +145,7 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
             )
         )
 
-    folder = next(iter(await client.folders_by_project(project.id)), None)
+    folder = project_folder(await client.folders_by_project(project.id))
     if folder is None and request.folder_id is not None:
         # Flattened, like every other folder lookup here: `/library/folders` answers
         # with a tree, so a folder nested under another is invisible to a scan of the
@@ -167,7 +172,7 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
     picker offers folderless projects on the promise that the first send creates the
     folder. One read when the folder exists; :func:`ensure_project` otherwise.
     """
-    folder = next(iter(await client.folders_by_project(project_id)), None)
+    folder = project_folder(await client.folders_by_project(project_id))
     if folder is not None:
         return folder.id
     view = await ensure_project(client, ProjectRequest(project_id=project_id))
@@ -179,6 +184,17 @@ async def folder_for(client: BambuddyClient, project_id: int) -> int:
     return view.folder_id
 
 
+def project_folder(folders: list[Folder]) -> Folder | None:
+    """The project's own folder among the folders linked to it.
+
+    A sub-folder linked to the project too (``Media/``, #309) would be in the by-project
+    list, and, in whatever order Bambuddy lists them, "the first one" could be it. The
+    project folder is the one whose parent is not another folder of the same project.
+    """
+    ids = {folder.id for folder in folders}
+    return next((folder for folder in folders if folder.parent_id not in ids), None)
+
+
 class AttachResult(BaseModel):
     """What was attached, so the UI can say so rather than claiming more than happened."""
 
@@ -188,7 +204,13 @@ class AttachResult(BaseModel):
 
 
 async def attach_results(
-    client: BambuddyClient, project_id: int, *, queue_item_ids: list[int]
+    client: BambuddyClient,
+    project_id: int,
+    *,
+    queue_item_ids: list[int],
+    output_id: str | None = None,
+    links: PrintLinkStore | None = None,
+    linkable: Collection[int] = (),
 ) -> AttachResult:
     """Attach this output's queue entries, and any archives they have produced.
 
@@ -196,6 +218,11 @@ async def attach_results(
     and an archive only once a print has finished — so attaching at run time would
     attach only part of it. This is called once the ids are known, and attaching the
     same id twice is Bambuddy's problem to dedupe, not a reason to keep state here.
+
+    With ``output_id`` and ``links``, the archive of each item in ``linkable`` is also
+    linked to the output (#306), since the items are being read anyway. Only those:
+    ``queue_item_ids`` can come from the caller, and an item that is not the output's
+    must never open the media proxy to its archive.
     """
     archives: list[int] = []
     for item_id in queue_item_ids:
@@ -204,12 +231,18 @@ async def attach_results(
         except ApiError as error:
             if error.status != 404:
                 raise
-            # Bambuddy drops a dispatched entry from the queue; its archive is then
-            # already on the project by Bambuddy's own accounting.
+            # Deleted in Bambuddy (a queue item otherwise outlives its print); there is
+            # nothing left to attach it by.
             logger.info("a queue entry was gone before it could be attached", extra={"id": item_id})
             continue
         if item.archive_id is not None:
             archives.append(item.archive_id)
+            if output_id is not None and links is not None and item_id in linkable:
+                # A side effect of the attach, which must not fail over it.
+                try:
+                    await link_item(links, output_id, item)
+                except (psycopg.Error, DatabaseRequiredError):
+                    logger.exception("could not link a queue item's archive", extra={"id": item_id})
 
     if queue_item_ids:
         await client.add_queue_items_to_project(project_id, queue_item_ids)

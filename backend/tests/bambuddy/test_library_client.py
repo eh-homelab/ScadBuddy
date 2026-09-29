@@ -17,7 +17,7 @@ async def test_the_root_lists_without_a_folder(bambuddy: BambuddyClient) -> None
         return_value=httpx.Response(200, json=recording("library-files-root.json"))
     )
 
-    rows = await bambuddy.library_files(folder_id=None)
+    rows = await bambuddy.library_listing(folder_id=None)
 
     assert "folder_id" not in route.calls.last.request.url.params
     assert rows and all(row.folder_id is None for row in rows)
@@ -30,7 +30,7 @@ async def test_a_folder_is_asked_for_by_id(bambuddy: BambuddyClient) -> None:
         return_value=httpx.Response(200, json=recording("library-files-folder.json"))
     )
 
-    rows = await bambuddy.library_files(folder_id=4)
+    rows = await bambuddy.library_listing(folder_id=4)
 
     assert route.calls.last.request.url.params["folder_id"] == "4"
     assert {"3mf", "gcode.3mf", "stl"} <= {row.file_type for row in rows}

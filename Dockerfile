@@ -200,10 +200,11 @@ FROM node:24-bookworm-slim AS agent
 
 # tini for the same reason as the backend image: the Agent SDK spawns the
 # Claude Code binary as a child process per query, and node as PID 1 does not
-# reap orphans.
+# reap orphans. git (and ca-certificates for its https) fetches plugin
+# packages at their pinned commit (#297, agent/src/plugins/packages/git.ts).
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Numeric uid 10001, the same as the backend image, so one pod
@@ -218,8 +219,26 @@ RUN groupadd --gid 10001 scadbuddy \
 
 WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
+
+# The headless browser (#349, AI spec D11 and §5.3): the Chromium build the
+# pinned @playwright/mcp's own `playwright-core` expects, installed at build
+# time with its system libraries, so nothing is downloaded at runtime (the
+# upstream plugin's `npx @playwright/mcp@latest` is what spec D11 rejects).
+# `install-browser` is @playwright/mcp's cli.js passing through to
+# `playwright install`. `--only-shell` installs chromium-headless-shell alone,
+# which is what a headless launch without a `channel` uses
+# (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
+# 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
+# Bump with @playwright/mcp in agent/package.json.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
+# The vendored plugin manifest (agent/plugins/playwright/README.md); each
+# session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
+COPY --from=agent-build /src/agent/plugins ./plugins
 
 # The Claude Code binary the Agent SDK bundles is pinned the way
 # OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
@@ -449,6 +468,28 @@ FROM app AS test
 # Re-chown: this sync runs as root and rewrites both the venv and the cache.
 RUN uv sync --frozen \
     && chown -R scadbuddy:scadbuddy /opt/venv /opt/uv-cache
+
+# The Temporal CLI's dev server backs the `requires_temporal` tests
+# (tests/support/temporal.py). Pinned by version and per-arch digest like openscad-lsp
+# above (the release's checksums.txt).
+ARG TARGETARCH
+ARG TEMPORAL_CLI_VERSION=1.9.1
+ARG TEMPORAL_CLI_SHA256_AMD64=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+ARG TEMPORAL_CLI_SHA256_ARM64=6c57c352d52fc3df34412376fd9ba6f74b7e3ace8e426e6cba8600156d36a145
+RUN case "$TARGETARCH" in \
+      amd64) sha="$TEMPORAL_CLI_SHA256_AMD64" ;; \
+      arm64) sha="$TEMPORAL_CLI_SHA256_ARM64" ;; \
+      *) echo "ERROR: no pinned Temporal CLI for '${TARGETARCH}'." >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location --output /tmp/temporal-cli.tar.gz \
+        "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_${TARGETARCH}.tar.gz" \
+    && printf '%s  /tmp/temporal-cli.tar.gz\n' "$sha" > /tmp/temporal-cli.sha256 \
+    && sha256sum --check --strict /tmp/temporal-cli.sha256 \
+    && tar -xzf /tmp/temporal-cli.tar.gz -C /usr/local/bin temporal \
+    && rm -f /tmp/temporal-cli.tar.gz /tmp/temporal-cli.sha256 \
+    && temporal --version
+ENV SCADBUDDY_TEST_TEMPORAL_DEV_SERVER=/usr/local/bin/temporal
+
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.
 USER 10001:10001

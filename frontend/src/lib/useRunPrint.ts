@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, ApiError } from '../api/client'
+import { useEffect, useRef, useState } from 'react'
+import { api, ApiError, mayHaveRun } from '../api/client'
 import type {
   ChoicesView,
   PrintOptions,
@@ -7,6 +7,7 @@ import type {
   PrintRunResult,
   SlotChoice,
 } from '../api/types'
+import { printChoicesOf } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import type { PrintSelection } from './usePrintChoices'
 
@@ -32,7 +33,8 @@ interface RunInput {
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
  * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
  * refusing a combination; its `detail` is `runError`, and `refused` keeps Print disabled
- * until one of the choices changes. `reset` clears the run for the dialog's next open.
+ * until one of the choices changes. A run whose answer never arrived is `unanswered`
+ * instead (#470). `reset` clears the run for the dialog's next open.
  */
 export function useRunPrint({
   source,
@@ -53,6 +55,14 @@ export function useRunPrint({
   /** Only a 422 — these choices cannot resolve — keeps Print disabled until one changes. */
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
+  /**
+   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection):
+   * the backend may have queued it anyway, so the dialog says so instead of offering
+   * Print again. Closing the dialog is the way back to it.
+   */
+  const [unanswered, setUnanswered] = useState<string | null>(null)
+  /** Which `run()` may still update the dialog: bumped by each run. */
+  const runAttempt = useRef(0)
 
   // A refused run was refused for *these* choices; any change is worth another try.
   useEffect(() => {
@@ -92,7 +102,9 @@ export function useRunPrint({
   }
 
   async function run() {
-    if (!source || !choices || bedType === null) return
+    const printChoices = printChoicesOf(selection)
+    if (!source || !choices || !printChoices) return
+    const attempt = ++runAttempt.current
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -100,13 +112,7 @@ export function useRunPrint({
       const body: PrintRunRequest = {
         printer_id: printerId,
         filament_plan: { slots: plan, force_colour_match: false },
-        choices: {
-          nozzles,
-          tier,
-          process_name: processName,
-          bed_type: bedType,
-          filament_overrides: overrides,
-        },
+        choices: printChoices,
         ...(copies === null ? {} : { copies }),
         plate_id: plate === 'all' ? 1 : plate,
         all_plates: plate === 'all',
@@ -114,16 +120,22 @@ export function useRunPrint({
         options,
       }
       const ran = await sourceApi(source).run(body)
+      if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
+      if (attempt !== runAttempt.current) return
+      if (mayHaveRun(cause)) {
+        setUnanswered((cause as ApiError).detail)
+        return
+      }
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
+      // Anything else (a refusal, nothing upstream took it) is worth retrying as it stands.
       setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
-      setRunning(false)
+      if (attempt === runAttempt.current) setRunning(false)
     }
   }
 
@@ -131,7 +143,8 @@ export function useRunPrint({
     setRunError(null)
     setRefused(false)
     setResult(null)
+    setUnanswered(null)
   }
 
-  return { run, running, runError, refused, result, reset }
+  return { run, running, runError, refused, result, unanswered, reset }
 }

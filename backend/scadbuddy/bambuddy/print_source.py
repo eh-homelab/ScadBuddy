@@ -22,7 +22,7 @@ from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import copy_to_read, ensure_uploaded, target_for
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
@@ -86,6 +86,11 @@ class PrintSource(Protocol):
         sent: list[PlateSend],
     ) -> list[PlateSend]: ...
 
+    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+        """After a print into a project: what the next Generate into it lays its file
+        out for (#317)."""
+        ...
+
 
 async def _spool_colours(
     client: BambuddyClient, meta: OutputMeta, plan: FilamentPlan
@@ -108,6 +113,8 @@ class OutputSource:
     uploads: BambuddyUploadStore
     meta: OutputMeta
     settings: StoredSettings
+    #: Names a copy uploaded into a project's folder (``project_filename``, #317).
+    stem: str | None = None
 
     @property
     def colours(self) -> list[str]:
@@ -161,6 +168,7 @@ class OutputSource:
             self.settings,
             target=target,
             folder_id=folder_id,
+            stem=self.stem,
         )
         return PrintFile(file_id, folder_id)
 
@@ -200,6 +208,11 @@ class OutputSource:
                 plates=sent,
             )
         return sent
+
+    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+        await self.uploads.remember_project_target(
+            project_id, ProjectTarget(printer_id=printer_id, nozzle_diameter=nozzle_size)
+        )
 
 
 #: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2). An
@@ -297,3 +310,8 @@ class LibrarySource:
         # Recorded nowhere in ScadBuddy: Bambuddy's queue and archives are the record
         # (print history is #305).
         return sent
+
+    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+        # A library file is not laid out by ScadBuddy, so it says nothing about what the
+        # project's next Generate should target.
+        return None

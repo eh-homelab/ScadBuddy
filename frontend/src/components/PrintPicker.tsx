@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
-import type { PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
+import type { AnalysisRequest, PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { sourceApi, type PrintSource } from '../lib/printSource'
+import { useAsync } from '../lib/useAsync'
 import { useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
+import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { NozzleStep } from './print/NozzleStep'
 import { PlatesToPrint } from './print/PlatesToPrint'
@@ -19,6 +22,7 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
+import type { ProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -56,9 +60,19 @@ interface Props {
   onRan: (result: PrintRunResult) => void
   /** #81 — the model of the printer in view, so the preview can draw its plate. */
   onPrinterModel?: (model: string | null) => void
+  /**
+   * #317 — the project chosen on the Customize page. Given, the dialog's picker shows and
+   * moves that one choice rather than a copy of its own, so the two never disagree.
+   */
+  project?: {
+    value: number | null
+    onChange: (projectId: number | null) => void
+    /** The page's project list, so the dialog does not fetch it a second time. */
+    list?: ProjectList
+  }
 }
 
-export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Props) {
+export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, project }: Props) {
   /**
    * The model, for its print-options scope — the same slug its choices are remembered
    * under (`sourceApi`). A library file has none.
@@ -83,8 +97,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
-  /** #79 — the Bambuddy project this print is filed under. */
-  const [projectId, setProjectId] = useState<number | null>(null)
+  /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
+  const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
+  const projectId = project ? project.value : ownProjectId
 
   const runPrint = useRunPrint({
     source,
@@ -98,7 +113,15 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
     options,
     onRan,
   })
-  const { run, running, runError, refused, result } = runPrint
+  const { run, running, runError, refused, result, unanswered } = runPrint
+  // Only for the queue link while a run is unanswered (a result carries its own), so it
+  // is read then, not on every open; a failed read offers to try again.
+  const settings = useAsync(
+    async () => (open && unanswered !== null ? await api.getSettings() : null),
+    [open, unanswered !== null],
+  )
+  // As typed in Settings: a trailing slash would make `…//queue` below.
+  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
@@ -162,8 +185,32 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
 
+  /**
+   * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
+   * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
+   * "All plates" the filament checks read every plate; the mesh checks read plate 1.
+   */
+  const printChoices = printChoicesOf(selection)
+  const allPlates = plate === 'all'
+  const analysisRequest: AnalysisRequest | null =
+    choices && printChoices
+      ? {
+          printer_id: printerId,
+          filament_plan: { slots: plan, force_colour_match: false },
+          choices: printChoices,
+          plate_id: allPlates ? 1 : plate,
+          all_plates: allPlates,
+          copies: effectiveCopies,
+          options,
+        }
+      : null
+
   function close() {
-    setProjectId(null)
+    // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
+    // reopen with Print enabled and send the print a second time (#539 review).
+    if (running) return
+    // The page's project (#317) outlives the dialog; only its own copy is reset.
+    setOwnProjectId(null)
     setOptions({})
     runPrint.reset()
     picker.reset()
@@ -175,7 +222,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
       open={open}
       title="Print"
       description={
-        result
+        result || unanswered !== null
           ? undefined
           : 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
@@ -187,6 +234,19 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
             <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
               Open in queue
             </Button>
+          </>
+        ) : unanswered !== null ? (
+          <>
+            <Button onClick={close}>Close</Button>
+            {bambuddyUrl ? (
+              <Button variant="primary" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
+                {"Open Bambuddy's queue"}
+              </Button>
+            ) : (
+              settings.error && (
+                <Button onClick={settings.reload}>{"Find Bambuddy's queue"}</Button>
+              )
+            )}
           </>
         ) : (
           <>
@@ -214,6 +274,13 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
           progress={progress}
           polling={polling}
         />
+      ) : unanswered !== null ? (
+        <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
+          {unanswered}{' '}
+          {
+            "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice."
+          }
+        </p>
       ) : (
         <>
           {loading && !choices && (
@@ -332,9 +399,22 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Pr
               />
 
               {/* #79 — a send to a project uploads into that project's folder. */}
-              <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
+              {project ? (
+                <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
+              ) : (
+                <ProjectPicker
+                  value={ownProjectId}
+                  onChange={setOwnProjectId}
+                  onLoaded={setOwnProjectId}
+                />
+              )}
 
               <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+
+              {/* The analyzers judge an output's own 3MF; a library file has none (#313). */}
+              {outputId !== undefined && (
+                <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates} />
+              )}
             </div>
           )}
 

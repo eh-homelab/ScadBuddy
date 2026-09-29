@@ -50,6 +50,21 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   // Mounted from the first open on, and hidden rather than unmounted when closed, so
   // closing the panel doesn't drop the connection or the transcript.
   const [mounted, setMounted] = useState(false)
+  // A mounted panel rides out an outage: while the agent restarts, or its status
+  // read fails for a moment, the panel's transport keeps reconnecting with its
+  // transcript and anything queued for the reconnect (a decision, say) intact,
+  // where unmounting would drop them. The panel goes only when the agent says the
+  // assistant is off for this page: not set up, or its chat gate refuses this
+  // address. Until it is first opened, the agent's answer alone decides.
+  const off = ai.state === 'not_configured' || ai.chat === 'refused'
+  const shown = ai.available || (mounted && !off)
+  useEffect(() => {
+    // Gone for good: the next time the agent is available it starts afresh.
+    if (!shown) {
+      setOpen(false)
+      setMounted(false)
+    }
+  }, [shown])
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
 
@@ -81,7 +96,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   }, [open, closePanel, openPanel])
 
   useEffect(() => {
-    if (!ai.available) return
+    if (!shown) return
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !isAssistantShortcut(event)) return
       event.preventDefault()
@@ -89,7 +104,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ai.available, toggle])
+  }, [shown, toggle])
 
   const onPanelKey = (event: ReactKeyboardEvent) => {
     if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -136,7 +151,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
 
         <div className="ml-auto flex items-center gap-2">
           <LiveUpdatesIndicator />
-          {ai.available && (
+          {shown && (
             <button
               ref={toggleButton}
               type="button"
@@ -159,7 +174,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <Outlet />
         </main>
-        {ai.available && mounted && (
+        {shown && mounted && (
           <aside
             id={PANEL_ID}
             aria-label="Assistant"

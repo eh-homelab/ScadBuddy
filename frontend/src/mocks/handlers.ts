@@ -10,6 +10,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LastProject,
   CatalogueLibrary,
   LibraryListing,
   MediaView,
@@ -34,6 +35,7 @@ import type {
   PrintOptionsState,
   PrintOptionsUpdate,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   SendResult,
@@ -45,7 +47,8 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
+import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -55,6 +58,7 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import { libraryFiles, libraryFolders, MULTI_PLATE_FILE } from './library'
 import * as fixtures from './fixtures'
@@ -94,6 +98,8 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
+  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
+  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
@@ -163,6 +169,15 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
@@ -195,6 +210,8 @@ function runJob(jobId: string): void {
 
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
+  resetAiPluginMocks()
+  resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -205,6 +222,7 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
+  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
@@ -225,7 +243,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -286,6 +304,11 @@ export function setMockUploadLimit(bytes: number): void {
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -461,8 +484,12 @@ function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: 
   return view(updated)
 }
 
-/** Job and output ids are 32 hex characters — the routes reject anything else. */
-function nextHexId(): string {
+/**
+ * Job and output ids are 32 hex characters — the routes reject anything else. One
+ * counter for every mock, feature modules (`features/`) included, reset by
+ * `resetMockState`.
+ */
+export function nextHexId(): string {
   state.seq += 1
   return state.seq.toString(16).padStart(32, '0')
 }
@@ -580,7 +607,7 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
@@ -621,9 +648,9 @@ function pngResponse() {
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -899,6 +926,47 @@ function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   return undefined
 }
 
+/**
+ * A preset's tags as the server keeps them (#327, `_clean_tags`): trimmed, inner
+ * whitespace collapsed, blanks dropped, each kept once ignoring case, in order.
+ */
+export function cleanTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+  for (const raw of tags) {
+    const tag = raw.trim().replace(/\s+/g, ' ')
+    // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
+    const key = tag.toUpperCase().toLowerCase()
+    if (tag && !seen.has(key)) {
+      seen.add(key)
+      cleaned.push(tag)
+    }
+  }
+  return cleaned
+}
+
+/**
+ * A preset's description and tags past their bounds, refused as FastAPI refuses a
+ * body it cannot parse (`shapeRefusal`), or undefined. The description is trimmed and
+ * the tags cleaned first, as pydantic does before it checks the bounds.
+ */
+function detailsRefusal(description: string | null | undefined, tags: string[] | null | undefined) {
+  // Lengths in code points, as Python counts them.
+  if ([...(description ?? '').trim()].length > MAX_PRESET_DESCRIPTION) {
+    return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
+  }
+  const cleaned = cleanTags(tags ?? [])
+  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
+    return shapeRefusal(
+      `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+    )
+  }
+  if (cleaned.some((tag) => tag.includes(','))) {
+    return shapeRefusal('a preset tag cannot contain a comma')
+  }
+  return undefined
+}
+
 /** Why a preset save is refused, as the server words it, or undefined. */
 function presetRefusal(
   slug: string,
@@ -976,8 +1044,12 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // The agent service's plugin routes (#297), under /api/v1/ai.
+  ...aiPluginHandlers,
+  // Each feature's own mocks (`features/`), then the agent service's MCP OIDC routes;
+  // the rest of this list is the backend.
+  ...features.flatMap((feature) => feature.handlers),
+  ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()
@@ -1406,18 +1478,14 @@ export const handlers = [
         ) {
           return shapeRefusal(`'${preset.id}' is not a preset id`)
         }
-        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
-          return shapeRefusal(
-            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
-          )
-        }
-        const tags = preset.tags ?? []
-        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
-          return shapeRefusal(
-            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
-          )
-        }
-        cleaned.push({ ...preset, name })
+        const details = detailsRefusal(preset.description, preset.tags)
+        if (details) return details
+        cleaned.push({
+          ...preset,
+          name,
+          description: (preset.description ?? '').trim(),
+          tags: cleanTags(preset.tags ?? []),
+        })
       }
       if (cleaned.length > MAX_PRESETS) {
         return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
@@ -1467,6 +1535,8 @@ export const handlers = [
         name: preset.name,
         origin: 'template',
         params: preset.params ?? {},
+        description: preset.description ?? '',
+        tags: preset.tags ?? [],
       }))
       state.presets[slug] = [...shipped, ...saved]
     }
@@ -1846,8 +1916,12 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const body = (await request.json()) as ParamPresetCreate
+    // The details' bounds are the body's shape: refused before the route looks up
+    // the model, as FastAPI parses the body first.
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, body.params ?? {}, null)
     if (refused) return refused
@@ -1856,6 +1930,8 @@ export const handlers = [
       name,
       origin: 'mine',
       params: body.params ?? {},
+      description: (body.description ?? '').trim(),
+      tags: cleanTags(body.tags ?? []),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -1873,11 +1949,14 @@ export const handlers = [
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
+    // Everything but the name is the original's, its description and tags too.
     const copy: ParamPreset = {
       id: nextHexId(),
       name,
       origin: 'mine',
       params: { ...source.params },
+      description: source.description,
+      tags: [...source.tags],
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
@@ -1888,10 +1967,12 @@ export const handlers = [
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
+    const body = (await request.json()) as ParamPresetUpdate
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
     if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Preset not found')
-    const body = (await request.json()) as ParamPresetUpdate
     const name = body.name?.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
     if (refused) return refused
@@ -1899,6 +1980,12 @@ export const handlers = [
       ...existing,
       name: name ?? existing.name,
       params: body.params ?? existing.params,
+      // Each detail given replaces the old one; an empty one clears it.
+      description:
+        body.description === undefined || body.description === null
+          ? existing.description
+          : body.description.trim(),
+      tags: body.tags === undefined || body.tags === null ? existing.tags : cleanTags(body.tags),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -2187,9 +2274,38 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true'
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
@@ -2306,6 +2422,40 @@ export const handlers = [
     state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
     await delay(150)
     return HttpResponse.json(saved)
+  }),
+
+  // #317 — the project both pickers open on.
+  http.put(`${base}/print/projects/last`, async ({ request }) => {
+    const body = (await request.json()) as LastProject
+    state.lastProjectId = body.project_id ?? null
+    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #317 — Generate with a project files the editable 3MF in its folder, once per
+  // (folder, target): the same project again answers with the file already there.
+  http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id: number }
+    const project = state.projects.find((p) => p.id === body.project_id)
+    if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
+    const folderId = project.folder_id ?? nextNumber()
+    state.projects = state.projects.map((p) =>
+      p.id === project.id ? { ...p, folder_id: folderId, folder_name: p.folder_name ?? p.name } : p,
+    )
+    const before = output.library_files?.length ?? 0
+    const libraryFileId = copyIn(output, folderId)
+    const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+    await delay(100)
+    return HttpResponse.json({
+      project_id: project.id,
+      folder_id: folderId,
+      library_file_id: libraryFileId,
+      filename: `${output.slug}.3mf`,
+      created: after > before,
+      bambuddy_url: `${state.settings.bambuddy_url}/projects/${project.id}`,
+      edit_url: null,
+    } satisfies ProjectFile)
   }),
 
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
@@ -2531,6 +2681,20 @@ export const handlers = [
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
+
+  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/settings/headless-browser`, () =>
+    HttpResponse.json({ enabled: state.headlessBrowser }),
+  ),
+
+  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
+    const body = (await request.json()) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
+    }
+    state.headlessBrowser = body.enabled
+    return HttpResponse.json({ enabled: state.headlessBrowser })
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {

@@ -9,7 +9,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -31,7 +31,7 @@ from scadbuddy.bambuddy.filaments import (
     across_plates,
     check,
     every_plate,
-    gather_options,
+    gather_plate_options,
     queue_filaments,
 )
 from scadbuddy.bambuddy.hardware import (
@@ -97,9 +97,9 @@ class PrintRunRequest(BaseModel):
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
-    #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
-    #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
-    #: be — a print with no project is simply one nobody filed.
+    #: The Bambuddy project this print belongs to (#79). Omitted means the remembered
+    #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
+    #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
@@ -158,17 +158,14 @@ async def filament_options(
     read_file = await source.file_to_read(client)
     library_file_id = read_file.id
     plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
-    read = [
-        await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate,
-            fallback_colours=list(source.colours),
-            own_colours=read_file.own_colours,
-        )
-        for plate in plate_ids
-    ]
+    read = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(source.colours),
+        own_colours=read_file.own_colours,
+    )
     options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
@@ -204,6 +201,24 @@ async def filament_options_for_output(
     )
 
 
+class ChoosesProject(Protocol):
+    """A request body with an optional ``project_id``."""
+
+    @property
+    def project_id(self) -> int | None: ...
+
+    @property
+    def model_fields_set(self) -> set[str]: ...
+
+
+def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
+    """The request's ``project_id`` when it sent one, ``null`` included ("No project");
+    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    if "project_id" in request.model_fields_set:
+        return request.project_id
+    return settings.last_project_id
+
+
 async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
     """The printer's live status, read once per run (#469); unreadable is ``None``."""
     try:
@@ -219,20 +234,22 @@ async def _spool_sides(
     used: set[int],
     printer_id: int,
     printer_status: PrinterStatus | None,
-) -> list[SlotSide]:
-    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
+) -> tuple[list[SlotSide], list[SpoolAssignment] | None]:
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469), and
+    the assignments read for it, so the plates' read reuses them (#480).
 
     With no printer status no side can be told, so the assignments aren't read; and an
     unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
-    status does, rather than failing a run that used to succeed."""
+    status does, rather than failing a run that used to succeed. Either way the
+    assignments are ``None``, and the plates' read tries them itself."""
     own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
-    assignments: list[SpoolAssignment] = []
+    assignments: list[SpoolAssignment] | None = None
     if printer_status is not None:
         try:
             assignments = await client.spool_assignments()
         except (ApiError, ValueError):
             logger.info("spool assignments unreadable; no spool's side is known")
-    return slot_sides(own, assignments, printer_status, printer_id=printer_id)
+    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
 
 
 async def run_print(
@@ -242,6 +259,10 @@ async def run_print(
     request: PrintRunRequest,
 ) -> PrintRunResult:
     """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    A print into a project also records its printer and nozzle for that project
+    (:meth:`PrintSource.remember_project`), which is what the next Generate into it
+    lays its file out for.
 
     Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
@@ -283,13 +304,15 @@ async def run_print(
     # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
     used = await source.used_slots(client, plate_ids)
-    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
     extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
     if extruders.errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
-    project_id = request.project_id or settings.last_project_id
+    project_id = chosen_project(request, settings)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -315,14 +338,15 @@ async def run_print(
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
     planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     errors: list[str] = []
-    for plate_id in plate_ids:
-        options = await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate_id,
-            fallback_colours=list(source.colours),
-        )
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(source.colours),
+        assignments=assignments,
+    )
+    for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
         for error in resolved.errors:
             message = (
@@ -386,6 +410,10 @@ async def run_print(
         )
         if warning.kind == "low-filament"
     ]
+    if project_id is not None:
+        await source.remember_project(
+            project_id, printer_id=printer_id, nozzle_size=choices.nozzles[0].size
+        )
     return _queued(
         client,
         outcomes,
@@ -404,20 +432,32 @@ async def run_for_output(
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
+    *,
+    stem: str | None = None,
 ) -> PrintRunResult:
-    """:func:`run_print` for an output ScadBuddy rendered."""
-    return await run_print(client, OutputSource(store, uploads, meta, settings), settings, request)
+    """:func:`run_print` for an output ScadBuddy rendered. ``stem`` names a copy uploaded
+    into a project's folder (:func:`project_filename`, #317)."""
+    return await run_print(
+        client, OutputSource(store, uploads, meta, settings, stem=stem), settings, request
+    )
 
 
 async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
-    printer: one Bambuddy does not list, or any model but the H2C, whose presets are the
-    only ones the resolver knows (``PRINTER_MODEL``)."""
+    printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
+    offers those), or any model but the H2C, whose presets are the only ones the
+    resolver knows (``PRINTER_MODEL``)."""
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     if printer is None:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Bambuddy has no printer {printer_id}. Pick another printer.",
+        )
+    if not printer.is_active:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
+            "another printer.",
         )
     if (printer.model or "").upper() != PRINTER_MODEL:
         raise ApiError(

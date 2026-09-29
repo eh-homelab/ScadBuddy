@@ -1,14 +1,38 @@
-"""Issue #307 — the archive media proxy. The browser gets Bambuddy's bytes, never its
-key, and a seek is a ``Range`` request that reaches Bambuddy and comes back as a 206."""
+"""Issues #307 and #306 — the archive media proxy. The browser gets Bambuddy's bytes,
+never its key or address, and a seek is a ``Range`` request that reaches Bambuddy and
+comes back as a 206. Only an archive one of ScadBuddy's outputs printed is served."""
 
 from __future__ import annotations
+
+import asyncio
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_send import API, configure
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from tests.api.test_send import API, BASE, configure
+
+# The gate reads the links, which live in Postgres (#306).
+pytestmark = pytest.mark.requires_postgres
+
+LINKED = 35
+
+
+def print_links(client: TestClient) -> PrintLinkStore:
+    links: PrintLinkStore = getattr(client.app.state, STATE_ATTR).print_links  # type: ignore[attr-defined]
+    return links
+
+
+@pytest.fixture(autouse=True)
+def _linked(client: TestClient) -> None:
+    """Archive 35 is a print of one of ScadBuddy's outputs."""
+    asyncio.run(
+        print_links(client).record("a" * 32, PrintLink(archive_id=LINKED, matched_by="queue_item"))
+    )
+
 
 VIDEO_HEADERS = {
     "Content-Type": "video/mp4",
@@ -166,3 +190,99 @@ def test_a_photo_name_cannot_walk_out_of_the_archive(client: TestClient) -> None
 def test_without_bambuddy_configured_it_says_so(client: TestClient) -> None:
     response = client.get("/api/v1/prints/35/timelapse")
     assert response.status_code == 409
+
+
+@respx.mock
+def test_an_archive_no_output_printed_is_a_404_and_bambuddy_is_not_asked(
+    client: TestClient,
+) -> None:
+    configure(client)
+    route = respx.get(f"{API}/archives/36/timelapse").mock(return_value=httpx.Response(200))
+
+    response = client.get("/api/v1/prints/36/timelapse")
+
+    assert response.status_code == 404
+    assert not route.called
+
+
+@respx.mock
+def test_head_answers_the_headers_and_no_body(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/archives/35/timelapse").mock(
+        return_value=httpx.Response(
+            200, content=b"v" * 50, headers={**VIDEO_HEADERS, "Content-Length": "50"}
+        )
+    )
+
+    response = client.head("/api/v1/prints/35/timelapse")
+
+    assert route.called
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.content == b""
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+@respx.mock
+def test_the_proxy_is_read_only(client: TestClient, method: str) -> None:
+    configure(client)
+    route = respx.route(host="bambuddy.test").mock(return_value=httpx.Response(200))
+
+    response = client.request(method, "/api/v1/prints/35/timelapse")
+
+    assert response.status_code == 405
+    assert not route.called
+
+
+@respx.mock
+def test_only_range_and_if_range_reach_bambuddy(client: TestClient) -> None:
+    configure(client)
+    route = respx.get(f"{API}/archives/35/photos/finish_1.jpg").mock(
+        return_value=httpx.Response(200, content=b"jpg", headers={"Content-Type": "image/jpeg"})
+    )
+
+    client.get(
+        "/api/v1/prints/35/photos/finish_1.jpg",
+        headers={
+            "Range": "bytes=0-9",
+            "If-Range": '"1"',
+            "Cookie": "scadbuddy=session",
+            "Authorization": "Bearer browser-token",
+            "X-API-Key": "from-the-browser",
+            "X-Forwarded-For": "10.0.0.9",
+            "Referer": "https://scadbuddy.example/prints/35",
+        },
+    )
+
+    sent = route.calls.last.request.headers
+    assert sent["Range"] == "bytes=0-9"
+    assert sent["If-Range"] == '"1"'
+    assert sent["X-API-Key"] == "s3cret", "the configured key, never the browser's"
+    for name in ("Cookie", "Authorization", "X-Forwarded-For", "Referer"):
+        assert name not in sent, name
+
+
+@respx.mock
+def test_bambuddys_address_never_reaches_the_browser(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/archives/35/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"3mf",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Disposition": 'attachment; filename="name-keychain.gcode.3mf"',
+                "Location": f"{BASE}/api/v1/archives/35/download",
+                "Content-Location": f"{BASE}/archive/35.3mf",
+                "Link": f"<{BASE}/api/v1/archives/35>; rel=up",
+            },
+        )
+    )
+
+    response = client.get("/api/v1/prints/35/files/sliced")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].endswith('"name-keychain.gcode.3mf"')
+    assert "bambuddy.test" not in str(response.headers)
+    assert "s3cret" not in str(response.headers)

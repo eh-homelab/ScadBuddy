@@ -8,11 +8,13 @@ a FastAPI app, and so the route stays a thin adapter. The send bar only uploads
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from fastapi import status
 from pydantic import BaseModel
@@ -30,6 +32,7 @@ from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.recolour import recolour_3mf
+from scadbuddy.render.split import normalise_colour
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,16 @@ class Target:
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
         return key
 
+    @property
+    def uncoloured_key(self) -> str:
+        """:attr:`key` in the model's own colours: the plate and nozzle alone.
+
+        What the project file filed on Generate is recorded under (#317). A print into
+        that project reuses it when its spools are the model's own colours; spools in
+        other colours get a copy in theirs (#476).
+        """
+        return Target(self.plate, self.nozzle_diameter).key
+
 
 async def target_for(
     client: BambuddyClient,
@@ -180,6 +193,55 @@ def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:
     return folder_id == settings.library_folder_id
 
 
+class EnsuredCopy(NamedTuple):
+    """A copy :func:`ensure_copy` found or made."""
+
+    library_file_id: int
+    filename: str
+    #: Uploaded by this call, rather than a recorded copy reused.
+    created: bool
+
+
+async def project_filename(
+    client: BambuddyClient,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    folder_id: int,
+    stem: str,
+    target: Target,
+) -> str:
+    """``<stem>.3mf``, made unique among the files already in ``folder_id`` (#317).
+
+    When this output already has a copy in the folder — laid out for another printer
+    model, or it would have been reused — the new one is named after its model
+    (``Name sign — Reagan (H2D).3mf``) so the two are told apart. Anything else that
+    collides is numbered from 2.
+
+    A listing that fails (a timeout, a 5xx, a body that is not a list) leaves the name
+    unchecked rather than failing the print: naming is never worth the print.
+    """
+    try:
+        taken = {row.filename.casefold() for row in await client.library_files(folder_id)}
+    except (ApiError, ValueError) as error:
+        logger.warning(
+            "could not list the project folder; naming the copy without checking it",
+            extra={"folder_id": folder_id, "error": str(error)},
+        )
+        return f"{stem}.3mf"
+    candidates = [f"{stem}.3mf"]
+    ours = any(copy.folder_id == folder_id for copy in await uploads.for_output(meta.id))
+    if ours and target.plate.model:
+        # The profile names the vendor too ("Bambu Lab H2D"); the model is what differs.
+        candidates.append(f"{stem} ({target.plate.model.removeprefix('Bambu Lab ')}).3mf")
+    for candidate in candidates:
+        if candidate.casefold() not in taken:
+            return candidate
+    number = 2
+    while f"{stem} ({number}).3mf".casefold() in taken:
+        number += 1
+    return f"{stem} ({number}).3mf"
+
+
 async def upload_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -189,9 +251,14 @@ async def upload_output(
     *,
     target: Target | None = None,
     folder_id: int | None = None,
+    stem: str | None = None,
 ) -> tuple[int, str]:
     """Upload a new copy of ``model.3mf`` into ``folder_id`` (the inbox when ``None``);
     returns its library file id and file name.
+
+    In a project's folder, ``stem`` names the file (:func:`project_filename`, #317): the
+    template and the params that differ from its defaults, made unique in the folder.
+    The inbox keeps :func:`download_filename`.
 
     A folder carries ``project_id``, so the folder is what files the copy under a
     project (#79) and puts it on Bambuddy's project page.
@@ -213,7 +280,12 @@ async def upload_output(
     payload = _laid_out_for(_read_3mf(store, meta), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
 
-    uploaded = await client.upload_library_file(download_filename(meta), payload, folder_id=folder)
+    filename = (
+        await project_filename(client, uploads, meta, folder, stem, target)
+        if stem is not None and folder is not None and not is_inbox(folder, settings)
+        else download_filename(meta)
+    )
+    uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
     await uploads.record(
         meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
     )
@@ -254,7 +326,7 @@ async def _delete_copy(
     await uploads.forget(meta.id, library_file_id)
 
 
-async def _ensure_copy(
+async def ensure_copy(
     client: BambuddyClient,
     store: OutputStore,
     uploads: BambuddyUploadStore,
@@ -263,19 +335,102 @@ async def _ensure_copy(
     *,
     target: Target | None,
     folder_id: int | None,
-) -> tuple[int, str]:
-    """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under."""
+    stem: str | None = None,
+) -> EnsuredCopy:
+    """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under and
+    whether this call uploaded it.
+
+    Outside the inbox a copy laid out for the same plate and nozzle in the model's own
+    colours also serves (:attr:`Target.uncoloured_key`) when the chosen spools are the
+    model's colours too: that is the project file Generate filed (#317), and a print
+    into the project uses it rather than putting a second file beside it. Spools in
+    other colours get a copy in theirs, as in the inbox (#476). An exact match is still
+    preferred.
+
+    Finding and uploading hold one lock per folder (per output and folder in the inbox),
+    so Generate's filing and a print started while it runs cannot both upload the same
+    copy, and two outputs filed into one project cannot both take the same free name.
+    The lock is taken in this process first, then in the database, so it holds across
+    replicas too without every waiter here holding a database connection.
+    """
     target = target if target is not None else await target_for(client, settings)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-    for copy in await uploads.for_output(meta.id):
-        if copy.folder_id != folder or copy.target_key != target.key:
-            continue
-        filename = await _still_there(client, uploads, meta, copy)
-        if filename is not None:
-            return copy.id, filename
-    return await upload_output(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id
+    key = _copy_lock_key(meta.id, folder, settings)
+    async with _copy_lock(key), uploads.copy_lock(f"{key[0] or ''}:{key[1]}"):
+        for copy in await _reusable(uploads, meta, settings, target, folder):
+            filename = await _still_there(client, uploads, meta, copy)
+            if filename is not None:
+                return EnsuredCopy(copy.id, filename, created=False)
+        library_file_id, filename = await upload_output(
+            client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
+        )
+    return EnsuredCopy(library_file_id, filename, created=True)
+
+
+#: One per folder while :func:`ensure_copy` holds it; weak, so an idle folder's lock is
+#: dropped rather than kept for the life of the process.
+_COPY_LOCKS: weakref.WeakValueDictionary[tuple[str | None, int | None], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _copy_lock_key(
+    output_id: str, folder: int | None, settings: StoredSettings
+) -> tuple[str | None, int | None]:
+    """A project folder's lock is shared by every output: :func:`project_filename` lists
+    the folder and the upload takes a name from that listing, so two outputs must not
+    interleave there. The inbox keeps :func:`download_filename`, which is not made
+    unique, so there only one output's copies are serialized."""
+    return (output_id if is_inbox(folder, settings) else None, folder)
+
+
+def _copy_lock(key: tuple[str | None, int | None]) -> asyncio.Lock:
+    """This process's lock for a :func:`_copy_lock_key` key."""
+    lock = _COPY_LOCKS.get(key)
+    if lock is None:
+        lock = _COPY_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+async def _reusable(
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    target: Target,
+    folder: int | None,
+) -> list[LibraryCopy]:
+    """The recorded copies in ``folder`` that serve ``target``, best first.
+
+    Outside the inbox, when ``target`` is in the model's own colours, that also takes
+    the uncoloured copy and then one recoloured for spools that were the model's own
+    colours (a print whose spools matched the model), so a later filing with no spools
+    reuses it rather than uploading a duplicate.
+    """
+    keys = [target.key]
+    own = [normalise_colour(colour) for colour in meta.colors]
+    own_colours = (
+        target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
+    recoloured = f"{target.uncoloured_key}{_RECOLORED}"
+    extended = not is_inbox(folder, settings) and own_colours
+    if extended and target.uncoloured_key != target.key:
+        keys.append(target.uncoloured_key)
+
+    def rank(copy: LibraryCopy) -> int | None:
+        if copy.target_key in keys:
+            return keys.index(copy.target_key)
+        if extended and copy.target_key.startswith(recoloured):
+            suffix = copy.target_key.removeprefix(recoloured).split(",")
+            if [normalise_colour(colour) for colour in suffix] == own:
+                return len(keys)
+        return None
+
+    ranked = [
+        (order, copy)
+        for copy in await uploads.for_output(meta.id)
+        if copy.folder_id == folder and (order := rank(copy)) is not None
+    ]
+    return [copy for _, copy in sorted(ranked, key=lambda pair: pair[0])]
 
 
 async def _still_there(
@@ -344,6 +499,7 @@ async def ensure_uploaded(
     *,
     target: Target | None = None,
     folder_id: int | None = None,
+    stem: str | None = None,
 ) -> int:
     """The library file id to slice, judge or print, uploading the 3MF where needed.
 
@@ -362,10 +518,10 @@ async def ensure_uploaded(
     so moving the file to project B would leave A pointing at nothing. And never a
     delete outside the inbox; see :func:`upload_output`.
     """
-    library_file_id, _ = await _ensure_copy(
-        client, store, uploads, meta, settings, target=target, folder_id=folder_id
+    ensured = await ensure_copy(
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem
     )
-    return library_file_id
+    return ensured.library_file_id
 
 
 async def delete_inbox_copies(
@@ -457,7 +613,7 @@ async def send_output(
 
     A copy already in the inbox for the same target is reused rather than uploaded again.
     """
-    library_file_id, filename = await _ensure_copy(
+    library_file_id, filename, _ = await ensure_copy(
         client, store, uploads, meta, settings, target=None, folder_id=None
     )
     return SendResult(

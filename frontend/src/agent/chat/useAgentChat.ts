@@ -3,6 +3,9 @@ import { clientMessage, parseServerEvent, type PageContext } from './protocol'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
+const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
+const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
+
 export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
@@ -22,6 +25,10 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   const transport = useRef<ChatTransport | null>(null)
   // The reducer's view, for callbacks that must not re-create on every delta.
   const latest = useRef(state)
+  /** A first turn is held by the transport for the reconnect, so its `awaitingStart` survives a failed attempt. */
+  const startQueued = useRef(false)
+  /** The transport has a connection open now (between onOpen and onClose). */
+  const live = useRef(false)
   useEffect(() => {
     latest.current = state
   }, [state])
@@ -31,6 +38,22 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     let open = true
     transport.current = t
     t.connect({
+      onOpen: () => {
+        if (!open) return
+        // The new connection follows nothing yet, so attach the session on screen
+        // (attach replays it, and `select` clears it first). `select` sends no attach
+        // while disconnected, so this is the only one: a second would replay again
+        // onto the feed and double every reply.
+        live.current = true
+        const active = latest.current.activeId
+        if (active) {
+          dispatch({ type: 'select', sessionId: active })
+          t.send(clientMessage({ type: 'session.attach', sessionId: active }))
+        }
+        // What was queued goes out right after this, so from here a drop loses it again.
+        startQueued.current = false
+        dispatch({ type: 'connected' })
+      },
       onFrame: (frame) => {
         if (!open) return
         const parsed = parseServerEvent(frame)
@@ -38,12 +61,15 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         else dispatch({ type: 'protocol-error', message: parsed.error })
       },
       onClose: (reason) => {
-        if (open) dispatch({ type: 'disconnected', reason })
+        live.current = false
+        if (open) dispatch({ type: 'disconnected', reason, keepStart: startQueued.current })
       },
     })
-    dispatch({ type: 'connected' })
+    // `connected` comes from onOpen only: the real socket is not open until its
+    // handshake completes, and may close first.
     return () => {
       open = false
+      live.current = false
       transport.current = null
       t.close()
     }
@@ -54,7 +80,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
     if (!activeId) dispatch({ type: 'started-new' })
-    transport.current.send(
+    const result = transport.current.send(
       clientMessage({
         type: 'user.message',
         ...(activeId ? { sessionId: activeId } : {}),
@@ -62,27 +88,46 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         context,
       }),
     )
+    // Like a decision, a message held for the reconnect is shown as such (the
+    // composer has cleared); `connected` clears the notice when it goes out.
+    if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
+    else if (result === 'queued') {
+      // A failed reconnect attempt before it goes out must not stop the wait for its session.
+      if (!activeId) startQueued.current = true
+      dispatch({ type: 'queued', message: QUEUED })
+    }
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
     if (!transport.current) return
-    transport.current.send(
+    const result = transport.current.send(
       clientMessage({ type: 'approval.decision', sessionId, id: approvalId, approve }),
     )
-    dispatch({ type: 'decided', sessionId, approvalId })
+    // `sent` or `queued` is shown as such until the server's approval.resolved
+    // confirms it; a refused one leaves the card pending, buttons live, to try again.
+    if (result === 'refused') {
+      dispatch({ type: 'not-sent', message: `Your decision was not sent. ${NOT_SENT}` })
+    } else {
+      dispatch({ type: 'decided', sessionId, approvalId, queued: result === 'queued' })
+    }
   }, [])
 
   const interrupt = useCallback((sessionId: string) => {
-    transport.current?.send(clientMessage({ type: 'session.interrupt', sessionId }))
+    if (transport.current?.send(clientMessage({ type: 'session.interrupt', sessionId })) === 'refused') {
+      dispatch({ type: 'not-sent', message: NOT_SENT })
+    }
   }, [])
 
   const takeOver = useCallback((sessionId: string) => {
-    transport.current?.send(clientMessage({ type: 'session.handoff', sessionId }))
+    if (transport.current?.send(clientMessage({ type: 'session.handoff', sessionId })) === 'refused') {
+      dispatch({ type: 'not-sent', message: NOT_SENT })
+    }
   }, [])
 
   const select = useCallback((sessionId: string | null) => {
     dispatch({ type: 'select', sessionId })
-    if (sessionId) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
+    // Offline, the reconnect's onOpen attaches whatever is on screen then.
+    if (sessionId && live.current) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
   }, [])
 
   return { state, send, decide, interrupt, takeOver, select }

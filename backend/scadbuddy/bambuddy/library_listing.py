@@ -69,7 +69,9 @@ async def list_library(
         for depth, folder in top.walk_with_depth()
     ]
     here = [
-        row for row in await client.library_files(folder_id=folder_id) if row.folder_id == folder_id
+        row
+        for row in await client.library_listing(folder_id=folder_id)
+        if row.folder_id == folder_id
     ]
     shown = [row for row in here if show_all or row.file_type.lower() in DEFAULT_TYPES]
     return LibraryListing(

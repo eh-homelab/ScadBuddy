@@ -10,8 +10,26 @@ the file and reports definitions by real path, so every string that starts with 
 client's root is rewritten to the model's real directory on the way in, and every
 string under that directory is rewritten back on the way out. The client's root is
 whatever ``rootUri`` its ``initialize`` names, so the bridge carries no copy of the
-frontend's URI scheme. Anything outside the directory — a library on
-``OPENSCADPATH`` — passes through as the server named it.
+frontend's URI scheme. Until that arrives, and for a client that names none, the root
+is ``DEFAULT_CLIENT_ROOT``, so no message ever shows the browser a path on this
+machine. Anything outside the directory — a library on ``OPENSCADPATH`` — passes
+through as the server named it.
+
+A server that stops answering (alive, but wedged) would hold its session's permit for
+as long as the editor stays open, so a request left unanswered for
+``REQUEST_TIMEOUT`` seconds ends the session: the server is killed and the socket
+closed with 1011, and the editor carries on without one as it does on any failure.
+This assumes the server answers every request, which openscad-lsp 2.0.1 does only for
+the capabilities it advertises, on documents the editor has opened: an unknown method,
+params it cannot read, or a URI it never saw gets no reply at all. The editor
+(``frontend/src/lib/languageClient.ts``) keeps to that; a request outside it would
+end a healthy session.
+
+A killed server is given ``KILL_WAIT`` seconds to be reaped, then its permit is let go
+whether or not it has died. That is deliberate: a process stuck in the kernel (a hung
+filesystem) cannot be killed, and holding the permit for it wedges the editor all the
+same. The cost is that such processes are not counted against ``SCADBUDDY_LSP_SESSIONS``,
+so each one is logged with how many are still unreaped.
 """
 
 from __future__ import annotations
@@ -20,6 +38,7 @@ import asyncio
 import json
 import logging
 import signal
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +51,21 @@ from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 logger = logging.getLogger(__name__)
 
 _CONTENT_LENGTH = b"content-length"
+
+#: The client root the server's paths are shown under before, or without, one named
+#: by the client's ``initialize``.
+DEFAULT_CLIENT_ROOT = "file:///workspace/"
+#: Seconds a client's request may go unanswered before the server is taken as wedged.
+#: The watchdog checks every tenth of it, so detection takes up to 1.1x this. Only
+#: requests openscad-lsp answers may be sent (see the module docstring).
+REQUEST_TIMEOUT = 60.0
+#: Seconds to wait for a killed server to be reaped before letting the permit go;
+#: asyncio's child watcher reaps it whenever it does die.
+KILL_WAIT = 5.0
+
+#: Killed servers that outlived ``KILL_WAIT``, each with the task still waiting on it;
+#: the task drops its server out once asyncio reaps it.
+_unreaped: dict[asyncio.subprocess.Process, asyncio.Task[int]] = {}
 
 
 def frame(body: bytes) -> bytes:
@@ -90,7 +124,8 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
     """Run one openscad-lsp in ``root`` for an accepted socket, until either side ends.
 
     The server lives exactly as long as the socket: closing the editor kills it, and a
-    server that exits closes the editor's socket.
+    server that exits, or leaves a request unanswered for ``REQUEST_TIMEOUT``, closes
+    the editor's socket.
     """
     process = await asyncio.create_subprocess_exec(
         binary,
@@ -104,10 +139,15 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
     assert process.stdin is not None and process.stdout is not None
     stdin, stdout = process.stdin, process.stdout
     server_root = root.as_uri() + "/"
-    roots: _Roots | None = None
+    roots = _Roots(DEFAULT_CLIENT_ROOT, server_root)
+    initialized = False
+    # The client's requests the server has yet to answer, by id: when each was sent,
+    # oldest first. A list, so a client that reuses an id still has each one watched.
+    unanswered: dict[int | str, list[float]] = {}
+    close_code = status.WS_1000_NORMAL_CLOSURE
 
     async def to_server() -> None:
-        nonlocal roots
+        nonlocal roots, initialized
         while True:
             try:
                 text = await websocket.receive_text()
@@ -122,15 +162,19 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             if not isinstance(message, dict):
                 await websocket.close(code=status.WS_1007_INVALID_FRAME_PAYLOAD_DATA)
                 return
-            if roots is None and message.get("method") == "initialize":
+            if not initialized and message.get("method") == "initialize":
+                initialized = True
                 params = message.setdefault("params", {})
                 client_root = params.get("rootUri")
                 if client_root:
                     roots = _Roots(_directory_uri(client_root), server_root)
                 else:
-                    params["rootUri"] = server_root
-            if roots is not None:
-                message = roots.inbound(message)
+                    # Rewritten to the server root below, like any client path.
+                    params["rootUri"] = roots.client
+            message = roots.inbound(message)
+            request_id = message.get("id")
+            if "method" in message and isinstance(request_id, int | str):
+                unanswered.setdefault(request_id, []).append(time.monotonic())
             try:
                 stdin.write(frame(json.dumps(message).encode()))
                 await stdin.drain()
@@ -151,9 +195,33 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 # server failure rather than raising out of the bridge.
                 logger.warning("openscad-lsp sent an unreadable message: %s", error)
                 return
-            if roots is not None:
-                message = roots.outbound(message)
-            await websocket.send_text(json.dumps(message))
+            if not isinstance(message, dict):
+                logger.warning("openscad-lsp sent an unreadable message: not a JSON object")
+                return
+            request_id = message.get("id")
+            if "method" not in message and isinstance(request_id, int | str):
+                sent = unanswered.get(request_id)
+                if sent:
+                    sent.pop(0)
+                    if not sent:
+                        del unanswered[request_id]
+            await websocket.send_text(json.dumps(roots.outbound(message)))
+
+    async def watchdog() -> None:
+        nonlocal close_code
+        while True:
+            await anyio.sleep(REQUEST_TIMEOUT / 10)
+            if (
+                unanswered
+                and time.monotonic() - min(sent[0] for sent in unanswered.values())
+                > REQUEST_TIMEOUT
+            ):
+                logger.warning(
+                    "openscad-lsp left a request unanswered for %gs; ending the session",
+                    REQUEST_TIMEOUT,
+                )
+                close_code = status.WS_1011_INTERNAL_ERROR
+                return
 
     try:
         async with anyio.create_task_group() as pumps:
@@ -165,19 +233,34 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
 
             pumps.start_soon(pump, to_server)
             pumps.start_soon(pump, to_client)
+            pumps.start_soon(pump, watchdog)
     finally:
         # Shielded: the handler can be cancelled while this runs (a server shutting
         # down, the test client), and an interrupted cleanup leaves the process behind.
         with anyio.CancelScope(shield=True):
             if process.returncode is None:
                 process.kill()
-            await process.wait()
+            with anyio.move_on_after(KILL_WAIT) as waiting:
+                await process.wait()
+            if waiting.cancelled_caught:
+                # Stuck in the kernel: holding the permit for it would be the wedge
+                # all over again, so it is let go and counted instead.
+                reaper = asyncio.ensure_future(process.wait())
+                reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
+                _unreaped[process] = reaper
+                logger.warning(
+                    "killed openscad-lsp (pid %d) was not reaped within %gs; "
+                    "%d killed server(s) not yet reaped",
+                    process.pid,
+                    KILL_WAIT,
+                    len(_unreaped),
+                )
             # Anything but our own kill means it went on its own: say so, or a server
             # that crashes on every session is invisible.
-            if process.returncode not in (0, -signal.SIGKILL):
+            if process.returncode not in (None, 0, -signal.SIGKILL):
                 logger.warning("openscad-lsp exited with status %d", process.returncode)
             if (
                 websocket.client_state == WebSocketState.CONNECTED
                 and websocket.application_state == WebSocketState.CONNECTED
             ):
-                await websocket.close()
+                await websocket.close(code=close_code)

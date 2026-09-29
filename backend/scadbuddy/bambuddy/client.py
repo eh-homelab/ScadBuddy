@@ -319,17 +319,20 @@ class BambuddyClient:
     async def archives(
         self,
         *,
-        printer_id: int,
+        printer_id: int | None = None,
         limit: int = 20,
         offset: int = 0,
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> list[Archive]:
-        """This printer's archives, optionally within a date window. Bambuddy's order is
+        """Archives, of one printer or all, optionally within a date window (on
+        ``created_at``, which is when the print was dispatched). Bambuddy's order is
         not documented, so callers sort; ``limit`` keeps the read small. There is no
         filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
-        params: dict[str, Any] = {"printer_id": printer_id, "limit": limit}
+        params: dict[str, Any] = {"limit": limit}
+        if printer_id is not None:
+            params["printer_id"] = printer_id
         if offset:
             params["offset"] = offset
         if date_from is not None:
@@ -499,6 +502,18 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        """``GET /library/files?folder_id=`` — the files directly in one folder (#317)."""
+        what = f"list the files in library folder {folder_id}"
+        response = await self._send(
+            "GET",
+            "/library/files",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id},
+        )
+        return [LibraryFile.model_validate(row) for row in self._rows(response, what=what)]
+
     async def library_file(self, file_id: int) -> LibraryFile:
         """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
         response = await self._send(
@@ -509,7 +524,7 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
-    async def library_files(self, *, folder_id: int | None) -> list[LibraryListRow]:
+    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
         """``GET /library/files/`` — one folder's files, or the root's without one
         (``include_root`` defaults to true). One read, however many files: Bambuddy
         does not paginate it."""

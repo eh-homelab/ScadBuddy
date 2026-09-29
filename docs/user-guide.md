@@ -265,10 +265,13 @@ Top to bottom, the dialog is:
   badge only says where it rests ("rests on L"). Without the switch,
   each AMS feeds one side: a spool on a side whose nozzle is another size is grayed out
   with the reason (for example "L · 0.4 fitted"), and the dialog never opens on one.
-  If neither nozzle is the chosen size, the print is refused before upload.
+  If neither nozzle is the chosen size, the print is refused before upload. A spare
+  hotend of the chosen size in the H2C's rack counts for one side, since the printer
+  swaps it on for the print.
 - **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
   there is no per-side size control. Sizes installed in the rack are marked
-  "(installed)". A size neither mounted nozzle has is refused before upload; if the
+  "(installed)". A size neither mounted nozzle has, and the rack holds no spare of, is
+  refused before upload (on a single-nozzle printer, a size its nozzle isn't); if the
   printer doesn't report what's mounted, picking one the rack lacks warns you to install
   it first. Advanced adds
   Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
