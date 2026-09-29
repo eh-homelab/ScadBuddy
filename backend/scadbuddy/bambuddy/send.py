@@ -1,47 +1,37 @@
-"""The two "send to Bambuddy" flows and the sidebar registration.
+"""The send bar's library upload, the upload the print run shares, and the sidebar link.
 
 Kept out of the route module so they can be tested against respx recordings without
-a FastAPI app, and so the route stays a thin adapter.
+a FastAPI app, and so the route stays a thin adapter. The send bar only uploads
+(#312); slicing and queueing is the print dialog's run, in
+``scadbuddy.bambuddy.print_run``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Literal
 
 from fastapi import status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
-from scadbuddy.bambuddy.models import (
-    ExternalLink,
-    Pipeline,
-    PipelineRunRequest,
-    PresetRef,
-    Printer,
-    QueueItemCreate,
-    SliceRequest,
-)
+from scadbuddy.bambuddy.models import ExternalLink
 from scadbuddy.bambuddy.options import PrintOptions, resolve
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
-from scadbuddy.render.plate import PlateFitError, PlateGeometry, nozzle_diameter_of, plate_for
+from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.recolour import recolour_3mf
 
 logger = logging.getLogger(__name__)
-
-SendMode = Literal["library", "queue"]
 
 SIDEBAR_NAME = "ScadBuddy"
 # Earlier builds registered the link as "Customize"; adopt and rename it rather than
@@ -49,38 +39,27 @@ SIDEBAR_NAME = "ScadBuddy"
 LEGACY_SIDEBAR_NAMES = frozenset({"Customize"})
 SIDEBAR_ICON = "shapes"
 
-QUEUE_PATH = "/queue"
 LIBRARY_PATH = "/library"
-
-# Two different things are called a "plate" in this module, and they are not
-# interchangeable. ``DEFAULT_PLATE`` is the *index* of the plate on the bed, which
-# Bambuddy's SliceRequest and QueueItemCreate take (#106). ``FALLBACK_PLATE`` is
-# the plate *geometry* the 3MF is laid out against when no printer is known (#105).
-DEFAULT_PLATE = 1
 
 
 class SendRequest(BaseModel):
-    mode: SendMode = "library"
-    #: The per-send quantity. Left unset it falls back to the remembered ``quantity``
-    #: option, and then to Bambuddy's own default of 1.
-    copies: int | None = Field(default=None, ge=1, le=1000)
-    #: Per-request overrides, the most specific scope. Nothing here is remembered.
-    options: PrintOptions = Field(default_factory=PrintOptions)
+    """The send bar's body. It only uploads to the library (#312).
+
+    ``mode`` stays so that a client still asking for the removed ``"queue"`` mode is
+    refused with a 422 rather than silently getting an upload it did not ask for. Any
+    other field an older client sends (``copies``, ``options``) is ignored.
+    """
+
+    mode: Literal["library"] = "library"
 
 
 class SendResult(BaseModel):
-    mode: SendMode
     library_file_id: int
     filename: str
-    pipeline_run_id: int | None = None
-    queue_item_id: int | None = None
-    #: Deep link into Bambuddy for what this send produced.
+    #: Bambuddy's library page, where the upload landed.
     bambuddy_url: str | None = None
     #: The "Edit in ScadBuddy" link attached to the library file, when one is known.
     edit_url: str | None = None
-    #: What was actually sent, after the four scopes were merged. Unset fields were
-    #: left to Bambuddy.
-    options: PrintOptions = Field(default_factory=PrintOptions)
 
 
 class SidebarLink(BaseModel):
@@ -116,9 +95,8 @@ class Target:
     """What the 3MF is laid out for: the target's plate and, when known, its nozzle."""
 
     plate: PlateGeometry
-    #: The nozzle the run chose, or read off the pipeline's printer preset name (#126).
-    #: ``None`` — no pipeline, no printer preset, or a name that states no nozzle —
-    #: keeps the placeholder.
+    #: The nozzle the print run chose (#126). ``None`` — the send bar, which chooses
+    #: none — keeps the placeholder.
     nozzle_diameter: str | None = None
     #: One colour per filament, from the spools the run chose (#476). ``None`` — the
     #: send bar, which chooses no spools — keeps the model's own colours.
@@ -140,106 +118,30 @@ class Target:
         return key
 
 
-async def _target_model_and_preset(
-    client: BambuddyClient, settings: StoredSettings, slug: str, *, pipeline_id: int | None = None
-) -> tuple[str | None, PresetRef | None]:
-    """Which printer model this output is heading for, as Bambuddy names it, and the
-    printer preset of the pipeline in play.
-
-    The pipeline wins over the globally configured printer, the same precedence
-    :meth:`StoredSettings.pipeline_for` gives the print itself. A pipeline aimed
-    at a printer *class* names the model directly; one aimed at a specific
-    printer has to be resolved through the printer list. A ``None`` model — no pipeline,
-    no printer, or a printer Bambuddy reports without a model — is not an error;
-    it means the default plate. ``pipeline_id`` names the pipeline actually in play
-    when the caller has already chosen one that is not the slug's default — a run
-    request may override it (#86), and the plate has to follow the same pipeline the
-    print will use, not the one the settings would have picked.
-    """
-    pipeline_id = pipeline_id if pipeline_id is not None else settings.pipeline_for(slug)
-    if pipeline_id is None and settings.printer_id is None:
-        # Nothing to resolve against, so do not spend two round trips finding out.
-        return None, None
-    printers: list[Printer] | None = None
-    printer_preset: PresetRef | None = None
-    if pipeline_id is not None:
-        pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
-        if pipeline is not None:
-            printer_preset = pipeline.printer_preset
-            if pipeline.target_model_class:
-                return pipeline.target_model_class, printer_preset
-            if pipeline.target_printer_id is not None:
-                printers = await client.printers()
-                target = next(
-                    (row for row in printers if row.id == pipeline.target_printer_id), None
-                )
-                if target is not None and target.model:
-                    return target.model, printer_preset
-    if settings.printer_id is not None:
-        printers = printers if printers is not None else await client.printers()
-        target = next((row for row in printers if row.id == settings.printer_id), None)
-        if target is not None and target.model:
-            return target.model, printer_preset
-    return None, printer_preset
-
-
-async def _nozzle_diameter(client: BambuddyClient, preset: PresetRef | None) -> str | None:
-    """The nozzle ``preset``'s name states, from ``/slicer/presets`` (#126).
-
-    Bambuddy has no preset-by-id route, and a :class:`PresetRef` carries no name, so
-    this reads the catalogue. The value is only *reported* — Bambuddy slices with the
-    pipeline's presets, never this field — so a catalogue that cannot be read degrades
-    to the placeholder rather than failing the send.
-    """
-    if preset is None:
-        return None
-    try:
-        catalogue = await client.presets()
-    # ValueError covers a 200 whose body is not JSON or not a catalogue (both
-    # JSONDecodeError and pydantic's ValidationError subclass it).
-    except (ApiError, ValueError):
-        logger.warning(
-            "could not read the preset catalogue; the 3MF keeps the placeholder nozzle",
-            extra={"preset_source": preset.source, "preset_id": preset.id},
-        )
-        return None
-    for tier in (catalogue.cloud, catalogue.standard, catalogue.local, catalogue.orca_cloud):
-        for row in tier.printer:
-            if row.source == preset.source and row.id == preset.id:
-                return nozzle_diameter_of(row.name)
-    return None
-
-
 async def target_for(
     client: BambuddyClient,
     settings: StoredSettings,
-    slug: str,
     *,
-    pipeline_id: int | None = None,
     printer_id: int | None = None,
     nozzle_diameter: str | None = None,
     colours: Sequence[str] | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
-    With an explicit ``printer_id`` and ``nozzle_diameter`` — the spool-first run, which
-    has chosen both (spec 2026-09-27 §4) — no pipeline is read: the model comes from the
-    printer list and the nozzle is the one chosen. Otherwise, as the send bar and the
-    eligibility check need, from the pipeline in play. ``colours`` are the chosen spools'
-    (#476), and only the spool-first run has any.
+    The plate is ``printer_id``'s, else the printer set in Settings, else the fallback
+    plate; a printer Bambuddy reports without a model falls back the same way. The
+    nozzle is stated only when the caller chose one: the print run does (spec
+    2026-09-27 §4), the send bar does not. ``colours`` are the chosen spools' (#476),
+    and only the print run has any.
     """
-    if printer_id is not None and nozzle_diameter is not None:
-        printer = next((row for row in await client.printers() if row.id == printer_id), None)
-        model = printer.model if printer is not None else None
-        return Target(
-            _plate_for_model(model),
-            nozzle_diameter,
-            tuple(colours) if colours is not None else None,
-        )
-    model, printer_preset = await _target_model_and_preset(
-        client, settings, slug, pipeline_id=pipeline_id
-    )
-    return Target(_plate_for_model(model), await _nozzle_diameter(client, printer_preset))
+    chosen = tuple(colours) if colours is not None else None
+    printer_id = printer_id if printer_id is not None else settings.printer_id
+    if printer_id is None:
+        # Nothing to resolve against, so do not spend a round trip finding out.
+        return Target(_plate_for_model(None), nozzle_diameter, chosen)
+    printer = next((row for row in await client.printers() if row.id == printer_id), None)
+    model = printer.model if printer is not None else None
+    return Target(_plate_for_model(model), nozzle_diameter, chosen)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -307,7 +209,7 @@ async def upload_output(
     in Bambuddy with nothing pointing at it. It is tried again the next time an upload
     supersedes it.
     """
-    target = target if target is not None else await target_for(client, settings, meta.slug)
+    target = target if target is not None else await target_for(client, settings)
     payload = _laid_out_for(_read_3mf(store, meta), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
 
@@ -363,7 +265,7 @@ async def _ensure_copy(
     folder_id: int | None,
 ) -> tuple[int, str]:
     """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under."""
-    target = target if target is not None else await target_for(client, settings, meta.slug)
+    target = target if target is not None else await target_for(client, settings)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     for copy in await uploads.for_output(meta.id):
         if copy.folder_id != folder or copy.target_key != target.key:
@@ -494,8 +396,8 @@ async def attach_edit_link(
     """Best-effort: note the "Edit in ScadBuddy" link on the uploaded library file.
 
     Deliberately the last thing a send does, and deliberately swallowing every
-    ApiError. The note is cosmetic — the file is already uploaded and the print
-    already queued — so letting a timeout or a rejected note abort the send would
+    ApiError. The note is cosmetic — the file is already uploaded, and on the print
+    run already queued — so letting a timeout or a rejected note abort the send would
     fail the request for work that had in fact succeeded. Same reasoning as the
     tolerated 404 in upload_output.
 
@@ -517,72 +419,11 @@ async def attach_edit_link(
     return link
 
 
-def _check_colours(meta: OutputMeta, presets: list[PresetRef], what: str) -> None:
-    if len(meta.colors) > len(presets):
-        raise not_configured(
-            f"this output has {len(meta.colors)} colours but {what} provides only "
-            f"{len(presets)} filament presets"
-        )
-
-
-def _settings_slice_request(settings: StoredSettings, meta: OutputMeta) -> SliceRequest:
-    if settings.printer_preset is None or settings.process_preset is None:
-        raise not_configured(
-            "no slicer pipeline is configured, and the printer and process presets "
-            "needed to slice directly are not set either"
-        )
-    if not settings.filament_presets:
-        raise not_configured(
-            "no filament presets are configured; set one per AMS slot, in extruder order"
-        )
-    _check_colours(meta, settings.filament_presets, "the configured filament presets")
-    return SliceRequest(
-        printer_preset=settings.printer_preset,
-        process_preset=settings.process_preset,
-        filament_presets=settings.filament_presets,
-        filament_colours=list(meta.colors),
-        bed_type=settings.bed_type,
-        plate=DEFAULT_PLATE,
-    )
-
-
-def pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest:
-    """Slice from the pipeline's own presets, the way a pipeline run would.
-
-    This is what a send carrying print options does *instead of* running the pipeline.
-    ``POST /slicer-pipelines/{id}/run`` accepts only a source, ``copies`` and ``force``:
-    it answers 202 and its queue entries are created later, in a background task, from
-    Bambuddy's own model defaults — so there is no option passthrough and not even a
-    queue-entry id to ``PATCH`` by the time it returns. Bambuddy's own
-    ``_slice_request_from_pipeline`` reads the same four fields this does.
-    """
-    if pipeline.printer_preset is None or pipeline.process_preset is None:
-        raise not_configured(
-            f"slicer pipeline {pipeline.id} has no printer and process presets, so "
-            "ScadBuddy cannot slice with it to apply the print options"
-        )
-    if not pipeline.filament_presets:
-        raise not_configured(
-            f"slicer pipeline {pipeline.id} has no filament presets, so ScadBuddy "
-            "cannot slice with it to apply the print options"
-        )
-    _check_colours(meta, pipeline.filament_presets, f"slicer pipeline {pipeline.id}")
-    return SliceRequest(
-        printer_preset=pipeline.printer_preset,
-        process_preset=pipeline.process_preset,
-        filament_presets=pipeline.filament_presets,
-        filament_colours=list(meta.colors),
-        bed_type=pipeline.bed_type,
-        plate=DEFAULT_PLATE,
-    )
-
-
 def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
     """The per-request overlay. ``copies`` is each dialog's own control for the same
     quantity, and wins over an ``options.quantity`` sent alongside it.
 
-    Shared by the send bar and the print picker (#78) for the same reason
-    :func:`resolve_print_options` is.
+    The print run's per-request overlay (#78).
     """
     if copies is None:
         return options
@@ -594,8 +435,8 @@ def resolve_print_options(
 ) -> PrintOptions:
     """global → per-printer → per-model → per-request, least specific first.
 
-    Shared by the send bar and the print picker (#124), so the two can never disagree
-    about which remembered option wins.
+    The print run's merge (#124). The send bar no longer queues (#312), so it resolves
+    none.
     """
     return resolve(
         settings.print_options,
@@ -605,189 +446,25 @@ def resolve_print_options(
     )
 
 
-def _resolve_options(
-    settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
-) -> PrintOptions:
-    return resolve_print_options(
-        settings, meta.slug, printer_id, request_scope(request.copies, request.options)
-    )
-
-
-async def scope_printer(
-    settings: StoredSettings,
-    request_printer_id: int | None,
-    fetch_pipeline: Callable[[], Awaitable[Pipeline]] | None,
-) -> tuple[int | None, Pipeline | None]:
-    """The printer the per-printer scope keys on, and the pipeline if it had to be read.
-
-    That is the printer ScadBuddy believes it prints to: the one the request names, else
-    the configured one, else the pipeline's own target. Not the same thing as the queue
-    item's target, which a pipeline owns outright. Shared by the send bar and the print
-    picker (#141), each passing its own way of reading the pipeline, or ``None`` when
-    there is none to read.
-
-    The pipeline is read only when no printer is named and some per-printer option is
-    remembered at all. With a printer named the key is already known; with the map empty
-    the key cannot change the resolution. Reading it on any saved override regardless
-    would make one override cost every later send an extra GET it does not need, and turn
-    that GET's failure into a send failure.
-    """
-    printer_id = request_printer_id or settings.printer_id
-    if printer_id is not None or not settings.printer_print_options or fetch_pipeline is None:
-        return printer_id, None
-    pipeline = await fetch_pipeline()
-    return pipeline.target_printer_id, pipeline
-
-
-async def _queue_send(
-    client: BambuddyClient,
-    store: OutputStore,
-    uploads: BambuddyUploadStore,
-    meta: OutputMeta,
-    settings: StoredSettings,
-    request: SendRequest,
-    library_file_id: int,
-    filename: str,
-) -> SendResult:
-    """Queue mode, after the upload.
-
-    The resolved options decide the path, not the configuration alone: a pipeline run
-    cannot carry any of them, so a send that has one takes the slice-and-queue route
-    using that same pipeline's presets and target.
-    """
-    # The Settings pipeline; a legacy per-model one is no longer read.
-    pipeline_id = settings.pipeline_for(meta.slug)
-    # The printer the *option scopes* key on; see below, where conflating it with the
-    # queue item's target pinned a printer-class pipeline to one printer.
-    scope_printer_id, pipeline = await scope_printer(
-        settings,
-        None,
-        partial(client.pipeline, pipeline_id) if pipeline_id is not None else None,
-    )
-    options = _resolve_options(settings, meta, request, scope_printer_id)
-
-    if pipeline_id is not None and not options.beyond_pipeline():
-        run = await client.run_pipeline(
-            pipeline_id,
-            PipelineRunRequest(
-                source_library_file_id=library_file_id, copies=options.quantity or 1
-            ),
-        )
-        store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
-        if run.sliced_library_file_id is not None:
-            await uploads.record_sliced(
-                meta.id,
-                library_file_id,
-                SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
-            )
-        return SendResult(
-            mode="queue",
-            library_file_id=library_file_id,
-            filename=filename,
-            pipeline_run_id=run.id,
-            bambuddy_url=client.config.web_url(QUEUE_PATH),
-            options=options,
-            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
-        )
-
-    printer_id: int | None
-    target_model: str | None = None
-    if pipeline_id is not None:
-        if pipeline is None:  # the scope needed no pipeline, but the slice does
-            pipeline = await client.pipeline(pipeline_id)
-        slice_request = pipeline_slice_request(pipeline, meta)
-        # The pipeline's own target, never ``settings.printer_id``: a ``printer_class``
-        # pipeline resolves no printer id at all, and taking the configured one there
-        # pinned every copy to that single printer and silently ended the fan-out the
-        # pipeline exists for. Bambuddy picks among the class from ``target_model``.
-        printer_id = pipeline.target_printer_id
-        target_model = pipeline.target_model_class if printer_id is None else None
-        if printer_id is None and target_model is None:
-            raise not_configured(
-                f"slicer pipeline {pipeline.id} targets neither a printer nor a printer "
-                "model, so there is nothing to queue the print options to"
-            )
-    else:
-        printer_id = settings.printer_id
-        if printer_id is None:
-            raise not_configured(
-                "no slicer pipeline and no printer are configured, so there is nothing to queue to"
-            )
-        slice_request = _settings_slice_request(settings, meta)
-
-    accepted = await client.slice(library_file_id, slice_request)
-    job = await client.await_slice(accepted.job_id)
-    failure = job.failure
-    if failure is not None:
-        raise ApiError(status.HTTP_502_BAD_GATEWAY, f"Bambuddy failed to slice the file: {failure}")
-    sliced = job.result.library_file_id if job.result else None
-    if sliced is None:
-        raise ApiError(
-            status.HTTP_502_BAD_GATEWAY,
-            f"Bambuddy slice job {accepted.job_id} completed without a sliced file",
-        )
-
-    await uploads.record_sliced(
-        meta.id, library_file_id, SlicedCopy(id=sliced, preset_key=slice_request.preset_key)
-    )
-    item = await client.enqueue(
-        QueueItemCreate(
-            printer_id=printer_id,
-            target_model=target_model,
-            library_file_id=sliced,
-            plate_id=DEFAULT_PLATE,
-            # Only the options that were actually set; the rest stay Bambuddy's.
-            **options.queue_fields(),
-        )
-    )
-    store.record_send(
-        meta.id,
-        queue_item_id=item.id,
-        print_route="slice_queue",
-        slice_job_id=accepted.job_id,
-    )
-    # Slicing leaves a second library entry, and the queue references that one — so
-    # it is what a reader opens from the queue. Both are this output, so both get the
-    # link; the note is best-effort either way.
-    # Two independent best-effort notes; nothing waits on the first to send the second.
-    noted, noted_sliced = await asyncio.gather(
-        attach_edit_link(client, library_file_id, meta, settings),
-        attach_edit_link(client, sliced, meta, settings),
-    )
-    return SendResult(
-        mode="queue",
-        library_file_id=library_file_id,
-        filename=filename,
-        queue_item_id=item.id,
-        bambuddy_url=client.config.web_url(QUEUE_PATH),
-        options=options,
-        edit_url=noted or noted_sliced,
-    )
-
-
 async def send_output(
     client: BambuddyClient,
     store: OutputStore,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
-    request: SendRequest,
 ) -> SendResult:
+    """Upload the 3MF to the library and note the edit link on it. Nothing is queued.
+
+    A copy already in the inbox for the same target is reused rather than uploaded again.
+    """
     library_file_id, filename = await _ensure_copy(
         client, store, uploads, meta, settings, target=None, folder_id=None
     )
-
-    if request.mode == "library":
-        return SendResult(
-            mode="library",
-            library_file_id=library_file_id,
-            filename=filename,
-            bambuddy_url=client.config.web_url(LIBRARY_PATH),
-            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
-        )
-
-    return await _queue_send(
-        client, store, uploads, meta, settings, request, library_file_id, filename
+    return SendResult(
+        library_file_id=library_file_id,
+        filename=filename,
+        bambuddy_url=client.config.web_url(LIBRARY_PATH),
+        edit_url=await attach_edit_link(client, library_file_id, meta, settings),
     )
 
 

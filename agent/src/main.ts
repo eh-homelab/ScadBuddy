@@ -1,4 +1,5 @@
-import { serve } from '@hono/node-server'
+import { serve, upgradeWebSocket } from '@hono/node-server'
+import { WebSocketServer } from 'ws'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
@@ -24,6 +25,7 @@ import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
+import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
@@ -119,6 +121,12 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
+// `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
+// `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
+// (routes/mcpAuthMode.ts), so both report the same thing. A read that throws
+// makes /mcp fail closed (mcp/http.ts).
+const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo)
 // The registry's services (#251), shared by /mcp and every session's
 // in-process tools. `pending` is swapped for the ai_approvals store below once
 // the sessions (and so the approval service) exist.
@@ -139,10 +147,6 @@ const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cache
 // One store for Settings (routes/mcpTokens.ts) and /mcp.
 const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
-// Sessions (#300) and their approvals (#258). Nothing starts a session over
-// HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
-// expiry sweep are live so that approvals left pending by a restart can be
-// seen, decided or expired.
 // Whether the headless browser's Chromium can keep its sandbox in this pod
 // (harness/headlessSandbox.ts): probed once, on the first turn that uses the
 // browser, and said loudly either way.
@@ -159,6 +163,10 @@ const chromiumSandbox = (): Promise<boolean> =>
     return probe.available
   }))
 
+// Sessions (#300) and their approvals (#258): started from the assistant
+// panel's socket (routes/chat.ts) and the session routes (routes/sessions.ts).
+// The approval routes and the expiry sweep also serve approvals left pending
+// by a restart.
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -214,12 +222,14 @@ const app = createApp({
   packageInstaller,
   settings,
   tokens: database ? tokens : undefined,
+  aiSettings: settings,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
-  ...(sessions ? { approvals: sessions.approvals } : {}),
+  ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
+  upgradeWebSocket,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -235,18 +245,19 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
-    // Read per request (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
-    // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode`
-    // and `mcp_anonymous_cap` keys. A read that throws makes /mcp fail closed
-    // (mcp/http.ts).
-    authSettings: mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo),
+    authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
-const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {
+// The chat socket (routes/chat.ts). A frame is one panel message; 256 KiB
+// covers the largest (a 32k-character message plus its page context).
+const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
+const stopHeartbeat = startHeartbeat(wss)
+
+const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
       `database ${database ? 'configured' : 'not configured (AI disabled)'}; ` +
@@ -259,11 +270,19 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     stopSweeper?.()
+    stopHeartbeat()
+    // 1001 "going away": the panel reconnects to another replica or after the restart.
+    for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
+    // A peer that never answers the close frame would hold server.close() for
+    // ws's 30 s close timeout, past the 10 s deadline.
+    setTimeout(() => {
+      for (const socket of wss.clients) socket.terminate()
+    }, 2_000).unref()
     // Running turns stop; their pending approvals stay pending (approvals/service.ts).
     sessions?.abortAll()
     void shutdown({
-      // End the /mcp sessions first: their standing SSE streams would
-      // otherwise hold server.close() until the deadline.
+      // End the /mcp sessions and the session event streams first: their
+      // standing SSE responses would otherwise hold server.close() until the deadline.
       closeSessions: async () => {
         await app.close()
         resources.close()

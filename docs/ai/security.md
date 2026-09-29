@@ -245,8 +245,43 @@ warning in the log. A read that fails makes `/mcp` answer as `bearer` with no to
 verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
 While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
 and again whenever the settings change, not on every request. Outward calls still stop
-at the approval gate in every mode. There is no Settings route or UI for these keys yet
-(#255); [operating.md](operating.md#10-mcp-auth-mode) shows how to set them.
+at the approval gate in every mode.
+
+Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)):
+
+- `PUT` is a settings write, so outward tier (spec §8.1). It passes the same interim gate
+  as the credential and token writes (`uiRequestProblem` in
+  [`guard.ts`](../../agent/src/routes/guard.ts): the UI's origin through the HTTPS
+  ingress, JSON only), and `GET` passes `uiReadProblem`. The limitation stated there
+  applies: this is not an approval, and anyone who can reach Settings can change the
+  mode (spec §8.3, "Stated plainly").
+- It sets `bearer` or `disabled` and the cap. `oidc` is refused: it is on while the OIDC
+  configuration is enabled (#262), not a value of this key.
+- Both keys are written in one transaction, so no request sees the new mode with the
+  old cap. The write is a compare-and-set: the body carries the stored mode and cap the
+  page showed (`expected`), and the transaction locks `ai_settings` against other writers,
+  re-reads them and answers `409` without writing when they differ. A stale Settings tab
+  therefore cannot turn authentication off without the confirmation the current setting
+  would have asked for.
+- Each change is logged as soon as it commits, before anything is read back, with the
+  client the trusted ingress names (the last `X-Forwarded-For` value, believed only from a
+  `SCADBUDDY_AGENT_TRUSTED_PROXIES` peer) and the socket peer.
+- `GET` answers through the same `mcpAuthSettings()` reader `/mcp` uses, so `mode` is
+  what `/mcp` applies (a stored unknown value shows as its fail-closed value).
+  `configured_mode` is the stored key. While OIDC is enabled, `mode` is `oidc` even when
+  `configured_mode` is `disabled`; a `PUT` of `disabled` then stores it and answers
+  `mode: "oidc"`, and Settings says OIDC still applies rather than that auth is off. A
+  stored `"oidc"` without an enabled configuration reads as `bearer`.
+- The UI asks for an explicit confirmation before it saves a change that lets
+  unauthenticated callers do more: switching to `disabled`, or raising the anonymous
+  cap while `disabled` stays on. It asks while OIDC is on too, saying the choice applies
+  once OIDC is turned off. It shows a warning in the section while calls without a token
+  are allowed, or would be once OIDC is turned off. **That confirmation is UI-only.** The `PUT` route does not require
+  it, so a request that passes the interim gate changes the mode without one; a
+  server-side approval for settings writes is #258.
+  [operating.md](operating.md#10-mcp-auth-mode) shows how to set the keys in the database
+  instead.
 
 ## MCP prepare/confirm on the approval store
 
@@ -448,7 +483,10 @@ only fetches, vets and stores the pin with its review. Nothing loads until the a
 approves that exact `commit_sha` and `content_hash` through
 `POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
 `CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
-until the admin approves the new one after seeing its file diff. The routes use the
+until the admin approves the new one after seeing its file diff. A re-pin fetched from
+another repository or path than the current pin (a marketplace entry that moved) is
+shown as such in the review, and approving it leaves the package disabled: the new
+source loads only once the admin enables it again. The routes use the
 same UI guard as credential writes, with the same limitation (Known limitations, 1).
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit

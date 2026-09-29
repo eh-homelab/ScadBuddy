@@ -112,17 +112,22 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
   parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
-  (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
+  (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
   a save never moves a template's revision; a template's own read-only ones in the `presets` list of its
-  `model.json`, with a legacy `presets.json` still read).
+  `model.json`, with a legacy `presets.json` still read), uploads for `// file`
+  parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
+  usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
-  the mocked e2e run.
+  the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
+  `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
+  up without editing `handlers.ts`, and must export `handlers` (and optionally
+  `reset`) (#508).
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
@@ -131,9 +136,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   variable the backend reads; the one origin allowed to write) and
   `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
   env vars; AI settings live in the database.
-  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
-  `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
+  `src/app.ts` is the Hono server (`/healthz`, `/api/v1/ai/status`, plus
+  `src/routes/credentials.ts` for `/api/v1/ai/credentials`, and the assistant's
+  WebSocket `/api/v1/ai/chat` and `/api/v1/ai/sessions` in `src/routes/chat.ts` and
+  `src/routes/sessions.ts`, backed by `SessionManager`). Every route that must know "is this the UI's origin"
+  (credential writes, `/mcp`, and the chat socket and session routes under `/api/v1/ai/*`) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
@@ -243,13 +250,27 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `open_in_new_tab=false`, which Bambuddy renders in a sandboxed iframe at
   `/external/{id}` with `sandbox="allow-scripts allow-same-origin allow-forms
   allow-popups allow-popups-to-escape-sandbox"` (verified in the 1.2.5.5 bundle).
-- Consequences in `frontend/src/lib/embed.ts`: downloads are fetched as a blob and
-  opened with `target=_blank`; deep links to Bambuddy use `window.open(..., '_blank')`
-  when embedded.
+- Downloads (`frontend/src/lib/embed.ts`): the sandbox has no `allow-downloads`, so
+  Chromium silently drops a download started in the frame, `target=_blank` or not.
+  When embedded, `downloadBlob` opens a blank popup first (it escapes the sandbox via
+  `allow-popups-to-escape-sandbox` and is same-origin via `allow-same-origin`, so it can
+  use the frame's blob URL), fetches the file as a blob, and clicks the download anchor
+  in the popup. The popup is opened before the fetch, while the click still permits it.
+  A blocked popup, or one closed before the file loaded, is an error the user sees
+  (`DownloadBlockedError`, `DownloadWindowClosedError`), never a fallback to the
+  frame's own anchor, which would fail silently.
+  `e2e/downloads.spec.ts` checks this in a replica of the frame.
+- Deep links to Bambuddy use `window.open(..., '_blank')` when embedded.
 - Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
   where it is refused (`document.fullscreenEnabled` is false, or the request is
   rejected) the full-screen view covers the frame instead.
+- The assistant (the agent's `/api/v1/ai/*`, including its WebSocket `/api/v1/ai/chat`)
+  is reached on ScadBuddy's own origin: the ingress routes those paths to the agent
+  sidecar (AI spec §4.2, `docs/ai/operating.md` §1.1). The sandbox's
+  `allow-same-origin` is what keeps the frame's `Origin` ScadBuddy's own, and the agent's
+  origin allowlist requires that. This is inferred from the sandbox attribute above and
+  has not been exercised inside a live Bambuddy.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 
