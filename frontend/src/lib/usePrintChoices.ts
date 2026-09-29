@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError } from '../api/client'
+import { ApiError } from '../api/client'
 import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
 import { DEFAULT_NOZZLES, refKey } from './printChoices'
+import { sourceApi, sourceKey, type PrintSource } from './printSource'
+import { useLatest } from './useLatest'
 
 export type Tier = NonNullable<PrintChoices['tier']>
 
@@ -18,7 +20,7 @@ export interface PrintSelection {
 }
 
 /**
- * The print dialog's one read, `GET /print/outputs/{id}/choices`, for the chosen printer,
+ * The print dialog's one read, the source's choices read, for the chosen printer,
  * and the choices made over it: the nozzles, tier or process, plate type, per-slot preset
  * overrides and which plate of the output (#83).
  *
@@ -28,7 +30,9 @@ export interface PrintSelection {
  * `sourceKey` identifies what is being printed; what belongs to one source is reset when
  * it changes, here and by the caller's own effect keyed on it.
  */
-export function usePrintChoices(open: boolean, outputId: string | undefined) {
+export function usePrintChoices(open: boolean, source: PrintSource | undefined) {
+  const key = sourceKey(source)
+  const latest = useLatest(source)
   const [choices, setChoices] = useState<ChoicesView | null>(null)
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
@@ -69,12 +73,13 @@ export function usePrintChoices(open: boolean, outputId: string | undefined) {
     setAdvanced(nextProcess !== null || nextNozzles.some((n) => n.flow === 'high_flow'))
   }
   const reload = useCallback(() => {
-    if (!open || !outputId) return
+    const current = latest.current
+    if (!open || !current || sourceKey(current) !== key) return
     const token = (attempt.current += 1)
     setLoading(true)
     setLoadError(null)
-    api
-      .getChoices(outputId, askedPrinter)
+    sourceApi(current)
+      .getChoices(askedPrinter)
       .then((next) => {
         if (token !== attempt.current) return
         setChoices(next)
@@ -93,33 +98,33 @@ export function usePrintChoices(open: boolean, outputId: string | undefined) {
       .finally(() => {
         if (token === attempt.current) setLoading(false)
       })
-  }, [open, outputId, askedPrinter])
+  }, [open, key, askedPrinter, latest])
   useEffect(() => {
     reload()
   }, [reload])
 
   // One output's plates and overrides do not survive a change of output. PrintPicker
   // resets its print options on the same `sourceKey`; the two are one reset.
-  const sourceKey = outputId
+  const resetKey = key
   useEffect(() => {
     setPlate(1)
     setPlates([])
     setOverrides({})
     seeded.current = false
-  }, [sourceKey])
+  }, [resetKey])
 
   useEffect(() => {
-    if (!open || !outputId) return
+    if (!open || !latest.current) return
     let live = true
-    api
-      .getOutputPlates(outputId)
+    sourceApi(latest.current)
+      .getPlates()
       .then((next) => live && setPlates(next))
       // One plate is what every ScadBuddy render is, so an unreadable list asks nothing.
       .catch(() => live && setPlates([]))
     return () => {
       live = false
     }
-  }, [open, outputId])
+  }, [open, key, latest])
 
   const printerId = choices?.printer_id ?? null
   const printers = choices?.printers ?? []
@@ -174,7 +179,7 @@ export function usePrintChoices(open: boolean, outputId: string | undefined) {
 
   const selection: PrintSelection = { nozzles, tier, processName, bedType, overrides, plate }
   return {
-    sourceKey,
+    sourceKey: resetKey,
     choices,
     loading,
     loadError,
