@@ -49,6 +49,10 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   }
 }
 
+function unmounted(): Promise<never> {
+  return Promise.reject(new Error('the template UI is unmounted'))
+}
+
 export function createHost(deps: HostDeps): HostHandle {
   const listeners = new Set<(inputs: JsonObject) => void>()
   let live = true
@@ -80,14 +84,14 @@ export function createHost(deps: HostDeps): HostHandle {
       return deps.getSchema()
     },
     files: { url: (path) => api.uiFileUrl(deps.slug, deps.version, checkedUiPath(path)) },
-    generate: () => (live ? deps.generate() : Promise.reject(new Error('the template UI is unmounted'))),
+    generate: () => (live ? deps.generate() : unmounted()),
     openPrint: (outputId) => {
       if (live) deps.openPrint(outputId)
     },
     presets: {
-      list: () => deps.presets.list(),
-      save: (name) => deps.presets.save(name),
-      load: (id) => deps.presets.load(id),
+      list: () => (live ? deps.presets.list() : unmounted()),
+      save: (name) => (live ? deps.presets.save(name) : unmounted()),
+      load: (id) => (live ? deps.presets.load(id) : unmounted()),
     },
     describe: (fn) => {
       if (live) deps.onDescribe(fn)

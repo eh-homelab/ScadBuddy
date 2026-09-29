@@ -28,7 +28,11 @@ export interface Host {
   readonly api: number
   inputs: {
     get(): JsonObject
-    /** An RFC 7386 merge patch over the inputs; `null` deletes a key. */
+    /**
+     * An RFC 7386 merge patch over the inputs; `null` deletes a key. Parameters are the
+     * exception: they are typed values and are never deleted, so `null` inside `params`
+     * is refused. A UI returns one to its default by setting the default value.
+     */
     set(patch: JsonObject): void
     subscribe(fn: (inputs: JsonObject) => void): () => void
   }
