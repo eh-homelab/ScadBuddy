@@ -308,7 +308,7 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
 
 
 def test_recording_a_decision_without_a_database_is_a_503(client: TestClient, app: FastAPI) -> None:
-    # What `_build` gives when SCADBUDDY_DATABASE_URL is not set.
+    # Settings requires a database (#401), so only an override leaves no store.
     components = getattr(app.state, STATE_ATTR).components
     built = components.get(DECISIONS)
     components.override(DECISIONS, None)

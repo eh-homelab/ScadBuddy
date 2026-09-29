@@ -11,14 +11,14 @@ from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 
-#: In Postgres only. ``None`` without a database (until #401 makes one required): the
-#: routes that persist answer 503.
+#: In Postgres only. ``Settings`` requires a database (#401), so the built store is never
+#: ``None``; only ``Components.override`` sets that, and then the routes that persist
+#: answer 503.
 DECISIONS: Key[DecisionStore | None] = Key("decisions")
 
 
 def _build(core: Core, components: Components) -> DecisionStore | None:
-    url = core.settings.database_url
-    return PostgresDecisionStore(url) if url else None
+    return PostgresDecisionStore(core.settings.database_url)
 
 
 @asynccontextmanager
