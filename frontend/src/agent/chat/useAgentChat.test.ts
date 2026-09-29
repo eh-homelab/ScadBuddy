@@ -137,6 +137,29 @@ describe('useAgentChat', () => {
     expect(result.current.state.activeId).toBe('s1')
   })
 
+  it('keeps waiting for a queued first turn through failed reconnect attempts', () => {
+    let answer: SendResult = 'queued'
+    const t = scripted(() => answer)
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.send('hello', { route: '/' }))
+    // The back-off's next handshake fails too; the message is still queued.
+    act(() => t.h().onClose?.('Lost the connection to the assistant; reconnecting…'))
+    expect(result.current.state.awaitingStart).toBe(true)
+    answer = 'sent'
+    act(() => t.h().onOpen?.())
+    act(() => t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 'hello' })))
+    expect(result.current.state.activeId).toBe('s1')
+    // Once it went out, a drop before its session starts stops the wait as before.
+    act(() => result.current.select(null))
+    act(() => result.current.send('again', { route: '/' }))
+    act(() => t.h().onClose?.('Lost the connection to the assistant; reconnecting…'))
+    expect(result.current.state.awaitingStart).toBe(false)
+  })
+
   it('says a refused message was not sent, and stops waiting for its session', () => {
     const t = scripted(() => 'refused')
     const { result } = renderHook(() => useAgentChat(t.factory))

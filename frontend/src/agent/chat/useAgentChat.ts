@@ -25,6 +25,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   const transport = useRef<ChatTransport | null>(null)
   // The reducer's view, for callbacks that must not re-create on every delta.
   const latest = useRef(state)
+  /** A first turn is held by the transport for the reconnect, so its `awaitingStart` survives a failed attempt. */
+  const startQueued = useRef(false)
   useEffect(() => {
     latest.current = state
   }, [state])
@@ -45,6 +47,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
           t.send(clientMessage({ type: 'session.attach', sessionId: active }))
         }
         opened = true
+        // What was queued goes out right after this, so from here a drop loses it again.
+        startQueued.current = false
         dispatch({ type: 'connected' })
       },
       onFrame: (frame) => {
@@ -54,7 +58,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         else dispatch({ type: 'protocol-error', message: parsed.error })
       },
       onClose: (reason) => {
-        if (open) dispatch({ type: 'disconnected', reason })
+        if (open) dispatch({ type: 'disconnected', reason, keepStart: startQueued.current })
       },
     })
     // `connected` comes from onOpen only: the real socket is not open until its
@@ -82,7 +86,11 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // Like a decision, a message held for the reconnect is shown as such (the
     // composer has cleared); `connected` clears the notice when it goes out.
     if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
-    else if (result === 'queued') dispatch({ type: 'queued', message: QUEUED })
+    else if (result === 'queued') {
+      // A failed reconnect attempt before it goes out must not stop the wait for its session.
+      if (!activeId) startQueued.current = true
+      dispatch({ type: 'queued', message: QUEUED })
+    }
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {

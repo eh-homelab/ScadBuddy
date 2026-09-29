@@ -62,7 +62,8 @@ export interface ChatState {
 export type ChatAction =
   | { type: 'server'; event: ServerEvent }
   | { type: 'connected' }
-  | { type: 'disconnected'; reason?: string }
+  /** `keepStart`: the first turn awaiting its session is queued for the reconnect, not lost. */
+  | { type: 'disconnected'; reason?: string; keepStart?: boolean }
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
@@ -297,7 +298,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         connected: false,
-        awaitingStart: false,
+        awaitingStart: action.keepStart ? state.awaitingStart : false,
         notice: action.reason ?? 'Lost the connection to the assistant.',
       }
     case 'protocol-error':
