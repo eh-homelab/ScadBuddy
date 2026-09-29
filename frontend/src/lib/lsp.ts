@@ -161,3 +161,65 @@ export function socketUrl(path: string, page: string = window.location.href): st
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }
+
+/**
+ * Where the backend's bridge shows the model's pinned libraries (`LIBRARY_CLIENT_ROOT`
+ * in backend/scadbuddy/library/lsp.py): `file:///libraries/<name>@<commit>/<path>`.
+ * The commit is there so one URI is always one checkout's file: a model opened for
+ * an earlier pin never stands in for a later one's.
+ */
+export const LIBRARY_ROOT = 'file:///libraries/'
+
+/**
+ * A file a definition can land in outside the open one (#185): beside the model
+ * (`library` absent) or in one of its pinned libraries, at `commit`. `path` is decoded
+ * and relative, `/`-separated, as the backend's file routes take it.
+ */
+export interface DefinitionFile {
+  library?: string
+  commit?: string
+  path: string
+}
+
+/** A library's directory in its client URI: `<name>@<commit>`. */
+const LIBRARY_DIRECTORY = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63})@([0-9a-f]{40}(?:[0-9a-f]{24})?)$/
+
+/**
+ * A plain segment, as the backend's `_segments` (library/editor_files.py) takes one:
+ * not empty, no `.`/`..` or dot-file, no separator or NUL once decoded. Anything else
+ * could let the request URL's normalization move it off the `/files/` route.
+ */
+function plainSegment(segment: string): boolean {
+  return segment !== '' && !segment.startsWith('.') && !/[/\\\0]/.test(segment)
+}
+
+function decodedPath(rest: string): string | null {
+  try {
+    const segments = rest.split('/').map(decodeURIComponent)
+    return segments.every(plainSegment) ? segments.join('/') : null
+  } catch {
+    return null
+  }
+}
+
+/** The file `uri` names under the model's `root` or a library, or null for anywhere else. */
+export function definitionFile(uri: string, root: string): DefinitionFile | null {
+  if (uri.startsWith(root)) {
+    const path = decodedPath(uri.slice(root.length))
+    return path === null ? null : { path }
+  }
+  if (uri.startsWith(LIBRARY_ROOT)) {
+    const rest = uri.slice(LIBRARY_ROOT.length)
+    const slash = rest.indexOf('/')
+    if (slash <= 0) return null
+    const directory = LIBRARY_DIRECTORY.exec(rest.slice(0, slash))
+    const path = decodedPath(rest.slice(slash + 1))
+    return !directory || path === null ? null : { library: directory[1]!, commit: directory[2]!, path }
+  }
+  return null
+}
+
+/** How the editor names a definition's file: `helper.scad`, `BOSL2/shapes3d.scad`. */
+export function definitionLabel(file: DefinitionFile): string {
+  return file.library ? `${file.library}/${file.path}` : file.path
+}

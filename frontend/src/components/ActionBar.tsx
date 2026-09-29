@@ -15,6 +15,7 @@ import type {
 } from '../api/types'
 import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
+import type { CameraView } from '../lib/framing'
 import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
@@ -42,6 +43,8 @@ interface Props {
   captureImage: (options: SnapshotOptions) => Promise<Blob | null>
   /** The view's size in CSS pixels. */
   viewSize: () => { width: number; height: number }
+  /** #722 — the viewer's camera now, which the image dialog frames a copy of. */
+  cameraView?: () => CameraView | null
   /** The template, so the rendered image can be added to its media. */
   model?: ModelSummary
   onModelChanged?: (model: ModelSummary) => void
@@ -69,6 +72,7 @@ export function ActionBar({
   capture,
   captureImage,
   viewSize,
+  cameraView,
   model,
   onModelChanged,
   fit,
@@ -297,6 +301,7 @@ export function ActionBar({
         slug={slug}
         captureImage={captureImage}
         viewSize={viewSize}
+        cameraView={cameraView}
         model={model}
         onMediaChanged={onModelChanged}
         onClose={() => setImageOpen(false)}
@@ -311,8 +316,7 @@ export function ActionBar({
 
       <PrintPicker
         open={printOpen}
-        slug={slug}
-        output={output}
+        source={output ? { kind: 'output', output } : undefined}
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}

@@ -221,6 +221,7 @@ export function CustomizePage() {
     () => captureRef.current?.viewSize() ?? { width: 0, height: 0 },
     [],
   )
+  const cameraView = useCallback(() => captureRef.current?.cameraView() ?? null, [])
 
   // #254 — the parameter the agent last touched: the panel shows its tab, and the row
   // gets the highlight once it is on screen.
@@ -706,6 +707,7 @@ export function CustomizePage() {
               capture={capture}
               captureImage={captureImage}
               viewSize={viewSize}
+              cameraView={cameraView}
               model={modelState.data}
               onModelChanged={modelState.setData}
               fit={fit}
