@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useImperativeHandle, useState, type Ref } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -15,7 +15,13 @@ import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
+/** What a template UI's `host.openPrint` reaches (spec §4.3). */
+export interface ActionBarHandle {
+  openPrint(outputId: string): void
+}
+
 interface Props {
+  ref?: Ref<ActionBarHandle>
   slug: string
   job: Job | undefined
   rendering: boolean
@@ -45,6 +51,7 @@ interface Props {
 }
 
 export function ActionBar({
+  ref,
   slug,
   job,
   rendering,
@@ -64,6 +71,19 @@ export function ActionBar({
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openPrint: (outputId) => {
+        if (output?.id !== outputId) {
+          throw new Error(`output ${outputId} is not the one on screen; call generate() first`)
+        }
+        setPrintOpen(true)
+      },
+    }),
+    [output],
+  )
 
   const ready = job?.status === 'done' && !rendering
   const stale = Boolean(output) && output?.id !== undefined && !ready

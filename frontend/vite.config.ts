@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -14,7 +15,13 @@ export default defineConfig({
   // Vite's default host is the NAME `localhost`, which Node 17+ resolves
   // `verbatim`; on a host whose /etc/hosts maps it to ::1 first (GitHub
   // runners) vite binds ::1 only and every IPv4 poll is refused (#62).
-  preview: { host: '127.0.0.1', port: 4173 },
+  preview: {
+    host: '127.0.0.1',
+    port: 4173,
+    // The backend's PAGE_CSP (backend/scadbuddy/api/static.py), so the mocked e2e run
+    // meets the same policy a template UI does in production (spec §9).
+    headers: { 'Content-Security-Policy': readFileSync(new URL('./page-csp.txt', import.meta.url), 'utf8').trim() },
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,

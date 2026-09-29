@@ -58,6 +58,7 @@ import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
+import { UI_MODULES } from './templateUi'
 
 const base = '/api/v1'
 
@@ -1730,6 +1731,18 @@ export const handlers = [
     ], { has_readme: false })
     return HttpResponse.json(updated)
   }),
+
+  // #425 — a template's own UI files, live or pinned; the module graph is plain JS.
+  ...['/models/:slug/ui/*', '/models/:slug/versions/:commit/ui/*'].map((route) =>
+    http.get(`${base}${route}`, ({ params, request }) => {
+      const slug = decodeURIComponent(String(params['slug']))
+      const path = decodeURIComponent(new URL(request.url).pathname.split('/ui/')[1] ?? '')
+      const body = UI_MODULES[slug]?.[path]
+      return body === undefined
+        ? problem(404, 'Not Found', `no ui file '${path}'`)
+        : new HttpResponse(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } })
+    }),
+  ),
 
   http.get(`${base}/models/:slug`, ({ params }) => {
     landPreviews()

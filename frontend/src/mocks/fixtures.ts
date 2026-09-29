@@ -197,6 +197,9 @@ function image(id: string, caption = ''): MediaView {
 
 /** #274 — the template of mine with a gallery: three images and a video. */
 export const GALLERY_SLUG = 'creme-coaster'
+/** #425 — templates with their own interface: one that mounts, one that throws. */
+export const UI_DEMO_SLUG = 'ui-demo'
+export const UI_BROKEN_SLUG = 'ui-broken'
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -292,6 +295,34 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'mine',
     media: media[GALLERY_SLUG],
+  },
+  {
+    slug: UI_DEMO_SLUG,
+    name: 'UI Demo',
+    description: 'A template with its own interface.',
+    tags: ['custom-ui'],
+    updated_at: '2026-09-01T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'mine',
+    ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
+  },
+  {
+    slug: UI_BROKEN_SLUG,
+    name: 'UI Broken',
+    description: 'A template with its own interface.',
+    tags: ['custom-ui'],
+    updated_at: '2026-09-01T09:00:00Z',
+    has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
+    has_readme: false,
+    origin: 'mine',
+    ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
 ]
 
@@ -435,6 +466,8 @@ export const schemas: Record<string, CustomizerSchema> = {
   [BUILTIN_SLUG]: builtinSchema,
   // #280 — the template page's gallery needs a template with media that opens.
   [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
+  [UI_DEMO_SLUG]: keychainSchema,
+  [UI_BROKEN_SLUG]: keychainSchema,
 }
 
 export const fonts: FontFamily[] = [
