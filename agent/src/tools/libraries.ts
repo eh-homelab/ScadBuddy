@@ -6,8 +6,8 @@ import { defineTool, json, type Tool, ToolError } from './registry.js'
 
 // Libraries & fonts (issue #251): the library catalogue, pinning a library to a
 // model (a revision of the model's `libraries` list), installed fonts, the
-// Google Fonts catalogue, and installing a family. Routes:
-// backend/scadbuddy/api/{libraries,models,fonts}.py.
+// Google Fonts catalogue, and installing a family; include/use resolution and
+// the font checks are #253. Routes: backend/scadbuddy/api/{libraries,models,fonts}.py.
 
 const libraryName = z.string().min(1).describe('Library name, as list_libraries returns it')
 
@@ -247,11 +247,48 @@ export const libraryTools: Tool[] = [
     },
   }),
 
+  // Include/use resolution (#253): the backend resolves each target the way
+  // OpenSCAD's find_valid_path does (beside the file, then each pinned checkout
+  // on OPENSCADPATH), in backend/scadbuddy/library/includes.py. Read-only; the
+  // route is a POST only because it takes an unsaved source.
+  defineTool({
+    name: 'check_dependencies',
+    description:
+      "Resolve a model's `include <…>`/`use <…>` targets against its own files and pinned libraries, as a " +
+      'render would, without rendering or fetching anything. Each target is `resolved` (with the file and ' +
+      'library it resolved to) or `unresolved` with the reason and, when one exists, a `suggestion`: the ' +
+      'catalogue library to pin (pin_library), or one another model pins from its own URL ' +
+      '(pin_library_from_url). Also lists every `font = "…"` literal with the families not installed. Pass ' +
+      '`source` to check an unsaved edit. OpenSCAD only warns on a missing include and renders without it.',
+    input: z.object({
+      slug,
+      source: z
+        .string()
+        .max(1_000_000)
+        .optional()
+        .describe("Unsaved OpenSCAD source to check in place of the model's saved model.scad"),
+    }),
+    risk: 'read',
+    source: "the model's own source and file names, and library data fetched from third-party git repositories",
+    routes: ['POST /api/v1/models/{slug}/dependencies'],
+    handler: async ({ slug, source }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/models/{slug}/dependencies', {
+            params: { path: { slug } },
+            body: { source: source ?? null },
+          }),
+          `check the dependencies of ${slug}`,
+        ),
+      ),
+  }),
+
   defineTool({
     name: 'list_fonts',
     description:
-      'Font families installed for rendering. A `// font` parameter must name one exactly: a missing family ' +
-      'silently falls back to DejaVu and changes the geometry.',
+      'Font families installed for rendering. A `// font` value must name one of them (case and spaces do not ' +
+      'matter): OpenSCAD itself would silently draw a missing family in DejaVu Sans with other geometry, so ' +
+      'render_model and save_preset refuse one with an error naming it. install_font adds a family.',
     input: z.object({}),
     risk: 'read',
     source:
@@ -278,7 +315,10 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'install_font',
-    description: 'Install a Google Fonts family onto the data volume so renders can use it.',
+    description:
+      'Install a Google Fonts family onto the data volume so renders can use it. The backend then checks that ' +
+      'fontconfig resolves the family where renders run, and answers an error if it does not (the files may ' +
+      'name another family: see list_fonts).',
     input: z.object({ family: z.string().min(1).max(100), force: z.boolean().default(false) }),
     risk: 'write',
     routes: ['POST /api/v1/fonts/install'],

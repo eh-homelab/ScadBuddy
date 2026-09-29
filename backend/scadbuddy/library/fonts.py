@@ -3,6 +3,20 @@
 ``list_installed`` is the ground truth — it asks fontconfig, so it covers both the
 families baked into the image and anything downloaded onto the data volume. A
 catalogue row is reported as installed only when fontconfig agrees.
+
+That is also what OpenSCAD sees. Its ``FontCache`` (src/FontCache.cc,
+https://github.com/openscad/openscad/blob/master/src/FontCache.cc) loads fontconfig's
+config and adds only its bundled ``fonts`` resource directory and ``$HOME/.fonts``;
+``openscad --info`` in a local build of the image (measured 2026-09-29, #253) lists
+fontconfig's own directories and ``$HOME/.fonts``, and no bundled one. So ``fc-list``
+under the render's environment (:func:`~scadbuddy.core.fontconfig.env_for`) answers
+for the render.
+
+What OpenSCAD cannot do is refuse a missing family: ``find_face_fontconfig`` parses
+the font string with ``FcNameParse`` and takes ``FcFontMatch``'s best match, which for
+a family that is not installed is the default font (DejaVu Sans in this image),
+silently, with other geometry. :meth:`FontService.missing_families` is how a caller
+refuses one first (#253).
 """
 
 from __future__ import annotations
@@ -13,7 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -68,6 +82,70 @@ class FontNotFoundError(KeyError):
     """The requested family is not in the catalogue."""
 
 
+class FontNotResolvedError(RuntimeError):
+    """An install wrote a family's files, but fontconfig does not resolve the family
+    afterwards, so a render naming it would fall back to the default font (#253)."""
+
+    def __init__(self, family: str, files: list[str]) -> None:
+        super().__init__(family)
+        self.family = family
+        self.files = files
+
+
+def _split_fc(text: str, separators: str, stop: str = "") -> list[str]:
+    """``text`` split at each unescaped character of ``separators``, and cut at the
+    first unescaped one of ``stop``, with fontconfig's backslash escapes undone.
+
+    fontconfig's name syntax escapes ``\\``, ``-``, ``:`` and ``,`` with a backslash:
+    ``FcNameUnparse`` writes them so (``fc-list`` prints "IBM 3270 Semi\\-Narrow") and
+    ``FcNameParse`` reads them so ("Font Names",
+    https://www.freedesktop.org/software/fontconfig/fontconfig-user.html).
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char in stop:
+            break
+        elif char in separators:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def normalise_family(family: str) -> str:
+    """A family name as fontconfig compares it: ignoring case and blanks
+    (``FcStrCmpIgnoreBlanksAndCase``,
+    https://www.freedesktop.org/software/fontconfig/fontconfig-devel/fcstrcmpignoreblanksandcase.html)."""
+    return family.replace(" ", "").casefold()
+
+
+def font_families(font: str) -> list[str]:
+    """The families an OpenSCAD font string names, read the way ``FcNameParse`` reads
+    it: up to the first unescaped ``-`` (a point size follows) or ``:`` (properties),
+    split at unescaped commas (a fallback list).
+
+    ``"Liberation Sans:style=Bold"`` names one family; ``""`` and ``":style=Bold"``
+    name none, which is the default font.
+    """
+    return [family.strip() for family in _split_fc(font, ",", stop="-:") if family.strip()]
+
+
+def cut_by_dash(font: str) -> bool:
+    """Whether a bare ``-`` ends the family part of ``font`` before its ``:``, which
+    fontconfig reads as the start of a point size: ``"Unifont-JP"`` is family
+    "Unifont" at size "JP". Written ``"Unifont\\-JP"`` it is the family."""
+    return _split_fc(font, "", stop=":")[0] != _split_fc(font, "", stop="-:")[0]
+
+
 def parse_fc_list(output: str) -> list[FontFamily]:
     """``fc-list : family style`` prints ``Family[,alias]:style=Style[,alias]``.
 
@@ -80,10 +158,11 @@ def parse_fc_list(output: str) -> list[FontFamily]:
         if not line:
             continue
         head, separator, tail = line.partition(":style=")
-        family = head.split(",", 1)[0].strip()
+        # Unescaped: a family is listed as OpenSCAD matches it, not as fc-list quotes it.
+        family = _split_fc(head, ",")[0].strip()
         if not family:
             continue
-        style = tail.split(",", 1)[0].strip() if separator else ""
+        style = _split_fc(tail, ",")[0].strip() if separator else ""
         styles = families.setdefault(family, set())
         if style:
             styles.add(style)
@@ -116,6 +195,26 @@ def list_fonts(env: Mapping[str, str] | None = None) -> list[FontFamily]:
     """Font families fontconfig can resolve, or an empty list without fontconfig."""
     output = _run_fc([FC_LIST, ":", "family", "style"], os.environ if env is None else env)
     return parse_fc_list(output) if output is not None else []
+
+
+def resolvable_families(env: Mapping[str, str] | None = None) -> set[str] | None:
+    """Every family name fontconfig resolves, each alias included, as
+    :func:`normalise_family` writes it; None without fontconfig to ask.
+
+    Outline, scalable faces only: the ones OpenSCAD's ``FontCache::init_pattern`` asks
+    fontconfig for.
+    """
+    output = _run_fc(
+        [FC_LIST, ":outline=true:scalable=true", "family"], os.environ if env is None else env
+    )
+    if output is None:
+        return None
+    return {
+        normalise_family(name)
+        for line in output.splitlines()
+        for name in _split_fc(line.strip(), ",")
+        if name.strip()
+    }
 
 
 class FontService:
@@ -167,6 +266,18 @@ class FontService:
 
     def installed_families(self) -> set[str]:
         return {family.family.casefold() for family in self.installed()}
+
+    def resolvable(self) -> set[str] | None:
+        """:func:`resolvable_families` under the render's own environment."""
+        return resolvable_families(self.env())
+
+    def missing_families(self, families: Iterable[str]) -> list[str] | None:
+        """Those of ``families`` fontconfig does not resolve, which a render would
+        silently draw in the default font instead; None without fontconfig to ask."""
+        known = self.resolvable()
+        if known is None:
+            return None
+        return [family for family in families if normalise_family(family) not in known]
 
     def refresh_cache(self) -> None:
         if _run_fc([FC_CACHE, "--force", str(self.root)], self.env()) is None:
@@ -267,6 +378,14 @@ class FontService:
         self._write_manifest(font, written, licence)
         # fc-cache walks the whole font tree and is slow enough to stall the loop.
         await asyncio.to_thread(self.refresh_cache)
+        # Files on disk are not a family that resolves: a cache fc-cache did not
+        # rebuild, a face fontconfig will not load, or TTFs that name another family
+        # all leave a render falling back to the default font (#253). Asked the way
+        # a render asks, under its environment. Without fontconfig nothing can be
+        # checked, and no render could use the family either.
+        missing = await asyncio.to_thread(self.missing_families, [font.family])
+        if missing:
+            raise FontNotResolvedError(font.family, written)
         return InstalledFamily(
             family=font.family,
             styles=await asyncio.to_thread(self._styles_of, font),

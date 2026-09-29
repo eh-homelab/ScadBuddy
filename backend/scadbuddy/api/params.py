@@ -12,6 +12,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.fonts import FontService, cut_by_dash, font_families, normalise_family
 from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.jobs import ModelSource, resolve_source
@@ -81,6 +82,65 @@ def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamVal
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
+async def require_installed_fonts(
+    schema: CustomizerSchema, params: Mapping[str, ParamValue], fonts: FontService
+) -> None:
+    """422 unless every family a `// font` value names resolves in this image (#253).
+
+    OpenSCAD never refuses one: a family fontconfig does not have renders in the
+    default font (DejaVu Sans here) with other geometry and no warning
+    (library/fonts.py, module docstring). So a caller that asks for one is told here.
+    Only values the caller chose are judged -- the template's own default and options
+    are its business, as for a path-like value (render/runner.py
+    `_refuse_path_like`) -- and "" is the default font. Without fontconfig to ask
+    (a development machine), nothing is refused.
+    """
+    by_name = {parameter.name: parameter for parameter in schema.parameters}
+    wanted: dict[str, tuple[str, list[str]]] = {}
+    for name, value in params.items():
+        parameter = by_name.get(name)
+        if parameter is None or parameter.type != "font" or not isinstance(value, str):
+            continue
+        if value == parameter.initial or any(o.value == value for o in parameter.options):
+            continue
+        families = font_families(value)
+        if families:
+            wanted[name] = (value, families)
+    if not wanted:
+        return
+    # fc-list shells out; off the loop.
+    known = await asyncio.to_thread(fonts.resolvable)
+    if known is None:
+        return
+    problems: list[str] = []
+    missing_names: list[str] = []
+    missing_families: list[str] = []
+    for name, (value, families) in wanted.items():
+        missing = [family for family in families if normalise_family(family) not in known]
+        if not missing:
+            continue
+        missing_names.append(name)
+        missing_families.extend(family for family in missing if family not in missing_families)
+        hint = (
+            " (a bare '-' starts a point size in fontconfig's syntax; write it '\\-')"
+            if cut_by_dash(value)
+            else ""
+        )
+        problems.append(
+            f"parameter {name!r} names font family "
+            f"{', '.join(repr(family) for family in missing)}{hint}, which is not installed"
+        )
+    if problems:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "; ".join(problems)
+            + ". OpenSCAD would silently draw it in the default font instead; install the "
+            "family (POST /fonts/install) or name one GET /fonts lists",
+            parameters=missing_names,
+            families=missing_families,
+        )
+
+
 def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
     """422 unless ``params`` would render as they are *and* every dropdown value is one
     of its options or a value the template retired.
@@ -112,10 +172,12 @@ async def require_valid_presets(
     config: Config,
     assets: AssetStore,
     fetcher: CheckoutFetcher | None = None,
+    fonts: FontService | None = None,
 ) -> None:
     """422 unless every one of ``presets`` would render the template as it is now:
-    the values a render takes, a dropdown value among its options, and a `file` value
-    that names an upload or a sample (#204). Checking a file value marks the upload
+    the values a render takes, a dropdown value among its options, a `file` value
+    that names an upload or a sample (#204), and, given ``fonts``, a `font` value whose
+    family is installed (#253). Checking a file value marks the upload
     used, so the sweep cannot take it from under the preset being saved (#296).
 
     The one check for a preset's values, whether it is saved on its own or defined
@@ -127,6 +189,8 @@ async def require_valid_presets(
     has_files = any(parameter.type == "file" for parameter in schema.parameters)
     for params in presets:
         require_valid_preset_params(schema, params)
+        if fonts is not None:
+            await require_installed_fonts(schema, params, fonts)
         if has_files:
             try:
                 await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)

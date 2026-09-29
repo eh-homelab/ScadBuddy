@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,7 +9,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import get_fonts
-from scadbuddy.library.fonts import FontFamily, FontService, list_fonts, parse_fc_list
+from scadbuddy.api.params import require_installed_fonts
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.fonts import (
+    MANIFEST_NAME,
+    FontFamily,
+    FontService,
+    list_fonts,
+    normalise_family,
+    parse_fc_list,
+)
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
     FamilyFiles,
@@ -17,6 +27,7 @@ from scadbuddy.library.googlefonts import (
     FontVariant,
     GoogleFontsError,
 )
+from scadbuddy.render.schema import CustomizerSchema, Parameter
 
 CATALOGUE = "/api/v1/fonts/catalogue"
 
@@ -88,7 +99,23 @@ class FakeBackedService(FontService):
         return list(self.pretend_installed)
 
     def refresh_cache(self) -> None:
-        return None
+        # What a working fc-cache does, unless the test says fontconfig ignores them.
+        if self.downloads_resolve:
+            self.pretend_installed = [
+                *self.pretend_installed,
+                *(
+                    FontFamily(
+                        family=json.loads(m.read_text(encoding="utf-8"))["family"],
+                        styles=["Regular"],
+                    )
+                    for m in self.root.glob(f"*/{MANIFEST_NAME}")
+                ),
+            ]
+
+    def resolvable(self) -> set[str] | None:
+        return {normalise_family(family.family) for family in self.pretend_installed}
+
+    downloads_resolve = True
 
 
 FC_LIST_SAMPLE = """\
@@ -213,3 +240,95 @@ def test_an_empty_family_is_rejected_before_anything_is_fetched(
     client: TestClient, fonts: FakeBackedService
 ) -> None:
     assert client.post("/api/v1/fonts/install", json={"family": ""}).status_code == 422
+
+
+def test_an_install_fontconfig_then_does_not_resolve_is_a_500_naming_the_files(
+    client: TestClient, fonts: FakeBackedService
+) -> None:
+    """#253: not a success that leaves every render of the family in DejaVu Sans."""
+    fonts.downloads_resolve = False
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    assert response.status_code == 500
+    body = response.json()
+    assert "does not resolve" in body["detail"]
+    assert body["family"] == "Pacifico"
+    assert body["files"] == ["Pacifico-Regular.ttf"]
+
+
+# ── a `// font` value names an installed family (#253) ───────────────────────────
+
+
+class Resolving(FontService):
+    def __init__(self, families: set[str] | None) -> None:
+        super().__init__(Path("/nonexistent"))
+        self.families = families
+        self.asked = 0
+
+    def resolvable(self) -> set[str] | None:
+        self.asked += 1
+        return None if self.families is None else {normalise_family(f) for f in self.families}
+
+
+FONT_SCHEMA = CustomizerSchema(
+    parameters=[
+        Parameter(name="font", type="font", initial="Lobster Two:style=Bold"),
+        Parameter(name="label", type="string", initial="hi"),
+    ]
+)
+
+
+async def test_a_font_value_whose_family_is_not_installed_is_a_422() -> None:
+    fonts = Resolving({"DejaVu Sans", "Lobster Two"})
+    with pytest.raises(ApiError) as raised:
+        await require_installed_fonts(FONT_SCHEMA, {"font": "Pacifico:style=Regular"}, fonts)
+    assert raised.value.status == 422
+    assert "'Pacifico'" in raised.value.detail
+    assert "default font" in raised.value.detail
+    assert raised.value.extensions == {"parameters": ["font"], "families": ["Pacifico"]}
+
+
+async def test_an_installed_family_passes_whatever_its_case_and_spacing() -> None:
+    fonts = Resolving({"DejaVu Sans"})
+    await require_installed_fonts(FONT_SCHEMA, {"font": "dejavusans:style=Bold"}, fonts)
+
+
+async def test_the_templates_own_default_and_the_default_font_are_not_judged() -> None:
+    fonts = Resolving(set())
+    await require_installed_fonts(
+        FONT_SCHEMA, {"font": "Lobster Two:style=Bold", "label": "Pacifico"}, fonts
+    )
+    await require_installed_fonts(FONT_SCHEMA, {"font": ""}, fonts)
+    await require_installed_fonts(FONT_SCHEMA, {"font": ":style=Bold"}, fonts)
+    assert fonts.asked == 0
+
+
+async def test_a_bare_dash_is_explained() -> None:
+    with pytest.raises(ApiError) as raised:
+        await require_installed_fonts(FONT_SCHEMA, {"font": "Unifont-JP"}, Resolving(set()))
+    assert "'Unifont'" in raised.value.detail
+    assert "\\-" in raised.value.detail
+
+
+def test_a_render_or_preset_naming_a_family_that_is_not_installed_is_refused(
+    app: FastAPI, client: TestClient
+) -> None:
+    """The routes an agent sets a font through: a render and a saved preset (#253).
+    The fake openscad exports `label` as a string, which `// font` overlays."""
+    app.dependency_overrides[get_fonts] = lambda: Resolving({"DejaVu Sans"})
+    source = 'width = 10;\nlabel = "DejaVu Sans"; // font\n'
+    assert client.post("/api/v1/models", json={"name": "sign", "source": source}).status_code == 201
+
+    render = client.post("/api/v1/models/sign/render", json={"params": {"label": "Pacifico"}})
+    preset = client.post(
+        "/api/v1/models/sign/presets", json={"name": "curly", "params": {"label": "Pacifico"}}
+    )
+
+    for response in (render, preset):
+        assert response.status_code == 422, response.text
+        assert response.json()["families"] == ["Pacifico"]
+    fine = client.post("/api/v1/models/sign/render", json={"params": {"label": "dejavu sans"}})
+    assert fine.status_code == 202, fine.text
+
+
+async def test_without_fontconfig_nothing_is_refused() -> None:
+    await require_installed_fonts(FONT_SCHEMA, {"font": "Pacifico"}, Resolving(None))

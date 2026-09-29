@@ -432,6 +432,18 @@ choice the way the print dialog opens, then slices and queues behind a single ap
 (It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
 pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
+As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
+`POST /api/v1/models/{slug}/dependencies`, which reports each `include <…>`/`use <…>`
+as resolved (file and library) or unresolved (reason, and a catalogue or installed
+library to pin), resolved as OpenSCAD's lexer and `find_valid_path` resolve them
+against the model's own pins, and lists `font = "…"` literals with their missing
+families (`backend/scadbuddy/library/includes.py`). A missing font family is enforced
+by the backend, not the tool: the render and preset routes answer 422 for a `// font`
+value whose family fontconfig does not resolve, and `POST /api/v1/fonts/install`
+answers 500 when the family still does not resolve after the install
+(`backend/scadbuddy/api/params.py` `require_installed_fonts`,
+`backend/scadbuddy/library/fonts.py`). Details and sources: `docs/ai/dependencies.md`.
+
 ### 5.2 Browser tools
 
 The SDK runs tools in the service process ([custom tools][sdk-tools]), so a browser tool

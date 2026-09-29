@@ -31,6 +31,7 @@ from scadbuddy.api.deps import (
     INSTALL_CONCURRENCY,
     STATE_ATTR,
     AppState,
+    get_fonts,
     get_libraries,
 )
 from scadbuddy.core.paths import DataPaths, model_path
@@ -1542,3 +1543,99 @@ def test_a_candidate_check_holds_off_removals(
     assert response.status_code == 200, response.text
     assert held == [1]
     assert state.checkouts._pins == 0
+
+
+# ── include/use resolution (#253) ────────────────────────────────────────────────
+
+
+def dependencies(client: TestClient, slug: str = SLUG, **body: Any) -> dict[str, Any]:
+    response = client.post(f"/api/v1/models/{slug}/dependencies", json=body or None)
+    assert response.status_code == 200, response.text
+    report: dict[str, Any] = response.json()
+    return report
+
+
+def test_an_unpinned_library_is_unresolved_with_the_catalogue_one_suggested(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, _ = upstream
+    create_model(lib_client)
+
+    report = dependencies(lib_client)
+
+    [entry] = report["includes"]
+    assert (entry["kind"], entry["target"], entry["status"]) == (
+        "use",
+        "BOSL2/std.scad",
+        "unresolved",
+    )
+    assert entry["suggestion"]["name"] == "BOSL2"
+    assert entry["suggestion"]["source"] == "catalogue"
+    assert entry["suggestion"]["url"] == url
+    assert entry["suggestion"]["ref"] == "v1"
+    assert report["unresolved"] == 1
+
+
+def test_once_pinned_the_library_resolves_into_its_checkout(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+
+    report = dependencies(lib_client)
+
+    [entry] = report["includes"]
+    assert (entry["status"], entry["path"], entry["library"]) == (
+        "resolved",
+        "BOSL2/std.scad",
+        "BOSL2",
+    )
+    assert report["unresolved"] == 0
+    assert report["missing_checkouts"] == []
+
+
+def test_an_unsaved_source_is_read_against_the_models_directory_and_pins(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    paths.model_dir(SLUG).joinpath("helper.scad").write_text("", encoding="utf-8")
+
+    report = dependencies(
+        lib_client,
+        source="include <helper.scad>\ninclude <BOSL2/nope.scad>\nuse <other/x.scad>\n",
+    )
+
+    helper, nope, other = report["includes"]
+    assert (helper["status"], helper["path"]) == ("resolved", "helper.scad")
+    assert nope["status"] == "unresolved"
+    assert "has no nope.scad" in nope["reason"]
+    assert other["status"] == "unresolved"
+    assert other["suggestion"] is None
+    # The saved source is untouched.
+    assert paths.model_source(SLUG).read_text(encoding="utf-8") == SOURCE
+
+
+def test_a_font_the_image_does_not_have_is_reported(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    class Fonts:
+        def resolvable(self) -> set[str]:
+            return {"dejavusans"}
+
+    libraries_app.dependency_overrides[get_fonts] = lambda: Fonts()
+    create_model(lib_client)
+
+    report = dependencies(
+        lib_client, source='text("a", font="DejaVu Sans");\ntext("b", font="Pacifico");\n'
+    )
+
+    assert [(f["font"], f["missing"]) for f in report["fonts"]] == [
+        ("DejaVu Sans", []),
+        ("Pacifico", ["Pacifico"]),
+    ]
+    assert report["fonts_checked"] is True
+
+
+def test_resolving_the_dependencies_of_a_model_that_does_not_exist_is_a_404(
+    lib_client: TestClient,
+) -> None:
+    assert lib_client.post("/api/v1/models/nope/dependencies").status_code == 404
