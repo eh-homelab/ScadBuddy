@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -10,13 +11,12 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
-    contextmanager,
     nullcontext,
     suppress,
 )
@@ -47,7 +47,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
-from scadbuddy.render.glb import bounding_box, write_glb
+from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import Job as Job
 from scadbuddy.render.job_models import JobResult as JobResult
 from scadbuddy.render.job_models import JobState as JobState
@@ -61,9 +61,9 @@ from scadbuddy.render.job_store import JobStore as JobStore
 from scadbuddy.render.job_store import QueueFullError as QueueFullError
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.render_cache import cached_render, keep_render, prune_render_cache
-from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids, solid_file, solid_mesh
 from scadbuddy.render.split import ColourPart, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
@@ -85,6 +85,7 @@ OUTCOME_EVENT_KINDS: dict[RenderOutcome, JobKind] = {
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
+LAYOUT_NAME = "layout.json"
 
 # Material 0 is OpenSCAD's "Default": geometry no color() call reached.
 UNCOLOURED_MATERIAL_INDEX = 0
@@ -194,6 +195,15 @@ def plate_defines(index: int) -> list[str]:
 
 
 @dataclass(frozen=True)
+class PartSource:
+    """Where a layout part's mesh is on disk, relative to the render's directory:
+    a closed solid's own file, or the material of a split render."""
+
+    file: str
+    solid: bool = False
+
+
+@dataclass(frozen=True)
 class PlateLayout:
     """What the 3MF of a render is written from: its plates, and the one filament
     list their extruder numbers index into."""
@@ -201,6 +211,87 @@ class PlateLayout:
     plates: list[PlateParts]
     colours: list[str]
     warnings: list[str]
+    #: The everything-at-once render's box: what the preview shows and the result reports.
+    bbox: BoundingBox
+    #: Each plate's `PartSource`s, in the order of its parts.
+    sources: list[tuple[PartSource, ...]]
+
+    def save(self, path: Path) -> None:
+        """The layout as JSON beside the files its parts are read from; no meshes."""
+        plates = [
+            {
+                "extruders": list(plate.extruders),
+                "parts": [
+                    {
+                        "material_index": part.material_index,
+                        "name": part.name,
+                        "colour": part.colour,
+                        "file": source.file,
+                        "solid": source.solid,
+                    }
+                    for part, source in zip(plate.parts, sources, strict=True)
+                ],
+            }
+            for plate, sources in zip(self.plates, self.sources, strict=True)
+        ]
+        document = {
+            "plates": plates,
+            "colours": self.colours,
+            "warnings": self.warnings,
+            "bbox": self.bbox.model_dump(mode="json"),
+        }
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: Path) -> PlateLayout:
+        """What :meth:`save` wrote, the meshes re-read from the files it names."""
+        work = path.parent
+        document = json.loads(path.read_text(encoding="utf-8"))
+        splits: dict[str, list[ColourPart]] = {}
+
+        def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
+            source = PartSource(entry["file"], entry["solid"])
+            if source.solid:
+                mesh = solid_mesh(work / source.file)
+                if mesh is None:
+                    raise ValueError(f"{source.file} holds no solid")
+            else:
+                if source.file not in splits:
+                    splits[source.file] = split_by_material(work / source.file)
+                mesh = next(
+                    split.mesh
+                    for split in splits[source.file]
+                    if split.material_index == entry["material_index"]
+                )
+            return ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh), source
+
+        plates: list[PlateParts] = []
+        sources: list[tuple[PartSource, ...]] = []
+        for plate in document["plates"]:
+            parts = [part(entry) for entry in plate["parts"]]
+            plates.append(PlateParts(tuple(p for p, _ in parts), tuple(plate["extruders"])))
+            sources.append(tuple(s for _, s in parts))
+        return cls(
+            plates,
+            document["colours"],
+            document["warnings"],
+            BoundingBox.model_validate(document["bbox"]),
+            sources,
+        )
+
+
+def _part_sources(
+    work_dir: Path, raw: Path, split: Sequence[ColourPart], parts: Sequence[ColourPart]
+) -> tuple[PartSource, ...]:
+    """Where each of ``parts`` is on disk. `solid_parts` returns the very part it was
+    given where it has no closed solid for that colour, so a part that is not its
+    split is the wrapper render of its position (`solid_file`)."""
+    return tuple(
+        PartSource(raw.relative_to(work_dir).as_posix())
+        if part is given
+        else PartSource(solid_file(raw.parent, index).relative_to(work_dir).as_posix(), solid=True)
+        for index, (part, given) in enumerate(zip(parts, split, strict=True), start=1)
+    )
 
 
 async def plate_layout(
@@ -223,11 +314,15 @@ async def plate_layout(
     extruder, and one only a plate draws is appended; both are warnings, because
     either means the template's plates and its preview disagree.
     """
+    box = bounding_box(preview_parts)
     if count <= 1:
         parts, solid_warnings = await solid_parts(
             scad_path, schema, params, preview_parts, work_dir, config=config
         )
-        return PlateLayout([single_plate(parts)], [part.colour for part in parts], solid_warnings)
+        single = _part_sources(work_dir, work_dir / RAW_RENDER_NAME, preview_parts, parts)
+        return PlateLayout(
+            [single_plate(parts)], [part.colour for part in parts], solid_warnings, box, [single]
+        )
     if count > MAX_PLATES:
         raise OpenSCADError(
             f"the template asks for {count} plates; ScadBuddy renders at most {MAX_PLATES}", []
@@ -236,6 +331,7 @@ async def plate_layout(
     colours = [part.colour for part in preview_parts]
     warnings: list[str] = []
     drawn: list[tuple[list[ColourPart], list[int]]] = []
+    sources: list[tuple[PartSource, ...]] = []
     for index in range(1, count + 1):
         plate_dir = work_dir / f"plate-{index}"
         plate_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +364,7 @@ async def plate_layout(
         # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
         warnings += [warning for warning in solid_warnings if warning not in warnings]
         drawn.append((parts, [colours.index(part.colour) + 1 for part in parts]))
+        sources.append(_part_sources(work_dir, raw, split, parts))
 
     # Dense extruders, as §7 promises: a colour no plate draws gives up its slot.
     used = sorted({extruder for _, extruders in drawn for extruder in extruders})
@@ -279,7 +376,7 @@ async def plate_layout(
         PlateParts(tuple(parts), tuple(renumber[extruder] for extruder in extruders))
         for parts, extruders in drawn
     ]
-    return PlateLayout(plates, [colours[old - 1] for old in used], warnings)
+    return PlateLayout(plates, [colours[old - 1] for old in used], warnings, box, sources)
 
 
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
@@ -396,13 +493,13 @@ async def plates_thumbnails(
     return rendered, []
 
 
-@contextmanager
-def staged_assets(
+@asynccontextmanager
+async def staged_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
     model_dir: Path,
     store: AssetStore,
-) -> Iterator[dict[str, ParamValue]]:
+) -> AsyncIterator[dict[str, ParamValue]]:
     """``params`` with each uploaded file copied beside the model (#204).
 
     OpenSCAD resolves `import()` and `surface()` relative to the file that calls
@@ -412,11 +509,16 @@ def staged_assets(
     its file parameter against paths still takes it. Each render gets its own
     copies: two renders of one model overlap routinely, and a shared name would be
     deleted from under the one still running.
+
+    The lookup runs in a worker thread, as at every other call site: `use` is a
+    database round trip (#591) that can wait on a row lock, and on the loop that
+    wait would stall every other request and render in the process.
     """
+    found = await asyncio.to_thread(file_assets, schema, params, store, model_dir)
     staged = dict(params)
     created: list[Path] = []
     try:
-        for name, meta in file_assets(schema, params, store, model_dir).items():
+        for name, meta in found.items():
             target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
             shutil.copyfile(store.blob_path(meta), target)
             created.append(target)
@@ -590,6 +692,199 @@ def attempt_work_dir(paths: DataPaths, job: Job) -> Path:
     return base if job.attempt <= 1 else base / f"attempt-{job.attempt}"
 
 
+def no_stage(name: RenderStage) -> AbstractContextManager[None]:
+    """A stage that neither reports nor times anything: a stage run on its own."""
+    return nullcontext()
+
+
+@dataclass(frozen=True)
+class Prepared:
+    """The source a piece renders, as `resolve_source` settled it: plain values, so
+    a stage in another process can take it up."""
+
+    scad: Path
+    version: str
+    library_path: tuple[Path, ...]
+    schema_cache: Path
+
+
+async def prepare_source(
+    slug: str,
+    revision: str | None,
+    *,
+    config: Config,
+    paths: DataPaths,
+    history: ModelHistory | None,
+    fetcher: CheckoutFetcher | None,
+) -> tuple[Prepared, Config]:
+    """The source, its revision, and ``config`` for every openscad call made on it."""
+    source = await resolve_source(slug, revision, paths=paths, history=history, fetcher=fetcher)
+    # #90 stamps the model's own commit id, which `provenance.source_version`
+    # was written to accept (a free string, never a structured field). The
+    # content hash remains the answer when there is no repository to name a
+    # revision -- and it hashes what was actually rendered, which for an old
+    # revision is its export, not the live model directory. Reads every file
+    # under it; off the loop, like the other two.
+    version = source.version
+    config = source.configure(config)
+    if version is None:
+        version = await asyncio.to_thread(source_version, source.scad.parent)
+    return Prepared(source.scad, version, source.library_path, source.schema_cache), config
+
+
+async def _render_main(
+    prepared: Prepared,
+    schema: CustomizerSchema,
+    staged: Mapping[str, ParamValue],
+    params: Mapping[str, ParamValue],
+    work: Path,
+    *,
+    config: Config,
+) -> ProcessOutput:
+    try:
+        return await render_3mf(
+            prepared.scad, schema, staged, work / RAW_RENDER_NAME, config=config
+        )
+    except OpenSCADError as error:
+        error.warnings = failed_render_warnings(error.missing_files, schema, params)
+        raise
+
+
+async def _render_solids(
+    prepared: Prepared,
+    schema: CustomizerSchema,
+    staged: Mapping[str, ParamValue],
+    params: Mapping[str, ParamValue],
+    work: Path,
+    output: ProcessOutput,
+    *,
+    config: Config,
+    stage: Callable[[RenderStage], AbstractContextManager[None]],
+) -> PlateLayout:
+    with stage("split"):
+        preview_parts = extruder_order(split_by_material(work / RAW_RENDER_NAME), schema, staged)
+        if not preview_parts:
+            raise OpenSCADError(
+                "the render produced no geometry",
+                output.log_tail,
+                diagnostics=output.diagnostics,
+                diagnostics_dropped=output.diagnostics_dropped,
+                missing_files=output.missing_files,
+                warnings=failed_render_warnings(output.missing_files, schema, params),
+            )
+        write_glb(preview_parts, work / PREVIEW_NAME)
+
+    with stage("solids"):
+        # One plate unless the template asked for more (spec §6.4); every plate
+        # beyond the ordinary render is rendered and solidified here.
+        layout = await plate_layout(
+            prepared.scad, schema, staged, preview_parts, output.plates or 1, work, config=config
+        )
+    layout.save(work / LAYOUT_NAME)
+    return layout
+
+
+async def render_main(
+    prepared: Prepared,
+    params: Mapping[str, ParamValue],
+    work: Path,
+    *,
+    config: Config,
+    assets: AssetStore,
+    checkouts: CheckoutGate | None,
+    holder: str,
+) -> ProcessOutput:
+    """The customizer schema, then the raw multi-material 3MF, `RAW_RENDER_NAME` in
+    ``work``."""
+    async with library_lease(checkouts, holder, prepared.library_path):
+        schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
+        work.mkdir(parents=True, exist_ok=True)
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+            return await _render_main(prepared, schema, staged, params, work, config=config)
+
+
+async def render_solids_stage(
+    prepared: Prepared,
+    params: Mapping[str, ParamValue],
+    work: Path,
+    output: ProcessOutput,
+    *,
+    config: Config,
+    assets: AssetStore,
+    checkouts: CheckoutGate | None,
+    holder: str,
+) -> PlateLayout:
+    """The preview parts and `PREVIEW_NAME`, then one closed solid per colour per
+    plate, from `RAW_RENDER_NAME` in ``work``. The layout is saved as `LAYOUT_NAME`
+    beside the files it names, which is what :func:`finish_piece_stage` reads."""
+    async with library_lease(checkouts, holder, prepared.library_path):
+        schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+            return await _render_solids(
+                prepared, schema, staged, params, work, output, config=config, stage=no_stage
+            )
+
+
+async def finish_piece_stage(
+    prepared: Prepared,
+    params: Mapping[str, ParamValue],
+    work: Path,
+    output: ProcessOutput,
+    *,
+    config: Config,
+    paths: DataPaths,
+    slug: str,
+    thumbnail_executor: Executor | None,
+    stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
+    schema: CustomizerSchema | None = None,
+) -> JobResult:
+    """The cover images and `MODEL_NAME`, from `LAYOUT_NAME` and `PREVIEW_NAME` in
+    ``work``. ``schema`` is the one the render used, when the caller derived it
+    under its lease; otherwise it is derived here."""
+    layout = await asyncio.to_thread(PlateLayout.load, work / LAYOUT_NAME)
+    if schema is None:
+        schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
+    # Exit 0 with the picture missing is otherwise invisible: the preview simply
+    # has no overlay, and nothing says why.
+    warnings = [
+        *(MISSING_FILE_WARNING.format(name=name) for name in output.missing_files),
+        *layout.warnings,
+    ]
+    with stage("thumbnail"):
+        thumbnails, thumbnail_warnings = await plates_thumbnails(
+            [plate.parts for plate in layout.plates], config=config, executor=thumbnail_executor
+        )
+    warnings += thumbnail_warnings
+    warnings += unreadable_colour_warnings(schema, params)
+
+    model_3mf = work / MODEL_NAME
+    # A built-in's bare slug, as download_filename names the file: the id's
+    # `builtin:` prefix is not something to show as the model's title.
+    with stage("write"):
+        await asyncio.to_thread(
+            write_plates_3mf,
+            layout.plates,
+            layout.colours,
+            model_3mf,
+            thumbnails=thumbnails,
+            model_name=slug.removeprefix(BUILTIN_PREFIX),
+        )
+
+    return JobResult(
+        model_3mf=str(model_3mf.relative_to(paths.root)),
+        preview_glb=str((work / PREVIEW_NAME).relative_to(paths.root)),
+        source_version=prepared.version,
+        parts=result_parts(layout),
+        bbox_mm=layout.bbox,
+        colors=list(layout.colours),
+        warnings=warnings,
+        plates=result_plates(layout),
+        diagnostics=list(output.diagnostics),
+        diagnostics_dropped=output.diagnostics_dropped,
+        notes=list(output.notes),
+    )
+
+
 async def render_job(
     job: Job,
     *,
@@ -613,104 +908,45 @@ async def render_job(
     # render newer source while claiming the older revision.
     async with AsyncExitStack() as held:
         with stage("source"):
-            source = await resolve_source(
-                job.slug, job.model_version, paths=paths, history=history, fetcher=fetcher
+            # One timed stage for all of it: resolving the source and deriving its
+            # schema are the same step.
+            prepared, config = await prepare_source(
+                job.slug,
+                job.model_version,
+                config=config,
+                paths=paths,
+                history=history,
+                fetcher=fetcher,
             )
-            scad = source.scad
-            # #90 stamps the model's own commit id, which `provenance.source_version`
-            # was written to accept (a free string, never a structured field). The
-            # content hash remains the answer when there is no repository to name a
-            # revision -- and it hashes what was actually rendered, which for an old
-            # revision is its export, not the live model directory. Reads every file
-            # under it; off the loop, like the other two. One timed stage for all of
-            # it: resolving the source and deriving its schema are the same step.
-            version = source.version
-            config = source.configure(config)
-            if version is None:
-                version = await asyncio.to_thread(source_version, scad.parent)
             # Held from here for every openscad run below -- the schema derivation
             # included: those are what read the checkouts on OPENSCADPATH, and a
-            # removal must not take one out from under them (#253).
-            await held.enter_async_context(library_lease(checkouts, job.id, source.library_path))
-            schema = await cached_schema(scad, source.schema_cache, config=config)
+            # removal must not take one out from under them (#253). One lease and
+            # one staging for the render and the solids, where the stages each
+            # take their own.
+            await held.enter_async_context(library_lease(checkouts, job.id, prepared.library_path))
+            schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
 
-        with staged_assets(schema, job.params, scad.parent, assets) as params:
+        async with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:
             with stage("render"):
-                try:
-                    output = await render_3mf(
-                        scad, schema, params, work / RAW_RENDER_NAME, config=config
-                    )
-                except OpenSCADError as error:
-                    error.warnings = failed_render_warnings(error.missing_files, schema, job.params)
-                    raise
-            with stage("split"):
-                preview_parts = extruder_order(
-                    split_by_material(work / RAW_RENDER_NAME), schema, params
+                output = await _render_main(
+                    prepared, schema, params, job.params, work, config=config
                 )
-                if not preview_parts:
-                    raise OpenSCADError(
-                        "the render produced no geometry",
-                        output.log_tail,
-                        diagnostics=output.diagnostics,
-                        diagnostics_dropped=output.diagnostics_dropped,
-                        missing_files=output.missing_files,
-                        warnings=failed_render_warnings(output.missing_files, schema, job.params),
-                    )
-                preview_path = work / PREVIEW_NAME
-                box = write_glb(preview_parts, preview_path)
-
-            with stage("solids"):
-                # One plate unless the template asked for more (spec §6.4); every plate
-                # beyond the ordinary render is rendered and solidified here.
-                layout = await plate_layout(
-                    scad,
-                    schema,
-                    params,
-                    preview_parts,
-                    output.plates or 1,
-                    work,
-                    config=config,
-                )
-    # Exit 0 with the picture missing is otherwise invisible: the preview simply
-    # has no overlay, and nothing says why.
-    warnings = [
-        *(MISSING_FILE_WARNING.format(name=name) for name in output.missing_files),
-        *layout.warnings,
-    ]
-    with stage("thumbnail"):
-        thumbnails, thumbnail_warnings = await plates_thumbnails(
-            [plate.parts for plate in layout.plates], config=config, executor=thumbnail_executor
-        )
-    warnings += thumbnail_warnings
-    warnings += unreadable_colour_warnings(schema, job.params)
-
-    model_3mf = work / MODEL_NAME
-    # A built-in's bare slug, as download_filename names the file: the id's
-    # `builtin:` prefix is not something to show as the model's title.
-    with stage("write"):
-        await asyncio.to_thread(
-            write_plates_3mf,
-            layout.plates,
-            layout.colours,
-            model_3mf,
-            thumbnails=thumbnails,
-            model_name=job.slug.removeprefix(BUILTIN_PREFIX),
-        )
-
-    result = JobResult(
-        model_3mf=str(model_3mf.relative_to(paths.root)),
-        preview_glb=str(preview_path.relative_to(paths.root)),
-        source_version=version,
-        parts=result_parts(layout),
-        bbox_mm=box,
-        colors=list(layout.colours),
-        warnings=warnings,
-        plates=result_plates(layout),
-        diagnostics=list(output.diagnostics),
-        diagnostics_dropped=output.diagnostics_dropped,
-        notes=list(output.notes),
+            await _render_solids(
+                prepared, schema, params, job.params, work, output, config=config, stage=stage
+            )
+    result = await finish_piece_stage(
+        prepared,
+        job.params,
+        work,
+        output,
+        config=config,
+        paths=paths,
+        slug=job.slug,
+        thumbnail_executor=thumbnail_executor,
+        stage=stage,
+        schema=schema,
     )
     return result, output.log_tail
 
@@ -789,7 +1025,8 @@ class RenderQueue:
         self.paths = paths
         #: The upload store the renders stage `file` parameters from: the app's own
         #: (`AppState.assets`), so one instance serves the routes and the workers.
-        #: Built from ``paths`` only when none is given, for tests that render.
+        #: Built from ``paths`` only when none is given, for tests that render no
+        #: upload: without a database pool, every lookup in it raises.
         self.assets = assets if assets is not None else AssetStore(paths.assets)
         self.history = history
         #: Told of every state a job enters (`job.*`), whichever path moved it.

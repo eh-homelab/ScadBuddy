@@ -66,7 +66,9 @@ describe('/mcp: tools over Streamable HTTP', () => {
     const result = await client.callTool({ name: 'get_model', arguments: { slug: 'nope' } })
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('HTTP 404')
-    expect(firstText(result)).toContain('no model "nope"')
+    // The backend's detail reaches the model inside the untrusted-data envelope (#258).
+    expect(firstText(result)).toContain('"untrusted_data"')
+    expect(firstText(result)).toContain('"content": "no model \\"nope\\""')
   })
 
   it('streams progress notifications for a render before the call completes', async () => {
@@ -282,12 +284,15 @@ describe('/mcp: disabled mode', () => {
   })
 })
 
-describe('/mcp: oidc mode', () => {
-  it('is not implemented yet and says so with a 501', async () => {
+describe('/mcp: oidc mode with nothing configured', () => {
+  // The OIDC paths themselves are test/mcpOidc.test.ts and test/oidc.e2e.test.ts.
+  it('still needs a token, names no metadata, and refuses anything but a bearer token', async () => {
     const { app } = testApp({ settings: { mode: 'oidc' } })
     const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
-    expect(res.status).toBe(501)
-    expect(await res.text()).toContain('#262')
+    expect(res.status).toBe(401)
+    expect(res.headers.get('www-authenticate')).toBe('Bearer realm="scadbuddy"')
+    const jwt = await appFetch(app, { headers: { authorization: 'Bearer a.b.c' } })(MCP_URL, { method: 'POST', body: '{}' })
+    expect(jwt.status).toBe(401)
   })
 })
 

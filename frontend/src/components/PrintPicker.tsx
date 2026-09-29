@@ -1,15 +1,24 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
-import type { Output, PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
+import type {
+  AnalysisRequest,
+  Output,
+  PrintOptions,
+  PrintOptionsState,
+  PrintRunResult,
+} from '../api/types'
 import { openExternal } from '../lib/embed'
+import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
+import { useAsync } from '../lib/useAsync'
 import { useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
 import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
+import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { NozzleStep } from './print/NozzleStep'
 import { PlatesToPrint } from './print/PlatesToPrint'
@@ -90,7 +99,15 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     options,
     onRan,
   })
-  const { run, running, runError, refused, result } = runPrint
+  const { run, running, runError, refused, result, unanswered } = runPrint
+  // Only for the queue link while a run is unanswered (a result carries its own), so it
+  // is read then, not on every open; a failed read offers to try again.
+  const settings = useAsync(
+    async () => (open && unanswered !== null ? await api.getSettings() : null),
+    [open, unanswered !== null],
+  )
+  // As typed in Settings: a trailing slash would make `…//queue` below.
+  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
@@ -154,7 +171,30 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
 
+  /**
+   * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
+   * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
+   * "All plates" the filament checks read every plate; the mesh checks read plate 1.
+   */
+  const printChoices = printChoicesOf(selection)
+  const allPlates = plate === 'all'
+  const analysisRequest: AnalysisRequest | null =
+    choices && printChoices
+      ? {
+          printer_id: printerId,
+          filament_plan: { slots: plan, force_colour_match: false },
+          choices: printChoices,
+          plate_id: allPlates ? 1 : plate,
+          all_plates: allPlates,
+          copies: effectiveCopies,
+          options,
+        }
+      : null
+
   function close() {
+    // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
+    // reopen with Print enabled and send the print a second time (#539 review).
+    if (running) return
     setProjectId(null)
     setOptions({})
     runPrint.reset()
@@ -167,7 +207,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       open={open}
       title="Print"
       description={
-        result
+        result || unanswered !== null
           ? undefined
           : 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
@@ -179,6 +219,19 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
             <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
               Open in queue
             </Button>
+          </>
+        ) : unanswered !== null ? (
+          <>
+            <Button onClick={close}>Close</Button>
+            {bambuddyUrl ? (
+              <Button variant="primary" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
+                {"Open Bambuddy's queue"}
+              </Button>
+            ) : (
+              settings.error && (
+                <Button onClick={settings.reload}>{"Find Bambuddy's queue"}</Button>
+              )
+            )}
           </>
         ) : (
           <>
@@ -206,6 +259,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
           progress={progress}
           polling={polling}
         />
+      ) : unanswered !== null ? (
+        <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
+          {unanswered}{' '}
+          {
+            "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice."
+          }
+        </p>
       ) : (
         <>
           {loading && !choices && (
@@ -338,6 +398,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
 
               <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+
+              <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates} />
             </div>
           )}
 

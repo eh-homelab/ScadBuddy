@@ -2,8 +2,17 @@ import { randomBytes } from 'node:crypto'
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import type { Hono } from 'hono'
-import { authenticate, DEFAULT_MCP_AUTH, type McpAuthSettings, mcpTransportProblem } from '../auth/authenticate.js'
+import type { Context, Hono } from 'hono'
+import type { AuditLog } from '../audit/log.js'
+import {
+  authenticate,
+  DEFAULT_MCP_AUTH,
+  type McpAuthSettings,
+  mcpTransportProblem,
+  oidcContext,
+  type OidcRuntime,
+} from '../auth/authenticate.js'
+import { type OidcProvider, protectedResourceMetadata, RESOURCE_METADATA_PATH } from '../auth/oidc.js'
 import type { Principal } from '../auth/principal.js'
 import { FailClosedTokenStore, type TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -31,12 +40,24 @@ export type McpEndpointDeps = {
   tools: readonly Tool[]
   services: ToolServices
   tokens: TokenStore
+  /** Every tool call over /mcp is recorded here (#258, audit/log.ts). */
+  audit?: AuditLog | undefined
   /**
    * Read per request, so a Settings change (#255) applies without a restart.
    * If it throws (settings unreadable, database blip), the request is handled
    * fail-closed: `bearer` mode with a token store that verifies nothing.
    */
   authSettings: () => McpAuthSettings | Promise<McpAuthSettings>
+  /**
+   * `oidc` mode (#262): the JWT verifier with its metadata and JWKS caches.
+   * Left out, JWTs are refused and only bearer tokens work in that mode.
+   */
+  oidc?: OidcProvider | undefined
+  /**
+   * SCADBUDDY_PUBLIC_URL: the resource URI (`<origin>/mcp`) and the metadata
+   * URL are made from it, never from the request's Host.
+   */
+  publicUrl?: string | undefined
   /**
    * The `scadbuddy://` resources and their subscriptions (#264,
    * src/resources/). Left out, the server offers tools only.
@@ -152,6 +173,29 @@ export function mountMcp(
     }
   }
 
+  const oidc: OidcRuntime | undefined = deps.oidc ? { provider: deps.oidc, publicUrl: deps.publicUrl } : undefined
+
+  // RFC 9728 Protected Resource Metadata for /mcp: at the well-known root,
+  // which the 401 challenge names, and at the path-inserted form of §3.1
+  // (`/.well-known/oauth-protected-resource/mcp`) that clients also probe.
+  // Served only while `oidc` mode can run; in `bearer` and `disabled` mode
+  // there is no authorization server to name, so both are 404 (#262). The
+  // document is public, like the IdP's own metadata.
+  const metadata = async (c: Context) => {
+    let settings: McpAuthSettings
+    try {
+      settings = await deps.authSettings()
+    } catch {
+      return c.json({ error: 'the MCP auth settings cannot be read' }, 503)
+    }
+    const ctx = oidcContext(settings, oidc)
+    if (!ctx || !deps.publicUrl) return c.json({ error: 'OAuth is not enabled for /mcp' }, 404)
+    c.header('Cache-Control', 'max-age=300')
+    return c.json(protectedResourceMetadata(ctx.config, deps.publicUrl))
+  }
+  app.get(RESOURCE_METADATA_PATH, metadata)
+  app.get(`${RESOURCE_METADATA_PATH}/mcp`, metadata)
+
   app.all('/mcp', async (c) => {
     const request = c.req.raw
     const facts = requestFacts(c, http.remoteAddress)
@@ -164,7 +208,7 @@ export function mountMcp(
       return new Response(null, { status: 405, headers: { Allow: 'GET, POST, DELETE' } })
     }
 
-    const auth = await authenticate(request, { settings, tokens, clientAddress })
+    const auth = await authenticate(request, { settings, tokens, clientAddress, oidc })
     if (!auth.ok) return auth.response
 
     const sessionId = request.headers.get('mcp-session-id')
@@ -197,9 +241,9 @@ export function mountMcp(
     // from the initialize request on.
     const id = newSessionId()
     const principal = sessionPrincipal(auth.principal, id)
-    const server = createExternalServer(deps.tools, deps.services)
+    const server = createExternalServer(deps.tools, deps.services, deps.audit)
     const { detach } = deps.resources
-      ? installResources(server, { tools: deps.tools, services: deps.services, hub: deps.resources })
+      ? installResources(server, { tools: deps.tools, services: deps.services, hub: deps.resources, audit: deps.audit })
       : { detach: () => {} }
     const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => id,

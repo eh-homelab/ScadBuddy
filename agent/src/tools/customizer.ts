@@ -19,6 +19,12 @@ const jobId = z
   .regex(/^[0-9a-f]{32}$/, 'must be a render job id: 32 lowercase hex digits, as render_model returns it')
   .describe('Render job id, as render_model returns it')
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
+// The bounds of backend/scadbuddy/library/presets.py (#327).
+const presetDescription = z.string().max(2000).describe("What the preset is for, in short Markdown")
+const presetTags = z
+  .array(z.string().max(40).regex(/^[^,]*$/, 'a tag cannot contain a comma'))
+  .max(20)
+  .describe('Short labels to find the preset by')
 async function fetchSchema(ctx: ToolContext, slug: string, version?: string) {
   return version
     ? ok(
@@ -48,7 +54,8 @@ export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatu
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (job.status === 'done' || job.status === 'failed' || Date.now() >= deadline) return job
+    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled' || Date.now() >= deadline)
+      return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
   }
 }
@@ -76,6 +83,8 @@ export const customizerTools: Tool[] = [
       'the schema at an earlier revision.',
     input: z.object({ slug, version: z.string().regex(/^[0-9a-f]{7,40}$/).optional() }),
     risk: 'read',
+    source:
+      "the customizer schema OpenSCAD derives from the model's source, with the parameter names and comments its author wrote",
     routes: ['GET /api/v1/models/{slug}/schema', 'GET /api/v1/models/{slug}/versions/{commit}/schema'],
     handler: async ({ slug, version }, ctx) => json(await fetchSchema(ctx, slug, version)),
   }),
@@ -107,6 +116,8 @@ export const customizerTools: Tool[] = [
       output_name: z.string().optional(),
     }),
     risk: 'write',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
     handler: async ({ slug, params, version, save_output, output_name }, ctx) => {
       const report = validateParams(await fetchSchema(ctx, slug, version), params)
@@ -126,7 +137,7 @@ export const customizerTools: Tool[] = [
       await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
       const job = await waitForJob(ctx, accepted.job_id)
       const summary = jobSummary(job)
-      if (job.status === 'failed') {
+      if (job.status === 'failed' || job.status === 'cancelled') {
         return { ...json(summary), isError: true }
       }
       if (job.status !== 'done') {
@@ -149,6 +160,8 @@ export const customizerTools: Tool[] = [
     description: "A render job's current state: status, error, warnings, bounding box, colours, parts and log tail.",
     input: z.object({ job_id: jobId }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: [],
     handler: async ({ job_id }, ctx) => json(jobSummary(await getJob(ctx, job_id))),
   }),
@@ -203,6 +216,8 @@ export const customizerTools: Tool[] = [
       'settled render (done or failed). Use it to fix a failing or warning-laden model.',
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['GET /api/v1/models/{slug}/diagnostics'],
     handler: async ({ slug }, { backend }) =>
       json(
@@ -226,6 +241,8 @@ export const customizerTools: Tool[] = [
     description: "A model's saved parameter presets, including read-only ones a template ships.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      'preset names and values written by model authors or users',
     routes: ['GET /api/v1/models/{slug}/presets'],
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`)),
@@ -233,14 +250,23 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'save_preset',
-    description: 'Save a parameter set as a named preset of a model.',
-    input: z.object({ slug, name: z.string().min(1).max(80), params: params.default({}) }),
+    description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.',
+    input: z.object({
+      slug,
+      name: z.string().min(1).max(80),
+      params: params.default({}),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params }, { backend }) =>
+    handler: async ({ slug, name, params, description, tags }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/models/{slug}/presets', { params: { path: { slug } }, body: { name, params } }),
+          backend.POST('/api/v1/models/{slug}/presets', {
+            params: { path: { slug } },
+            body: { name, params, description, tags },
+          }),
           `save preset ${name}`,
         ),
       ),
@@ -248,16 +274,24 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'update_preset',
-    description: "Rename a preset or replace its values. Omitted fields are unchanged.",
-    input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80).optional(), params: params.optional() }),
+    description:
+      'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.',
+    input: z.object({
+      slug,
+      preset_id: presetId,
+      name: z.string().min(1).max(80).optional(),
+      params: params.optional(),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params }, { backend }) =>
+    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
       json(
         await ok(
           backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
-            body: { name: name ?? null, params: params ?? null },
+            body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
           }),
           `update preset ${preset_id}`,
         ),

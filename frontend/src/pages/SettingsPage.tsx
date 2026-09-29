@@ -7,9 +7,17 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import type { McpAuthMode } from '../api/mcpTokens'
+import { AiStatusSection } from '../components/assistant/AiStatusSection'
+import { McpAuthSection } from '../components/McpAuthSection'
+import { McpOidcSettings } from '../components/McpOidcSettings'
+import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -43,12 +51,13 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
 
 export function SettingsPage() {
   const settingsState = useAsync(() => api.getSettings(), [])
+  // The agent-service sections render only where the agent is (#256, #261).
+  const ai = useAiAvailability()
 
   const [url, setUrl] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [folderId, setFolderId] = useState('')
-  const [pipelineId, setPipelineId] = useState('')
   const [printerId, setPrinterId] = useState('')
   const [defaultPlate, setDefaultPlate] = useState('')
   const [unit, setUnit] = useState<DisplayUnit>('mm')
@@ -63,7 +72,7 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
-  const ai = useAiAvailability()
+  const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -81,7 +90,6 @@ export function SettingsPage() {
     setUrl(settings.bambuddy_url ?? '')
     setPublicUrl(settings.public_url ?? '')
     setFolderId(idValue(settings.library_folder_id))
-    setPipelineId(idValue(settings.pipeline_id))
     setPrinterId(idValue(settings.printer_id))
     setDefaultPlate(settings.default_plate ?? '')
     setUnit(settings.display_unit)
@@ -101,7 +109,6 @@ export function SettingsPage() {
       bambuddy_url: url,
       public_url: publicUrl || null,
       library_folder_id: asId(folderId),
-      pipeline_id: asId(pipelineId),
       printer_id: asId(printerId),
       default_plate: defaultPlate || null,
       display_unit: unit,
@@ -118,7 +125,6 @@ export function SettingsPage() {
     bambuddy_url: [url, setUrl, 'bambuddy-url'],
     public_url: [publicUrl, setPublicUrl, 'public-url'],
     library_folder_id: [folderId, setFolderId, 'library-folder'],
-    pipeline_id: [pipelineId, setPipelineId, 'slicer-pipeline'],
     printer_id: [printerId, setPrinterId, 'printer'],
     default_plate: [defaultPlate, setDefaultPlate, 'default-plate'],
     display_unit: [unit, (next: string) => setUnit(next as DisplayUnit), 'display-unit'],
@@ -126,7 +132,6 @@ export function SettingsPage() {
 
   const choices = {
     library_folder_id: ['', ...(targetsState.data?.folders ?? []).map((folder) => String(folder.id))],
-    pipeline_id: ['', ...(targetsState.data?.pipelines ?? []).map((pipeline) => String(pipeline.id))],
     printer_id: ['', ...(targetsState.data?.printers ?? []).map((printer) => String(printer.id))],
     default_plate: ['', ...plateNames, ...(defaultPlate && !plateNames.includes(defaultPlate) ? [defaultPlate] : [])],
     display_unit: ['mm', 'in'],
@@ -139,7 +144,6 @@ export function SettingsPage() {
       (url !== (settings.bambuddy_url ?? '') ||
         publicUrl !== (settings.public_url ?? '') ||
         folderId !== idValue(settings.library_folder_id) ||
-        pipelineId !== idValue(settings.pipeline_id) ||
         printerId !== idValue(settings.printer_id) ||
         defaultPlate !== (settings.default_plate ?? '') ||
         unit !== settings.display_unit))
@@ -176,7 +180,6 @@ export function SettingsPage() {
         api_key_typed: apiKey.length > 0,
         choices: {
           library_folder_id: (targetsState.data?.folders ?? []).map((folder) => ({ value: String(folder.id), name: folder.name })),
-          pipeline_id: (targetsState.data?.pipelines ?? []).map((pipeline) => ({ value: String(pipeline.id), name: pipeline.name })),
           printer_id: (targetsState.data?.printers ?? []).map((printer) => ({ value: String(printer.id), name: printer.name })),
           default_plate: plateNames,
           display_unit: ['mm', 'in'],
@@ -304,8 +307,10 @@ export function SettingsPage() {
           </div>
         )}
 
-        <section className="mt-5 rounded-[6px] border border-line bg-surface">
-          <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Connection</h2>
+        <section className="mt-5 rounded-[6px] border border-line bg-surface" aria-labelledby="connection-heading">
+          <h2 id="connection-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+            Connection
+          </h2>
           <div className="space-y-4 p-4">
             <div>
               <label htmlFor="bambuddy-url" className="block text-[13px]">
@@ -385,30 +390,6 @@ export function SettingsPage() {
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div>
-              <label htmlFor="slicer-pipeline" className="block text-[13px]">
-                Slicer pipeline
-              </label>
-              <select
-                id="slicer-pipeline"
-                value={pipelineId}
-                onChange={(event) => setPipelineId(event.target.value)}
-                className="sb-field mt-1.5 cursor-pointer"
-              >
-                <option value="">None — slice with the presets below</option>
-                {(targetsState.data?.pipelines ?? []).map((pipeline) => (
-                  <option key={pipeline.id} value={pipeline.id}>
-                    {pipeline.name}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1.5 text-[12px] text-muted">
-                The fallback for &ldquo;Slice and queue&rdquo; and for Print. A model given its
-                own pipeline in the print picker uses that instead. Without either, ScadBuddy
-                slices with the stored presets and queues to the printer below.
-              </p>
             </div>
 
             <div>
@@ -534,10 +515,30 @@ export function SettingsPage() {
           </div>
         </section>
 
+        <AiStatusSection />
+        <HeadlessBrowserSetting />
+
         {/* Applied at once, not part of the saved form (#251). The agent service serves
-            these routes, so the section shows only where the assistant would: hidden in
-            a production build until the service is deployed and routed. */}
-        {ai.available && <McpTokensSection />}
+            these routes, so the section shows only where the assistant would: when the
+            agent answers /api/v1/ai/status as available (useAiAvailability). */}
+        {ai.available && (
+          <>
+            <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
+            <McpTokensSection authMode={mcpAuthMode} />
+          </>
+        )}
+
+        {ai.available && (
+          <section className="mt-4 rounded-[6px] border border-line bg-surface">
+            <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+              MCP sign-in (OIDC)
+            </h2>
+            <div className="p-4">
+              {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+              <McpOidcSettings />
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
@@ -605,6 +606,21 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Applied as you go, not by Save changes: each action is its own request. */}
+        {ai.available && (
+          <div className="mt-8">
+            <h2 className="text-[15px] font-semibold tracking-tight">Assistant plugins</h2>
+            <p className="mt-0.5 text-[13px] text-muted">
+              What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            </p>
+            <PluginPackagesPanel />
+            <RemotePluginsPanel />
+          </div>
+        )}
+
+        {/* Not part of the form above: it saves on its own (#258). */}
+        <AiAuditSection />
       </div>
     </div>
   )

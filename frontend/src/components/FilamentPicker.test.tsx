@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { cleanup, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { FilamentOptions, SlotChoice } from '../api/types'
@@ -129,6 +129,29 @@ describe('FilamentPicker', () => {
       '0.4',
     )
     expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
+  })
+
+  it('counts a spare of the size in the rack, and names it when it serves one side', () => {
+    // Both sides 0.4 and a 0.2 in the rack: one side can print 0.2, so two colors can't.
+    const both04: FilamentOptions = {
+      ...wired,
+      nozzles: [
+        { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
+        { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
+      ],
+      rack: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }],
+    }
+    open(both04, 1, '0.2')
+    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
+    expect(screen.getByTestId('one-fitting-nozzle')).toHaveTextContent(
+      'Neither nozzle is 0.2 mm and the rack holds one spare, enough for one side',
+    )
+    cleanup()
+    // A second 0.2 in the rack, beside the mounted one: both sides can print it.
+    open({ ...wired, rack: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }] }, 1, '0.2')
+    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
+    expect(within(slot(1)).getByTestId('spool-22')).toBeEnabled()
+    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
   })
 
   it('says nothing about sides when both nozzles fit', () => {

@@ -100,6 +100,8 @@ function ApprovalCard({
         <p className="mt-1.5 text-[12px] text-muted" role="status">
           {item.state === 'sent'
             ? 'Sending your answer…'
+            : item.state === 'queued'
+              ? 'Not connected: your answer goes first when the assistant reconnects.'
             : item.state === 'approved'
               ? `Approved${item.by ? ` by ${item.by.label}` : ''}.`
               : `Denied${item.by ? ` by ${item.by.label}` : ''}.`}
