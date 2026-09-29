@@ -268,9 +268,30 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         bed_type: 'Textured PEI Plate',
         filament_overrides: { '1': { source: 'cloud', id: 'GFSA04' } },
       },
-      project_id: null,
       options: {},
     })
+    // Omitted, so the backend files it under the remembered project; null would be "No project".
+    expect(run.body).not.toHaveProperty('project_id')
+  })
+
+  it('passes a chosen project through', async () => {
+    const run: { body?: unknown } = {}
+    server.use(choicesView(), capturedRun(run))
+    const result = await tool('print_output').execute({ output_id: OUT, project_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(run.body).toMatchObject({ project_id: 7 })
+  })
+
+  it('sends an explicit null as "No project", which wins over the remembered one', async () => {
+    const run: { body?: unknown } = {}
+    server.use(choicesView(), capturedRun(run))
+    const result = await tool('print_output').execute({ output_id: OUT, project_id: null }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(run.body).toHaveProperty('project_id', null)
+  })
+
+  it('says what omitting the project and null each mean', () => {
+    expect(tool('print_output').description).toMatch(/project_id.*remembered.*null.*No project/s)
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
@@ -852,5 +873,64 @@ describe('get_output_preview (#308)', () => {
         resource: { uri: `scadbuddy://outputs/${id}/preview.glb`, mimeType: 'model/gltf-binary', blob: 'AQIDBA==' },
       },
     ])
+  })
+})
+
+describe('project tools (#317)', () => {
+  const OUT = 'c'.repeat(32)
+
+  it('remember_last_project sends the chosen project, and null for "No project"', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/print/projects/last`, async ({ request }) => {
+        const body = (await request.json()) as { project_id: number | null }
+        bodies.push(body)
+        return HttpResponse.json(body)
+      }),
+    )
+    const chosen = await tool('remember_last_project').execute({ project_id: 7 }, ctx())
+    const cleared = await tool('remember_last_project').execute({ project_id: null }, ctx())
+    expect(chosen.isError).toBeFalsy()
+    expect(cleared.isError).toBeFalsy()
+    expect(bodies).toEqual([{ project_id: 7 }, { project_id: null }])
+    expect(firstText(chosen)).toEqual({ project_id: 7 })
+  })
+
+  it('file_output_in_project_folder posts the project to the output and answers with the file', async () => {
+    const filed = {
+      project_id: 7,
+      folder_id: 9,
+      library_file_id: 41,
+      filename: 'Demo.3mf',
+      created: true,
+      bambuddy_url: 'http://b/projects/7',
+    }
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/${OUT}/project-file`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(filed)
+      }),
+    )
+    const fileTool = tool('file_output_in_project_folder')
+    const result = await fileTool.execute({ output_id: OUT, project_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ project_id: 7 }])
+    expect(firstText(result)).toEqual(filed)
+    expect(fileTool.risk).toBe('outward')
+    expect(fileTool.summarize?.({ output_id: OUT, project_id: 7 })).toBe(
+      `Upload output ${OUT}'s 3MF into Bambuddy project 7's folder`,
+    )
+  })
+
+  it('file_output_in_project_folder reports a refusal as an error', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/${OUT}/project-file`, () =>
+        HttpResponse.json({ detail: 'no such project' }, { status: 404 }),
+      ),
+    )
+    await expect(
+      tool('file_output_in_project_folder').execute({ output_id: OUT, project_id: 7 }, ctx()),
+    ).rejects.toThrow(/HTTP 404/)
   })
 })

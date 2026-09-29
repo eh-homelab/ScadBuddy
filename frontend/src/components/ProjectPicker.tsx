@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
-import type { ProjectChoices, ProjectRequest, ProjectView } from '../api/types'
+import type { ProjectRequest, ProjectView } from '../api/types'
+import { type ProjectList, useProjectList } from '../lib/projects'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
@@ -15,9 +16,11 @@ import { Spinner } from './ui/Spinner'
  * and linking a project that has none creates one — so a project chosen here is somewhere
  * the 3MF can actually land.
  *
- * The control fetches its own list and owns the "remember" write, so the parent needs to
- * know nothing but the chosen id: it passes that as `project_id` on the run, and the
- * backend resolves the folder from it. Attaching the resulting queue entries and archives
+ * The control fetches its own list, unless the parent passes one from
+ * {@link useProjectList} (#317: the Customize page's picker and the print dialog's share
+ * one list rather than each fetching it), so the parent needs to know nothing but the
+ * chosen id: it passes that as `project_id` on the run, and the backend resolves the
+ * folder from it. Attaching the resulting queue entries and archives
  * is deliberately *not* here — neither id exists when a print starts (#89).
  */
 
@@ -45,49 +48,66 @@ interface Props {
    * can seed `value` from it without ever handling a `ProjectChoices`.
    */
   onLoaded?: (projectId: number | null) => void
+  /**
+   * #317 — a list the parent shares between pickers. Given, this picker fetches nothing
+   * and `onLoaded` is the parent's business (it passed it to {@link useProjectList}).
+   */
+  list?: ProjectList
+  /**
+   * #317 — the chosen project's row, whenever it changes, so the parent can name it
+   * ("Saved to Kids' room") without fetching the list a second time.
+   */
+  onProject?: (project: ProjectView | null) => void
+  /** The select's id and test id, which differ when two pickers share a page (#317). */
+  id?: string
+  testId?: string
+  /** The label beside the select rather than above it, for the Customize page's bar. */
+  inline?: boolean
 }
 
-export function ProjectPicker({ value, onChange, onLoaded }: Props) {
-  const [choices, setChoices] = useState<ProjectChoices | null>(null)
+export function ProjectPicker({
+  value,
+  onChange,
+  onLoaded,
+  list,
+  onProject,
+  id = 'print-project',
+  testId = 'project-select',
+  inline = false,
+}: Props) {
+  const own = useProjectList(onLoaded, list === undefined)
+  const { choices, loading, error: listError, rereadFor, add } = list ?? own
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [colour, setColour] = useState('')
 
-  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const error = createError ?? listError
 
-  /**
-   * Held in a ref because it is a notification, not an input to the load: a parent that
-   * passes an inline arrow would otherwise change `load`'s identity on every render and
-   * re-fetch the list forever.
-   */
-  const report = useRef(onLoaded)
+  const reportProject = useRef(onProject)
   useEffect(() => {
-    report.current = onLoaded
+    reportProject.current = onProject
   })
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const next = await api.getProjects()
-      setChoices(next)
-      report.current?.(next.last_project_id ?? null)
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load])
 
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)
+
+  useEffect(() => {
+    reportProject.current?.(current ?? null)
+  }, [current])
+
+  /**
+   * #317 — the other picker on the page may have just created the project in view, which
+   * this one's list predates. Re-read once per such id across every picker sharing the
+   * list (`rereadFor`). The re-read only refreshes the list: `value` is the parent's, and
+   * the remembered `last_project_id` may still be the old project.
+   */
+  const missing = choices !== null && value !== null && current === undefined ? value : null
+  useEffect(() => {
+    if (missing !== null) rereadFor(missing)
+  }, [missing, rereadFor])
 
   async function create() {
     const body: ProjectRequest = {
@@ -96,21 +116,17 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       colour: colour.trim() || null,
     }
     setSaving(true)
-    setError(null)
+    setCreateError(null)
     try {
       const created = await api.createProject(body)
-      // The POST answers with the whole view, folder included, so re-listing would only
-      // fetch back what is already in hand.
-      setChoices((choice) =>
-        choice ? { ...choice, projects: [created, ...(choice.projects ?? [])] } : choice,
-      )
+      add(created)
       setCreating(false)
       setName('')
       setDescription('')
       setColour('')
       onChange(created.id)
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
+      setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
     } finally {
       setSaving(false)
     }
@@ -125,13 +141,13 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
   }
 
   return (
-    <div>
-      <label htmlFor="print-project" className="block text-[13px]">
+    <div className={inline ? 'flex flex-wrap items-center gap-2' : undefined}>
+      <label htmlFor={id} className={inline ? 'text-[12px] text-muted' : 'block text-[13px]'}>
         Project
       </label>
       <select
-        id="print-project"
-        data-testid="project-select"
+        id={id}
+        data-testid={testId}
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
@@ -141,7 +157,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
           setCreating(false)
           onChange(event.target.value === '' ? null : Number(event.target.value))
         }}
-        className="sb-field mt-1.5 cursor-pointer"
+        className={inline ? 'sb-field w-auto max-w-56 cursor-pointer py-1 text-[12px]' : 'sb-field mt-1.5 cursor-pointer'}
       >
         <option value="">No project</option>
         {projects.map((project) => (
@@ -155,7 +171,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       </select>
 
       {!creating && current && current.folder_id === null && (
-        <p className="mt-1.5 text-[12px] text-muted" data-testid="project-no-folder">
+        <p className="mt-1.5 basis-full text-[12px] text-muted" data-testid="project-no-folder">
           {current.name} has no library folder yet &mdash; ScadBuddy creates one and links it
           the first time it sends here, because the folder is what Bambuddy&rsquo;s project
           page lists.
@@ -163,7 +179,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       )}
 
       {creating && (
-        <div className="mt-2 space-y-3 rounded-[6px] border border-line bg-surface-2 p-3">
+        <div className="mt-2 basis-full space-y-3 rounded-[6px] border border-line bg-surface-2 p-3">
           <div>
             <label htmlFor="new-project-name" className="block text-[13px]">
               Name
@@ -235,7 +251,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
       )}
 
       {error && (
-        <p role="alert" className="mt-2 text-[13px] text-warn">
+        <p role="alert" className="mt-2 basis-full text-[13px] text-warn">
           {error}
         </p>
       )}

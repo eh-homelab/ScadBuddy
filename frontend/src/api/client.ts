@@ -1,4 +1,6 @@
 import type {
+  AnalysisReport,
+  AnalysisRun,
   Asset,
   AssetUsage,
   AttachResult,
@@ -18,6 +20,7 @@ import type {
   LibraryPinRequest,
   MediaView,
   ModelPatch,
+  LastProject,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -45,6 +48,7 @@ import type {
   Problem,
   ProjectAttach,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   RenderAccepted,
@@ -711,6 +715,13 @@ export const api = {
     }),
 
   /**
+   * #284 — judge an output against the request the print dialog would send. Reads only:
+   * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
+   */
+  runAnalyzers: (body: AnalysisRun) =>
+    request<AnalysisReport>('/analyzers/run', { method: 'POST', body: JSON.stringify(body) }),
+
+  /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
    * the one the last send went to so the picker opens where it was left. ScadBuddy
    * models no relationship between a model and a project: which prints belong to a
@@ -725,6 +736,23 @@ export const api = {
    */
   createProject: (body: ProjectRequest) =>
     request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #317 — the project both pickers open on; `null` is "No project". */
+  rememberProject: (projectId: number | null) =>
+    request<LastProject>('/print/projects/last', {
+      method: 'PUT',
+      body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /**
+   * #317 — put a generated output's editable 3MF in the project's Bambuddy folder.
+   * Idempotent: the same project again answers with the file already there.
+   */
+  fileIntoProject: (outputId: string, projectId: number) =>
+    request<ProjectFile>(`/outputs/${seg(outputId)}/project-file`, {
+      method: 'POST',
+      body: JSON.stringify({ project_id: projectId }),
+    }),
 
   /** Filed after the run, never during it: a plate's queue item only exists once it has
    * sliced, and an archive only once a print has finished, so the ids come from the

@@ -500,6 +500,18 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        """``GET /library/files?folder_id=`` — the files directly in one folder (#317)."""
+        what = f"list the files in library folder {folder_id}"
+        response = await self._send(
+            "GET",
+            "/library/files",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id},
+        )
+        return [LibraryFile.model_validate(row) for row in self._rows(response, what=what)]
+
     async def library_file(self, file_id: int) -> LibraryFile:
         """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
         response = await self._send(
