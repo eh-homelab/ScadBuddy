@@ -29,6 +29,7 @@ from scadbuddy.store.content_models import (
     BlobScope,
     BlobStat,
     RefusedDeleteError,
+    ReuseLostError,
     StoreFullError,
     StoreUsage,
 )
@@ -109,11 +110,17 @@ class ContentStore:
                 f" past SCADBUDDY_STORE_MAX_TOTAL_BYTES ({self.max_total_bytes})"
             )
 
-    async def _store(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> BlobRef:
+    async def _store(
+        self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope, reuse: bool = True
+    ) -> tuple[BlobRef, bool]:
+        """The stored object, and whether it is an existing one reused. Its row must then
+        be written with ``reuse=True``, which fails if a release freed it meanwhile."""
         sha = hashlib.sha256(data).hexdigest()
-        existing = await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+        existing = (
+            await asyncio.to_thread(self.index.by_sha, sha, kind, self.name) if reuse else None
+        )
         if existing is not None and await self.backend.exists(existing.backend_id):
-            return existing  # a re-put: never refused, never uploaded twice
+            return existing, True  # a re-put: never refused, never uploaded twice
         try:
             await asyncio.to_thread(self._require_room, len(data))
         except StoreFullError:
@@ -121,9 +128,10 @@ class ContentStore:
             raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
-        return BlobRef(
+        ref = BlobRef(
             sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data)
         )
+        return ref, False
 
     async def _release(self, ref: BlobRef) -> None:
         """Remove the object unless an index row still names it. Refuses a ref on another
@@ -144,11 +152,18 @@ class ContentStore:
         key: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> BlobRef:
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
-        previous = await asyncio.to_thread(
-            self.index.put, key, ref, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            previous = await asyncio.to_thread(
+                self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
+            )
+        except ReuseLostError:
+            # Freed between the lookup and this row: store this put's own copy.
+            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            previous = await asyncio.to_thread(
+                self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+            )
         if previous is not None and previous.backend_id != ref.backend_id:
             await self._release_replaced(key, previous)
         return ref
@@ -182,11 +197,23 @@ class ContentStore:
     ) -> BlobRef | None:
         """`put` under ``key`` only if the key still names ``expected``; None if it
         moved on, and this call's own upload is removed again."""
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         previous = await asyncio.to_thread(self.index.get, key)
-        landed = await asyncio.to_thread(
-            self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            landed = await asyncio.to_thread(
+                self.index.swap,
+                key,
+                ref,
+                expected=expected,
+                slug=scope.slug,
+                meta=meta or {},
+                reuse=reused,
+            )
+        except ReuseLostError:
+            ref, _ = await self._store(kind, data, name=name, scope=scope, reuse=False)
+            landed = await asyncio.to_thread(
+                self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
+            )
         if not landed:
             await self._release(ref)
             return None
@@ -318,6 +345,7 @@ __all__ = [
     "ContentBackend",
     "ContentStore",
     "RefusedDeleteError",
+    "ReuseLostError",
     "StoreFullError",
     "StoreUsage",
     "sweep_content",

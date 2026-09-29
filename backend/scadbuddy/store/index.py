@@ -11,7 +11,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.store.content_models import BlobRef, BlobStat
+from scadbuddy.store.content_models import BlobRef, BlobStat, ReuseLostError
 
 Pool = ConnectionPool[Connection[DictRow]]
 _COLUMNS = "key, sha256, kind, backend, backend_id, size, slug, meta, touched_at"
@@ -53,17 +53,41 @@ class BlobIndex:
             ).fetchone()
         return _stat(row).ref if row is not None else None
 
+    @staticmethod
+    def _hold_shared(conn: Connection[DictRow], ref: BlobRef) -> None:
+        """For a reused object, in the caller's transaction: lock a row that names it.
+        A put or delete that would free that row now waits for this transaction, and its
+        `shares_backend_id` check afterwards sees the new row. If the object was freed
+        first, no row matches, and this raises so the caller uploads its own copy. A
+        false miss (the one matched row moved on under READ COMMITTED) only costs an
+        upload."""
+        row = conn.execute(
+            "SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s LIMIT 1 FOR SHARE",
+            (ref.backend, ref.backend_id),
+        ).fetchone()
+        if row is None:
+            raise ReuseLostError(f"{ref.backend}:{ref.backend_id} was freed while being reused")
+
     def put(
-        self, key: str, ref: BlobRef, *, slug: str | None, meta: dict[str, Any]
+        self,
+        key: str,
+        ref: BlobRef,
+        *,
+        slug: str | None,
+        meta: dict[str, Any],
+        reuse: bool = False,
     ) -> BlobRef | None:
         """Point ``key`` at ``ref`` and return what it named before, read under the
         row's lock in the same transaction, so two racing puts each release exactly the
         object the other one replaced. A key another put created meanwhile is retried
-        as an update: a single upsert would not see that row's object."""
+        as an update: a single upsert would not see that row's object. With ``reuse``,
+        ``ref`` names an existing object (`_hold_shared`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
         with self._pool.connection() as conn:
             while True:
                 with conn.transaction():
+                    if reuse:
+                        self._hold_shared(conn, ref)
                     row = conn.execute(
                         f"SELECT {_COLUMNS} FROM store_blobs WHERE key = %s FOR UPDATE", (key,)
                     ).fetchone()
@@ -92,10 +116,14 @@ class BlobIndex:
         expected: str | None,
         slug: str | None,
         meta: dict[str, Any],
+        reuse: bool = False,
     ) -> bool:
-        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row)."""
+        """Point ``key`` at ``ref`` only if it still names ``expected`` (None: no row).
+        With ``reuse``, ``ref`` names an existing object (`_hold_shared`)."""
         values = (ref.sha256, ref.kind, ref.backend, ref.backend_id, ref.size, slug, Jsonb(meta))
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            if reuse:
+                self._hold_shared(conn, ref)
             if expected is None:
                 cursor = conn.execute(
                     "INSERT INTO store_blobs"
