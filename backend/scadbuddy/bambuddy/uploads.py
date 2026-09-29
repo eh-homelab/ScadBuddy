@@ -4,7 +4,9 @@ Every copy of an output's ``model.3mf`` ScadBuddy has put in Bambuddy's *file li
 (not an OpenSCAD library), and every sliced 3MF Bambuddy wrote beside one. They are
 the only pointers ScadBuddy has to those files, so they live in the database rather
 than in the output's ``meta.json``. The tables are migration
-``20260928T0720Z_output_bambuddy_uploads``.
+``20260928T0720Z_output_bambuddy_uploads``. Beside them, the printer and nozzle each
+Bambuddy project last printed on (``20260928T0937Z_project_print_targets``, #317): what
+the project's file is laid out for when Generate files it there.
 
 The database is required (#401): without ``SCADBUDDY_DATABASE_URL`` there is no
 fallback, and every call raises `DatabaseRequiredError`.
@@ -13,13 +15,17 @@ fallback, and every call raises `DatabaseRequiredError`.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager
 from datetime import datetime
 
-from psycopg import Connection
+from psycopg import AsyncConnection, Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
+
+#: Prefixes the key of :meth:`BambuddyUploadStore.copy_lock`'s advisory lock.
+COPY_LOCK_PREFIX = "scadbuddy-library-copy:"
 
 
 class DatabaseRequiredError(RuntimeError):
@@ -68,6 +74,13 @@ class LibraryCopy(BaseModel):
     sliced: list[SlicedCopy] = Field(default_factory=list)
 
 
+class ProjectTarget(BaseModel):
+    """The printer and nozzle a Bambuddy project last printed on (#317)."""
+
+    printer_id: int
+    nozzle_diameter: str | None = None
+
+
 class BambuddyUploadStore:
     """``output_bambuddy_uploads`` and ``output_bambuddy_slices``, on the process's pool.
 
@@ -86,6 +99,30 @@ class BambuddyUploadStore:
         if self._pool is None:
             raise DatabaseRequiredError
         return self._pool
+
+    @asynccontextmanager
+    async def copy_lock(self, key: str) -> AsyncIterator[None]:
+        """Held, across every replica on this database, while one caller finds, uploads
+        and records a library copy under ``key`` (#317).
+
+        A session-level advisory lock on a connection of its own, closed on the way
+        out, rather than a transaction-level one on the pool's. The section spans a
+        Bambuddy upload (up to its upload timeout), and the pool is the render queue's:
+        a pooled connection held that long takes a slot from it, and the store's own
+        queries inside the section need further slots, so enough folders locked at
+        once would exhaust the pool against itself. Closing the connection releases
+        the lock however the section ends, cancellation and a lost connection included.
+        """
+        pool = self._require()
+        conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
+        conn = await AsyncConnection.connect(conninfo, autocommit=True)
+        try:
+            await conn.execute(
+                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"{COPY_LOCK_PREFIX}{key}",)
+            )
+            yield
+        finally:
+            await conn.close()
 
     async def for_output(self, output_id: str) -> list[LibraryCopy]:
         """The output's copies in upload order, each with its slices."""
@@ -138,7 +175,37 @@ class BambuddyUploadStore:
         """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
         await asyncio.to_thread(self._delete_outputs, list(output_ids))
 
+    async def project_target(self, project_id: int) -> ProjectTarget | None:
+        """What ``project_id`` last printed on, or ``None`` if nothing has been printed
+        into it from here (#317). Generate lays the project's file out for it."""
+        return await asyncio.to_thread(self._project_target, project_id)
+
+    async def remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
+        """Record the printer and nozzle a print into ``project_id`` used (#317)."""
+        await asyncio.to_thread(self._remember_project_target, project_id, target)
+
     # The blocking bodies, run in a worker thread by the coroutines above.
+
+    def _project_target(self, project_id: int) -> ProjectTarget | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "SELECT printer_id, nozzle_diameter FROM project_print_targets"
+                " WHERE project_id = %s",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ProjectTarget(printer_id=row["printer_id"], nozzle_diameter=row["nozzle_diameter"])
+
+    def _remember_project_target(self, project_id: int, target: ProjectTarget) -> None:
+        with self._require().connection() as conn:
+            conn.execute(
+                "INSERT INTO project_print_targets (project_id, printer_id, nozzle_diameter)"
+                " VALUES (%s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
+                " SET printer_id = EXCLUDED.printer_id,"
+                " nozzle_diameter = EXCLUDED.nozzle_diameter, updated_at = now()",
+                (project_id, target.printer_id, target.nozzle_diameter),
+            )
 
     def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
