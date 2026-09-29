@@ -139,18 +139,22 @@ def test_packing_is_deterministic_and_leaves_out_dotfiles(tmp_path: Path) -> Non
     assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ["a.txt"]
 
 
-async def test_eviction_keeps_unpublished_and_recent_pieces(
+async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
     for key in ("old", "recent"):
         (a.dir_for(key) / "m").write_bytes(b"x" * 10)
         await a.publish(key, scope=SCOPE)
-    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published, in flight
+    (a.dir_for("crashed") / "m").write_bytes(b"x" * 10)  # never published, abandoned
+    staging = a.local.root / ".staging-1"
+    staging.mkdir()
+    (staging / "m").write_bytes(b"x" * 10)  # an `unpack_dir` a crash left
     past = time.time() - 3600
-    os.utime(a.local.root / "old", (past, past))
-    os.utime(a.local.root / "rendering", (past, past))
-    assert a.evict() == ["old"]
+    for name in ("old", "crashed", ".staging-1"):
+        os.utime(a.local.root / name, (past, past))
+    assert sorted(a.evict()) == [".staging-1", "crashed", "old"]
     assert a.local.exists("recent") and a.local.exists("rendering")
 
 
