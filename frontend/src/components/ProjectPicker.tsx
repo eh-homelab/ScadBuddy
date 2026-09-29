@@ -68,6 +68,11 @@ interface Props {
    * (Generate filing its file), so what is on screen matches where it was filed.
    */
   disabled?: boolean
+  /**
+   * #665 — whether a "Create project" is in flight, so the parent can hold Generate:
+   * the create's completion moves `value`, which must not happen under a Generate.
+   */
+  onCreating?: (creating: boolean) => void
 }
 
 export function ProjectPicker({
@@ -80,6 +85,7 @@ export function ProjectPicker({
   testId = 'project-select',
   inline = false,
   disabled = false,
+  onCreating,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
   const { choices, loading, error: listError, rereadFor, add } = list ?? own
@@ -96,6 +102,17 @@ export function ProjectPicker({
   useEffect(() => {
     reportProject.current = onProject
   })
+
+  const reportCreating = useRef(onCreating)
+  useEffect(() => {
+    reportCreating.current = onCreating
+  })
+  useEffect(() => {
+    if (!saving) return
+    reportCreating.current?.(true)
+    // Also on unmount (the print dialog closing mid-create).
+    return () => reportCreating.current?.(false)
+  }, [saving])
 
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)

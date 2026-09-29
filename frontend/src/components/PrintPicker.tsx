@@ -74,6 +74,8 @@ interface Props {
     list?: ProjectList
     /** #665 — frozen while the page's Generate is filing into the chosen project. */
     disabled?: boolean
+    /** #665 — a "Create project" in this picker is in flight. */
+    onCreating?: (creating: boolean) => void
   }
 }
 
@@ -413,6 +415,7 @@ export function PrintPicker({
                   onChange={project.onChange}
                   list={project.list}
                   disabled={project.disabled}
+                  onCreating={project.onCreating}
                 />
               ) : (
                 <ProjectPicker

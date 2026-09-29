@@ -1,4 +1,5 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { bridge } from '../agent/bridge'
@@ -6,6 +7,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
+import { projectViews } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -169,6 +171,64 @@ describe('customizer tools', () => {
     expect(!confirm.ok && confirm.error.code).toBe('refused')
     expect(send).not.toHaveBeenCalled()
     expect(bridge.snapshot().dialogs).toEqual(['Send to Bambuddy'])
+  })
+
+  /** A request to `path` that waits until the returned function is called, then falls through. */
+  function hold(method: 'post', path: string): () => void {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http[method](path, async () => {
+        await gate
+        return undefined
+      }),
+    )
+    return release
+  }
+
+  it('freezes the print dialog\'s picker while a Generate files the project (#665)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
+      ),
+    )
+    await open()
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    expect(await call('open_print_dialog', { kind: 'print' })).toMatchObject({ ok: true })
+    const dialog = await screen.findByRole('dialog')
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    expect(dialogPicker).toHaveValue('1')
+    expect(dialogPicker).toBeEnabled()
+
+    // The dialog is open when the agent generates again: its picker shares the project.
+    const release = hold('post', '/api/v1/outputs/:id/project-file')
+    const generating = call('generate', { timeout_ms: 5000 })
+    await waitFor(() => expect(dialogPicker).toBeDisabled())
+    release()
+    expect(await generating).toMatchObject({ ok: true })
+    await waitFor(() => expect(dialogPicker).toBeEnabled())
+  })
+
+  it('holds Generate while a project is being created (#665)', async () => {
+    const { user } = await open()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('post', '/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // Its completion switches the project, so neither the button nor the tool may start.
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeDisabled())
+    const refused = await call('generate', { timeout_ms: 5000 })
+    expect(!refused.ok && refused.error.message).toMatch(/still being created/)
+
+    release()
+    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
   })
 
   it('reports itself in the snapshot and goes unavailable when the page does', async () => {
