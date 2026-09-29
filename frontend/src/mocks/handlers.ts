@@ -12,7 +12,7 @@ import type {
   Job,
   LastProject,
   CatalogueLibrary,
-  LibraryListing,
+  InvalidLibraryEntry,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -60,13 +60,12 @@ import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
-import { libraryFiles, libraryFolders, MULTI_PLATE_FILE } from './library'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
-const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
   filament_plan: [],
   nozzles: [],
@@ -75,7 +74,7 @@ const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
-function isNoModelChoices(choices: ModelPrintChoices): boolean {
+export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   return (
     choices.printer_id == null &&
     !choices.filament_plan?.length &&
@@ -97,14 +96,14 @@ const state = {
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
-  settings: { ...fixtures.settings } as Settings,
+  settings: structuredClone(fixtures.settings) as Settings,
   /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
-  /** #313 — per library-file choices, the store's `library_choices`. */
+  /** #313 — per library-file choices, the store's `library_print_choices`. */
   libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
@@ -221,7 +220,7 @@ export function resetMockState(): void {
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
-  state.settings = { ...fixtures.settings }
+  state.settings = structuredClone(fixtures.settings)
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -296,14 +295,30 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
-/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+/** #274 — the upload limit in effect (#322: Settings can change it too). */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #322 — seeds what the print dialog remembers, for the Remembered choices table. */
+export function setMockRemembered(remembered: {
+  modelChoices?: Record<string, ModelPrintChoices>
+  printerBedTypes?: Record<string, string>
+}): void {
+  if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
+  if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
 }
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
+export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEntry[]): void {
+  state.models = state.models.map((m) =>
+    m.slug === slug ? { ...m, invalid_libraries: entries } : m,
+  )
 }
 
 /** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
@@ -494,7 +509,7 @@ export function nextHexId(): string {
   return state.seq.toString(16).padStart(32, '0')
 }
 
-function nextNumber(): number {
+export function nextNumber(): number {
   state.seq += 1
   return 8800 + state.seq
 }
@@ -607,41 +622,66 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/**
+ * #322 — what the print dialog remembers, as `GET /settings/remembered` answers it. The
+ * route is in `features/settings.ts`; the state is the print routes' own, so it is read here.
+ */
+export function mockRemembered() {
+  const dropEmpty = (options: PrintOptions | undefined) =>
+    Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== null && value !== undefined))
+  return {
+    model_print_choices: structuredClone(state.modelChoices),
+    printer_bed_types: { ...state.printerBedTypes },
+    print_options: dropEmpty(state.printOptions.global_options),
+    printer_print_options: structuredClone(state.printOptions.printers ?? {}),
+    model_print_options: structuredClone(state.printOptions.models ?? {}),
+  }
+}
+
+/** #322 — "Forget all": every remembered choice, and none of the settings. */
+export function forgetMockRemembered(): void {
+  state.modelChoices = {}
+  state.libraryChoices = {}
+  state.printerBedTypes = {}
+  state.printOptions.global_options = {}
+  state.printOptions.printers = {}
+  state.printOptions.models = {}
+}
+
+/**
+ * #313 — what the print dialog remembers for one Bambuddy library file. The routes are in
+ * `features/library.ts`; the state is here with the other remembered choices, so "Forget
+ * all" (`forgetMockRemembered`) drops it too.
+ */
+export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
+  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+}
+
+/** Remembers one library file's choices; the empty choice forgets them, as the store does. */
+export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
+  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
+  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  return mockLibraryChoices(fileId)
+}
+
+/**
+ * #322 — the settings the mock holds. Their routes are in `features/settings.ts`; the
+ * state stays here because the send, plate and upload routes read it too.
+ */
+export function mockSettings(): Settings {
+  return state.settings
+}
+
+export function setMockSettings(settings: Settings): void {
+  state.settings = settings
+}
+
 export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 }
-
-/** #313 — what the library routes answer for a file that is gone or not printable. */
-function libraryRefusal(fileId: number) {
-  const file = libraryFiles.find((row) => row.id === fileId)
-  if (!file) {
-    return problem(
-      404,
-      'Not Found',
-      `Bambuddy has no such resource when asked to read library file ${fileId}`,
-    )
-  }
-  if (file.file_type === 'gcode.3mf') {
-    return problem(422, 'Unprocessable Content', `${file.filename} is sliced already. Print it from Bambuddy.`)
-  }
-  if (!file.printable) {
-    return problem(
-      422,
-      'Unprocessable Content',
-      `ScadBuddy prints only 3MF and STL files from the library, and ${file.filename} is a ${file.file_type}.`,
-    )
-  }
-  return null
-}
-
-function pngResponse() {
-  const bytes = Uint8Array.from(atob(fixtures.MEDIA_PNG_BASE64), (char) => char.charCodeAt(0))
-  return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
-}
-
 
 /**
  * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
@@ -2492,95 +2532,6 @@ export const handlers = [
     return HttpResponse.json(null)
   }),
 
-  // --- #313: printing a file already in Bambuddy's library ---------------------------
-
-  http.get(`${base}/print/library`, ({ request }) => {
-    const search = new URL(request.url).searchParams
-    const asked = search.get('folder_id')
-    const folderId = asked === null ? null : Number(asked)
-    const all = search.get('all') === 'true'
-    const here = libraryFiles.filter((file) => (file.folder_id ?? null) === folderId)
-    const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
-    return HttpResponse.json({
-      folder_id: folderId,
-      all,
-      folders: libraryFolders,
-      files,
-      hidden: here.length - files.length,
-    } satisfies LibraryListing)
-  }),
-
-  http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
-  http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
-
-  http.get(`${base}/print/library/:id/plates`, ({ params }) => {
-    const file = libraryFiles.find((row) => row.id === Number(params['id']))
-    if (!file) {
-      return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read the plates of library file ${params['id']}`)
-    }
-    if (file.file_type === 'stl') return HttpResponse.json([] satisfies OutputPlate[])
-    const count = file.id === MULTI_PLATE_FILE ? 2 : 1
-    return HttpResponse.json(
-      Array.from({ length: count }, (_, n) => ({ index: n + 1, has_thumbnail: true })) satisfies OutputPlate[],
-    )
-  }),
-
-  http.get(`${base}/print/library/:id/choices`, ({ params, request }) => {
-    const refused = libraryRefusal(Number(params['id']))
-    if (refused) return refused
-    const remembered = state.libraryChoices[String(params['id'])] ?? NO_MODEL_CHOICES
-    const asked = new URL(request.url).searchParams.get('printer_id')
-    const printerId =
-      asked !== null ? Number(asked) : (remembered.printer_id ?? choicesView.printer_id ?? null)
-    return HttpResponse.json({
-      ...choicesView,
-      printer_id: printerId,
-      filaments: { ...choicesView.filaments, library_file_id: Number(params['id']), printer_id: printerId },
-      model_choices: remembered,
-    } satisfies ChoicesView)
-  }),
-
-  http.put(`${base}/print/library/:id/choices`, async ({ params, request }) => {
-    const key = String(params['id'])
-    const body = (await request.json()) as ModelPrintChoices
-    if (isNoModelChoices(body)) delete state.libraryChoices[key]
-    else state.libraryChoices[key] = { ...NO_MODEL_CHOICES, ...body }
-    return HttpResponse.json(state.libraryChoices[key] ?? NO_MODEL_CHOICES)
-  }),
-
-  http.get(`${base}/print/library/:id/filaments`, ({ params, request }) => {
-    const refused = libraryRefusal(Number(params['id']))
-    if (refused) return refused
-    const printerId = new URL(request.url).searchParams.get('printer_id')
-    return HttpResponse.json({
-      ...fixtures.filamentOptions,
-      ...(printerId === null ? { nozzles: [] } : {}),
-      library_file_id: Number(params['id']),
-      printer_id: printerId === null ? null : Number(printerId),
-    } satisfies FilamentOptions)
-  }),
-
-  http.post(`${base}/print/library/:id/run`, async ({ params, request }) => {
-    const fileId = Number(params['id'])
-    const refused = libraryRefusal(fileId)
-    if (refused) return refused
-    const body = (await request.json()) as PrintRunRequest
-    await delay(200)
-    return HttpResponse.json({
-      route: 'slice_queue',
-      library_file_id: fileId,
-      printer_id: body.printer_id ?? null,
-      slice_job_id: nextNumber(),
-      sliced_library_file_id: nextNumber(),
-      queue_item_ids: [nextNumber()],
-      copies: body.copies ?? 1,
-      warnings: [],
-      project_id: body.project_id ?? null,
-      folder_id: null,
-      bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-    } satisfies PrintRunResult)
-  }),
-
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),
 
   http.get(`${base}/fonts/catalogue`, ({ request }) => {
@@ -2658,12 +2609,14 @@ export const handlers = [
     const libraries = current.some((row) => row.name === name)
       ? current.map((row) => (row.name === name ? pin : row))
       : [...current, pin]
-    const updated = { ...model, libraries }
+    // As the backend's `pin_library`: the pin takes the place of any entry of that name.
+    const invalid = (model.invalid_libraries ?? []).filter((entry) => entry.name !== name)
+    const updated = { ...model, libraries, invalid_libraries: invalid }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
 
-  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const name = String(params['name'])
     const refused = refuseBuiltin(slug)
@@ -2671,16 +2624,38 @@ export const handlers = [
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const current = model.libraries ?? []
-    if (!current.some((row) => row.name === name)) {
+    const invalid = model.invalid_libraries ?? []
+    const at = new URL(request.url).searchParams.get('index')
+    if (at !== null) {
+      // #217 — that invalid entry alone, as the backend's `unpin_library(index=)`.
+      const index = Number(at)
+      if (!invalid.some((entry) => entry.index === index && entry.name === name)) {
+        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'; nothing was removed`)
+      }
+      await delay(50)
+      const updated = {
+        ...model,
+        invalid_libraries: invalid
+          .filter((entry) => entry.index !== index)
+          .map((entry) =>
+            entry.index !== null && entry.index > index ? { ...entry, index: entry.index - 1 } : entry,
+          ),
+      }
+      state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+      return HttpResponse.json(view(updated))
+    }
+    if (![...current, ...invalid].some((row) => row.name === name)) {
       return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
     }
     await delay(50)
-    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    const updated = {
+      ...model,
+      libraries: current.filter((row) => row.name !== name),
+      invalid_libraries: invalid.filter((entry) => entry.name !== name),
+    }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
-
-  http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
   http.get(`${base}/ai/settings/headless-browser`, () =>
@@ -2694,31 +2669,6 @@ export const handlers = [
     }
     state.headlessBrowser = body.enabled
     return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
-  http.put(`${base}/settings`, async ({ request }) => {
-    const body = (await request.json()) as {
-      bambuddy_url?: string | null
-      bambuddy_api_key?: string
-      public_url?: string | null
-      library_folder_id?: number | null
-      printer_id?: number | null
-      display_unit?: Settings['display_unit'] | null
-    }
-    state.settings = {
-      ...state.settings,
-      ...body,
-      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
-      media_upload_max_bytes: state.settings.media_upload_max_bytes,
-      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
-      has_api_key:
-        body.bambuddy_api_key === undefined
-          ? state.settings.has_api_key
-          : body.bambuddy_api_key.length > 0,
-    }
-    delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
-    await delay(120)
-    return HttpResponse.json(state.settings)
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
@@ -2783,25 +2733,6 @@ export const handlers = [
     // result pass in tests and break in the browser.
     const { defaults, global_options, printers, models } = state.printOptions
     return HttpResponse.json({ defaults, global_options, printers, models })
-  }),
-
-  http.post(`${base}/settings/test`, async () => {
-    await delay(200)
-    if (!state.settings.bambuddy_url?.startsWith('http')) {
-      return problem(409, 'Conflict', 'no Bambuddy URL is configured')
-    }
-    if (!state.settings.has_api_key) {
-      return HttpResponse.json({
-        ok: false,
-        detail: "Bambuddy refused the API key when asked to list the printers. The key needs the 'Read Status' scope",
-        printers: [],
-      })
-    }
-    return HttpResponse.json({
-      ok: true,
-      detail: 'Connected. Bambuddy reports 3DP-31B-598.',
-      printers: fixtures.targets.printers,
-    })
   }),
 
   http.get(`${base}/settings/targets`, () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelPatch, ModelSummary, PrintRunRequest } from '../api/types'
+import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
 import { DEFAULT_NOZZLES } from '../lib/printChoices'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
@@ -868,14 +868,17 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(removed.thumbnail_source).not.toBe('model')
   })
 
-  it('reports the upload limit read-only: a settings PUT does not change it', async () => {
-    const limit = (await api.getSettings()).media_upload_max_bytes
+  it('stores an upload limit a settings PUT sets, as a value set here (#322)', async () => {
     const saved = await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ media_upload_max_bytes: 1024 }),
-    }).then((response) => response.json() as Promise<{ media_upload_max_bytes: number }>)
-    expect(saved.media_upload_max_bytes).toBe(limit)
+    }).then((response) => response.json() as Promise<Settings>)
+    expect(saved.media_upload_max_bytes).toBe(1024)
+    expect(saved.sources?.media_upload_max_bytes).toBe('stored')
+    const reset = await api.putSettings({ reset: ['media_upload_max_bytes'] })
+    expect(reset.media_upload_max_bytes).toBe(1024 * 1024 * 1024)
+    expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
   it('refuses an upload over the limit with a 413 naming it', async () => {
@@ -1077,6 +1080,12 @@ describe('library print', () => {
     })
     expect((await api.getLibraryChoices(89)).model_choices?.nozzles?.[0]?.size).toBe('0.2')
     expect((await api.getLibraryChoices(67)).model_choices?.nozzles ?? []).toEqual([])
+  })
+
+  it('forgets the choices with every other remembered choice', async () => {
+    await api.putLibraryChoices(89, { printer_id: 1, filament_plan: [] })
+    await api.forgetAllRemembered()
+    expect((await api.getLibraryChoices(89)).model_choices?.printer_id ?? null).toBeNull()
   })
 
   it('refuses a sliced file and a missing one', async () => {

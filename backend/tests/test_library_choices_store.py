@@ -64,3 +64,12 @@ def test_a_row_that_no_longer_validates_is_nothing_remembered(
         )
 
     assert store.library_choices(89) == ModelPrintChoices()
+
+
+def test_forget_all_forgets_the_library_files_choices_too(store: SettingsStore) -> None:
+    """#322's "Forget all" drops every remembered choice, a library file's included."""
+    store.set_library_choices(89, CHOSEN)
+
+    store.forget_remembered()
+
+    assert store.library_choices(89) == ModelPrintChoices()
