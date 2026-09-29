@@ -464,3 +464,52 @@ def test_a_mounted_hotend_listed_in_the_rack_is_not_a_spare() -> None:
     assert [slot.nozzle_diameter for slot in status.nozzle_rack] == ["0.2", "0.4"]
     result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.4", used_slots={1, 2})
     assert len(result.errors) == 1
+
+
+def item_149(**changes: Any) -> PrinterStatus:
+    """Queue item 149's printer (2026-09-29): 0.4 on both sides, standard on the right and
+    High Flow on the left, with the switch fitted."""
+    nozzles = [
+        {"nozzle_type": "HS01", "nozzle_diameter": "0.4"},
+        {"nozzle_type": "HH01", "nozzle_diameter": "0.4"},
+    ]
+    return fts(nozzles=nozzles, **changes)
+
+
+HF_LEFT = (
+    "The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow "
+    "slicing is supported (#484), so if the print uses the left, the printer pauses at "
+    'the first layer ("the left nozzle is not matched with slicing file"). Fit a '
+    "standard nozzle there before it starts."
+)
+
+
+def test_a_high_flow_side_warns_a_multi_color_print_and_never_refuses_it() -> None:
+    """#723: item 149 paused at layer 0 on its High Flow left nozzle. A warning, not a
+    refusal, because a print may be set up before its nozzle is fitted."""
+    result = plan_extruders([RIGHT_02, LEFT_02], item_149(), size="0.4", used_slots={1, 2})
+    assert result.errors == []
+    assert [(warning.kind, warning.message) for warning in result.warnings] == [
+        ("hf-unsupported", HF_LEFT)
+    ]
+
+
+def test_a_high_flow_side_warns_a_one_color_print_too() -> None:
+    """The slicer picks the extruder for one color, so it may pick the High Flow side."""
+    result = plan_extruders([RIGHT_02], item_149(), size="0.4", used_slots={1})
+    assert result.errors == []
+    assert ("hf-unsupported", HF_LEFT) in [(w.kind, w.message) for w in result.warnings]
+
+
+def test_standard_nozzles_of_the_size_raise_no_type_warning() -> None:
+    status = fts(nozzles=[{"nozzle_type": "HS01", "nozzle_diameter": "0.4"}] * 2)
+    result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.4", used_slots={1, 2})
+    assert result.errors == []
+    assert result.warnings == []
+
+
+def test_a_high_flow_nozzle_of_another_size_raises_no_type_warning() -> None:
+    """Only a side the print can use matters: a 0.4 High Flow is irrelevant at 0.2 once
+    the size refusal has spoken."""
+    result = plan_extruders([RIGHT_02, LEFT_02], item_149(), size="0.2", used_slots={1})
+    assert all(warning.kind != "hf-unsupported" for warning in result.warnings)

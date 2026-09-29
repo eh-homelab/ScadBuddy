@@ -104,6 +104,7 @@ export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
 /** #755 — the run's nozzle verdict for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
+export type PrintRun = Schemas['PrintRun']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']

@@ -31,6 +31,7 @@ import type {
   PrintProgress,
   PrintCheck,
   PrintRunRequest,
+  PrintRun,
   PrintRunResult,
   PrintOptions,
   PrintOptionsState,
@@ -87,6 +88,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
 
 const state = {
   models: [...fixtures.models] as ModelSummary[],
+  /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
+  printRuns: new Map<string, PrintRun>(),
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
   sources: {
@@ -215,6 +218,7 @@ export function resetMockState(): void {
   resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
+  state.printRuns = new Map()
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.sources = {
@@ -2539,7 +2543,7 @@ export const handlers = [
           },
         ]
       : []
-    return HttpResponse.json({
+    const result = {
       route: 'slice_queue',
       library_file_id: libraryFileId,
       printer_id: body.printer_id ?? null,
@@ -2551,7 +2555,28 @@ export const handlers = [
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-    } satisfies PrintRunResult)
+    } satisfies PrintRunResult
+    // #470: the server answers 202 with a run. This one has already finished, so the
+    // client reads its result without polling; GET /print/runs/:id answers it too.
+    const now = new Date().toISOString()
+    const run: PrintRun = {
+      id: `run-${nextNumber()}`,
+      output_id: output.id,
+      status: 'succeeded',
+      created_at: now,
+      finished_at: now,
+      result,
+      error: null,
+      may_have_queued: false,
+      repeated: false,
+    }
+    state.printRuns.set(run.id, run)
+    return HttpResponse.json(run, { status: 202 })
+  }),
+
+  http.get(`${base}/print/runs/:id`, ({ params }) => {
+    const run = state.printRuns.get(String(params['id']))
+    return run ? HttpResponse.json(run) : problem(404, 'Not Found', `there is no print run ${params['id']}`)
   }),
 
   /**

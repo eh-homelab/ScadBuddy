@@ -27,7 +27,8 @@ export interface SourceApi {
   getFilaments: (query: FilamentQuery) => Promise<FilamentOptions>
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
-  run: (body: PrintRunRequest) => Promise<PrintRunResult>
+  /** `signal` stops waiting on the run (the dialog went away); the run itself goes on. */
+  run: (body: PrintRunRequest, signal?: AbortSignal) => Promise<PrintRunResult>
   /** #755 — the run's nozzle verdict for `body`, with nothing uploaded or queued. */
   check: (body: PrintRunRequest) => Promise<PrintCheck>
   /** What this source reopens on next time: per model for an output, per file here. */
@@ -49,7 +50,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
-      run: (body) => api.runPrint(id, body),
+      run: (body, signal) => api.runPrint(id, body, signal),
       check: (body) => api.checkPrint(id, body),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
@@ -60,7 +61,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     getFilaments: (query) => api.getLibraryFilaments(id, query),
     getPlates: () => api.getLibraryPlates(id),
     plateThumbnailUrl: (index) => api.libraryPlateThumbnailUrl(id, index),
-    run: (body) => api.runLibraryPrint(id, body),
+    run: (body, signal) => api.runLibraryPrint(id, body, signal),
     check: (body) => api.checkLibraryPrint(id, body),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }

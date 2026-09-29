@@ -56,6 +56,7 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
     "/api/v1/print/outputs/{output_id}/check",
+    "/api/v1/print/runs/{run_id}",
     "/api/v1/analyzers",
     "/api/v1/analyzers/run",
     "/api/v1/analyzers/fixes/preview",
