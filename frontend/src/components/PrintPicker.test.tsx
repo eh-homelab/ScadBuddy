@@ -375,7 +375,7 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('says when the nozzle check could not run, and reads it again on request', async () => {
+  it('says when the check before Print could not run, and reads it again on request', async () => {
     let failing = true
     server.use(
       http.post('/api/v1/print/outputs/:id/check', () =>
@@ -388,7 +388,7 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     await loaded()
 
     const failed = await screen.findByTestId('nozzle-verdict-failed')
-    expect(failed).toHaveTextContent('The nozzle check could not run: Bambuddy did not answer')
+    expect(failed).toHaveTextContent('The check before Print could not run: Bambuddy did not answer')
     expect(screen.getByTestId('run-print')).toBeEnabled()
 
     failing = false

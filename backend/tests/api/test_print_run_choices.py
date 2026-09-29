@@ -1399,6 +1399,58 @@ def test_the_check_gives_several_nozzle_refusals_as_the_runs_one_422(
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "choices",
+    [
+        {"nozzles": [{"size": "0.2"}, {"size": "0.4"}]},
+        {"process_name": "No Such Process @BBL H2C"},
+    ],
+    ids=["mixed-sizes", "unknown-process"],
+)
+def test_the_check_gives_the_runs_choice_refusal_word_for_word(
+    client: TestClient, model: str, choices: dict[str, Any]
+) -> None:
+    """#760: what the catalogue refuses for the choices is said before Print too, as the
+    run's own 422 detail, with nothing uploaded or sliced."""
+    output_id = prepared(client, model)
+    uploaded = upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(**choices))
+    run = run_print(client, output_id, json=body(**choices))
+
+    assert check.status_code == 200, check.text
+    assert run.status_code == 422, run.text
+    assert check.json() == {"errors": [run.json()["detail"]], "warnings": []}
+    assert not uploaded.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_the_check_gives_the_runs_printer_refusal_word_for_word(
+    client: TestClient, model: str
+) -> None:
+    """#760: a printer the resolver cannot serve is said before Print, as the run says it."""
+    output_id = prepared(client, model)
+    uploaded = upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 1, "name": "Workshop", "model": "H2C", "is_active": False}]
+        )
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [
+        "Workshop is deactivated in Bambuddy. Activate it there, or pick another printer."
+    ]
+    assert not uploaded.called
+
+
+@respx.mock
 def test_the_check_refuses_nothing_when_both_nozzles_match(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

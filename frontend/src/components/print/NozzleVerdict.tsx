@@ -9,8 +9,8 @@ interface Props {
 }
 
 /**
- * #755 — the run's nozzle verdict, shown in Checks before Print. An error is what the
- * run would refuse, so Print is held while one stands; a warning is advisory.
+ * #755, #760 — the run's own refusals and nozzle advisories, shown in Checks before
+ * Print. Print is held while an error stands; a warning is advisory.
  */
 export function NozzleVerdict({ verdict, error, onRetry }: Props) {
   if (error) {
@@ -20,9 +20,9 @@ export function NozzleVerdict({ verdict, error, onRetry }: Props) {
         data-testid="nozzle-verdict-failed"
         className="mt-2 rounded-[6px] border border-warn/50 bg-warn/10 px-2.5 py-2 text-[12.5px] text-warn"
       >
-        The nozzle check could not run:{' '}
+        The check before Print could not run:{' '}
         {error instanceof ApiError ? error.detail : 'ScadBuddy did not answer.'} Print still
-        refuses a run the nozzles cannot take.{' '}
+        refuses what it cannot print.{' '}
         {onRetry && (
           <button type="button" onClick={onRetry} className="underline underline-offset-2">
             Check again

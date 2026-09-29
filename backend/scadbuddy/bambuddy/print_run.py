@@ -289,10 +289,9 @@ def _refusal(plan: ExtruderPlan) -> str:
 
 
 class PrintCheck(BaseModel):
-    """What the nozzles make of the dialog's choices before Print (#755): the run's own
-    :func:`plan_extruders` verdict. ``errors`` holds the run's 422 detail word for word,
-    the reasons joined as the run joins them (#758 review); ``warnings`` what it would
-    carry back as advisories."""
+    """What the run makes of the dialog's choices before Print (#755, #760). ``errors``
+    holds the run's 422 detail word for word (#758 review); ``warnings`` the nozzle
+    advisories it would carry back."""
 
     errors: list[str] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
@@ -304,17 +303,22 @@ async def check_print(
     settings: StoredSettings,
     request: PrintRunRequest,
 ) -> PrintCheck:
-    """The run's nozzle verdict for ``request``, with nothing uploaded, sliced or queued.
+    """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
-    Only :func:`plan_extruders`' verdict: the other refusals need the catalogue or the
-    uploaded file, and the run still states them. With no plate or no printer there is
-    nothing to judge here, and the run says why."""
-    plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
-    printer_id = request.printer_id or settings.printer_id
-    if not plate_ids or printer_id is None:
+    It is :func:`prepare_run` itself (#760), so the check makes every refusal the run
+    makes before it answers 202 -- no plate, a printer the resolver cannot serve, choices
+    the catalogue refuses, nozzles that do not fit -- in the run's own words. What needs
+    the uploaded file is still found by the run. With no printer chosen or configured
+    there is nothing to judge, and the run says why."""
+    if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
-    plan, _, _ = await _extruder_plan(client, source, request, printer_id, plate_ids)
-    return PrintCheck(errors=[_refusal(plan)] if plan.errors else [], warnings=plan.warnings)
+    try:
+        prepared = await prepare_run(client, source, settings, request)
+    except ApiError as refused:
+        if refused.status != status.HTTP_422_UNPROCESSABLE_CONTENT:
+            raise
+        return PrintCheck(errors=[refused.detail])
+    return PrintCheck(warnings=prepared.extruders.warnings)
 
 
 async def check_for_output(
