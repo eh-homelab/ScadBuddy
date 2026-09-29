@@ -6,8 +6,10 @@ from unittest import mock
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.render.inputs import MAX_INPUTS_BYTES
 from scadbuddy.render.job_models import QueueFullError
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
@@ -232,15 +234,27 @@ def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: st
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "detail"),
     [
-        {"inputs": {"params": {"width": 1}}, "params": {"width": 2}},
-        {"inputs": {"params": {"nope": 1}}},
-        {"inputs": {"params": {"width": [1]}}},
-        {"inputs": {"params": {}, "blob": "x" * 70000}},
+        ({"inputs": {"params": {"width": 1}}, "params": {"width": 2}}, "disagree"),
+        ({"inputs": {"params": {"nope": 1}}}, "unknown parameters: nope"),
+        ({"inputs": {"params": {"width": [1]}}}, "inputs.params.width must be a number"),
+        ({"inputs": {"params": {}, "blob": "x" * 70000}}, f"at most {MAX_INPUTS_BYTES}"),
+        ('{"inputs": {"params": {"width": NaN}}}', "no NaN or Infinity"),
+        ('{"inputs": {"params": {}, "ui": {"zoom": Infinity}}}', "no NaN or Infinity"),
     ],
+    ids=["disagree", "unknown", "type", "size", "nan-param", "inf-nested"],
 )
 def test_bad_inputs_are_refused_before_a_job_exists(
-    client: TestClient, model: str, body: dict[str, object]
+    client: TestClient, model: str, body: dict[str, object] | str, detail: str
 ) -> None:
-    assert client.post(f"/api/v1/models/{model}/render", json=body).status_code == 422
+    url = f"/api/v1/models/{model}/render"
+    if isinstance(body, str):
+        # httpx will not encode NaN; send the bytes a client that does would send.
+        refused = client.post(url, content=body, headers={"content-type": "application/json"})
+    else:
+        refused = client.post(url, json=body)
+    assert refused.status_code == 422, refused.text
+    assert detail in refused.json()["detail"]
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert state.render.store.list_jobs() == []
