@@ -49,6 +49,7 @@ test.describe('settings', () => {
     await expect(page.getByLabel('Show dimensions in')).toHaveValue('mm')
     await page.getByRole('link', { name: 'Models', exact: true }).click()
     await expect(dialog).toHaveCount(0)
-    await expect(page).toHaveURL(/\/$/)
+    // The catalogue writes its view to the URL (#534, lib/catalogueQuery.ts).
+    await expect(page).toHaveURL(/\/(\?view=cards)?$/)
   })
 })
