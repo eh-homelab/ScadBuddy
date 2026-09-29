@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import time
 import zipfile
 
 import pytest
@@ -48,6 +49,7 @@ def test_persisting_a_job_writes_the_documented_layout(
 
     directory = paths.output_dir(model, body["id"])
     assert sorted(path.name for path in directory.iterdir()) == [
+        "inputs.json",
         "meta.json",
         "model.3mf",
         "params.json",
@@ -258,6 +260,7 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "slug": model,
         "name": "Reagan",
         "params": {"width": 12},
+        "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
     }
@@ -281,6 +284,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "slug": model,
         "name": None,
         "params": {"width": 12},
+        "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
     }
@@ -423,3 +427,61 @@ def test_an_old_records_upload_keys_are_ignored() -> None:
     )
     dumped = meta.model_dump()
     assert not {"library_file_id", "library_file_plate", "library_files"} & dumped.keys()
+
+
+def _rendered(client: TestClient, model: str, body: dict[str, object]) -> str:
+    accepted = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert accepted.status_code == 202, accepted.text
+    url = accepted.json()["status_url"]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        job = client.get(url).json()
+        if job["status"] in {"done", "failed"}:
+            assert job["status"] == "done", job
+            return str(job["id"])
+        time.sleep(0.02)
+    raise AssertionError("the render did not finish")
+
+
+def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, model: str) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    sent = {"params": {"width": 12}, "ui": {"tab": "b"}}
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "inputs": sent}
+    )
+    assert created.status_code == 201, created.text
+    output = created.json()
+    assert output["inputs"] == {**sent, "v": 0}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == output["inputs"]
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == output["inputs"]
+
+
+def test_an_output_refuses_inputs_the_job_did_not_render(client: TestClient, model: str) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": job_id, "inputs": {"params": {"width": 13}}},
+    )
+    assert refused.status_code == 422
+
+
+def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
+    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    assert output["inputs"] == {"params": {"width": 12}, "ui": {"tab": "a"}, "v": 0}
+
+
+def test_an_output_from_before_inputs_reads_as_params_v0(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == {
+        "params": {"width": 12},
+        "v": 0,
+    }
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == {
+        "params": {"width": 12},
+        "v": 0,
+    }

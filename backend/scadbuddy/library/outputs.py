@@ -7,11 +7,11 @@ import shutil
 import threading
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -21,6 +21,7 @@ from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 META_NAME = "meta.json"
 PARAMS_NAME = "params.json"
+INPUTS_NAME = "inputs.json"
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
@@ -161,6 +163,13 @@ class OutputStore:
         loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
         return loaded
 
+    def inputs(self, output_id: str) -> dict[str, Any]:
+        path = self._find_dir(output_id) / INPUTS_NAME
+        if not path.is_file():
+            return legacy_inputs(self.params(output_id))
+        loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return loaded
+
     def list_for(self, slug: str) -> list[OutputMeta]:
         directory = self.paths.outputs / slug
         if not directory.is_dir():
@@ -184,7 +193,12 @@ class OutputStore:
         ]
 
     def create(
-        self, job: Job, *, name: str | None = None, public_url: str | None = None
+        self,
+        job: Job,
+        *,
+        name: str | None = None,
+        public_url: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
     ) -> OutputMeta:
         if job.result is None:
             raise ValueError("the job has no result to persist")
@@ -196,6 +210,12 @@ class OutputStore:
         shutil.copyfile(self.paths.root / job.result.preview_glb, directory / PREVIEW_NAME)
         (directory / PARAMS_NAME).write_text(
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        recorded = normalize_inputs(
+            inputs if inputs is not None else (job.inputs or None), job.params
+        )
+        (directory / INPUTS_NAME).write_text(
+            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
         # A job from before the hash existed has none to read back; the live tree is
