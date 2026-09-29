@@ -6,6 +6,7 @@ import type {
   ModelPrintChoices,
   Output,
   OutputPlate,
+  PrintCheck,
   PrintRunRequest,
   PrintRunResult,
 } from '../api/types'
@@ -27,6 +28,8 @@ export interface SourceApi {
   getPlates: () => Promise<OutputPlate[]>
   plateThumbnailUrl: (index: number) => string
   run: (body: PrintRunRequest) => Promise<PrintRunResult>
+  /** #755 — the run's nozzle verdict for `body`, with nothing uploaded or queued. */
+  check: (body: PrintRunRequest) => Promise<PrintCheck>
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
 }
@@ -47,6 +50,7 @@ export function sourceApi(source: PrintSource): SourceApi {
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
       run: (body) => api.runPrint(id, body),
+      check: (body) => api.checkPrint(id, body),
       remember: (choices) => api.putModelChoices(slug, choices),
     }
   }
@@ -57,6 +61,7 @@ export function sourceApi(source: PrintSource): SourceApi {
     getPlates: () => api.getLibraryPlates(id),
     plateThumbnailUrl: (index) => api.libraryPlateThumbnailUrl(id, index),
     run: (body) => api.runLibraryPrint(id, body),
+    check: (body) => api.checkLibraryPrint(id, body),
     remember: (choices) => api.putLibraryChoices(id, choices),
   }
 }

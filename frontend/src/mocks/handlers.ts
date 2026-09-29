@@ -29,6 +29,7 @@ import type {
   Plate,
   PlateFit,
   PrintProgress,
+  PrintCheck,
   PrintRunRequest,
   PrintRunResult,
   PrintOptions,
@@ -2552,6 +2553,18 @@ export const handlers = [
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     } satisfies PrintRunResult)
   }),
+
+  /**
+   * #755 — the run's nozzle verdict before Print. The mock printer's nozzles never
+   * refuse anything; a test that needs a verdict answers this route itself.
+   */
+  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+    if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
+    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
+  }),
+  http.post(`${base}/print/library/:id/check`, () =>
+    HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck),
+  ),
 
   // --- #79 projects -----------------------------------------------------------------
 

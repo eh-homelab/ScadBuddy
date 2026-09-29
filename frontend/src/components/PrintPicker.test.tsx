@@ -293,6 +293,65 @@ describe('PrintPicker', () => {
   })
 })
 
+describe('PrintPicker · Nozzle verdict (#755)', () => {
+  const refusal =
+    'This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm ' +
+    "hotend in the rack. The slicer spreads a multi-color print across both, and ScadBuddy can't " +
+    'keep it on one side, so the other would pause it at the first layer. Fit a 0.2 mm nozzle on ' +
+    'both sides, or print in one color.'
+
+  it('says before Print what the run would refuse for the nozzles, and holds Print', async () => {
+    const checks = watch('POST', '/check')
+    const run = vi.spyOn(api, 'runPrint')
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as { choices: { nozzles: { size: string }[] } }
+        const errors = body.choices.nozzles[0]?.size === '0.2' ? [refusal] : []
+        return HttpResponse.json({ errors, warnings: [] })
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+
+    const error = await screen.findByTestId('nozzle-verdict-error')
+    expect(error).toHaveTextContent(refusal)
+    expect(within(screen.getByTestId('print-checks')).getByTestId('nozzle-verdict-error')).toBe(error)
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+    expect(run).not.toHaveBeenCalled()
+    const last = checks.bodies.at(-1) as { choices: unknown; filament_plan: unknown; printer_id: unknown }
+    expect(last.choices).toMatchObject({ nozzles: [{ size: '0.2' }, { size: '0.2' }] })
+    expect(last.filament_plan).toMatchObject({ slots: expect.any(Array) })
+    expect(last.printer_id).toBe(choicesView.printer_id)
+  })
+
+  it('lists the nozzle advisories without holding Print', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            {
+              kind: 'side-unknown',
+              message: 'Only the right nozzle is 0.2 mm, and the slicer picks the extruder.',
+            },
+          ],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    expect(await screen.findByTestId('nozzle-verdict-warning')).toHaveTextContent(
+      'Only the right nozzle is 0.2 mm',
+    )
+    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+  })
+})
+
 describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
   it('offers no per-slot preset override until Advanced is on', async () => {
     const { user } = renderPicker()

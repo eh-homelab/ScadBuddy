@@ -1,13 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
-import type { AnalysisRequest, PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
+import type {
+  AnalysisRequest,
+  PrintOptions,
+  PrintOptionsState,
+  PrintRunRequest,
+  PrintRunResult,
+} from '../api/types'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import { sourceApi, type PrintSource } from '../lib/printSource'
 import { useAsync } from '../lib/useAsync'
 import { useFilamentPlan } from '../lib/useFilamentPlan'
+import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -16,6 +23,7 @@ import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { NozzleStep } from './print/NozzleStep'
+import { NozzleVerdict } from './print/NozzleVerdict'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
@@ -205,6 +213,27 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         }
       : null
 
+  /**
+   * #755 — the run's nozzle verdict for these choices, before Print: the same
+   * `plan_extruders` the run refuses with. An error holds Print, since the run would 422;
+   * one for choices since changed does not.
+   */
+  const checkRequest: PrintRunRequest | null =
+    choices && printChoices
+      ? {
+          printer_id: printerId,
+          filament_plan: { slots: plan, force_colour_match: false },
+          choices: printChoices,
+          plate_id: allPlates ? 1 : plate,
+          all_plates: allPlates,
+        }
+      : null
+  const check = usePrintCheck(source, checkRequest)
+  const nozzlesRefuse = check.current && (check.verdict?.errors ?? []).length > 0
+  const verdict = <NozzleVerdict verdict={check.verdict} />
+  const verdictShown =
+    (check.verdict?.errors ?? []).length + (check.verdict?.warnings ?? []).length > 0
+
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
@@ -256,7 +285,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || loading || !choices || refused}
+              disabled={running || loading || !choices || refused || nozzlesRefuse}
               data-testid="run-print"
               {...USER_ONLY}
             >
@@ -411,9 +440,25 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
 
               <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
 
-              {/* The analyzers judge an output's own 3MF; a library file has none (#313). */}
-              {outputId !== undefined && (
-                <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates} />
+              {/* The analyzers judge an output's own 3MF; a library file has none (#313), so its
+                  Checks are the nozzle verdict alone (#755). */}
+              {outputId !== undefined ? (
+                <AnalyzerPanel outputId={outputId} request={analysisRequest} allPlates={allPlates}>
+                  {verdict}
+                </AnalyzerPanel>
+              ) : (
+                verdictShown && (
+                  <section
+                    aria-labelledby="print-checks-title"
+                    data-testid="print-checks"
+                    className="rounded-[6px] border border-line bg-surface-2 px-3 py-2"
+                  >
+                    <h3 id="print-checks-title" className="text-[13px] text-ink">
+                      Checks
+                    </h3>
+                    {verdict}
+                  </section>
+                )
               )}
             </div>
           )}
