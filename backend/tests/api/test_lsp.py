@@ -486,7 +486,7 @@ def test_unreaped_servers_are_counted(
     count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
     monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
-    monkeypatch.setattr(lsp, "_unreaped", set())
+    monkeypatch.setattr(lsp, "_unreaped", {})
     spawn = asyncio.create_subprocess_exec
 
     async def unkillable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
@@ -522,6 +522,45 @@ def test_unreaped_servers_are_counted(
         for pid in pids:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+
+def test_a_late_reaped_server_is_no_longer_counted(
+    settings: Settings,
+    model: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that outlives KILL_WAIT but is reaped later drops out of the count on
+    its own, without waiting for another server to be left unreaped."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    unreaped: dict[Any, Any] = {}
+    monkeypatch.setattr(lsp, "_unreaped", unreaped)
+    spawn = asyncio.create_subprocess_exec
+
+    async def slow_to_reap(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+        wait = process.wait
+
+        async def late() -> int:
+            await asyncio.sleep(0.5)
+            return await wait()
+
+        monkeypatch.setattr(process, "wait", late)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_to_reap)
+    app: FastAPI = create_app(settings)
+    with TestClient(app) as client:
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+            _initialize(session)
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect):
+                session.receive_json()
+
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert _wait_until(lambda: not unreaped)
 
 
 def test_a_reused_request_id_is_still_watched(

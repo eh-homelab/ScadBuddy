@@ -63,8 +63,9 @@ REQUEST_TIMEOUT = 60.0
 #: asyncio's child watcher reaps it whenever it does die.
 KILL_WAIT = 5.0
 
-#: Killed servers that outlived ``KILL_WAIT``; each drops out once asyncio reaps it.
-_unreaped: set[asyncio.subprocess.Process] = set()
+#: Killed servers that outlived ``KILL_WAIT``, each with the task still waiting on it;
+#: the task drops its server out once asyncio reaps it.
+_unreaped: dict[asyncio.subprocess.Process, asyncio.Task[int]] = {}
 
 
 def frame(body: bytes) -> bytes:
@@ -244,8 +245,9 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             if waiting.cancelled_caught:
                 # Stuck in the kernel: holding the permit for it would be the wedge
                 # all over again, so it is let go and counted instead.
-                _unreaped.difference_update([p for p in _unreaped if p.returncode is not None])
-                _unreaped.add(process)
+                reaper = asyncio.ensure_future(process.wait())
+                reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
+                _unreaped[process] = reaper
                 logger.warning(
                     "killed openscad-lsp (pid %d) was not reaped within %gs; "
                     "%d killed server(s) not yet reaped",
