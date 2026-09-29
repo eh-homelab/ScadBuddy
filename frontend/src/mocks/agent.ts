@@ -291,6 +291,8 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
     sent,
     connect(h) {
       handlers = h
+      // In-process, so open at once (the real socket reports it when its handshake is done).
+      h.onOpen?.()
       seedExternal()
       deliver({
         v: PROTOCOL_VERSION,
@@ -307,6 +309,7 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
     send(message) {
       sent.push(message)
       onMessage(message)
+      return 'sent'
     },
     close() {
       handlers = null
