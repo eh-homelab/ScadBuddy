@@ -164,19 +164,25 @@ export function socketUrl(path: string, page: string = window.location.href): st
 
 /**
  * Where the backend's bridge shows the model's pinned libraries (`LIBRARY_CLIENT_ROOT`
- * in backend/scadbuddy/library/lsp.py): `file:///libraries/<name>/<path>`.
+ * in backend/scadbuddy/library/lsp.py): `file:///libraries/<name>@<commit>/<path>`.
+ * The commit is there so one URI is always one checkout's file: a model opened for
+ * an earlier pin never stands in for a later one's.
  */
 export const LIBRARY_ROOT = 'file:///libraries/'
 
 /**
  * A file a definition can land in outside the open one (#185): beside the model
- * (`library` absent) or in one of its pinned libraries. `path` is decoded and
- * relative, `/`-separated, as the backend's file routes take it.
+ * (`library` absent) or in one of its pinned libraries, at `commit`. `path` is decoded
+ * and relative, `/`-separated, as the backend's file routes take it.
  */
 export interface DefinitionFile {
   library?: string
+  commit?: string
   path: string
 }
+
+/** A library's directory in its client URI: `<name>@<commit>`. */
+const LIBRARY_DIRECTORY = /^([A-Za-z0-9][A-Za-z0-9._-]{0,63})@([0-9a-f]{40}(?:[0-9a-f]{24})?)$/
 
 function decodedPath(rest: string): string | null {
   try {
@@ -197,9 +203,9 @@ export function definitionFile(uri: string, root: string): DefinitionFile | null
     const rest = uri.slice(LIBRARY_ROOT.length)
     const slash = rest.indexOf('/')
     if (slash <= 0) return null
-    const library = decodedPath(rest.slice(0, slash))
+    const directory = LIBRARY_DIRECTORY.exec(rest.slice(0, slash))
     const path = decodedPath(rest.slice(slash + 1))
-    return library === null || path === null ? null : { library, path }
+    return !directory || path === null ? null : { library: directory[1]!, commit: directory[2]!, path }
   }
   return null
 }

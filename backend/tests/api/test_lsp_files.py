@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library import editor_files
 from scadbuddy.library.lsp import LIBRARY_CLIENT_ROOT, _Roots, library_roots
 
 # Answers every request with the params it saw (as a JSON string, so the bridge leaves
@@ -122,9 +123,9 @@ def test_each_library_gets_a_client_root_and_comes_first() -> None:
     )
 
     assert roots.outbound("file:///data/libraries/BOSL2/c/BOSL2/std.scad") == (
-        LIBRARY_CLIENT_ROOT + "BOSL2/std.scad"
+        LIBRARY_CLIENT_ROOT + "BOSL2@c/std.scad"
     )
-    assert roots.inbound(LIBRARY_CLIENT_ROOT + "BOSL2/std.scad") == (
+    assert roots.inbound(LIBRARY_CLIENT_ROOT + "BOSL2@c/std.scad") == (
         "file:///data/libraries/BOSL2/c/BOSL2/std.scad"
     )
     # A directory that merely shares the prefix is not the library.
@@ -144,14 +145,17 @@ def test_a_pinned_library_is_on_the_servers_path_under_a_client_uri_of_its_own(
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "textDocument/definition",
-                "params": {"textDocument": {"uri": LIBRARY_CLIENT_ROOT + "BOSL2/std.scad"}},
+                "params": {
+                    "textDocument": {"uri": f"{LIBRARY_CLIENT_ROOT}BOSL2@{COMMIT}/std.scad"}
+                },
             }
         )
         again = session.receive_json()["result"]
 
     # The checkout's parent, as on a render, so `use <BOSL2/std.scad>` resolves.
     assert json.loads(result["path"]) == str(library.parent)
-    assert result["library"] == LIBRARY_CLIENT_ROOT + "BOSL2/shapes3d.scad"
+    # Scoped by the pinned commit, so a file the editor holds is never another pin's.
+    assert result["library"] == f"{LIBRARY_CLIENT_ROOT}BOSL2@{COMMIT}/shapes3d.scad"
     assert result["sibling"] == f"file:///models/{model}/helper.scad"
     seen = json.loads(again["seen"])
     assert seen["textDocument"]["uri"] == (library / "std.scad").as_uri()
@@ -280,6 +284,20 @@ def test_a_library_file_is_served_from_the_models_pin(
     assert response.text == "module cuboid(size) cube(size);\n"
 
 
+def test_a_library_file_for_a_commit_the_model_no_longer_pins_is_a_409(
+    client: TestClient, model: str, library: Path
+) -> None:
+    """The editor's URI names the commit its session saw; after a re-pin the old
+    file is not served under it, nor the new pin's file in its place."""
+    route = f"/api/v1/models/{model}/libraries/BOSL2/files/shapes3d.scad"
+    assert client.get(route, params={"commit": COMMIT}).status_code == 200
+
+    moved = client.get(route, params={"commit": "f" * 40})
+    assert moved.status_code == 409
+    assert "0123456" in moved.json()["detail"]
+    assert client.get(route, params={"commit": "HEAD"}).status_code == 422
+
+
 def test_a_library_the_model_does_not_pin_is_a_404(
     client: TestClient, model: str, library: Path, paths: DataPaths
 ) -> None:
@@ -325,3 +343,23 @@ def test_a_library_name_that_is_not_a_directory_name_is_a_422(
 ) -> None:
     response = client.get(f"/api/v1/models/{model}/libraries/.git/files/config")
     assert response.status_code == 422
+
+
+def test_a_file_swapped_after_the_check_is_refused(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptor that is read is checked again: one the kernel places outside the
+    root (a path swapped between the resolve and the open) reads as missing."""
+    outside = paths.root / "secret.scad"
+    outside.write_text("TOP SECRET\n", encoding="utf-8")
+    monkeypatch.setattr(editor_files, "opened_path", lambda fd: outside)
+
+    response = client.get(f"/api/v1/models/{model}/files/model.scad")
+    assert response.status_code == 404
+    assert "TOP SECRET" not in response.text
+
+
+def test_the_open_descriptor_is_where_the_file_is(tmp_path: Path) -> None:
+    (tmp_path / "a.scad").write_text("x\n", encoding="utf-8")
+    with (tmp_path / "a.scad").open("rb") as file:
+        assert editor_files.opened_path(file.fileno()) == (tmp_path / "a.scad").resolve()

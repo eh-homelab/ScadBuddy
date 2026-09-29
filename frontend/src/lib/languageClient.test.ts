@@ -231,7 +231,7 @@ describe('connectLanguageServer', () => {
   describe('definitions', () => {
     const range = { start: { line: 2, character: 7 }, end: { line: 2, character: 13 } }
     const SIBLING = 'file:///models/name-keychain/parts/helper.scad'
-    const LIBRARY = 'file:///libraries/BOSL2/shapes3d.scad'
+    const LIBRARY = 'file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/shapes3d.scad'
     const ELSEWHERE = 'file:///usr/share/openscad/libraries/MCAD/units.scad'
 
     beforeEach(() => {
@@ -274,7 +274,7 @@ describe('connectLanguageServer', () => {
 
       expect(readFile.mock.calls.map(([file]) => file)).toEqual([
         { path: 'parts/helper.scad' },
-        { library: 'BOSL2', path: 'shapes3d.scad' },
+        { library: 'BOSL2', commit: '0123456789abcdef0123456789abcdef01234567', path: 'shapes3d.scad' },
       ])
       expect(found.map((location) => location.uri.toString())).toEqual([SIBLING, LIBRARY])
       expect(found[1]?.range).toEqual({ startLineNumber: 3, startColumn: 8, endLineNumber: 3, endColumn: 14 })
@@ -293,6 +293,23 @@ describe('connectLanguageServer', () => {
         expect(await pending).toHaveLength(1)
       }
       expect(readFile).toHaveBeenCalledTimes(1)
+    })
+
+    it('never serve one pin of a library for another', async () => {
+      const REPINNED = 'file:///libraries/BOSL2@ffffffffffffffffffffffffffffffffffffffff/shapes3d.scad'
+      const readFile = vi.fn((file: { commit?: string }) => Promise.resolve(`// at ${file.commit}\n`))
+      const { found } = await definitions(
+        [
+          { uri: LIBRARY, range },
+          { uri: REPINNED, range },
+        ],
+        readFile,
+      )
+
+      expect(readFile).toHaveBeenCalledTimes(2)
+      expect(found.map((location) => location.uri.toString())).toEqual([LIBRARY, REPINNED])
+      expect(models.get(REPINNED)?.text).toBe(`// at ${'f'.repeat(40)}\n`)
+      expect(models.get(LIBRARY)?.text).toBe('// at 0123456789abcdef0123456789abcdef01234567\n')
     })
 
     it('drop a location outside the model and its libraries, and one that cannot be read', async () => {

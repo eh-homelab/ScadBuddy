@@ -10,10 +10,18 @@ no dot-file anywhere along it (``.git``, a model's ``.renders``), so nothing out
 the files a model ships is reachable. The file it names must resolve, symlinks
 followed, to a regular file still under the root, and be UTF-8 text no larger than
 the caller's limit (the API's ``MAX_SOURCE_CHARS``, the cap on a model's own source).
+
+The check and the read are one file: the resolved path is opened without following a
+symlink at its end (``O_NOFOLLOW``) and without blocking on a FIFO (``O_NONBLOCK``),
+and the open descriptor is checked again -- a regular file, still under the root by
+its own path (``/proc/self/fd``) -- so a path swapped between the resolve and the open
+is refused rather than read.
 """
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 #: Longer than any path a library ships, short enough to refuse before touching disk.
@@ -58,9 +66,20 @@ def read_text_file(root: Path, relative: str, *, limit: int) -> str:
     target = base.joinpath(*segments).resolve()
     if not target.is_relative_to(base) or not target.is_file():
         raise FileNotFoundError(relative)
-    if target.stat().st_size > limit:
-        raise FileTooLargeError(relative)
-    with target.open("rb") as file:
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        # ELOOP: a symlink swapped in at the end since the resolve.
+        raise FileNotFoundError(relative) from None
+    with os.fdopen(fd, "rb") as file:
+        info = os.fstat(fd)
+        opened = opened_path(fd)
+        if not stat.S_ISREG(info.st_mode) or (
+            opened is not None and not opened.is_relative_to(base)
+        ):
+            raise FileNotFoundError(relative)
+        if info.st_size > limit:
+            raise FileTooLargeError(relative)
         # One byte past the cap: a file that grew since the stat is still refused.
         data = file.read(limit + 1)
     if len(data) > limit:
@@ -71,3 +90,12 @@ def read_text_file(root: Path, relative: str, *, limit: int) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         raise NotTextError(relative) from None
+
+
+def opened_path(fd: int) -> Path | None:
+    """The path an open descriptor is at, as the kernel has it; None where there is no
+    ``/proc`` (not the image, which is Linux)."""
+    try:
+        return Path(os.readlink(f"/proc/self/fd/{fd}"))
+    except OSError:
+        return None

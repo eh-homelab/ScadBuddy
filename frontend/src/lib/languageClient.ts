@@ -122,6 +122,8 @@ export function connectLanguageServer(
     }
     if (disposed) return null
     const resource = monaco.Uri.parse(target)
+    // A model already at this URI holds the same file: a library's URI names its
+    // pinned commit (`<name>@<commit>`), and a checkout never changes under one.
     return monaco.editor.getModel(resource) ?? monaco.editor.createModel(text, OPENSCAD_LANGUAGE_ID, resource)
   }
 

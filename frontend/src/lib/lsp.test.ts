@@ -175,19 +175,22 @@ describe('socketUrl', () => {
 
 describe('definitionFile', () => {
   const ROOT = 'file:///models/name-keychain/'
+  const COMMIT = '0123456789abcdef0123456789abcdef01234567'
 
   it('names a file beside the model by its path under the model directory', () => {
     expect(definitionFile(`${ROOT}parts/helper.scad`, ROOT)).toEqual({ path: 'parts/helper.scad' })
     expect(definitionFile(`${ROOT}my%20part.scad`, ROOT)).toEqual({ path: 'my part.scad' })
   })
 
-  it('names a library file by the library and its path in it', () => {
-    expect(definitionFile('file:///libraries/BOSL2/shapes3d.scad', ROOT)).toEqual({
+  it('names a library file by the library, the pinned commit and its path in it', () => {
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}/shapes3d.scad`, ROOT)).toEqual({
       library: 'BOSL2',
+      commit: COMMIT,
       path: 'shapes3d.scad',
     })
-    expect(definitionFile('file:///libraries/NopSCADlib/vitamins/screw.scad', ROOT)).toEqual({
+    expect(definitionFile(`file:///libraries/NopSCADlib@${COMMIT}/vitamins/screw.scad`, ROOT)).toEqual({
       library: 'NopSCADlib',
+      commit: COMMIT,
       path: 'vitamins/screw.scad',
     })
   })
@@ -195,8 +198,11 @@ describe('definitionFile', () => {
   it('is null anywhere else, and for a URI with no file in it', () => {
     expect(definitionFile('file:///usr/share/openscad/libraries/MCAD/units.scad', ROOT)).toBeNull()
     expect(definitionFile('file:///models/other/helper.scad', ROOT)).toBeNull()
-    expect(definitionFile('file:///libraries/BOSL2', ROOT)).toBeNull()
-    expect(definitionFile('file:///libraries//std.scad', ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}`, ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/@${COMMIT}/std.scad`, ROOT)).toBeNull()
+    // No commit, or not one: a library URI always names the checkout it is from.
+    expect(definitionFile('file:///libraries/BOSL2/shapes3d.scad', ROOT)).toBeNull()
+    expect(definitionFile('file:///libraries/BOSL2@HEAD/shapes3d.scad', ROOT)).toBeNull()
     expect(definitionFile(`${ROOT}parts//helper.scad`, ROOT)).toBeNull()
     expect(definitionFile(`${ROOT}bad%E0.scad`, ROOT)).toBeNull()
   })

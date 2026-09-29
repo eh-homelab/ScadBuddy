@@ -553,9 +553,9 @@ export const api = {
   getDefinitionFile: (slug: string, file: DefinitionFile) => {
     const path = file.path.split('/').map(seg).join('/')
     const base = `/models/${seg(slug)}`
-    return requestText(
-      file.library ? `${base}/libraries/${seg(file.library)}/files/${path}` : `${base}/files/${path}`,
-    )
+    if (!file.library) return requestText(`${base}/files/${path}`)
+    const commit = file.commit ? `?commit=${seg(file.commit)}` : ''
+    return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
   },
 
   /** A `version` reads that revision's schema instead of the model's current one. */

@@ -115,6 +115,14 @@ export function SourceEditor({
   // Where to put the cursor once the editor shows the model a jump switched to.
   const landing = useRef<Target | null>(null)
   const latest = useLatest({ uri, onChange })
+  // A new model ends any definition view, rather than hiding it until that model comes
+  // back: by then the file's model has gone with the old session, and the view would
+  // reopen on an empty one. Reset while rendering, React's way to follow a prop.
+  const [viewingFor, setViewingFor] = useState(uri)
+  if (viewingFor !== uri) {
+    setViewingFor(uri)
+    setViewing(null)
+  }
   const shown = viewing?.from === uri ? viewing : null
 
   const ownModel = useCallback(() => monaco.editor.getModel(monaco.Uri.parse(uri)), [uri])
@@ -140,6 +148,8 @@ export function SourceEditor({
   useEffect(
     () => () => {
       monaco.editor.getModel(monaco.Uri.parse(uri))?.dispose()
+      // A jump into the old model's definitions is not one into the new model's.
+      landing.current = null
     },
     [uri],
   )

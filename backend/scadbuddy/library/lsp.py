@@ -15,10 +15,15 @@ is ``DEFAULT_CLIENT_ROOT``, so no message ever shows the browser a path on this
 machine.
 
 The libraries the model pins (#93) are on the server's ``OPENSCADPATH``, and each one
-is given a client URI of its own the same way: ``LIBRARY_CLIENT_ROOT`` + ``<name>/``
-stands for the library's directory in its checkout, so a definition in BOSL2 reaches
-the editor as ``file:///libraries/BOSL2/shapes3d.scad`` (#185), which the editor reads
-back through ``GET /models/{slug}/libraries/{name}/files/{path}``. Anything outside the
+is given a client URI of its own the same way: ``LIBRARY_CLIENT_ROOT`` +
+``<name>@<commit>/`` stands for the library's directory in the checkout the model pins,
+so a definition in BOSL2 reaches the editor as
+``file:///libraries/BOSL2@<commit>/shapes3d.scad`` (#185), which the editor reads back
+through ``GET /models/{slug}/libraries/{name}/files/{path}?commit=<commit>``. The
+commit is in the URI because a checkout never changes under its commit, so a file the
+editor already holds under that URI is still the right one, and one from before a
+re-pin never stands in for the new pin's (a library name alone does not say which
+checkout; two models can pin one at two commits). Anything outside the
 model's directory and those libraries (openscad-lsp's own default library locations)
 passes through as the server named it.
 
@@ -133,9 +138,10 @@ def _rewrite(value: Any, pairs: Sequence[tuple[str, str]]) -> Any:
 
 def library_roots(libraries: Mapping[str, Path]) -> tuple[tuple[str, str], ...]:
     """(client, server) for each library: ``name`` -> the directory ``use
-    <name/...>`` resolves into."""
+    <name/...>`` resolves into, ``<libraries>/<name>/<commit>/<name>``, shown as
+    ``LIBRARY_CLIENT_ROOT`` + ``<name>@<commit>/``."""
     return tuple(
-        (f"{LIBRARY_CLIENT_ROOT}{name}/", directory.as_uri() + "/")
+        (f"{LIBRARY_CLIENT_ROOT}{name}@{directory.parent.name}/", directory.as_uri() + "/")
         for name, directory in sorted(libraries.items())
     )
 
@@ -154,7 +160,8 @@ async def serve(
     """Run one openscad-lsp in ``root`` for an accepted socket, until either side ends.
 
     ``libraries`` names each library on ``env``'s ``OPENSCADPATH`` and the directory
-    its files are in (``<checkout>/<name>``), for the client URIs they are shown under.
+    its files are in (``<libraries>/<name>/<commit>/<name>``), for the client URIs they
+    are shown under.
 
     The server lives exactly as long as the socket: closing the editor kills it, and a
     server that exits, or leaves a request unanswered for ``REQUEST_TIMEOUT``, closes

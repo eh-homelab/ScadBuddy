@@ -359,6 +359,19 @@ describe('definition files (#185)', () => {
     expect(asked).toBe('/api/v1/models/builtin%3Akeychain/files/my%20parts/a%23b.scad')
   })
 
+  it('names the pinned commit a library file is from', async () => {
+    let asked = ''
+    server.use(
+      http.get('/api/v1/models/:slug/libraries/:name/files/*', ({ request }) => {
+        const url = new URL(request.url)
+        asked = url.pathname + url.search
+        return new HttpResponse('x', { headers: { 'Content-Type': 'text/plain' } })
+      }),
+    )
+    await api.getDefinitionFile('name-keychain', { library: 'BOSL2', commit: 'ab12', path: 'std.scad' })
+    expect(asked).toBe('/api/v1/models/name-keychain/libraries/BOSL2/files/std.scad?commit=ab12')
+  })
+
   it('is an ApiError for a file that is not there', async () => {
     await expect(api.getDefinitionFile('name-keychain', { path: 'nope.scad' })).rejects.toMatchObject({
       status: 404,

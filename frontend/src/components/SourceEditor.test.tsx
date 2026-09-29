@@ -98,7 +98,7 @@ const { SourceEditor } = await import('./SourceEditor')
 
 const props = { value: 'cube(1);', onChange: () => {}, label: 'OpenSCAD source' }
 const MODEL = 'file:///models/a/model.scad'
-const LIBRARY = 'file:///libraries/BOSL2/shapes3d.scad'
+const LIBRARY = 'file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/shapes3d.scad'
 const RANGE = { startLineNumber: 3, startColumn: 8, endLineNumber: 3, endColumn: 14 }
 
 function jump(resource: string, selection: object | undefined = RANGE, source: unknown = instance) {
@@ -200,9 +200,9 @@ describe('SourceEditor', () => {
 
     it('leaves jumps it cannot show to Monaco', () => {
       render(<SourceEditor {...props} uri={MODEL} />)
-      absent.add('file:///libraries/BOSL2/unfetched.scad')
+      absent.add('file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/unfetched.scad')
 
-      expect(jump('file:///libraries/BOSL2/unfetched.scad')).toBe(false)
+      expect(jump('file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/unfetched.scad')).toBe(false)
       expect(jump('file:///usr/share/openscad/libraries/MCAD/units.scad')).toBe(false)
       expect(jump(LIBRARY, RANGE, { another: 'editor' })).toBe(false)
       expect(screen.getByTestId('monaco').dataset.path).toBe(MODEL)
@@ -215,6 +215,22 @@ describe('SourceEditor', () => {
 
       expect(screen.getByTestId('monaco').dataset.path).toBe('file:///models/b/model.scad')
       expect(screen.queryByTestId('definition-bar')).toBeNull()
+    })
+
+    it('comes back to a model on its own source, not the file it last showed', () => {
+      // The file's text model went with the old session: reopening it would be empty.
+      const { rerender } = render(<SourceEditor {...props} uri={MODEL} />)
+      jump(LIBRARY)
+      rerender(<SourceEditor {...props} uri="file:///models/b/model.scad" />)
+      instance.setSelection.mockClear()
+      rerender(<SourceEditor {...props} uri={MODEL} />)
+
+      const editor = screen.getByTestId('monaco')
+      expect(editor.dataset.path).toBe(MODEL)
+      expect(editor.dataset.value).toBe('cube(1);')
+      expect(editor.dataset.readonly).toBe('false')
+      expect(screen.queryByTestId('definition-bar')).toBeNull()
+      expect(instance.setSelection).not.toHaveBeenCalled()
     })
 
     it('unregisters its opener when it unmounts', () => {
