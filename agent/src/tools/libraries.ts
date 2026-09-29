@@ -41,6 +41,8 @@ export const libraryTools: Tool[] = [
     description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.',
     input: z.object({}),
     risk: 'read',
+    source:
+      'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/libraries'), 'list libraries')),
   }),
@@ -202,6 +204,8 @@ export const libraryTools: Tool[] = [
     description: 'Every library checkout on the data volume, with the models whose live pins read it.',
     input: z.object({}),
     risk: 'read',
+    source:
+      'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries/installed'],
     handler: async (_args, { backend }) =>
       json(await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries')),
@@ -237,6 +241,8 @@ export const libraryTools: Tool[] = [
       'silently falls back to DejaVu and changes the geometry.',
     input: z.object({}),
     risk: 'read',
+    source:
+      'installed font names, some fetched from the web',
     routes: ['GET /api/v1/fonts'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/fonts'), 'list fonts')),
   }),
@@ -250,6 +256,8 @@ export const libraryTools: Tool[] = [
       limit: z.number().int().min(1).max(200).optional(),
     }),
     risk: 'read',
+    source:
+      'font metadata from the Google Fonts catalogue on the web',
     routes: ['GET /api/v1/fonts/catalogue'],
     handler: async ({ q, category, limit }, { backend }) =>
       json(await ok(backend.GET('/api/v1/fonts/catalogue', { params: { query: { q, category, limit } } }), 'search fonts')),

@@ -9,6 +9,7 @@ import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { OPENSCAD_COLOUR_NAMES } from '../src/tools/colours.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
@@ -366,7 +367,8 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     // … and once executed, the scope error reaches the agent verbatim.
     const executed = await runTool({ ...tool('send_to_bambuddy'), gated: false }, { output_id: '0123456789abcdef0123456789abcdef' }, ctx())
     expect(executed.isError).toBe(true)
-    expect(firstText(executed)).toContain('needs "Manage Library"')
+    expect(firstText(executed)).toContain('"untrusted_data"')
+    expect(firstText(executed)).toContain('needs \\"Manage Library\\"')
   })
 })
 
@@ -380,6 +382,29 @@ describe('analyze_geometry', () => {
     expect(t.risk).toBe('read')
     const result = await runTool(t, { output_id: id }, ctx({ principal: { id: 'r', kind: 'bearer', tiers: ['read'] } }))
     expect(firstText(result)).toEqual({ open_edges: 0, bbox_mm: { size: [1, 2, 3] } })
+  })
+})
+
+describe('preset tools carry a description and tags (#327)', () => {
+  it('save_preset and update_preset send them, and refuse a comma in a tag', async () => {
+    const bodies: unknown[] = []
+    const record = async ({ request }: { request: Request }) => {
+      bodies.push(await request.json())
+      return HttpResponse.json({ id: 'p', name: 'P', origin: 'mine', params: {}, description: 'D', tags: ['a'] })
+    }
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/m/presets`, record),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, record),
+    )
+    await runTool(tool('save_preset'), { slug: 'm', name: 'P', description: 'D', tags: ['a'] }, ctx())
+    await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', tags: [] }, ctx())
+    expect(bodies).toEqual([
+      { name: 'P', params: {}, description: 'D', tags: ['a'] },
+      { name: null, params: null, description: null, tags: [] },
+    ])
+    const refused = await runTool(tool('save_preset'), { slug: 'm', name: 'P', tags: ['M3, M4'] }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(bodies).toHaveLength(2)
   })
 })
 
@@ -463,6 +488,8 @@ describe('binary results: inline under the cap, a link over it', () => {
     const result = await runTool(tool('download_3mf'), { output_id: OUT }, ctx({ maxInlineBytes: 16 }))
     expect(result.isError).toBeFalsy()
     expect(result.content).toEqual([
+      // #258: a preamble names the tool and source of the blob that follows.
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
       {
         type: 'resource',
         resource: { uri: `scadbuddy://outputs/${OUT}/model.3mf`, mimeType: 'model/3mf', blob: 'AQIDBA==' },
@@ -488,7 +515,7 @@ describe('binary results: inline under the cap, a link over it', () => {
       mimeType: 'model/3mf',
       size: 64,
     })
-    expect(JSON.parse((result.content[1] as { text: string }).text)).toMatchObject({
+    expect(JSON.parse(unwrapUntrusted((result.content[1] as { text: string }).text))).toMatchObject({
       inline: false,
       size_bytes: 64,
       fetch: { method: 'GET', path: `/api/v1/outputs/${OUT}/model.3mf` },
@@ -524,7 +551,7 @@ describe('binary results: inline under the cap, a link over it', () => {
     )
     const args = { slug: 'box', asset_id: asset, include_content: true }
     const small = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
-    expect(small.content.map((c) => c.type)).toEqual(['text', 'image'])
+    expect(small.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
     size = 64
     const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
     expect(large.isError).toBeFalsy()
@@ -557,7 +584,14 @@ describe("tools for #324's routes", () => {
       }),
     )
     const inline = await runTool(tool('get_render_view'), { job_id: job, view: 'top', size: 256 }, ctx())
-    expect(inline.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' })
+    expect(JSON.parse((inline.content[0] as { text: string }).text)).toEqual({
+      untrusted_data: {
+        tool: 'get_render_view',
+        source: expect.any(String),
+        content_follows: { type: 'image', mime_type: 'image/png' },
+      },
+    })
+    expect(inline.content[1]).toMatchObject({ type: 'image', mimeType: 'image/png' })
     expect(requested).toBe('?size=256')
     const linked = await runTool(tool('get_render_view'), { job_id: job, view: 'top' }, ctx({ maxInlineBytes: 8 }))
     expect(linked.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/jobs/${job}/views/top.png` })
@@ -657,7 +691,7 @@ describe('print media (#307)', () => {
       ),
     )
     const result = await runTool(tool('get_print_image'), { archive_id: 35, photo: 'finish_1790488620_ab12.jpg' }, ctx())
-    expect(result.content[0]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
   })
 
   it('fetches a plate image, or the thumbnail with neither photo nor plate', async () => {
@@ -708,6 +742,7 @@ describe('print media (#307)', () => {
     )
     const result = await runTool(tool('download_print_file'), { archive_id: 35, file: 'source' }, ctx({ maxInlineBytes: 16 }))
     expect(result.content).toEqual([
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
       { type: 'resource', resource: { uri: 'scadbuddy://prints/35/files/source', mimeType: 'model/3mf', blob: 'AQIDBA==' } },
     ])
     expect(tool('download_print_file').risk).toBe('read')
