@@ -47,6 +47,10 @@ pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the
 ```
 
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
+`e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
+`/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
+(its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
+same way, `vite.config.ts`).
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):
 
