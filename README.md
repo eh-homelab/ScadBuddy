@@ -319,7 +319,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   timeouts from the same values.
 - **Versioning:** workflows are pinned to the build that started them. At start
   the worker makes its own build the deployment's current version, so a new build
-  receives new workflows once it is polling.
+  receives new workflows once it is polling. It retries that for a minute after it
+  starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
   running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
