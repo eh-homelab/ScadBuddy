@@ -298,6 +298,8 @@ describe('PrintPicker', () => {
     server.use(
       http.get('/api/v1/print/outputs/:id/choices', () => {
         reads += 1
+        // Returning nothing falls through to the default handler, so the retry reads
+        // real choices.
         if (reads > 1) return undefined
         return HttpResponse.json(
           { type: 'about:blank', title: 'Gateway Timeout', status: 504, detail: 'Bambuddy did not answer' },
