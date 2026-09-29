@@ -306,7 +306,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
   PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
   arm64 under QEMU and runs `openscad-lsp --version`, caching under
-  `scope=openscad-lsp-arm64`. It is not a required check.
+  `scope=openscad-lsp-arm64`. It is not a required check. Making it one needs its
+  `pull_request.paths` filter dropped first: a required check that never runs on a PR
+  outside those paths leaves that PR waiting for it forever.
 
 ## PR conventions
 
