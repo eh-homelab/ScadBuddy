@@ -46,7 +46,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -105,7 +105,7 @@ const state = {
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
@@ -238,7 +238,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -998,8 +998,9 @@ export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
   ...aiPluginHandlers,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // Each feature's own mocks (`features/`), then the agent service's MCP OIDC routes;
+  // the rest of this list is the backend.
+  ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
@@ -2180,35 +2181,20 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
+  http.post(`${base}/outputs/:id/send`, async ({ params }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
     if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
+    // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
     const libraryFileId = copyIn(output, null)
-    const queued = body.mode === 'queue'
-    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
-    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
-    state.outputs = state.outputs.map((o) =>
-      o.id === id
-        ? {
-            ...o,
-            pipeline_run_id: pipelineRunId,
-            queue_item_id: queueItemId,
-          }
-        : o,
-    )
     const result: SendResult = {
-      mode: body.mode,
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
-      pipeline_run_id: pipelineRunId,
-      queue_item_id: queueItemId,
-      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
         ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
         : null,
@@ -2275,9 +2261,38 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true'
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
@@ -2324,7 +2339,7 @@ export const handlers = [
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -2421,12 +2436,6 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    if (output.pipeline_run_id) {
-      return HttpResponse.json({
-        ...fixtures.pipelineProgress,
-        pipeline_run_id: output.pipeline_run_id,
-      } satisfies PrintProgress)
-    }
     if (output.queue_item_id) {
       return HttpResponse.json({
         ...fixtures.queuedSliceProgress,
@@ -2557,7 +2566,6 @@ export const handlers = [
       bambuddy_api_key?: string
       public_url?: string | null
       library_folder_id?: number | null
-      pipeline_id?: number | null
       printer_id?: number | null
       display_unit?: Settings['display_unit'] | null
     }
