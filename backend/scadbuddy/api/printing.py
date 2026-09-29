@@ -13,6 +13,7 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
+    CatalogueDep,
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
@@ -24,7 +25,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.outputs import require_output
+from scadbuddy.api.outputs import output_stem, require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -32,6 +33,7 @@ from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
     PrintRunResult,
+    chosen_project,
     execute_run,
     filament_options_for_output,
     prepare_run,
@@ -73,6 +75,7 @@ class ProjectAttach(BaseModel):
     has sliced, so the caller learns them by polling.
     """
 
+    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
     project_id: int | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
 
@@ -137,6 +140,7 @@ async def post_run(
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
     runs: PrintRunsDep,
+    catalogue: CatalogueDep,
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -170,6 +174,12 @@ async def post_run(
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
     settings = store.load()
+    # A copy uploaded into a project's folder is named like the one Generate files (#317).
+    stem = (
+        await output_stem(meta, outputs, catalogue)
+        if chosen_project(body, settings) is not None
+        else None
+    )
     async with client_for(settings) as client:
         prepared = await prepare_run(client, outputs, meta, settings, body)
     run, created = await runs.store.claim(meta.id, key)
@@ -181,7 +191,7 @@ async def post_run(
     async def work(before_enqueue: BeforeEnqueue) -> PrintRunResult:
         async with client_for(settings) as client:
             result = await execute_run(
-                client, outputs, uploads, meta, settings, body, prepared, before_enqueue
+                client, outputs, uploads, meta, settings, body, prepared, before_enqueue, stem=stem
             )
         observer.started(meta)
         await watcher.started(meta.id)
@@ -327,6 +337,20 @@ async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
         return await describe_projects(client, last_project_id=settings.last_project_id)
 
 
+class LastProject(BaseModel):
+    """The project the pickers open on (#317); ``null`` is "No project"."""
+
+    project_id: int | None = None
+
+
+@router.put("/projects/last", response_model=LastProject, summary="Remember the chosen project")
+def put_last_project(body: LastProject, store: SettingsStoreDep) -> LastProject:
+    """The project chosen on the Customize page or in the print dialog, which both open
+    on next (``last_project_id``). ScadBuddy's own preference: it needs no Bambuddy."""
+    settings = store.remember_project(body.project_id)
+    return LastProject(project_id=settings.last_project_id)
+
+
 @router.post("/projects", response_model=ProjectView, summary="Create or link a project")
 async def post_project(body: ProjectRequest, store: SettingsStoreDep) -> ProjectView:
     """``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with
@@ -361,7 +385,7 @@ async def post_attach_project(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    project_id = body.project_id or settings.last_project_id
+    project_id = chosen_project(body, settings)
     if project_id is None:
         raise ApiError(
             status.HTTP_409_CONFLICT,

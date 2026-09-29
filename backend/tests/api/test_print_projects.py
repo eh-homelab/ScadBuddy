@@ -21,11 +21,18 @@ API = f"{BASE}/api/v1"
 def upload_route(file_id: int = 41) -> respx.Route:
     """The folder is a **query parameter** on this route, so the assertions below read
     it off the request URL rather than out of a body."""
+    folder_listing()
     return respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(
             200, json={"id": file_id, "filename": "demo-elan.3mf", "file_type": "3mf"}
         )
     )
+
+
+def folder_listing() -> respx.Route:
+    """What the project folder already holds, which its copy's name must not collide
+    with (#317)."""
+    return respx.get(f"{API}/library/files").mock(return_value=httpx.Response(200, json=[]))
 
 
 @respx.mock
@@ -106,6 +113,7 @@ def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder
     report a folder the file is not in."""
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
+    folder_listing()
     uploaded = respx.post(f"{API}/library/files").mock(
         side_effect=[
             httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
