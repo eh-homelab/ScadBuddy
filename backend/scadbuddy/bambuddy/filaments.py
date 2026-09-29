@@ -559,6 +559,7 @@ async def gather_plate_options(
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
+    assignments: list[SpoolAssignment] | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -566,9 +567,13 @@ async def gather_plate_options(
     once (#480); only each plate's slots are read per plate, concurrently. The reads
     keep the single-plate order, spools, assignments, the plates, then the printer and
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
-    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins.
+
+    ``assignments`` already read by the caller (a run reads them for the spools' sides,
+    #469) are used instead of reading them again."""
     spools = await client.spools()
-    assignments = await client.spool_assignments()
+    if assignments is None:
+        assignments = await client.spool_assignments()
 
     answers = await asyncio.gather(
         *(
