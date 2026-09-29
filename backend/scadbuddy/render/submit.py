@@ -119,6 +119,7 @@ class RenderService:
         *,
         model_version: str | None = None,
         supersedes: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
     ) -> Job:
         """Record the job (or join the waiting one it matches) and start its workflow."""
         if self.snapshots is not None:
@@ -129,7 +130,7 @@ class RenderService:
             id=uuid.uuid4().hex,
             slug=slug,
             params=dict(params),
-            inputs={"params": dict(params)},
+            inputs=dict(inputs) if inputs is not None else {"params": dict(params)},
             model_version=model_version,
             created_at=now(),
         )

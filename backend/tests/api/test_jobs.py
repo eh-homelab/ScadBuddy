@@ -200,3 +200,34 @@ def test_a_preset_outside_the_customizer_is_rejected(client: TestClient, ranged:
     # A preset saved before an option was renamed can be saved again.
     kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
     assert kept.status_code == 201, kept.text
+
+
+def test_a_render_takes_inputs_and_the_job_reports_them(client: TestClient, model: str) -> None:
+    body = {"inputs": {"params": {"width": 12}, "ui": {"tab": "lid"}}}
+    accepted = client.post(f"/api/v1/models/{model}/render", json=body)
+    assert accepted.status_code == 202
+    job = client.get(accepted.json()["status_url"]).json()
+    assert job["params"] == {"width": 12}
+    assert job["inputs"] == {"params": {"width": 12}, "ui": {"tab": "lid"}, "v": 0}
+
+
+def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: str) -> None:
+    accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert accepted.status_code == 202
+    job = client.get(accepted.json()["status_url"]).json()
+    assert job["inputs"] == {"params": {"width": 12}, "v": 0}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"inputs": {"params": {"width": 1}}, "params": {"width": 2}},
+        {"inputs": {"params": {"nope": 1}}},
+        {"inputs": {"params": {"width": [1]}}},
+        {"inputs": {"params": {}, "blob": "x" * 70000}},
+    ],
+)
+def test_bad_inputs_are_refused_before_a_job_exists(
+    client: TestClient, model: str, body: dict[str, object]
+) -> None:
+    assert client.post(f"/api/v1/models/{model}/render", json=body).status_code == 422
