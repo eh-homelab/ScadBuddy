@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ModelSummary } from '../api/types'
+import { copyImage } from '../lib/clipboard'
 import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { addMedia, failure, makeCover, mediaProblem, useUploadLimit } from '../lib/mediaFiles'
 import { snapshotSize, type SnapshotOptions } from '../lib/snapshot'
@@ -121,11 +122,10 @@ export function ImageDialog({
     setError(null)
     setCopied(false)
     try {
-      // The item takes the promise, so the write starts inside the click (Safari).
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': render() })])
-      setCopied(true)
-    } catch {
-      setError('The browser would not put the image on the clipboard. Save it instead.')
+      // Started inside the click, so the browser may ask for clipboard access (#722).
+      const result = await copyImage(render())
+      if (result.ok) setCopied(true)
+      else setError(result.message)
     } finally {
       setBusy(false)
     }

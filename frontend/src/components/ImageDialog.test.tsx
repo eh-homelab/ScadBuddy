@@ -104,6 +104,20 @@ describe('ImageDialog', () => {
     ])
   })
 
+  it('says how to allow the clipboard when the site was denied it (#722)', async () => {
+    vi.stubGlobal('ClipboardItem', class {})
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: { write: vi.fn().mockRejectedValue(new DOMException('no', 'NotAllowedError')) },
+      permissions: { query: vi.fn().mockResolvedValue({ state: 'denied' }) },
+    })
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+    setup()
+    fireEvent.click(screen.getByTestId('image-copy'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/allow the clipboard for it/i)
+    vi.unstubAllGlobals()
+  })
+
   it("cannot add to a built-in's media", async () => {
     setup(await api.getModel(BUILTIN_SLUG))
     expect(screen.getByTestId('image-add-media')).toBeDisabled()
