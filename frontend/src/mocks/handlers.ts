@@ -10,6 +10,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LastProject,
   CatalogueLibrary,
   MediaView,
   ModelPatch,
@@ -33,6 +34,7 @@ import type {
   PrintOptionsState,
   PrintOptionsUpdate,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   SendResult,
@@ -94,8 +96,6 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: structuredClone(fixtures.settings) as Settings,
-  /** #322 — the values the mock process "started" with, for `restart_required`. */
-  running: structuredClone(fixtures.settings) as Settings,
   /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
@@ -218,7 +218,6 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = structuredClone(fixtures.settings)
-  state.running = structuredClone(fixtures.settings)
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -306,87 +305,14 @@ export function setMockRemembered(remembered: {
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
 }
 
-/** #322 — the settings the mock process runs with, as if it had just restarted. */
-export function restartMockBackend(): void {
-  state.running = structuredClone(state.settings)
-  state.settings = { ...state.settings, restart_required: [] }
-}
-
-const SECRETS = { bambuddy_api_key: 'has_api_key', google_fonts_api_key: 'has_google_fonts_api_key' } as const
-/** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
-const NULLABLE = new Set(['bambuddy_url', 'bambuddy_api_key', 'public_url', 'default_plate', 'google_fonts_api_key'])
-const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'render_max_attempts', 'library_max_bytes'])
-const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'render_poll_interval', 'render_fallback_poll_interval', 'render_lease_timeout', 'media_upload_max_bytes'])
-
-function envName(name: string): string {
-  return `SCADBUDDY_${name.toUpperCase()}`
-}
-
-function refused(name: string, msg: string) {
-  return HttpResponse.json(
-    {
-      type: 'about:blank',
-      title: 'Unprocessable Content',
-      status: 422,
-      detail: 'the request did not match the expected shape',
-      errors: [{ loc: ['body', name], msg }],
-    },
-    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
-  )
-}
-
-/** Mirrors `SettingsStore.save` and `SettingsPatch`'s checks, then the view's bookkeeping. */
-function putSettings(body: Record<string, unknown>) {
-  const sources = { ...state.settings.sources }
-  const next: Record<string, unknown> = { ...state.settings }
-  const reset = (body.reset as string[] | undefined) ?? []
-  const envSeeded = new Set(Object.keys(fixtures.settingsApplies))
-  for (const name of reset) {
-    if (!envSeeded.has(name)) return refused('reset', `${name}: not an env-seeded setting, so nothing to reset`)
-  }
-  for (const [name, value] of Object.entries(body)) {
-    if (name === 'reset') continue
-    if (!envSeeded.has(name)) {
-      next[name] = name === 'display_unit' ? (value ?? 'mm') : value
-      continue
-    }
-    if (value === null && !NULLABLE.has(name)) {
-      return refused(name, `Value error, ${envName(name)} cannot be cleared; reset it to follow the deployment's value`)
-    }
-    if (typeof value === 'number') {
-      if (AT_LEAST_ONE.has(name) && value < 1) return refused(name, `Value error, ${envName(name)} must be at least 1, not ${value}`)
-      if (MORE_THAN_ZERO.has(name) && value <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0, not ${value}`)
-      if (value < 0) return refused(name, `Value error, ${envName(name)} must be at least 0, not ${value}`)
-    }
-    if (name in SECRETS) {
-      const has = SECRETS[name as keyof typeof SECRETS]
-      next[has] = typeof value === 'string' && value.length > 0
-      sources[name] = next[has] ? 'stored' : 'cleared'
-      continue
-    }
-    next[name] = name === 'log_level' && typeof value === 'string' ? value.toUpperCase() : value
-    sources[name] = value === null ? 'cleared' : 'stored'
-  }
-  for (const name of reset) {
-    const fromEnv = name in fixtures.settingsDeployment
-    const value = fromEnv
-      ? fixtures.settingsDeployment[name]
-      : (fixtures.settingsDefaults as Record<string, unknown>)[name] ?? null
-    if (name in SECRETS) next[SECRETS[name as keyof typeof SECRETS]] = Boolean(value)
-    else next[name] = value
-    sources[name] = fromEnv ? 'env' : 'default'
-  }
-  next.sources = sources
-  next.restart_required = Object.entries(fixtures.settingsApplies)
-    .filter(([name, applies]) => applies === 'restart' && next[name] !== (state.running as Record<string, unknown>)[name])
-    .map(([name]) => name)
-  state.settings = next as Settings
-  return HttpResponse.json(state.settings)
-}
-
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
   state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -562,8 +488,12 @@ function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: 
   return view(updated)
 }
 
-/** Job and output ids are 32 hex characters — the routes reject anything else. */
-function nextHexId(): string {
+/**
+ * Job and output ids are 32 hex characters — the routes reject anything else. One
+ * counter for every mock, feature modules (`features/`) included, reset by
+ * `resetMockState`.
+ */
+export function nextHexId(): string {
   state.seq += 1
   return state.seq.toString(16).padStart(32, '0')
 }
@@ -706,12 +636,19 @@ export function forgetMockRemembered(): void {
   state.printOptions.models = {}
 }
 
-/** The Bambuddy URL the mock settings hold, for feature routes that need one configured. */
-export function mockBambuddyUrl(): string | null | undefined {
-  return state.settings.bambuddy_url
+/**
+ * #322 — the settings the mock holds. Their routes are in `features/settings.ts`; the
+ * state stays here because the send, plate and upload routes read it too.
+ */
+export function mockSettings(): Settings {
+  return state.settings
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+export function setMockSettings(settings: Settings): void {
+  state.settings = settings
+}
+
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
@@ -724,9 +661,9 @@ function problem(status: number, title: string, detail?: string, extensions: obj
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -2500,6 +2437,40 @@ export const handlers = [
     return HttpResponse.json(saved)
   }),
 
+  // #317 — the project both pickers open on.
+  http.put(`${base}/print/projects/last`, async ({ request }) => {
+    const body = (await request.json()) as LastProject
+    state.lastProjectId = body.project_id ?? null
+    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #317 — Generate with a project files the editable 3MF in its folder, once per
+  // (folder, target): the same project again answers with the file already there.
+  http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id: number }
+    const project = state.projects.find((p) => p.id === body.project_id)
+    if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
+    const folderId = project.folder_id ?? nextNumber()
+    state.projects = state.projects.map((p) =>
+      p.id === project.id ? { ...p, folder_id: folderId, folder_name: p.folder_name ?? p.name } : p,
+    )
+    const before = output.library_files?.length ?? 0
+    const libraryFileId = copyIn(output, folderId)
+    const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+    await delay(100)
+    return HttpResponse.json({
+      project_id: project.id,
+      folder_id: folderId,
+      library_file_id: libraryFileId,
+      filename: `${output.slug}.3mf`,
+      created: after > before,
+      bambuddy_url: `${state.settings.bambuddy_url}/projects/${project.id}`,
+      edit_url: null,
+    } satisfies ProjectFile)
+  }),
+
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
@@ -2633,8 +2604,6 @@ export const handlers = [
     return HttpResponse.json(view(updated))
   }),
 
-  http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
-
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
@@ -2647,14 +2616,6 @@ export const handlers = [
     }
     state.headlessBrowser = body.enabled
     return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
-  http.put(`${base}/settings`, async ({ request }) => {
-    const body = (await request.json()) as Record<string, unknown>
-    // Stored before the answer comes back, as the server commits before it responds.
-    const response = putSettings(body)
-    await delay(120)
-    return response
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
@@ -2719,41 +2680,6 @@ export const handlers = [
     // result pass in tests and break in the browser.
     const { defaults, global_options, printers, models } = state.printOptions
     return HttpResponse.json({ defaults, global_options, printers, models })
-  }),
-
-  http.post(`${base}/settings/test`, async () => {
-    await delay(200)
-    if (!state.settings.bambuddy_url?.startsWith('http')) {
-      return problem(409, 'Conflict', 'no Bambuddy URL is configured')
-    }
-    if (!state.settings.has_api_key) {
-      return HttpResponse.json({
-        ok: false,
-        detail: "Bambuddy refused the API key when asked to list the printers. The key needs the 'Read Status' scope",
-        printers: [],
-      })
-    }
-    return HttpResponse.json({
-      ok: true,
-      detail: 'Connected. Bambuddy reports 3DP-31B-598.',
-      printers: fixtures.targets.printers,
-      scopes: [
-        { scope: 'Read Status', status: 'ok', required: true, detail: 'Printers, their status, and the print history.' },
-        ...(
-          [
-            ['Manage Library', true, 'Uploading 3MFs to the library, and its folders.'],
-            ['Manage Queue', true, 'Queueing prints.'],
-            ['Manage Projects', false, 'Sending to a Bambuddy project.'],
-            ['Manage Archives', false, 'Attaching photos and timelapses to a print.'],
-          ] as const
-        ).map(([scope, required, what]) => ({
-          scope,
-          status: 'unknown',
-          required,
-          detail: `Not checked: Bambuddy cannot be asked what a key carries without a write, so a missing scope shows up when it is first used. Needed for: ${what}`,
-        })),
-      ],
-    })
   }),
 
   http.get(`${base}/settings/targets`, () => {

@@ -590,26 +590,35 @@ export class ApprovalService {
     where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
   ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    const [row] = await this.deps.sql.unsafe<Row[]>(
-      `UPDATE ai_approvals
-       SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-           decided_at = now(), reason = $6,
-           usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-       WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-       RETURNING ${COLUMNS}`,
-      [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-    )
-    if (!row) return undefined
-    const approval = record(row)
-    await this.append(approval.sessionId, [
-      event({
-        type: 'approval.resolved',
-        sessionId: approval.sessionId ?? '-',
-        id,
-        approved: decision === 'approved',
-        ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-      }),
-    ])
+    // The decision and its `approval.resolved` commit together: a parked gate
+    // polling the row must not see the decision (and log the session's
+    // `running`) before the event that reports it is in the log.
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const [row] = await tx.unsafe<Row[]>(
+        `UPDATE ai_approvals
+         SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
+             decided_at = now(), reason = $6,
+             usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
+         WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
+         RETURNING ${COLUMNS}`,
+        [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
+      )
+      if (!row) return undefined
+      const settled = record(row)
+      if (settled.sessionId !== null) {
+        const resolved = event({
+          type: 'approval.resolved',
+          sessionId: settled.sessionId,
+          id,
+          approved: decision === 'approved',
+          ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+        })
+        await this.deps.events.append(settled.sessionId, [scrubForLog(resolved, [])], tx)
+      }
+      return settled
+    })
+    if (!approval) return undefined
+    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
     this.wakeWaiters(id)
     await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
     return approval

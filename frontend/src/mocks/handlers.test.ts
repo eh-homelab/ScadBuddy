@@ -8,6 +8,7 @@ import {
   GALLERY_SLUG,
   MEDIA_MP4_BASE64,
   keychainSource,
+  outputs,
   versionIds,
 } from './fixtures'
 import {
@@ -1013,3 +1014,32 @@ describe('mock API: metadata PATCH on a model that is not there', () => {
   })
 })
 
+
+describe('mock API: analyzer decisions', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses a suppression without a reason as FastAPI refuses a body it cannot parse', async () => {
+    // `DecisionCreate._well_formed` is a model validator: `_validation_error` answers with
+    // one detail for every such refusal and the message under `errors`, never in `detail`.
+    const blank = {
+      diagnostic_id: 'SB1002',
+      kind: 'suppress' as const,
+      scope: { kind: 'global' as const, key: '' },
+      enforced: false,
+      confirm: false,
+    }
+    await expect(api.createDecision({ ...blank, reason: '  ' })).rejects.toMatchObject({
+      status: 422,
+      detail: 'the request did not match the expected shape',
+      problem: {
+        errors: [{ loc: ['body'], msg: expect.stringContaining('a suppression needs a reason') }],
+      },
+    })
+    const report = await api.runAnalyzers({
+      target: { output_id: outputs[0]!.id },
+      request: { plate_id: 1, all_plates: false },
+      detail: 'advanced',
+    })
+    expect(report.diagnostics.map((row) => row.status)).not.toContain('suppressed')
+  })
+})
