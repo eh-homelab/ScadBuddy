@@ -128,9 +128,12 @@ function oldestTime(prints: PrintSummary[]): number | null {
   return null
 }
 
-/** An output that went to Bambuddy's queue, by either route (#89). */
+/**
+ * An output that went to Bambuddy's queue (#89). Slice-and-queue is the only route
+ * left since #312; a record from the retired pipeline route reads as never printed.
+ */
 function wasSent(output: Output): boolean {
-  return Boolean(output.queue_item_id || output.pipeline_run_id || (output.plates ?? []).length > 0)
+  return Boolean(output.queue_item_id || (output.plates ?? []).length > 0)
 }
 
 /**

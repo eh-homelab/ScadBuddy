@@ -461,7 +461,6 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
       name: 'Draft',
       created_at: '2026-09-28T11:00:00Z',
       queue_item_id: null,
-      pipeline_run_id: null,
       plates: [],
     }
     server.use(
