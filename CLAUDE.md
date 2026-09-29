@@ -47,6 +47,10 @@ pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the
 ```
 
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
+`e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
+`/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
+(its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
+same way, `vite.config.ts`).
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):
 
@@ -136,9 +140,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   variable the backend reads; the one origin allowed to write) and
   `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
   env vars; AI settings live in the database.
-  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
-  `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
+  `src/app.ts` is the Hono server (`/healthz`, `/api/v1/ai/status`, plus
+  `src/routes/credentials.ts` for `/api/v1/ai/credentials`, and the assistant's
+  WebSocket `/api/v1/ai/chat` and `/api/v1/ai/sessions` in `src/routes/chat.ts` and
+  `src/routes/sessions.ts`, backed by `SessionManager`). Every route that must know "is this the UI's origin"
+  (credential writes, `/mcp`, and the chat socket and session routes under `/api/v1/ai/*`) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
@@ -263,6 +269,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
   where it is refused (`document.fullscreenEnabled` is false, or the request is
   rejected) the full-screen view covers the frame instead.
+- The assistant (the agent's `/api/v1/ai/*`, including its WebSocket `/api/v1/ai/chat`)
+  is reached on ScadBuddy's own origin: the ingress routes those paths to the agent
+  sidecar (AI spec §4.2, `docs/ai/operating.md` §1.1). The sandbox's
+  `allow-same-origin` is what keeps the frame's `Origin` ScadBuddy's own, and the agent's
+  origin allowlist requires that. This is inferred from the sandbox attribute above and
+  has not been exercised inside a live Bambuddy.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 
