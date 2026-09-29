@@ -31,11 +31,9 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.render.job_models import Job, now
-from scadbuddy.render.job_store import QueueFullError, render_key
+from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
 from scadbuddy.render.projection import JobProjection, workflow_id_for
-from scadbuddy.render.render_cache import cached_render, prune_render_cache
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.pipelines import RenderPreview, TemplatePipeline
 
@@ -65,7 +63,7 @@ class RenderService:
         self,
         *,
         projection: JobProjection,
-        client: Client | None,
+        client: Client,
         task_queue: str,
         config: Config,
         paths: DataPaths,
@@ -82,8 +80,8 @@ class RenderService:
         self.metrics = metrics
         self.reconcile_after = reconcile_after
         self.reconcile_interval = reconcile_interval
-        #: How often the reconciler also prunes: the legacy queue does it after every
-        #: job, and settled rows hold their blobs' refs until they go.
+        #: How often the reconciler also prunes: settled rows hold their blobs' refs
+        #: until they go.
         self.prune_interval = prune_interval
         self._reconciler: asyncio.Task[None] | None = None
         self._listened_before = False
@@ -93,10 +91,7 @@ class RenderService:
         metrics.latency_slo.set(config.render_latency_slo)
 
     async def start(self) -> None:
-        self.store.listener(
-            on_state=self._listener_state,
-            check_interval=self.config.render_fallback_poll_interval,
-        )
+        self.store.listener(on_state=self._listener_state)
         # A failed first pass must not stop the boot: the loop tries again.
         try:
             await self.reconcile_once()
@@ -122,7 +117,7 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
     ) -> Job:
-        """As `RenderQueue.submit`, with the workflow start in place of the wake-up."""
+        """Record the job (or join the waiting one it matches) and start its workflow."""
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,
@@ -139,18 +134,6 @@ class RenderService:
                 f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
             )
         key = render_key(slug, params, model_version)
-        kept = (
-            await asyncio.to_thread(cached_render, self.paths, slug, key)
-            if model_version is not None
-            else None
-        )
-        if kept is not None:
-            job.state = "done"
-            job.started_at = job.finished_at = job.created_at
-            job.result = kept.result
-            job.log_tail = kept.log_tail
-            job.diagnostics = kept.result.diagnostics
-            job.diagnostics_dropped = kept.result.diagnostics_dropped
         try:
             submitted = await asyncio.to_thread(
                 self.store.submit,
@@ -165,10 +148,6 @@ class RenderService:
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
             await self._cancel_workflow(submitted.superseded)
-        if submitted.cached:
-            self.metrics.render_cached.inc()
-            self._settled(submitted.job, "done")
-            return submitted.job
         if submitted.coalesced:
             self.metrics.render_coalesced.inc()
             return submitted.job
@@ -225,12 +204,10 @@ class RenderService:
         return len(started)
 
     async def prune(self) -> None:
-        """What `RenderQueue._prune` does: settled jobs past `job_ttl` (and their blob
-        refs), revision exports and kept renders."""
+        """Settled jobs past `job_ttl` (and their blob refs), and revision exports."""
         ttl = self.config.job_ttl
         await asyncio.to_thread(self.store.prune, ttl)
         await asyncio.to_thread(prune_revision_exports, self.paths, ttl)
-        await asyncio.to_thread(prune_render_cache, self.paths, ttl)
 
     async def render_preview(self, slug: str, timeout: float) -> bytes:
         """``slug``'s default-render preview, rendered on the worker. A second request
@@ -239,7 +216,6 @@ class RenderService:
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
         includes any wait for a free worker."""
-        assert self.client is not None
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
@@ -257,7 +233,7 @@ class RenderService:
         return max(1, math.ceil(INITIAL_RENDER_ESTIMATE))
 
     def refresh_metrics(self) -> None:
-        """As `RenderQueue.refresh_metrics`, over the projection."""
+        """The queue gauges, read from the projection."""
         try:
             counts = self.store.counts()
         except Exception:
@@ -278,7 +254,6 @@ class RenderService:
         job: Job,
         conflict: WorkflowIDConflictPolicy = WorkflowIDConflictPolicy.USE_EXISTING,
     ) -> None:
-        assert self.client is not None
         await self.client.start_workflow(
             TemplatePipeline.run,
             job,
@@ -303,7 +278,6 @@ class RenderService:
             self._settled(job, "failed")
 
     async def _cancel_workflow(self, job: Job) -> None:
-        assert self.client is not None
         try:
             await self.client.get_workflow_handle(workflow_id_for(job.id)).cancel(
                 rpc_timeout=RPC_TIMEOUT

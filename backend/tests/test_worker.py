@@ -8,8 +8,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import httpx
 import psycopg
@@ -29,20 +28,16 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.render.job_models import Job
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.worker import _poll, _wait_drained, run_inprocess_worker, run_worker
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
+from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import UNUSED_DATABASE_URL, fake_3mf_openscad
-
-if TYPE_CHECKING:
-    from scadbuddy.api.deps import AppState
-from tests.support.temporal import temporal_client
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
+from tests.support.temporal import current_address, temporal_client
 
 
 def _free_port() -> int:
@@ -245,6 +240,7 @@ async def test_the_in_process_worker_stops_without_draining(
     monkeypatch.setattr(worker_module, "drained", never)
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         data_dir=tmp_path,
         revision=f"test-{uuid.uuid4().hex[:8]}",
         temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
@@ -285,6 +281,7 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,
         data_dir=tmp_path,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         revision=f"test-{uuid.uuid4().hex[:8]}",
         temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
     )
@@ -327,7 +324,20 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
                 worker.cancel()
 
 
-def test_the_in_process_worker_names_the_state_it_is_missing() -> None:
-    state = cast("AppState", SimpleNamespace(projection=None, blobs=object(), refs=None))
-    with pytest.raises(RuntimeError, match=r"AppState\.projection, AppState\.refs"):
-        worker_module.worker_deps_from_state(state)
+def test_a_lazy_client_is_built_without_an_event_loop() -> None:
+    client = connect_lazily(UNUSED_TEMPORAL_ADDRESS, "somewhere")
+    assert client.namespace == "somewhere"
+
+
+async def test_a_lazy_client_is_built_inside_a_running_loop() -> None:
+    # `create_app` runs inside uvicorn's loop (`--factory`), so it cannot `asyncio.run`.
+    client = connect_lazily(UNUSED_TEMPORAL_ADDRESS, "default")
+    with pytest.raises(RuntimeError, match="Failed client connect"):
+        await client.count_workflows()
+
+
+@pytest.mark.requires_temporal
+async def test_a_lazy_client_connects_on_its_first_call() -> None:
+    async with temporal_client() as server:
+        client = connect_lazily(current_address(server), server.namespace)
+        assert (await client.count_workflows("WorkflowId = 'nothing-here'")).count == 0

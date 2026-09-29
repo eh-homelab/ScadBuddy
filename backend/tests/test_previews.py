@@ -30,8 +30,8 @@ from scadbuddy.library.previews import (
 )
 from scadbuddy.render import previews as previews_module
 from scadbuddy.render.jobs import ModelSource
-from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import render_preview
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -82,10 +82,10 @@ def test_the_source_key_follows_the_source_and_its_libraries_only(paths: DataPat
 
 @pytest.fixture
 def store(pg_conninfo: str, paths: DataPaths) -> Iterator[PreviewStore]:
-    database = PostgresJobStore(pg_conninfo, paths, pool_size=3)
+    database = JobProjection(pg_conninfo, pool_size=3)
     database.open()
     try:
-        yield PreviewStore(database.connection)
+        yield PreviewStore(database.pool.connection)
     finally:
         database.close()
 
@@ -361,14 +361,14 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
 ) -> None:
     """A second pool is a second process: it reads what the first wrote after the
     first is gone, and its drop waits behind the first one's write in progress."""
-    first = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    first = JobProjection(pg_conninfo, pool_size=2)
     first.open()
-    second = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    second = JobProjection(pg_conninfo, pool_size=2)
     second.open()
     try:
         mine, theirs = (
-            PreviewStore(first.connection),
-            PreviewStore(second.connection),
+            PreviewStore(first.pool.connection),
+            PreviewStore(second.pool.connection),
         )
         writer, _, release = _held_write(mine)
         dropper = threading.Thread(target=lambda: theirs.drop(SLUG))
@@ -384,14 +384,14 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
     finally:
         first.close()
     try:
-        assert PreviewStore(second.connection).image(SLUG) == b"png"
+        assert PreviewStore(second.pool.connection).image(SLUG) == b"png"
     finally:
         second.close()
 
 
 @pytest.mark.requires_postgres
 def test_a_row_has_its_image_exactly_when_it_rendered(pg_conninfo: str, paths: DataPaths) -> None:
-    database = PostgresJobStore(pg_conninfo, paths, pool_size=1)
+    database = JobProjection(pg_conninfo, pool_size=1)
     database.open()
     database.close()
     insert = (

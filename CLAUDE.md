@@ -40,10 +40,21 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
-Renders: `SCADBUDDY_TEMPORAL_ADDRESS` empty runs the legacy in-process render queue; set,
-renders run on Temporal with `python -m scadbuddy.worker` as the worker (or
-`SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). The legacy path
-goes in the follow-up that makes the address required (#546).
+Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
+`SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
+`SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
+an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
+`tests/api` renders on Temporal too, and skips without one: one dev server per session
+(`tests/api/conftest.py::temporal_address`), and each test's app runs its own in-process
+worker on a task queue of its own (the api `settings` fixture), because every test has
+its own data directory and schema. The render is the real pipeline behind the fake
+openscad (`FAKE_3MF`, `FAKE_STDERR` in `fake-env.json`; `width=999` fails). Every
+test's queue registers with one worker-deployment version, so the dev server raises
+`matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
+renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs the same.
+The fixture terminates the workflows a test leaves open, since an abandoned piece
+would be joined by the next test that renders it. The dev server's store is a SQLite
+file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
@@ -121,14 +132,16 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per-triangle material), `solids.py` (one closed solid per colour via a `color()`
   wrapper), `bambu3mf.py` (Bambu-style 3MF writer), `glb.py`, `thumbnail.py` (numpy
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
-  (`render_job` ties the steps together; job queue), `render_cache.py` (finished
-  renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
-  parameters at the same revision is answered without OpenSCAD), `submit.py`
-  (`RenderService`, the Temporal path: submit inserts the row, starts the workflow, and a
-  reconciler starts any pending row nothing picked up), `projection.py` (`render_jobs`
-  as a projection the workflow writes in place through the `project` activity),
-  `backend.py` (the `RenderBackend` Protocol the routes see, met by the legacy
-  `RenderQueue` and by `RenderService`).
+  (the render stages the worker's activities run; `render_job` runs them in one
+  process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
+  `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
+  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
+  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  the workflow writes in place through the `project` activity), `pg_store.py` (the
+  backend's migrations). The legacy in-process queue, its file and Postgres stores
+  and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
+  store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
+  any more (it stays hidden and git-ignored for volumes that still hold one).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,

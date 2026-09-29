@@ -22,8 +22,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
-from scadbuddy.render.job_models import Job, now
-from scadbuddy.render.job_store import JobNotFoundError
+from scadbuddy.render.job_models import Job, JobNotFoundError, now
 from scadbuddy.render.jobs import (
     Prepared,
     finish_piece_stage,
@@ -156,8 +155,8 @@ def _process_output(main: RenderMainResult) -> ProcessOutput:
 
 
 def _observe_settled(metrics: Metrics, job: Job) -> None:
-    """What `RenderQueue` observes when a render settles: its outcome, the latency
-    from the submit, and the render's own duration (here from `mark_started`)."""
+    """What a settled render records: its outcome, the latency from the submit, and
+    the render's own duration (from `mark_started`)."""
     assert job.state in ("done", "failed") and job.finished_at is not None
     outcome: RenderOutcome = job.state
     metrics.render_finished.labels(outcome).inc()

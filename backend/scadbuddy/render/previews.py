@@ -8,11 +8,10 @@ declares them -- and keeps that render's plate image as a stand-in, in the
 The work never sits in a request's path. A catalogue change hands the model's id to
 :meth:`PreviewScheduler.request`, which returns at once; the scheduler's one worker
 waits out a short debounce (a burst of edits is rendered once), decides whether a
-render is needed at all, and runs one through its ``runner``: on the legacy queue,
-:meth:`~scadbuddy.render.jobs.RenderQueue.run_background`, behind every render a
-person has asked for; on Temporal, :meth:`~scadbuddy.render.submit.RenderService.render_preview`,
-on the render worker. One preview at a time, with a pause after each, is also what
-throttles the boot-time pass over every model without a thumbnail.
+render is needed at all, and runs one through its ``runner``
+(:meth:`~scadbuddy.render.submit.RenderService.render_preview`, on the render worker).
+One preview at a time, with a pause after each, is also what throttles the boot-time
+pass over every model without a thumbnail.
 """
 
 from __future__ import annotations
@@ -56,8 +55,7 @@ DEFAULT_INTERVAL = 1.0
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
 
-#: Renders a slug's preview within the timeout it is given; it applies the timeout
-#: itself, so the legacy queue's runner can leave the wait for a worker out of it.
+#: Renders a slug's preview within the timeout it is given, applying it itself.
 PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 

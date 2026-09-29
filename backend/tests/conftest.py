@@ -8,7 +8,7 @@ import subprocess
 import uuid
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -20,11 +20,15 @@ import trimesh
 from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core import settings as settings_module
-from scadbuddy.core.config import load_config
+from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import url_import
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render.job_models import Job, JobResult, now
+from scadbuddy.render.jobs import render_job
+from scadbuddy.render.schema import ParamValue
 from tests.support.temporal import TEST_TEMPORAL_ADDRESS_ENV, temporal_available
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -132,6 +136,9 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
 #: nothing is dialled until the lifespan opens the stores.
 UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
+#: The same for the Temporal address (#546). Nothing listens on port 1, and the API's
+#: client is lazy, so an app built with it boots and its renders wait, unstarted.
+UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
 
 
 @pytest.fixture
@@ -162,6 +169,7 @@ FAKE_OPENSCAD = """#!/usr/bin/env python3
 import json
 import os
 import pathlib
+import shutil
 import sys
 
 args = sys.argv[1:]
@@ -216,6 +224,20 @@ if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
     )
     raise SystemExit(0)
 
+if out is not None and out.endswith(".3mf"):
+    # The API tests' render (tests/api/conftest.py): `width=999` fails as a template
+    # that could not open its picture does; anything else prints FAKE_STDERR and
+    # exports the 3MF named FAKE_3MF, if any.
+    if any(arg.startswith("width=999") for arg in args):
+        print("WARNING: The file 'pic.svg' couldn't be opened", file=sys.stderr)
+        print("ERROR: something broke", file=sys.stderr)
+        raise SystemExit(1)
+    for line in settings.get("FAKE_STDERR", []):
+        print(line, file=sys.stderr)
+    if "FAKE_3MF" in settings:
+        shutil.copyfile(settings["FAKE_3MF"], out)
+    raise SystemExit(0)
+
 if out is not None and out.endswith(".param"):
     pathlib.Path(out).write_text(
         json.dumps(
@@ -261,6 +283,7 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,
@@ -415,6 +438,20 @@ def read_png(data: bytes) -> np.ndarray:
     if rows[:, 0].any():
         raise ValueError("expected filter type 0 on every row")
     return rows[:, 1:].reshape(height, width, 4)
+
+
+async def render_once(
+    paths: DataPaths, slug: str, params: Mapping[str, ParamValue]
+) -> tuple[Job, JobResult]:
+    """Render ``slug`` through the production pipeline (`render_job`: the stages the
+    worker's activities run, in one process) with the configured `openscad`."""
+    job = Job(id=uuid.uuid4().hex, slug=slug, params=dict(params), created_at=now())
+    config = Config(openscad=load_config().openscad, data_dir=paths.root)
+    result, log_tail = await render_job(
+        job, config=config, paths=paths, assets=AssetStore(paths.assets)
+    )
+    job.state, job.result, job.log_tail = "done", result, log_tail
+    return job, result
 
 
 #: Any globally routable address; nothing ever connects to it.

@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from tests.api.conftest import read_stored
+from tests.api.conftest import read_stored, set_plate_image, wait_for_job
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_routes
@@ -110,10 +110,21 @@ def test_no_plate_type_slices_on_textured_pei(client: TestClient, model: str) ->
 # --- plate index --------------------------------------------------------------------
 
 
+def _output_without_cover(client: TestClient, slug: str) -> str:
+    """`make_output`, minus the plate image a render draws unless its step times out."""
+    job_id = client.post(f"/api/v1/models/{slug}/render", json={"params": {}}).json()["job_id"]
+    wait_for_job(client, job_id)
+    set_plate_image(client, job_id, None)
+    created: str = client.post(
+        f"/api/v1/models/{slug}/outputs", json={"job_id": job_id, "name": "Elan"}
+    ).json()["id"]
+    return created
+
+
 @respx.mock
 def test_a_scadbuddy_output_is_one_plate(client: TestClient, model: str) -> None:
     configure(client)
-    output_id = make_output(client, model)
+    output_id = _output_without_cover(client, model)
 
     assert client.get(f"/api/v1/outputs/{output_id}/plates").json() == [
         {"index": 1, "has_thumbnail": False}
@@ -125,7 +136,7 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client)
-    output_id = make_output(client, model)
+    output_id = _output_without_cover(client, model)
     add_plate(_output_3mf(paths, output_id), 2, thumbnail=b"\x89PNG plate two")
 
     assert client.get(f"/api/v1/outputs/{output_id}/plates").json() == [

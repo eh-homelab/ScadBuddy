@@ -3,13 +3,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
 import uuid
+from pathlib import Path
 
 import pytest
 from temporalio import workflow
+from temporalio.client import WorkflowExecutionStatus
 from temporalio.worker import Worker
 
-from tests.support.temporal import WorkerThread, temporal_client
+from tests.support.temporal import (
+    WorkerThread,
+    WorkflowReaper,
+    _store_dir,
+    current_address,
+    temporal_client,
+    temporal_server,
+)
 
 
 @workflow.defn
@@ -49,3 +60,38 @@ def test_a_worker_thread_raises_what_stopped_its_worker() -> None:
     thread = WorkerThread(make_worker)
     with pytest.raises(RuntimeError, match="could not build the worker"), thread:
         assert thread._loop is not None  # set before __enter__ returns
+
+
+@pytest.mark.requires_temporal
+async def test_the_reaper_ends_only_the_queues_running_workflows_on_one_client() -> None:
+    async with temporal_client() as client:
+        queues = [f"t-{uuid.uuid4().hex[:8]}" for _ in range(3)]
+        started = [
+            await client.start_workflow(Shout.run, q, id=f"s-{q}", task_queue=q) for q in queues
+        ]
+
+        with WorkflowReaper(current_address(client), client.namespace) as reaper:
+            first = reaper.client
+            await asyncio.to_thread(reaper.terminate, queues[0])
+            await asyncio.to_thread(reaper.terminate, queues[1])
+            assert reaper.client is first  # one connection for every teardown
+
+        statuses = [(await handle.describe()).status for handle in started]
+        assert statuses == [
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.TERMINATED,
+            WorkflowExecutionStatus.RUNNING,
+        ]
+
+
+@pytest.mark.requires_temporal
+def test_the_session_dev_server_keeps_its_store_in_a_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In memory, the dev server's SQLite was lost mid-session under load ("interrupted",
+    then "Namespace default is not found") and every later API test failed."""
+    monkeypatch.setattr("tests.support.temporal.TEST_TEMPORAL_ADDRESS", None)
+    with tempfile.TemporaryDirectory(dir=_store_dir()) as scratch:
+        db = Path(scratch) / "temporal.db"
+        with temporal_server(db_file=db):
+            assert db.is_file()

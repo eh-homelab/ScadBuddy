@@ -520,7 +520,8 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
 # frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
 # A factory, not a module-level app: building one reads Settings, which refuses to
-# start without SCADBUDDY_DATABASE_URL (#401), and importing the module must not.
+# start without SCADBUDDY_DATABASE_URL (#401) or SCADBUDDY_TEMPORAL_ADDRESS (#546),
+# and importing the module must not.
 # The render worker (#424) is this same image run as `python -m scadbuddy.worker`: it
 # serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
 # is the API's 8080). Phase 1 runs one replica, sharing /data with the API.

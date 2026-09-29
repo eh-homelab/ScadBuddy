@@ -3,14 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path, status
-from psycopg import Connection
-from psycopg.rows import DictRow
-from psycopg_pool import ConnectionPool
+from fastapi import Depends, Path
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
@@ -23,7 +20,6 @@ from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
     EventBus,
-    InProcessEventBus,
     UpstreamAvailable,
     VersionCommitted,
     emit,
@@ -31,8 +27,6 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
-from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
@@ -45,21 +39,16 @@ from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
-from scadbuddy.render.backend import RenderBackend
-from scadbuddy.render.job_store import JobBackend, JobStore
-from scadbuddy.render.jobs import RenderQueue
-from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
-    PreviewRender,
     PreviewScheduler,
-    render_preview,
 )
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.workflows.client import connect_lazily
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +65,8 @@ class AppState:
     history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
-    #: An output's uploads to Bambuddy's file library (#455), on the render queue's
-    #: Postgres pool. Without a database every use raises (#401).
+    #: An output's uploads to Bambuddy's file library (#455), on the projection's
+    #: Postgres pool.
     uploads: BambuddyUploadStore
     #: Which Bambuddy archives an output's prints produced (#306), on the same pool.
     print_links: PrintLinkStore
@@ -87,26 +76,28 @@ class AppState:
     libraries: LibraryStore
     #: Uploads for `// file` parameters, with their caps (#296).
     assets: AssetStore
-    #: The legacy `RenderQueue`, or `RenderService` on Temporal when
-    #: SCADBUDDY_TEMPORAL_ADDRESS is set: exactly one of them per deployment.
-    queue: RenderBackend
+    #: Submits renders to Temporal and reads them back from the projection (#546).
+    render: RenderService
+    #: The `render_jobs` projection, the blob store and its references.
+    projection: JobProjection
+    blobs: LocalBlobStore
+    refs: BlobRefs
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
     previews: PreviewScheduler | None
     #: Where every state change is published (spec §7): `PgNotifyEventBus` on
-    #: #241's database when one is configured, `InProcessEventBus` otherwise.
+    #: #241's database, or `InProcessEventBus` in a test that builds one itself.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
     metrics: Metrics
-    #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
-    #: (until #401 makes one required): the routes that persist answer 503.
-    decisions: DecisionStore | None
-    #: Caps the openscad runs that do NOT go through the render queue — the editor's
+    #: Print-analyzer decisions (#284), in Postgres.
+    decisions: DecisionStore
+    #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
-    #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
+    #: one: the worker's cap is its activity slots, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
@@ -121,7 +112,7 @@ class AppState:
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
-    #: render queue holds the same one.
+    #: in-process worker holds the same one.
     checkouts: CheckoutGate = field(default_factory=CheckoutGate)
     #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
     #: held for as long as the editor stays open rather than for one piece of work —
@@ -130,11 +121,8 @@ class AppState:
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
-    #: The Temporal path's (all None on the legacy one): the `render_jobs` projection,
-    #: the blob store and its references, and the client the lifespan connects.
-    projection: JobProjection | None = field(default=None)
-    blobs: LocalBlobStore | None = field(default=None)
-    refs: BlobRefs | None = field(default=None)
+    #: The in-process worker's client (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), which the
+    #: lifespan connects eagerly: a worker cannot run on the API's lazy one.
     temporal: Client | None = field(default=None)
 
 
@@ -168,56 +156,30 @@ def build_state(settings: Settings) -> AppState:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the job pool opens in `RenderQueue.open_store` and the
-    # event bus's in `PgNotifyEventBus.start`, both from the lifespan. The previews
-    # share the job pool, and there are none without a database (#454, #401).
-    store: JobBackend | None = None
-    events: EventBus
-    preview_store: PreviewStore | None = None
-    projection: JobProjection | None = None
-    pool: ConnectionPool[Connection[DictRow]] | None = None
-    if settings.database_url:
-        listener: PgListener
-        if settings.temporal_address:
-            # Renders on Temporal: the projection is the job store, and the legacy
-            # queue is never built, so nothing in this process claims a row.
-            projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
-            listener, pool = projection.pg_listener, projection.pool
-        else:
-            pg_store = PostgresJobStore(
-                settings.database_url, paths, pool_size=settings.database_pool_size
-            )
-            store, listener, pool = pg_store, pg_store.pg_listener, pg_store.pool
-        # One LISTEN connection per process: the bus shares the job store's.
-        pg_events = PgNotifyEventBus(
-            settings.database_url,
-            listener=listener,
-            metrics=metrics,
-            retention=EventLogRetention(
-                seconds=settings.event_log_retention_seconds,
-                rows=settings.event_log_retention_rows,
-            ),
-        )
-        # Job events commit with the job change that they describe.
-        if projection is not None:
-            projection.events = pg_events
-        else:
-            pg_store.events = pg_events
-        events = pg_events
-        preview_store = PreviewStore(pool.connection)
-    else:
-        # No database: the UI keeps working, events reach this process only.
-        store, events = JobStore(paths), InProcessEventBus()
-    decisions: DecisionStore | None = (
-        PostgresDecisionStore(settings.database_url) if settings.database_url else None
+    # Nothing connects here: the projection's pool opens in the lifespan, and the
+    # event bus's in `PgNotifyEventBus.start`. The previews share the projection's
+    # pool (#454, #401).
+    projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
+    pool = projection.pool
+    # One LISTEN connection per process: the bus shares the projection's.
+    events = PgNotifyEventBus(
+        settings.database_url,
+        listener=projection.pg_listener,
+        metrics=metrics,
+        retention=EventLogRetention(
+            seconds=settings.event_log_retention_seconds,
+            rows=settings.event_log_retention_rows,
+        ),
     )
+    # Job events commit with the job change that they describe.
+    projection.events = events
+    preview_store = PreviewStore(pool.connection)
+    decisions = PostgresDecisionStore(settings.database_url)
     outputs = OutputStore(paths)
     uploads = BambuddyUploadStore(pool)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
-    # The render queue's: a route builds its own over its `LibrariesDep`.
-    fetcher = CheckoutFetcher(libraries, installs, checkouts)
     assets = AssetStore(
         paths.assets,
         max_total_bytes=config.asset_max_total_bytes,
@@ -226,7 +188,7 @@ def build_state(settings: Settings) -> AppState:
     # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
     # stand in behind them. Off, the catalogue serves no preview at all -- including
     # ones rendered while it was on, which stay stored until their model goes.
-    # The media list (#274) shares the render queue's pool, opened in the lifespan.
+    # The media list (#274) shares the projection's pool, opened in the lifespan.
     # Nothing connects here either: the lifespan opens it.
     presets = PresetStore(
         paths, settings.database_url, pool_size=min(4, settings.database_pool_size)
@@ -240,63 +202,25 @@ def build_state(settings: Settings) -> AppState:
         presets=presets,
         wrapper_prefix=WRAPPER_PREFIX,
         serve_previews=settings.preview_renders,
-        media_store=PostgresMediaStore(pool) if pool is not None else None,
+        media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
-    queue: RenderBackend
-    runner: PreviewRender
-    blobs: LocalBlobStore | None = None
-    refs: BlobRefs | None = None
-    if projection is not None:
-        blobs = LocalBlobStore(paths.blobs)
-        refs = BlobRefs(projection.pool)
-        render = RenderService(
-            projection=projection,
-            client=None,
-            task_queue=settings.temporal_task_queue_render,
-            config=config,
-            paths=paths,
-            metrics=metrics,
-        )
-        queue, runner = render, render.render_preview
-    else:
-        assert store is not None
-        legacy = RenderQueue(
-            config,
-            paths,
-            store=store,
-            history=history,
-            metrics=metrics,
-            events=events,
-            checkouts=checkouts,
-            fetcher=fetcher,
-            assets=assets,
-        )
-
-        def runner(slug: str, timeout: float) -> Awaitable[bytes]:
-            # The timeout bounds the render, not the wait for a free worker.
-            return legacy.run_background(
-                lambda: asyncio.wait_for(
-                    render_preview(
-                        slug,
-                        config=config,
-                        paths=paths,
-                        history=history,
-                        assets=assets,
-                        executor=legacy.thumbnail_executor,
-                        checkouts=checkouts,
-                    ),
-                    timeout=timeout,
-                )
-            )
-
-        queue = legacy
+    # Lazy, so the API boots while Temporal is down: its renders wait, and the
+    # reconciler starts them once it is back.
+    render = RenderService(
+        projection=projection,
+        client=connect_lazily(settings.temporal_address, settings.temporal_namespace),
+        task_queue=settings.temporal_task_queue_render,
+        config=config,
+        paths=paths,
+        metrics=metrics,
+    )
     previews: PreviewScheduler | None = None
-    if settings.preview_renders and preview_store is not None:
+    if settings.preview_renders:
         previews = PreviewScheduler(
             catalogue,
             preview_store,
-            runner,
+            render.render_preview,
             timeout=config.render_timeout * TIMEOUT_FACTOR,
         )
         # Everything that can change whether a model needs a preview, or which one.
@@ -335,7 +259,7 @@ def build_state(settings: Settings) -> AppState:
         ),
         libraries=libraries,
         assets=assets,
-        queue=queue,
+        render=render,
         previews=previews,
         metrics=metrics,
         decisions=decisions,
@@ -355,8 +279,8 @@ def build_state(settings: Settings) -> AppState:
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
         projection=projection,
-        blobs=blobs,
-        refs=refs,
+        blobs=LocalBlobStore(paths.blobs),
+        refs=BlobRefs(pool),
     )
 
 
@@ -438,8 +362,8 @@ def get_assets(state: StateDep) -> AssetStore:
     return state.assets
 
 
-def get_queue(state: StateDep) -> RenderBackend:
-    return state.queue
+def get_render(state: StateDep) -> RenderService:
+    return state.render
 
 
 def get_events(state: StateDep) -> EventBus:
@@ -454,22 +378,7 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
     return state.print_watcher
 
 
-#: Problem ``type`` for a route that needs the database when none is configured.
-DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
-
-
-def get_decisions(state: StateDep) -> DecisionStore | None:
-    return state.decisions
-
-
-def require_decisions(state: StateDep) -> DecisionStore:
-    """The decision store, or a 503 naming what is missing. There is no file fallback."""
-    if state.decisions is None:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
+def get_decisions(state: StateDep) -> DecisionStore:
     return state.decisions
 
 
@@ -497,12 +406,11 @@ SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 AssetsDep = Annotated[AssetStore, Depends(get_assets)]
-QueueDep = Annotated[RenderBackend, Depends(get_queue)]
+RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
-DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
+DecisionsDep = Annotated[DecisionStore, Depends(get_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]

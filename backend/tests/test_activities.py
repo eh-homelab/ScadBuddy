@@ -26,8 +26,7 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.render.runner import ProcessOutput

@@ -9,10 +9,7 @@ import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import psycopg
 import pytest
@@ -20,7 +17,6 @@ import pytest_asyncio
 
 from scadbuddy.api.deps import build_state
 from scadbuddy.core import pg_events
-from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     PG_CHANNEL,
     BusResync,
@@ -31,9 +27,7 @@ from scadbuddy.core.events import (
     encode_event,
 )
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import (
-    EVENT_LOG_LOCK,
     MAX_PAYLOAD_BYTES,
     POSTGRES_NOTIFY_LIMIT,
     EventLogMissingError,
@@ -42,10 +36,10 @@ from scadbuddy.core.pg_events import (
 )
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
-from scadbuddy.render.job_store import render_key
-from scadbuddy.render.jobs import Job, JobResult, QueueFullError, RenderQueue
-from scadbuddy.render.pg_store import PostgresJobStore, migrate
-from tests.conftest import UNUSED_DATABASE_URL
+from scadbuddy.render.jobs import JobResult
+from scadbuddy.render.pg_store import migrate
+from scadbuddy.render.projection import JobProjection
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 #: Well inside this, or it is not "at once".
 PROMPTLY = 5.0
@@ -413,16 +407,6 @@ async def test_an_emptied_log_still_knows_what_was_pruned(
     assert (await bus.replay(0)).gap
 
 
-# --- job events ----------------------------------------------------------------------
-
-CONFIG = Config(
-    data_dir=Path("/unused"),
-    render_concurrency=1,
-    render_poll_interval=0.05,
-    job_ttl=3600.0,
-)
-
-
 def _result() -> JobResult:
     return JobResult.model_validate(
         {
@@ -438,137 +422,30 @@ def _jobs(events: list[Event]) -> list[tuple[str, str]]:
     return [(e.kind, e.job_id) for e in events if isinstance(e, JobEvent)]
 
 
-@pytest.mark.requires_postgres
-async def test_job_events_go_through_the_bus_and_commit_with_the_job(
-    make_bus: BusFactory, pg_conninfo: str, tmp_path: Path
-) -> None:
-    bus = await make_bus()
-    heard: list[Event] = []
-    bus.add_listener(heard.append)
-    release = asyncio.Event()
-
-    async def render(job: Job) -> tuple[JobResult, list[str]]:
-        await release.wait()
-        return _result(), []
-
-    paths = DataPaths(tmp_path)
-    store = PostgresJobStore(pg_conninfo, paths, pool_size=4)
-    store.events = bus
-    config = replace(CONFIG, render_queue_max=2)
-    queue = RenderQueue(config, paths, store=store, render=render, events=bus)
-    await queue.start()
-    try:
-        assert store.announces_jobs
-        running = await queue.submit("demo", {"n": 0})
-        await _until(lambda: ("job.running", running.id) in _jobs(heard))
-        first = await queue.submit("demo", {"n": 1})
-        second = await queue.submit("demo", {"n": 2}, supersedes=first.id)
-        again = await queue.submit("demo", {"n": 2})  # coalesced: nothing new
-        third = await queue.submit("demo", {"n": 3})
-        with pytest.raises(QueueFullError):  # rolled back: announces nothing
-            await queue.submit("demo", {"n": 4})
-        release.set()
-        await queue.join()
-        await _until(lambda: ("job.done", third.id) in _jobs(heard))
-        await asyncio.sleep(QUIET)
-    finally:
-        release.set()
-        await queue.aclose()
-
-    assert again.id == second.id
-    assert _jobs(heard) == [
-        ("job.pending", running.id),
-        ("job.running", running.id),
-        ("job.pending", first.id),
-        ("job.superseded", first.id),
-        ("job.pending", second.id),
-        ("job.pending", third.id),
-        ("job.done", running.id),
-        ("job.running", second.id),
-        ("job.done", second.id),
-        ("job.running", third.id),
-        ("job.done", third.id),
-    ]
-    # Every one of them is in the log, in the order it was heard.
-    replay = await bus.replay(0, limit=100)
-    assert _jobs([logged.event for logged in replay.events]) == _jobs(heard)
-
-
-@pytest.mark.requires_postgres
-async def test_a_mass_reap_never_holds_the_event_log_lock_across_jobs(
-    make_bus: BusFactory, pg_conninfo: str, tmp_path: Path
-) -> None:
-    """`EVENT_LOG_LOCK` is held to commit. A reap of many lost workers commits each
-    job with its event, so between two reaped jobs any replica can publish; one
-    transaction for the whole pass would hold every publisher up for all of them."""
-    bus = await make_bus()
-    heard: list[Event] = []
-    bus.add_listener(heard.append)
-    published: list[str] = []
-    free_between_jobs: list[bool] = []
-
-    class Probe:
-        """The bus, but before each job's event after the first it asks, from
-        another connection, whether the log lock is free right now."""
-
-        def publish_in(self, conn: psycopg.Connection[Any], event: Event) -> None:
-            if published:
-                with psycopg.connect(pg_conninfo) as other, other.transaction():
-                    row = other.execute(
-                        "SELECT pg_try_advisory_xact_lock(%s)", (EVENT_LOG_LOCK,)
-                    ).fetchone()
-                    assert row is not None
-                    free_between_jobs.append(bool(row[0]))
-            bus.publish_in(conn, event)
-            published.append(event.id)
-
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        jobs = [_stale_job(store, n) for n in range(4)]
-        store.events = Probe()
-        reaped = await asyncio.to_thread(store.reap, lease=0.0001, max_attempts=2)
-    finally:
-        store.close()
-
-    assert sorted(job.id for job in reaped.requeued) == sorted(job.id for job in jobs)
-    assert free_between_jobs == [True, True, True]
-    await _until(lambda: len(_jobs(heard)) == 4)
-    assert sorted(_jobs(heard)) == sorted(("job.pending", job.id) for job in jobs)
-
-
-def _stale_job(store: PostgresJobStore, n: int) -> Job:
-    """A job whose worker took it and died: claimed, never heartbeated."""
-    job = Job(id=f"{n:032x}", slug="demo", params={"n": n}, created_at=datetime.now(UTC))
-    store.submit(job, render_key("demo", job.params, None))
-    assert store.claim() is not None
-    return job
-
-
 # --- selection and the fallback ------------------------------------------------------
 
 
 @pytest.mark.requires_postgres
-def test_a_database_url_selects_the_postgres_bus_on_the_queue_s_listener(
+def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
     state = build_state(
         Settings(
             data_dir=tmp_path,
             database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
             event_log_retention_seconds=60,
             event_log_retention_rows=10,
         )
     )
     assert isinstance(state.events, PgNotifyEventBus)
-    store = state.queue.store
-    assert isinstance(store, PostgresJobStore)
-    assert store.events is state.events
-    assert state.events.listener is store.pg_listener
+    projection = state.projection
+    assert isinstance(projection, JobProjection)
+    assert state.render.store is projection
+    assert projection.events is state.events
+    assert state.events.listener is projection.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)
-    assert isinstance(state.queue, RenderQueue)
-    assert state.queue.events is state.events
-    assert PG_CHANNEL in store.pg_listener.channels
+    assert PG_CHANNEL in projection.pg_listener.channels
 
 
 @pytest.mark.parametrize("field", ["event_log_retention_seconds", "event_log_retention_rows"])
@@ -580,6 +457,6 @@ def test_retention_settings_are_validated_by_name(field: str) -> None:
 def test_retention_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_SECONDS", "120")
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_ROWS", "0")
-    settings = Settings(database_url=UNUSED_DATABASE_URL)
+    settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
     assert settings.event_log_retention_seconds == 120
     assert settings.event_log_retention_rows == 0
