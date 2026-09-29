@@ -773,6 +773,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 4: The `ui` declaration, served modules, and the page CSP
 
+> **Implemented** as PR #620 (`feat/425-ui-declaration`). The text below is the plan it was built from and is left as it was.
+
 **Files:**
 - Modify: `backend/scadbuddy/library/catalogue.py` (`UiDeclaration`, `UI_MODULE_PATTERN`, `ModelMeta.ui`, `ModelMeta.ui_error`, `ModelRecord.ui_error`, `Catalogue.record`)
 - Create: `backend/scadbuddy/api/template_ui.py` (picked up automatically: `main.py` `_api_router()` mounts every `scadbuddy.api` module's `router`, sorted by name; do not include it by hand, or `tests/api/test_routes.py` finds the routes twice)
@@ -2253,6 +2255,7 @@ The elements are thin registrations. `TemplateUi` renders the existing React wid
   export class HostElement extends HTMLElement
   export function provideRegistry(owner: HTMLElement, registry: ElementRegistry | undefined): void
   export function defineHostElements(): void
+  export function findParamRow(name: string, root?: Document | ShadowRoot): Element | null
   // HostElementContent.tsx
   export interface ElementContext { schema: CustomizerSchema; slug: string; version?: string; fonts: FontFamily[]; inputs: JsonObject; onInputs(next: JsonObject): void; slot: UiSlot; preview: ReactNode; generate: ReactNode }
   export function HostElementContent(props: { element: HostElement; context: ElementContext }): ReactNode
@@ -2268,6 +2271,7 @@ import { fireEvent, render, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import type { JsonObject } from '../lib/inputs'
+import { findParamRow } from './elements'
 import { setUiModuleLoader } from './loadModule'
 import { TemplateUi } from './TemplateUi'
 
@@ -2327,6 +2331,11 @@ describe('host custom elements', () => {
     fireEvent.change(second as HTMLInputElement, { target: { value: 'Ho' } })
     expect(onInputs).toHaveBeenLastCalledWith({ params: { name: 'Hi' }, style: { label: 'Ho' } })
     expect(shadowOf(container).textContent).toContain('model.scad has no parameter “nope”')
+    // The agent's highlight finds the widget through the shadow root, as it does a panel row.
+    const row = shadowOf(container).querySelector('[data-param="name"]')
+    expect(row).not.toBeNull()
+    expect(findParamRow('name')).toBe(row)
+    expect(findParamRow('nope')).toBeNull()
   })
 
   it('renders into an element inside a nested component shadow root', async () => {
@@ -2430,6 +2439,19 @@ export function defineHostElements(): void {
     if (!customElements.get(name)) customElements.define(name, class extends HostElement {})
   }
 }
+
+/** The row carrying `data-param="<name>"`: in the panel, or in a template's own interface,
+ *  where `<sb-param>` renders it inside the template's (open) shadow roots, which
+ *  `document.querySelector` does not enter. */
+export function findParamRow(name: string, root: Document | ShadowRoot = document): Element | null {
+  const hit = root.querySelector(`[data-param="${CSS.escape(name)}"]`)
+  if (hit) return hit
+  for (const element of root.querySelectorAll('*')) {
+    const found = element.shadowRoot ? findParamRow(name, element.shadowRoot) : null
+    if (found) return found
+  }
+  return null
+}
 ```
 
 - [ ] **Step 4: Implement `HostElementContent.tsx`**
@@ -2473,16 +2495,20 @@ function BoundParam({ element, context }: { element: HostElement; context: Eleme
   const bound = getPath(context.inputs, bind)
   const value = isParamValue(bound) ? bound : (param.initial as ParamValue)
   const { params } = splitInputs(context.inputs)
+  // `data-param`, as ParameterPanel's rows carry it: the agent's highlight (#254) finds
+  // the parameter it just changed by it (`findParamRow`).
   return (
-    <ParamWidget
-      param={param}
-      value={value}
-      slug={context.slug}
-      version={context.version}
-      fonts={context.fonts}
-      extruder={extrudersOf(context.schema, params).get(name)}
-      onChange={(next) => context.onInputs(setPath(context.inputs, bind, next))}
-    />
+    <div data-param={name}>
+      <ParamWidget
+        param={param}
+        value={value}
+        slug={context.slug}
+        version={context.version}
+        fonts={context.fonts}
+        extruder={extrudersOf(context.schema, params).get(name)}
+        onChange={(next) => context.onInputs(setPath(context.inputs, bind, next))}
+      />
+    </div>
   )
 }
 
@@ -2939,7 +2965,7 @@ where `previewElement` is the existing `<Suspense …><Preview …/></Suspense>`
 The page slot. When `customUi?.slot === 'page'`, render this in place of the whole `data-testid="workspace"` grid:
 
 ```tsx
-        <div data-testid="workspace" className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
+        <div ref={workspace} data-testid="workspace" className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto]">
           <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
             <PresetPicker key={`${slug}:${presetsRevision}`} slug={slug} schema={schema} values={values} extra={extra} onApply={onApplyPreset} />
             <span data-testid="ui-origin" className="ml-auto shrink-0 text-[11px] text-faint">
@@ -2952,7 +2978,16 @@ The page slot. When `customUi?.slot === 'page'`, render this in place of the who
         </div>
 ```
 
-and pass `ref={actions}` to the existing `<ActionBar>` in the panel layout as well.
+and pass `ref={actions}` to the existing `<ActionBar>` in the panel layout as well. The replacement keeps `ref={workspace}`: `useFullscreen(workspace)` calls `requestFullscreen()` on it, so without the ref Full screen would do nothing for a `slot: "page"` template (dollhouse-kit is one).
+
+The agent's highlight (#254): `showTouched` looks the row up with `findParamRow(name)` (Task 7, `template-ui/elements`) instead of ``document.querySelector(`[data-param="${name}"]`)`` (import it from `../template-ui/elements`), so a parameter shown by an `<sb-param>` inside the template's shadow root is scrolled to and highlighted like a panel row:
+
+```tsx
+  const showTouched = useCallback((name: string) => {
+    setReveal({ name })
+    touchAfterRender(() => findParamRow(name))
+  }, [])
+```
 
 The agent's `get_params` (same file) adds `inputs: joinInputs(values, extra)` and `ui_summary: describeRef.current?.() ?? null` to its result. In `frontend/src/agent/catalog.ts`, `get_params`'s description gains: " With a template's own interface, also its full inputs and the interface's own summary (`ui_summary`)."
 
@@ -3067,7 +3102,7 @@ The lid-only parameter in `models/maze-puzzle/model.scad` is `lid_color` (lines 
 
 **Interfaces:**
 - Consumes: Host v1 (Task 6), `<sb-param>` (Task 7).
-- Produces: `models/maze-puzzle/ui/index.js` exporting `async function mount(root, host)`; `LID_ONLY = ['lid_color']`.
+- Produces: `models/maze-puzzle/ui/index.js` exporting `async function mount(root, host)`; `LID_ONLY = new Set(['lid_color'])`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3305,7 +3340,7 @@ The designer takes a box house (columns × rows of 150 mm modules, 1–3 storeys
   Counting rules, on a one-module grid (`width_units = depth_units = 1`), perimeter `P = 2 × (cols + rows)`:
   - ground storey: lower course 1 `wall_door_lower` + `P−1` `wall`; upper course 1 `wall_door_upper` + `min(windows, P−1)` `wall_window` + the rest `wall`;
   - each upper storey: lower course `P` `wall`; upper course `min(windows, P)` `wall_window` + the rest `wall`;
-  - `corner_post`: 8 per storey (4 per course); `floor_tile`: `cols × rows` per storey; `roof_panel`: `cols × rows`;
+  - `corner_post`: 8 per storey, 4 per course, counted per course like `wall` (`corner_post:lower`, `corner_post:upper`: the model renders a different post per course); `wall_window` is always an upper-course piece and carries `course: 'upper'`; `floor_tile`: `cols × rows` per storey; `roof_panel`: `cols × rows`;
   - `stairs_lower`, `stairs_upper`, `railing`: `storeys − 1` each; `door_leaf_lower`, `door_leaf_upper`: 1 each; `connectors`: 1 set;
   - entries with count 0 are left out.
 
@@ -3336,7 +3371,7 @@ describe('housePieces', () => {
     )
     expect(counts).toEqual({
       'wall_door_lower': 1, 'wall:lower': 3, 'wall_door_upper': 1, 'wall_window': 2, 'wall:upper': 1,
-      'corner_post': 8, 'floor_tile': 1, 'roof_panel': 1, 'door_leaf_lower': 1, 'door_leaf_upper': 1,
+      'corner_post:lower': 4, 'corner_post:upper': 4, 'floor_tile': 1, 'roof_panel': 1, 'door_leaf_lower': 1, 'door_leaf_upper': 1,
       'connectors': 1,
     })
   })
@@ -3353,7 +3388,8 @@ describe('housePieces', () => {
     expect(counts['wall:upper']).toBe(5)
     expect(counts['floor_tile']).toBe(4)
     expect(counts['roof_panel']).toBe(2)
-    expect(counts['corner_post']).toBe(16)
+    expect(counts['corner_post:lower']).toBe(8)
+    expect(counts['corner_post:upper']).toBe(8)
     expect(counts['stairs_lower']).toBe(1)
     expect(counts['railing']).toBe(1)
   })
@@ -3368,6 +3404,18 @@ describe('housePieces', () => {
     expect(pieceParams({ id: 'wall:upper', piece: 'wall', course: 'upper', count: 1 })).toEqual({
       piece: 'wall', course: 'upper', width_units: 1, depth_units: 1,
     })
+  })
+
+  it('pins the course of a corner post and a window wall after a lower wall was shown', async () => {
+    const { housePieces, pieceParams } = await load()
+    const byId = Object.fromEntries(housePieces({ cols: 1, rows: 1, storeys: 1, windows: 2 }).map((e) => [e.id, e]))
+    // host.inputs.set is a JSON merge patch: a key the next Show leaves out keeps its value.
+    const show = (params: object, id: string) => ({ ...params, ...pieceParams(byId[id] as Entry) })
+    const afterLower = show({}, 'wall:lower')
+    expect(afterLower).toMatchObject({ piece: 'wall', course: 'lower' })
+    expect(show(afterLower, 'corner_post:upper')).toMatchObject({ piece: 'corner_post', course: 'upper' })
+    expect(show(afterLower, 'wall_window')).toMatchObject({ piece: 'wall_window', course: 'upper' })
+    expect(show(show({}, 'wall:upper'), 'corner_post:lower')).toMatchObject({ piece: 'corner_post', course: 'lower' })
   })
 })
 
@@ -3435,6 +3483,8 @@ const LABELS = {
   connectors: 'Connectors (keys, pegs, hinge pins)',
 }
 
+const COURSED = new Set(['wall', 'corner_post'])
+
 export function clampHouse(house) {
   const out = {}
   for (const [key, [min, max]] of Object.entries(LIMITS)) {
@@ -3448,12 +3498,15 @@ export function housePieces(input) {
   const { cols, rows, storeys, windows } = clampHouse(input)
   const perimeter = 2 * (cols + rows)
   const counts = new Map()
+  // Walls and corner posts come in a lower and an upper course (the model renders them
+  // differently), so each course is its own entry. A window wall is always upper.
   const add = (piece, course, count) => {
     if (count <= 0) return
-    const id = piece === 'wall' ? `wall:${course}` : piece
-    const entry = counts.get(id) ?? { id, piece, course: piece === 'wall' ? course : null, count: 0, label: '' }
+    const coursed = COURSED.has(piece)
+    const id = coursed ? `${piece}:${course}` : piece
+    const entry = counts.get(id) ?? { id, piece, course, count: 0, label: '' }
     entry.count += count
-    entry.label = piece === 'wall' ? `${LABELS.wall}, ${course} course` : LABELS[piece]
+    entry.label = coursed ? `${LABELS[piece]}, ${course} course` : LABELS[piece]
     counts.set(id, entry)
   }
   for (let storey = 0; storey < storeys; storey++) {
@@ -3465,9 +3518,10 @@ export function housePieces(input) {
       add('wall_door_upper', null, 1)
     }
     add('wall', 'lower', openings)
-    add('wall_window', null, glazed)
+    add('wall_window', 'upper', glazed)
     add('wall', 'upper', openings - glazed)
-    add('corner_post', null, 8)
+    add('corner_post', 'lower', 4)
+    add('corner_post', 'upper', 4)
     add('floor_tile', null, cols * rows)
   }
   add('roof_panel', null, cols * rows)
@@ -3758,3 +3812,20 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Type consistency.** `normalize_inputs`/`legacy_inputs`/`InputsError` (Task 1) are used with the same signatures in Tasks 2 and 3. `JsonObject`, `InputsExtra`, `NO_EXTRA`, `splitInputs`, `joinInputs` (Task 5) are used in Tasks 6–8. `HostDeps` fields in Task 6 match the object Task 8 builds. `TemplateUi` props: Task 6 defines `slug, ui, version, deps, inputs, onFailure`, and Task 7 adds `elementContext`, which Task 8 passes. `ElementContext` keys match `HostElementContent`. `ActionBarHandle.openPrint` (Task 8) is called through `HostDeps.openPrint`. `api.uiFileUrl(slug, version, path)` has the same argument order in Tasks 5, 6 and the tests.
 - **Declined (review M10).** An uploaded `model.json` with a malformed `ui` is written back without it (`Catalogue.create` dumps `ModelMeta`). Upload cannot carry `ui/` files in phase 2, so there is no module to lose, and the next upload that can carry `ui/` is where keeping the raw key belongs.
 - **Review Focus.** All five pinned: (1) Task 4 `test_ui_paths_never_leave_ui`; (2) Task 4 `test_a_patch_keeps_ui`, `test_a_malformed_ui_costs_only_the_ui`; (3) Task 6 `ignores writes after dispose`, `refuses a parameter the schema lacks`; (4) Task 3 `test_an_output_from_before_inputs_reads_as_params_v0`, Task 5 `reopens an output with its UI state`; (5) Task 3 `test_an_output_records_the_inputs_it_was_saved_with`, `test_an_output_refuses_inputs_the_job_did_not_render`.
+
+## Revision (review of f5ca79ff, PR #587)
+
+1. **Task 8: the page slot keeps `ref={workspace}`.** The page-slot replacement for the `data-testid="workspace"` grid now carries the ref that `useFullscreen(workspace)` calls `requestFullscreen()` on. Without it, Full screen was a silent no-op for `slot: "page"` templates such as dollhouse-kit.
+2. **Task 7: `<sb-param>` carries `data-param`.**
+   - `BoundParam` wraps its `ParamWidget` in `<div data-param={name}>`, as `ParameterPanel`'s rows do.
+   - That wrapper sits inside the template's shadow root, where `document.querySelector` does not look. So Task 7 adds `findParamRow(name)`, which searches the document and then every open shadow root, and Task 8's `showTouched` uses it.
+   - The elements test asserts the attribute and the lookup.
+3. **Task 10: courses are pinned.**
+   - `housePieces` counts `corner_post` per course (`corner_post:lower` and `corner_post:upper`, 4 each per storey), as it already does for `wall`.
+   - `wall_window` carries `course: 'upper'`, so `pieceParams` always sends a course for a coursed piece. The previous Show's course therefore can no longer carry over through the merge patch.
+   - The count tests use the split ids.
+   - A new test checks that, after a `wall:lower` Show, `corner_post:upper` and `wall_window` give `course: 'upper'`, and that after a `wall:upper` Show, `corner_post:lower` gives `course: 'lower'`.
+4. **Task 9: the `LID_ONLY` interface matches the code.** The listing now says `new Set(['lid_color'])`.
+
+Task 4 is implemented as PR #620; only a note saying so was added to it.
+
