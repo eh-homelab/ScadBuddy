@@ -249,6 +249,54 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
   })
 
+  it('says to allow pop-ups when the download popup is blocked inside Bambuddy (#612)', async () => {
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    try {
+      const { user } = render()
+      await firstRender()
+      await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+      await user.click(screen.getByTestId('generate'))
+      await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+      await user.click(screen.getByRole('button', { name: 'Download 3MF' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(/Allow pop-ups/)
+    } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
+  it('says the download window was closed when it goes before the file is ready (#612)', async () => {
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    // Open when the click asks for it, closed by the time the 3MF has been fetched.
+    let checks = 0
+    const popup = {
+      get closed() {
+        checks += 1
+        return checks > 1
+      },
+      document: null,
+      close: () => {},
+    }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    try {
+      const { user } = render()
+      await firstRender()
+      await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+      await user.click(screen.getByTestId('generate'))
+      await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+      await user.click(screen.getByRole('button', { name: 'Download 3MF' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(/download window was closed/)
+    } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
   it('sends a generated output to the library and links to it', async () => {
     const bodies: unknown[] = []
     server.use(

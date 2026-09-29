@@ -408,12 +408,16 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
+      description: 'A small tag for a **zip pull**, without the keyring hole.',
+      tags: ['small', 'zip pull'],
     },
     {
       id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
       name: 'Mum',
       origin: 'mine',
       params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      description: '',
+      tags: ['gift'],
       updated_at: '2026-09-20T10:00:00Z',
     },
     {
@@ -421,11 +425,20 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Old engraving',
       origin: 'mine',
       params: { name: 'Ada', engrave_depth: 2 },
+      description: '',
+      tags: [],
       updated_at: '2026-09-19T10:00:00Z',
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    {
+      id: 'template-tiny',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10 },
+      description: '',
+      tags: [],
+    },
   ],
 }
 
@@ -871,6 +884,11 @@ export const filamentOptions: FilamentOptions = {
   spools: [
     {
       spool_id: 9,
+      // #469 — the right extruder is 0, the left 1. Printer 1 has the Filament Track
+      // Switch, so this is where the spool rests (AMS 0 on inlet B), not a constraint;
+      // tests give an unswitched printer its own options.
+      extruder: 0,
+      side: 'R',
       material: 'PETG',
       subtype: 'Basic',
       brand: 'Bambu Lab',
@@ -889,6 +907,8 @@ export const filamentOptions: FilamentOptions = {
     },
     {
       spool_id: 21,
+      extruder: 0, // AMS 1 rests on inlet B too
+      side: 'R',
       material: 'PLA',
       subtype: 'Silk',
       brand: 'Bambu Lab',
@@ -908,6 +928,8 @@ export const filamentOptions: FilamentOptions = {
     {
       // The AMS-HT: one spool, no slot number to name, and on the other inlet.
       spool_id: 22,
+      extruder: 1, // the HT rests on inlet A
+      side: 'L',
       material: 'PLA',
       subtype: 'Basic',
       brand: 'Bambu Lab',
@@ -997,6 +1019,7 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
+  track_switch: true,
   // #78 — the H2C's two extruders, as `printers/{id}/status` reports them.
   nozzles: [
     { nozzle_type: 'HS00', nozzle_diameter: '0.2' },

@@ -35,6 +35,20 @@ export function toSlides(slug: string, media: MediaView[]): Slide[] {
   })
 }
 
+/**
+ * A template's slides with an uncaptioned one named after the template ("Crème Coaster,
+ * image 1 of 4", or the bare name for a single item) rather than just "Image 1 of 4".
+ */
+export function namedSlides(model: { slug: string; name: string; media?: MediaView[] | null }): Slide[] {
+  const all = toSlides(model.slug, model.media ?? [])
+  return all.map((slide, index) => ({
+    ...slide,
+    alt:
+      slide.caption ??
+      (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),
+  }))
+}
+
 type EmblaOptions = NonNullable<Parameters<typeof useEmblaCarousel>[0]>
 
 /** Embla's options. Under `prefers-reduced-motion` a slide change jumps (duration 0). */
