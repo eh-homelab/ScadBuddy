@@ -56,3 +56,34 @@ test.describe('duplicating a preset', () => {
     await expect(page.getByTestId('preset-modified')).toHaveCount(0)
   })
 })
+
+test.describe('a preset\'s details (#327)', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  test('shows a shipped preset\'s details, and a saved one\'s can be edited', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const preset = page.getByLabel('Preset', { exact: true })
+    const details = page.getByTestId('preset-details')
+
+    await preset.selectOption({ label: 'Tiny' })
+    await expect(details.getByRole('listitem')).toHaveText(['small', 'zip pull'])
+    await expect(details.locator('strong')).toHaveText('zip pull')
+
+    await preset.selectOption({ label: 'Old engraving' })
+    await expect(details).toHaveCount(0)
+    await page.getByRole('button', { name: 'Edit details of preset Old engraving' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit details of Old engraving' })
+    await dialog.getByLabel('Preset name').fill('Engraved')
+    await dialog.getByLabel('Description (optional, Markdown)').fill('Deep *engraving*.')
+    await dialog.getByLabel('Tags (optional, comma-separated)').fill('engraved, Engraved, deep')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(dialog).toBeHidden()
+    await expect(preset.locator('option:checked')).toHaveText('Engraved')
+    await expect(details.getByRole('listitem')).toHaveText(['engraved', 'deep'])
+    await expect(details.locator('em')).toHaveText('engraving')
+  })
+})

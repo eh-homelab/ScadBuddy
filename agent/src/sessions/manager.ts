@@ -31,6 +31,9 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
+import type { AuditLog } from '../audit/log.js'
+import { TurnAuditor } from '../audit/turn.js'
+import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
@@ -251,6 +254,11 @@ export type SessionManagerDeps = {
   approvalGrants?: GrantCheck
   /** HMAC key for approval input hashes (approvals/service.ts `approvalHashKey`); per process when omitted. */
   approvalHashKey?: Buffer
+  /**
+   * The audit log (#258, audit/log.ts): every tool call a turn makes
+   * (audit/turn.ts), and every approval decision.
+   */
+  audit?: AuditLog
   /** How often a parked turn polls its approval for a decision made on another replica. */
   approvalPollMs?: number
   /** New sessions per owner per window (MAX_NEW_SESSIONS per NEW_SESSION_WINDOW_MS by default). */
@@ -390,6 +398,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
       ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
+      ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
@@ -669,6 +678,18 @@ export class SessionManager {
     let eventTierOf: TierResolver = (name) => browserTierOf(name) ?? tierOf(name)
     const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
+    /** Redacted from everything this turn writes to the durable event log. */
+    let secrets: string[] = []
+    // One audit row per tool call of this turn (#258, audit/turn.ts).
+    const auditor = this.deps.audit
+      ? new TurnAuditor(this.deps.audit, {
+          sessionId: id,
+          turnId,
+          actor: session.owner,
+          tierOf: (name) => eventTierOf(name),
+          secrets: () => secrets,
+        })
+      : undefined
 
     // Lease renewal, and the interrupt flag from other replicas.
     let renewing: Promise<unknown> = Promise.resolve()
@@ -692,8 +713,6 @@ export class SessionManager {
 
     let result: SDKResultMessage | undefined
     let failure: string | undefined
-    /** Redacted from everything this turn writes to the durable event log. */
-    let secrets: string[] = []
     let forwarded: PluginsForRun | undefined
     let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
@@ -753,6 +772,13 @@ export class SessionManager {
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const gate = this.approvals.gate({
+        sessionId: id,
+        turnId,
+        requestedBy: session.owner,
+        secrets: () => secrets,
+        signal: controller.signal,
+      })
       const sandbox =
         this.deps.headlessBrowser?.sandbox && browserSetting === true
           ? await this.deps.headlessBrowser.sandbox()
@@ -782,13 +808,10 @@ export class SessionManager {
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
         signal: controller.signal,
         tierOf,
-        approvalGate: this.approvals.gate({
-          sessionId: id,
-          turnId,
-          requestedBy: session.owner,
-          secrets: () => secrets,
-          signal: controller.signal,
-        }),
+        approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+        // The data/instruction boundary (#258, safety/untrusted.ts): only the
+        // user's messages are instructions; tool results are data.
+        systemPromptAppend: UNTRUSTED_CONTENT_POLICY,
         ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
@@ -824,6 +847,7 @@ export class SessionManager {
         await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+        if (auditor) for (const e of events) await auditor.observe(e)
       }
     } catch (err) {
       // For an error result the SDK yields the result and then throws
@@ -836,6 +860,9 @@ export class SessionManager {
       local.settling = true
       clearInterval(renew)
       await renewing
+      await auditor?.finish(
+        controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
+      )
       // The query has ended, and with it the playwright server and Chromium:
       // its screenshots and profile go now, not when the volume fills.
       if (browserDirs) {

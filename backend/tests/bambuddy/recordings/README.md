@@ -59,6 +59,17 @@ Added for spool-first print (2026-09-27), over the ingress (all `GET`). AMS unit
 | `printer-status-rack.json` | `GET /api/v1/printers/1/status` |
 | `slicer-presets-h2c.json` | `GET /api/v1/slicer/presets` |
 
+Added for #469 on 2026-09-28, over the ingress (a `GET`, no auth). AMS and nozzle-rack
+`serial_number`, tray `tag_uid` and `tray_uuid` are replaced with `REDACTED`:
+
+| File | Source |
+|---|---|
+| `printer-status-fts.json` | `GET /api/v1/printers/1/status` — the Filament Track Switch fitted, right 0.2 HS00, left 0.4 HH01 |
+
+- **With the switch fitted, `ams_extruder_map` is `{}`** and `ams_switch_inlet` names each
+  AMS's inlet instead (`{"0":"B","1":"B","128":"A","2":"A"}`). Inlet A feeds the left
+  extruder and B the right, and `nozzles[0]` is the right extruder, `nozzles[1]` the left.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
