@@ -183,7 +183,8 @@ async def serve(
     roots = _Roots((*libraries_at, (DEFAULT_CLIENT_ROOT, server_root)))
     initialized = False
     # The client's requests the server has yet to answer, by id: when each was sent,
-    # oldest first. A list, so a client that reuses an id still has each one watched.
+    # oldest first. A list, so a client that reuses an id still has each one watched;
+    # a reply clears the oldest, which assumes the server answers one id in order.
     unanswered: dict[int | str, list[float]] = {}
     close_code = status.WS_1000_NORMAL_CLOSURE
 

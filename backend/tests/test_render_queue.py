@@ -928,6 +928,34 @@ def test_a_retry_renders_into_a_directory_of_its_own(paths: DataPaths) -> None:
     assert retry.is_relative_to(paths.job_work_dir(job.id))  # deleted with the job
 
 
+async def test_a_close_that_lands_as_a_render_winds_down_still_stops_the_worker(
+    make_queue: QueueFactory,
+) -> None:
+    """#643: `aclose` cancels the workers and waits for them. A cancel that lands
+    while `_run` waits for its heartbeat to stop must reach the worker, or it loops
+    on and `aclose` never returns (the CI hang in the two-pool test). The heartbeat
+    here takes a while to stop, which holds open the window the real one has for a
+    single tick."""
+    gate = Gate()
+    queue = await make_queue(gate)
+    winding_down = asyncio.Event()
+
+    async def slow_to_stop(job: Job) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            winding_down.set()
+            await asyncio.sleep(0.2)
+            raise
+
+    queue._heartbeat = slow_to_stop  # type: ignore[method-assign]
+    await _occupy_the_worker(queue, gate)
+    gate.release.set()
+    await winding_down.wait()
+
+    await asyncio.wait_for(queue.aclose(), timeout=5)
+
+
 async def test_a_store_that_cannot_be_read_says_so(make_queue: QueueFactory) -> None:
     """The queue gauges keep their last values through an outage, so the outage
     needs a signal of its own for the stall alert to key off."""

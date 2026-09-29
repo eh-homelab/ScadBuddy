@@ -327,6 +327,133 @@ def test_a_bad_entry_in_model_json_is_a_409_for_that_model_only(
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
 
 
+def test_a_model_lists_its_invalid_library_entries_and_they_can_be_removed(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """#217: an entry that is not a pin is left out of `libraries` but listed in
+    `invalid_libraries`, with the render's 409 detail, and removed by its name."""
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    good = meta["libraries"][0]
+    meta["libraries"] = [
+        "threads",
+        good,
+        {"name": "gears", "url": good["url"], "ref": "v1"},
+        42,
+        {**good, "name": "bad name"},
+    ]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    model = lib_client.get(f"/api/v1/models/{SLUG}").json()
+    render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
+
+    assert [lib["name"] for lib in model["libraries"]] == ["BOSL2"]
+    invalid = model["invalid_libraries"]
+    # Only the names DELETE can take; the rest are named in the problem alone.
+    assert [entry["name"] for entry in invalid] == ["threads", "gears", None, None]
+    # Their positions in model.json's `libraries`, past the valid pin at 1.
+    assert [entry["index"] for entry in invalid] == [0, 2, 3, 4]
+    assert render.status_code == 409
+    assert invalid[0]["problem"] == render.json()["detail"]
+    assert "'gears' is not valid: commit:" in invalid[1]["problem"]
+    assert "an entry is not valid" in invalid[2]["problem"]
+    assert "'bad name' is not valid: name:" in invalid[3]["problem"]
+
+    for name in ("threads", "gears"):
+        removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/{name}")
+        assert removed.status_code == 200, removed.text
+    assert [entry["name"] for entry in removed.json()["invalid_libraries"]] == [None, None]
+    assert [lib["name"] for lib in removed.json()["libraries"]] == ["BOSL2"]
+
+
+def test_a_libraries_that_is_not_a_list_is_one_invalid_entry(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    create_model(lib_client)
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["libraries"] = {"BOSL2": "v1"}
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    model = lib_client.get(f"/api/v1/models/{SLUG}").json()
+
+    assert model["libraries"] == []
+    assert model["invalid_libraries"] == [
+        {"name": None, "index": None, "problem": "`libraries` in model.json is not a list"}
+    ]
+
+
+def _write_libraries(paths: DataPaths, entries: list[Any]) -> None:
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["libraries"] = entries
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _raw_libraries(paths: DataPaths) -> Any:
+    return json.loads(paths.model_meta(SLUG).read_text(encoding="utf-8"))["libraries"]
+
+
+def test_removing_an_invalid_entry_by_index_keeps_a_pin_of_the_same_name(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """#217: Remove on an invalid entry takes that entry alone, not the valid pin
+    that shares its name."""
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    good = _raw_libraries(paths)[0]
+    broken = {"name": "BOSL2", "url": good["url"], "ref": "v1"}
+    _write_libraries(paths, [good, broken])
+    [entry] = lib_client.get(f"/api/v1/models/{SLUG}").json()["invalid_libraries"]
+    assert (entry["name"], entry["index"]) == ("BOSL2", 1)
+
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2", params={"index": 1})
+
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["invalid_libraries"] == []
+    assert _raw_libraries(paths) == [good]
+
+
+def test_removing_one_of_two_invalid_entries_of_a_name_keeps_the_other(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    create_model(lib_client)
+    first = {"name": "threads", "url": "https://example.invalid/a.git", "ref": "v1"}
+    _write_libraries(paths, ["threads", first])
+
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/threads", params={"index": 0})
+
+    assert removed.status_code == 200, removed.text
+    assert _raw_libraries(paths) == [first]
+    assert [(e["name"], e["index"]) for e in removed.json()["invalid_libraries"]] == [
+        ("threads", 0)
+    ]
+
+
+def test_removing_by_index_refuses_an_entry_that_is_not_that_invalid_one(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """The entry at `index` must still be an invalid one of that name: a valid pin,
+    another name or a position past the end is a 409, and nothing is removed."""
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    good = _raw_libraries(paths)[0]
+    _write_libraries(paths, [good, "threads"])
+
+    for name, index in (("BOSL2", 0), ("BOSL2", 1), ("threads", 0), ("threads", 2)):
+        refused = lib_client.delete(
+            f"/api/v1/models/{SLUG}/libraries/{name}", params={"index": index}
+        )
+        assert refused.status_code == 409, (name, index, refused.text)
+    assert _raw_libraries(paths) == [good, "threads"]
+    # Without `index`, every entry of the name goes, as before.
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/threads")
+    assert removed.status_code == 200, removed.text
+    assert _raw_libraries(paths) == [good]
+
+
 def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: DataPaths) -> None:
     staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
     staging.mkdir(parents=True)

@@ -6,6 +6,7 @@ import type {
   Asset,
   AssetUsage,
   AttachResult,
+  BambuddyStatus,
   BambuddyTargets,
   ChoicesView,
   ConnectionTest,
@@ -50,6 +51,7 @@ import type {
   ProjectFile,
   ProjectRequest,
   ProjectView,
+  RememberedChoices,
   RenderAccepted,
   SendRequest,
   SendResult,
@@ -834,8 +836,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  unpinModelLibrary: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
+  /** With `index` (#217), only the invalid entry at that position of `libraries`. */
+  unpinModelLibrary: (slug: string, name: string, index?: number) =>
+    request<ModelSummary>(
+      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
+      { method: 'DELETE' },
+    ),
 
   getSettings: () => request<Settings>('/settings'),
 
@@ -855,6 +861,14 @@ export const api = {
   testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
 
   getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
+
+  /** #322 — Bambuddy's version and whether it captures a finish photo; read-only. */
+  getBambuddyStatus: () => request<BambuddyStatus>('/settings/bambuddy'),
+
+  /** #322 — what the print dialog remembers. Each entry is forgotten by its own route. */
+  getRemembered: () => request<RememberedChoices>('/settings/remembered'),
+
+  forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),

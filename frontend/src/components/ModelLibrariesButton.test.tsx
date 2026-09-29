@@ -1,8 +1,9 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { MISSING_REF, models } from '../mocks/fixtures'
+import { setMockInvalidLibraries } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -14,14 +15,15 @@ function row(name: string) {
   return screen.getByRole('listitem', { name })
 }
 
-/** Records every library PUT/DELETE as `METHOD name body`. */
+/** Records every library PUT/DELETE as `METHOD name?query body`. */
 function watchPins() {
   const seen: string[] = []
   server.events.on('request:start', async ({ request }) => {
-    const match = /\/libraries\/([^/]+)$/.exec(new URL(request.url).pathname)
+    const url = new URL(request.url)
+    const match = /\/libraries\/([^/]+)$/.exec(url.pathname)
     if (!match) return
     const body = request.method === 'PUT' ? ` ${JSON.stringify(await request.clone().json())}` : ''
-    seen.push(`${request.method} ${decodeURIComponent(match[1] ?? '')}${body}`)
+    seen.push(`${request.method} ${decodeURIComponent(match[1] ?? '')}${url.search}${body}`)
   })
   return seen
 }
@@ -274,6 +276,161 @@ describe('ModelLibrariesButton', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).getByText(/None yet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent(/^Libraries$/)
+  })
+})
+
+describe('ModelLibrariesButton, invalid entries (#217)', () => {
+  const BARE = "model.json names library 'threads' without a pin; pin it again"
+  const NAMELESS = 'model.json library an entry is not valid: name: Field required; pin it again'
+  const BAD_NAME =
+    "model.json library 'bad name' is not valid: name: String should match pattern; pin it again"
+
+  it('lists an entry that is not a pin, says why, and removes it', async () => {
+    setMockInvalidLibraries('name-keychain', [
+      { name: 'threads', index: 0, problem: BARE },
+      { name: null, index: 1, problem: NAMELESS },
+    ])
+    const seen = watchPins()
+    const onSaved = vi.fn()
+    const { user } = renderPage(
+      <ModelLibrariesButton slug="name-keychain" name="Name Keychain" onSaved={onSaved} />,
+    )
+    const dialog = await openDialog(user, 'Libraries\\s*2')
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+
+    const bare = within(pinned).getByRole('listitem', { name: 'Invalid entry 1: threads' })
+    expect(bare).toHaveTextContent('Invalid')
+    expect(bare).toHaveTextContent(BARE)
+    // No name the remove route can take: it says where to fix it instead.
+    const nameless = within(pinned).getByRole('listitem', { name: 'Invalid entry 2: unnamed' })
+    expect(nameless).toHaveTextContent(NAMELESS)
+    expect(within(nameless).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() =>
+      expect(within(pinned).queryByRole('listitem', { name: /threads/ })).not.toBeInTheDocument(),
+    )
+    expect(
+      within(pinned).getByRole('listitem', { name: 'Invalid entry 1: unnamed' }),
+    ).toHaveTextContent(NAMELESS)
+    expect(seen).toEqual(['DELETE threads?index=0'])
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(onSaved).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives every invalid entry its own accessible name, and removes only the one clicked', async () => {
+    // As the backend's fixture in tests/api/test_libraries.py: two entries with no
+    // usable name, and here a name given twice as well.
+    const SECOND = "model.json library 'threads' is not valid: commit: Field required; pin it again"
+    setMockInvalidLibraries('name-keychain', [
+      { name: 'threads', index: 0, problem: BARE },
+      { name: 'threads', index: 1, problem: SECOND },
+      { name: null, index: 2, problem: NAMELESS },
+      { name: null, index: 3, problem: BAD_NAME },
+    ])
+    const seen = watchPins()
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user, 'Libraries\\s*4')
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+
+    const names = within(pinned)
+      .getAllByRole('listitem')
+      .map((item) => item.getAttribute('aria-label'))
+    expect(names).toEqual([
+      'Invalid entry 1: threads',
+      'Invalid entry 2: threads',
+      'Invalid entry 3: unnamed',
+      'Invalid entry 4: unnamed',
+    ])
+    expect(
+      within(pinned).getByRole('listitem', { name: 'Invalid entry 4: unnamed' }),
+    ).toHaveTextContent(BAD_NAME)
+
+    const second = within(pinned).getByRole('listitem', { name: 'Invalid entry 2: threads' })
+    await user.click(within(second).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => expect(within(pinned).getAllByRole('listitem')).toHaveLength(3))
+    expect(seen).toEqual(['DELETE threads?index=1'])
+    // The other entry of that name stays.
+    expect(
+      within(pinned).getByRole('listitem', { name: 'Invalid entry 1: threads' }),
+    ).toHaveTextContent(BARE)
+    expect(pinned).not.toHaveTextContent(SECOND)
+  })
+
+  it('says why a 409 was refused on the row and reads the model again', async () => {
+    const DETAIL =
+      "the model.json of 'name-keychain' is not valid: name: Input should be a valid string"
+    server.use(
+      http.delete(
+        '/api/v1/models/:slug/libraries/:name',
+        () =>
+          HttpResponse.json(
+            { title: 'Invalid Model Metadata', status: 409, detail: DETAIL },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        { once: true },
+      ),
+    )
+    setMockInvalidLibraries('name-keychain', [{ name: 'threads', index: 0, problem: BARE }])
+    const reads: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      const { pathname } = new URL(request.url)
+      if (request.method === 'GET' && pathname === '/api/v1/models/name-keychain') {
+        reads.push(pathname)
+      }
+    })
+    const onSaved = vi.fn()
+    const { user } = renderPage(
+      <ModelLibrariesButton slug="name-keychain" name="Name Keychain" onSaved={onSaved} />,
+    )
+    const dialog = await openDialog(user, 'Libraries\\s*1')
+    const bare = await within(dialog).findByRole('listitem', { name: 'Invalid entry 1: threads' })
+    const before = reads.length
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    expect(await within(bare).findByRole('alert')).toHaveTextContent(DETAIL)
+    await waitFor(() => expect(reads.length).toBe(before + 1))
+    expect(
+      within(dialog).getByRole('listitem', { name: 'Invalid entry 1: threads' }),
+    ).toHaveTextContent(BARE)
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+  it("keeps a failed remove's error on its own row when the list shifts under it", async () => {
+    // Another tab removed the first entry already: the 409 arrives, the model is read
+    // again, and the second entry moves up into the first one's position.
+    const GONE = "'name-keychain''s entry 0 is no longer an invalid 'threads'; nothing was removed"
+    server.use(
+      http.delete(
+        '/api/v1/models/:slug/libraries/:name',
+        () => {
+          setMockInvalidLibraries('name-keychain', [{ name: null, index: 0, problem: NAMELESS }])
+          return HttpResponse.json(
+            { title: 'Conflict', status: 409, detail: GONE },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        },
+        { once: true },
+      ),
+    )
+    setMockInvalidLibraries('name-keychain', [
+      { name: 'threads', index: 0, problem: BARE },
+      { name: null, index: 1, problem: NAMELESS },
+    ])
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user, 'Libraries\\s*2')
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+    const bare = within(pinned).getByRole('listitem', { name: 'Invalid entry 1: threads' })
+
+    await user.click(within(bare).getByRole('button', { name: 'Remove' }))
+
+    const moved = await within(pinned).findByRole('listitem', { name: 'Invalid entry 1: unnamed' })
+    expect(within(pinned).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(moved).queryByRole('alert')).not.toBeInTheDocument()
+    expect(moved).not.toHaveTextContent(GONE)
   })
 })
 
