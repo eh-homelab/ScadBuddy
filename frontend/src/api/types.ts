@@ -76,6 +76,8 @@ export type InstalledFamily = Schemas['InstalledFamily']
 /** #93 — third-party OpenSCAD libraries: the curated catalogue, and each model's own pins. */
 export type CatalogueLibrary = Schemas['CatalogueLibrary']
 export type ModelLibrary = Schemas['ModelLibrary']
+/** #217 — a `libraries` entry in model.json that is not a pin, and why. */
+export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
 export type LibraryPinRequest = Schemas['LibraryPinRequest']
 export type ModelPatch = Schemas['ModelPatch']
 
