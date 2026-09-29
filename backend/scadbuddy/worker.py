@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 HEALTH_PORT = 9090
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
+#: Making the build current, retried once the worker polls: Temporal 1.28 ignores
+#: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
+MAKE_CURRENT_EVERY = 5.0
+MAKE_CURRENT_DEADLINE = 60.0
 
 
 def build_worker_deps(settings: Settings) -> WorkerDeps:
@@ -93,24 +99,13 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
     """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the worker on the API's own stores and
     gates, so its renders lease the same checkouts the routes do. The thumbnail pool is
     its own; the lifespan shuts it down with the worker."""
-    projection, blobs, refs = state.projection, state.blobs, state.refs
-    missing = [
-        name
-        for name, value in (("projection", projection), ("blobs", blobs), ("refs", refs))
-        if value is None
-    ]
-    if projection is None or blobs is None or refs is None:
-        raise RuntimeError(
-            f"the in-process render worker needs AppState.{', AppState.'.join(missing)},"
-            " which build_state sets together only with SCADBUDDY_TEMPORAL_ADDRESS"
-        )
     return WorkerDeps(
         config=state.config,
         paths=state.paths,
         assets=state.assets,
-        blobs=blobs,
-        refs=refs,
-        projection=projection,
+        blobs=state.blobs,
+        refs=state.refs,
+        projection=state.projection,
         history=state.history,
         checkouts=state.checkouts,
         fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),
@@ -132,6 +127,41 @@ async def _wait_drained(
     except TimeoutError:
         return False
     return True
+
+
+async def make_current_until_polled(
+    set_current: Callable[[], Awaitable[None]],
+    *,
+    build_id: str,
+    backoff: Sequence[float],
+    every: float,
+    deadline: float,
+) -> bool:
+    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
+    passed; False when it never took. Any other error propagates."""
+    loop = asyncio.get_running_loop()
+    give_up = loop.time() + deadline
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await set_current()
+        except RPCError as error:
+            delay = backoff[attempt - 1] if attempt <= len(backoff) else every
+            logger.warning(
+                "could not make this build current yet",
+                extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
+            )
+            if loop.time() + delay > give_up:
+                logger.error(
+                    "could not make this build current; polling anyway",
+                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
+                )
+                return False
+            await asyncio.sleep(delay)
+        else:
+            logger.info("made this build current", extra={"build_id": build_id})
+            return True
 
 
 async def _poll(
@@ -158,16 +188,27 @@ async def _poll(
             return False
 
     async with worker:
-        # Phase 1 runs one replica: the newest worker is current.
-        try:
-            await make_current(client, namespace=client.namespace, build_id=build_id)
-        except RPCError:
-            logger.exception(
-                "could not make this build current; polling anyway", extra={"build_id": build_id}
+        # Phase 1 runs one replica: the newest worker is current. Entering the worker
+        # started its polling, so the retry runs beside it; stop cancels the retry.
+        current = asyncio.create_task(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                deadline=MAKE_CURRENT_DEADLINE,
             )
-        else:
-            logger.info("made this build current", extra={"build_id": build_id})
-        await stop.wait()
+        )
+        stopped = asyncio.create_task(stop.wait())
+        try:
+            done, _ = await asyncio.wait({current, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if current in done:
+                current.result()  # an error other than RPCError stops the worker, as before
+                await stopped
+        finally:
+            current.cancel()
+            stopped.cancel()
+            await asyncio.wait({current, stopped})
         if not drain:
             return
 

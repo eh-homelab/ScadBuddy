@@ -238,10 +238,9 @@ grace rule (§6.2).
 `piece.json` marker. `finish_piece` writes the marker last, atomically, and the
 `cached_piece` activity answers a later `RenderPiece` from it without running
 `openscad`. A piece with no revision is never served from the cache: its key stands for
-a live source that can change under it, the same rule the legacy `keep_render` applies.
-`RenderService` still answers a submit from the legacy `models/<slug>/.renders/<key>/`
-entries (`cached_render`) when the job has a revision, but only the legacy queue writes
-those.
+a live source that can change under it, the same rule the legacy `keep_render` applied.
+The legacy `models/<slug>/.renders/<key>/` cache went with the legacy queue (#546);
+nothing reads or writes it.
 
 Activity timeouts, and who kills what. `SCADBUDDY_RENDER_TIMEOUT` (operator-set,
 default 120 s) stays the one number an operator tunes: the `openscad_*` activities

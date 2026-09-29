@@ -17,12 +17,20 @@ from scadbuddy.main import create_app
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[2] / "openapi.json"
 #: Satisfies the required ``SCADBUDDY_DATABASE_URL`` for an app that never starts.
 UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
+#: And the required ``SCADBUDDY_TEMPORAL_ADDRESS``: nothing listens there.
+UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
 
 
 def export(out_path: Path) -> Path:
     # No frontend bundle and no data dir: the schema must not depend on the environment.
     # Building the app connects to nothing, so the database URL is never dialled.
-    app = create_app(Settings(frontend_dir=Path("/nonexistent"), database_url=UNUSED_DATABASE_URL))
+    app = create_app(
+        Settings(
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        )
+    )
     out_path.write_text(json.dumps(app.openapi(), indent=2, sort_keys=True) + "\n", "utf-8")
     return out_path
 

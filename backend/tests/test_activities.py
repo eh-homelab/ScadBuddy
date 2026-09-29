@@ -14,6 +14,7 @@ from typing import Any
 import psycopg
 import pytest
 import trimesh
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -26,13 +27,13 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.render.runner import ProcessOutput
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.worker import make_current_until_polled
 from scadbuddy.workflows import activities
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
@@ -523,6 +524,17 @@ async def test_project_for_an_unknown_job_returns(
 # ── the real workflows over the real activities ────────────────────────────────
 
 
+async def _make_current(client: Client) -> None:
+    """As the worker does: Temporal 1.28 takes the build only once it polls."""
+    assert await make_current_until_polled(
+        lambda: make_current(client, namespace=client.namespace, build_id="test"),
+        build_id="test",
+        backoff=(0.1,),
+        every=0.2,
+        deadline=30,
+    )
+
+
 @pytest.mark.requires_postgres
 @pytest.mark.requires_temporal
 async def test_a_job_renders_end_to_end_on_the_render_worker(
@@ -546,7 +558,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
@@ -597,7 +609,7 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             build_id="test",
             max_concurrent_activities=2,
         ):
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
 
             async def rendered(job: Job) -> Path:
                 projection.submit(job, render_key("demo", {"width": 1}, None))

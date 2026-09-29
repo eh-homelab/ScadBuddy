@@ -6,7 +6,6 @@ import json
 import os
 import shutil
 import time
-import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -26,9 +25,8 @@ from scadbuddy.library.catalogue import (
 )
 from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNotFoundError
 from scadbuddy.main import create_app
-from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
+from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 pytestmark = pytest.mark.requires_git
 
@@ -555,8 +553,7 @@ def _generate_with_cover(client: TestClient, paths: DataPaths, model_id: str, co
     """Render and save an output whose 3MF carries ``cover`` as its plate image."""
     job_id = client.post(f"/api/v1/models/{model_id}/render", json={"params": {}}).json()["job_id"]
     assert wait_for_job(client, job_id)["status"] == "done"
-    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
-        archive.writestr(PLATE_THUMBNAIL, cover)
+    set_plate_image(client, job_id, cover)
     saved = client.post(f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id})
     assert saved.status_code == 201, saved.text
     output_id: str = saved.json()["id"]

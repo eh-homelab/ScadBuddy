@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import trimesh
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import write_glb
-from scadbuddy.render.jobs import Job, JobStore
+from scadbuddy.render.job_models import Job
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, job_file, wait_for_job
 from tests.conftest import read_png
@@ -32,11 +34,11 @@ def _render(client: TestClient, slug: str, width: float = 12) -> str:
     return job_id
 
 
-def _real_preview(paths: DataPaths, job_id: str) -> None:
-    """The stub render writes placeholder bytes; a view needs a mesh to draw."""
+def _real_preview(client: TestClient, job_id: str) -> None:
+    """A preview wider than it is tall, so the views can tell front from left."""
     write_glb(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(40, 10, 10)))],
-        job_file(paths, job_id, "preview.glb"),
+        job_file(client, job_id, "preview.glb"),
     )
 
 
@@ -50,23 +52,19 @@ def test_a_job_reports_its_diagnostics(client: TestClient, model: str) -> None:
 
 
 def test_the_model_diagnostics_are_the_latest_settled_render(
-    client: TestClient, model: str, paths: DataPaths
+    app: FastAPI, client: TestClient, model: str
 ) -> None:
     _render(client, model)
-    store = JobStore(paths)
+    projection = getattr(app.state, STATE_ATTR).projection
     now = datetime.now(UTC)
-    store.write(
-        Job(
-            id="f" * 32,
-            slug=model,
-            state="failed",
-            created_at=now,
-            finished_at=now + timedelta(minutes=1),
-            error="openscad exited with 1",
-            diagnostics=[ERROR],
-            diagnostics_dropped=3,
-        )
-    )
+    job = Job(id="f" * 32, slug=model, created_at=now)
+    projection.submit(job, "planted")
+    job.state = "failed"
+    job.finished_at = now + timedelta(minutes=1)
+    job.error = "openscad exited with 1"
+    job.diagnostics = [ERROR]
+    job.diagnostics_dropped = 3
+    assert projection.finish(job)
 
     response = client.get(f"/api/v1/models/{model}/diagnostics")
 
@@ -102,7 +100,7 @@ def test_a_job_preview_is_drawn_from_a_named_view(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     job_id = _render(client, model)
-    _real_preview(paths, job_id)
+    _real_preview(client, job_id)
 
     front = client.get(f"/api/v1/jobs/{job_id}/views/front.png", params={"size": 128})
     left = client.get(f"/api/v1/jobs/{job_id}/views/left.png", params={"size": 128})
@@ -123,7 +121,7 @@ def test_a_job_preview_is_drawn_from_a_named_view(
 
 def test_a_view_that_is_not_one_is_a_422(client: TestClient, model: str, paths: DataPaths) -> None:
     job_id = _render(client, model)
-    _real_preview(paths, job_id)
+    _real_preview(client, job_id)
 
     assert client.get(f"/api/v1/jobs/{job_id}/views/sideways.png").status_code == 422
     too_big = client.get(f"/api/v1/jobs/{job_id}/views/iso.png", params={"size": 5000})
@@ -141,7 +139,7 @@ def test_a_saved_output_is_drawn_from_a_named_view(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     job_id = _render(client, model)
-    _real_preview(paths, job_id)
+    _real_preview(client, job_id)
     created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
     assert created.status_code == 201, created.text
     output_id = created.json()["id"]

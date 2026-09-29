@@ -27,6 +27,20 @@ async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client
     )
 
 
+def connect_lazily(address: str, namespace: str) -> Client:
+    """The API's client, built synchronously: `create_app` runs inside uvicorn's loop,
+    where nothing can be awaited. A lazy connect never suspends, so driving the
+    coroutine once returns the client; it connects on its first call."""
+    coro = connect(address, namespace, lazy=True)
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        client: Client = done.value
+        return client
+    coro.close()
+    raise RuntimeError("a lazy Temporal connect suspended")
+
+
 def render_worker(
     client: Client,
     task_queue: str,

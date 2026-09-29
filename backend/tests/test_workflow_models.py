@@ -9,8 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import JobResult, PartInfo
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import JobResult, PartInfo, render_key
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.models import Failure, PieceRequest, Projection, piece_key
 

@@ -15,7 +15,6 @@ import asyncio
 import itertools
 import subprocess
 import threading
-import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -31,11 +30,10 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
-from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
+from scadbuddy.render.submit import RenderService
+from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -133,8 +131,7 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
         f"/api/v1/models/{SLUG}/render", json={"params": {"width": next(_WIDTHS)}}
     ).json()["job_id"]
     wait_for_job(client, job_id)
-    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
-        archive.writestr(PLATE_THUMBNAIL, cover)
+    set_plate_image(client, job_id, cover)
     response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
@@ -518,7 +515,7 @@ def _failing_backfill(
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []
-    for name, part in (("previews", scheduler(booted)), ("queue", booted.queue)):
+    for name, part in (("previews", scheduler(booted)), ("queue", booted.render)):
         aclose = part.aclose
 
         async def recording(name: str = name, aclose: Any = aclose) -> None:
@@ -532,8 +529,8 @@ def _failing_backfill(
 def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
     settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Anything the backfill raises past the queue opening is cleaned up as a
-    shutdown is: the queue's store (a Postgres pool) and workers are released."""
+    """Anything the backfill raises past the render service starting is cleaned up as
+    a shutdown is: its reconciler and the projection's pool are released."""
     app, booted = _boot(settings, StubRender(paths))
     closed = _failing_backfill(booted, monkeypatch, RuntimeError("listing blew up"))
 
@@ -541,8 +538,9 @@ def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
         pass
 
     assert closed == ["previews", "queue"]
-    assert isinstance(booted.queue, RenderQueue)
-    assert booted.queue._tasks == []
+    assert isinstance(booted.render, RenderService)
+    assert booted.render._reconciler is None
+    assert booted.projection is not None and booted.projection.pool.closed
 
 
 def test_a_listing_error_costs_the_backfill_not_the_boot(

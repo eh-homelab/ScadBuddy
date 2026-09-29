@@ -18,10 +18,11 @@ SCHEMA_CACHE_NAME = "schema.json"
 #: The presets people save are not kept with a template: they are rows in Postgres
 #: (`library.presets.PresetStore`), so a save never moves the template's revision.
 LEGACY_PRESETS_NAME = "presets.json"
-#: Finished renders kept under a template, one directory per render key
-#: (`render/render_cache.py`). Hidden, so a duplicate or upload staging (which skip
-#: ``.*``) never copies them, and ignored by the models repository: they are
-#: derived from the source and must never move a template's revision.
+#: Where the legacy render queue kept finished renders under a template (removed in
+#: #546; the Temporal path's cache is the blob store). Nothing writes it now; a
+#: volume may still hold one. Hidden, so a duplicate or upload staging (which skip
+#: ``.*``) never copies it, and ignored by the models repository, so it never moves
+#: a template's revision.
 RENDERS_DIR_NAME = ".renders"
 #: Where the built-in templates are mirrored from the image, inside the models
 #: repository. Slugs are `[a-z0-9-]`, so it can never be one.
@@ -54,10 +55,6 @@ class DataPaths:
     @property
     def outputs(self) -> Path:
         return self.root / "outputs"
-
-    @property
-    def jobs(self) -> Path:
-        return self.root / "jobs"
 
     @property
     def blobs(self) -> Path:
@@ -138,17 +135,10 @@ class DataPaths:
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id
 
-    def job_file(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.json"
-
-    def job_work_dir(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.work"
-
     def ensure(self) -> None:
         for directory in (
             self.models,
             self.outputs,
-            self.jobs,
             self.blobs,
             self.cache,
             self.fonts,
