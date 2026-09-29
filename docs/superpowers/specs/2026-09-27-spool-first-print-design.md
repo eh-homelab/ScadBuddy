@@ -329,11 +329,11 @@ Rerun against the deployed builds `sha-74f634f` and later, which include #538's 
 | Check | Result | Measured value |
 |---|---|---|
 | Two colors at 0.2 are refused before upload | **Pass** | 422, nothing uploaded: "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm hotend in the rack… Fit a 0.2 mm nozzle on both sides, or print in one color." |
-| One color at 0.2 uses the rack's spare | **Pass** | Queue item 150: sliced at 0.2, `0.08mm High Quality`. At start the printer reported 0.2 on the right and 0.4 on the left, swapped in from the rack, and printed past layer 3 with no HMS. |
+| One color at 0.2 uses the rack's spare | **Pass** | Queue item 150: sliced at 0.2, `0.08mm High Quality`. At start the printer reported 0.2 on the right and 0.4 on the left, swapped in from the rack, and completed 03:55 to 04:43 UTC with no HMS. |
 | One color at 0.4 prints | **Pass** | Queue item 151: sliced at 0.4, `0.12mm High Quality`, completed 03:24 to 03:49 UTC. |
-| Two colors at 0.4 queue with both colors | **Pass** (queue side) | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Not started at the time of writing. |
+| Two colors at 0.4 print | **Fail** | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Started 13:15 UTC and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." Both sides were 0.4 mm, but the right was standard (`HS01`) and the left High Flow (`HH01`), and both were sliced as standard. #538's refusal compares size only; tracked in #723. |
 
-This closes #469 at the printer: the case that paused at layer 0 (queue items 108 and 114) is now refused before upload, and the rack swap that #538 assumed is confirmed.
+This closes #469 for sides that differ in size: that case (queue items 108 and 114) is now refused before upload, and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
 
 Also found:
 - Each run POST still outlives the 60 s ingress timeout, giving a 504 while the item queues (#470). Every run above was checked on Bambuddy's queue rather than retried.
