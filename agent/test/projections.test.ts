@@ -133,8 +133,8 @@ describe('registry projections', () => {
   it('declare a Bambuddy scope on every tool that reaches Bambuddy', () => {
     // The backend routes that call Bambuddy (backend/scadbuddy/api/printing.py,
     // outputs.py `send`, settings.py `test`/`targets`); `remember_*` only write
-    // ScadBuddy's own settings.json.
-    const bambuddyRoutes = /\/print\/|\/send$|\/settings\/(test|targets)$/
+    // ScadBuddy's own settings.json, and `/print/runs/` only reads its database.
+    const bambuddyRoutes = /\/print\/(?!runs\/)|\/send$|\/settings\/(test|targets)$/
     for (const tool of ALL_TOOLS) {
       if (tool.routes.some((r) => bambuddyRoutes.test(r.split(' ')[1]!)) && !tool.name.startsWith('remember_')) {
         expect(tool.bambuddyScope.length, tool.name).toBeGreaterThan(0)

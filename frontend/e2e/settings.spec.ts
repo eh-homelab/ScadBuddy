@@ -23,7 +23,8 @@ test.describe('settings', () => {
 
     // Away and back inside the app: the mock backend holds what was saved.
     await page.getByRole('link', { name: 'Models', exact: true }).click()
-    await expect(page).toHaveURL(/\/$/)
+    // The catalogue writes its view to the URL (#534, lib/catalogueQuery.ts).
+    await expect(page).toHaveURL(/\/(\?view=cards)?$/)
     await page.getByRole('link', { name: 'Settings', exact: true }).click()
     await expect(timeout).toHaveValue('45')
     await expect(source).toHaveText(/Set here/)
@@ -49,6 +50,7 @@ test.describe('settings', () => {
     await expect(page.getByLabel('Show dimensions in')).toHaveValue('mm')
     await page.getByRole('link', { name: 'Models', exact: true }).click()
     await expect(dialog).toHaveCount(0)
-    await expect(page).toHaveURL(/\/$/)
+    // The catalogue writes its view to the URL (#534, lib/catalogueQuery.ts).
+    await expect(page).toHaveURL(/\/(\?view=cards)?$/)
   })
 })

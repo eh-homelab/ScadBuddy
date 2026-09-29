@@ -555,16 +555,19 @@ export class ApprovalService {
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
     const summary = summariseInput(request.tool, request.input, secrets)
-    const row = await this.insert(this.deps.sql, request, summary)
-    if (!row) throw new Error('approval vanished after insert')
-    const approval = record(row)
-    const id = approval.id
-    if (approval.sessionId !== null) {
+    // The row and its `approval.required` commit together: a decision can only
+    // see the row once it has committed, so its `approval.resolved` cannot be
+    // logged before the event that asked for it.
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const row = await this.insert(tx, request, summary)
+      if (!row) throw new Error('approval vanished after insert')
+      const created = record(row)
+      if (created.sessionId === null) return created
       const tail: ServerEvent[] = [
         event({
           type: 'approval.required',
-          sessionId: approval.sessionId,
-          id,
+          sessionId: created.sessionId,
+          id: created.id,
           tool: request.toolUseId,
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
@@ -572,15 +575,21 @@ export class ApprovalService {
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
-        const moved = await this.deps.sql`
+        const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_approval', updated_at = now()
-          WHERE id = ${approval.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
+          WHERE id = ${created.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
         if (moved.count > 0) {
-          tail.push(event({ type: 'session.status', sessionId: approval.sessionId, status: 'waiting_approval' }))
+          tail.push(event({ type: 'session.status', sessionId: created.sessionId, status: 'waiting_approval' }))
         }
       }
-      await this.append(approval.sessionId, tail, secrets)
-    }
+      await this.deps.events.append(
+        created.sessionId,
+        tail.map((e) => scrubForLog(e, secrets)),
+        tx,
+      )
+      return created
+    })
+    if (approval.sessionId !== null) this.deps.events.wake(approval.sessionId)
     return approval
   }
 
