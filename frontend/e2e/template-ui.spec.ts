@@ -76,7 +76,7 @@ test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
   const ui = page.getByTestId('template-ui')
   await expect(ui.locator('sb-param[name="wall_color"]')).toBeVisible()
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeHidden()
-  await ui.getByRole('combobox').first().selectOption('ball_lid')
+  await ui.locator('sb-param[name="mode"]').getByRole('combobox').selectOption('ball_lid')
   await expect(ui.locator('sb-param[name="lid_color"]')).toBeVisible()
   await expect(page.getByTestId('ui-origin')).toHaveText('Custom interface · built-in')
   expect(await violations(page)).toEqual([])

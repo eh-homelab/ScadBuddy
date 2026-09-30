@@ -5,7 +5,15 @@ import { describe, expect, it } from 'vitest'
 async function read(path: string): Promise<Uint8Array> {
   const specifier: string = 'node:fs'
   const fs = (await import(/* @vite-ignore */ specifier)) as { readFileSync(path: URL): Uint8Array }
-  return fs.readFileSync(new URL(path, import.meta.url))
+  try {
+    return fs.readFileSync(new URL(path, import.meta.url))
+  } catch (error) {
+    throw new Error(
+      `cannot read ${path}: frontend/src/mocks/ui/maze-puzzle.js must stay a copy of ` +
+        `models/maze-puzzle/ui/index.js; if either moved, move the other and this test with it`,
+      { cause: error },
+    )
+  }
 }
 
 describe('mock copies of bundled template UIs', () => {
