@@ -11,7 +11,9 @@ had a different size fitted. The printer handles its nozzles itself, and the H2C
 hotends from its rack. That print was sliced in Bambu Studio, which saved every filament
 on one extruder; the run writes the same map
 (:func:`scadbuddy.render.bambu3mf.one_extruder_map`), which Bambuddy's headless slicer
-was measured not to follow on 2026-09-28 (#745).
+was measured not to follow on 2026-09-28 (#745). What the slicer does follow is which
+extruders have the nozzle, and the run now states that (:func:`slicer_nozzle_stats`,
+#834).
 
 One advisory stays, by the owner's ruling on #723 (queue item 149 paused on it): a
 mounted High Flow nozzle of the sliced size is warned about (:func:`high_flow_warnings`),
@@ -135,6 +137,66 @@ def high_flow_warnings(status: PrinterStatus | None, size: str) -> list[Filament
         for extruder in (RIGHT, LEFT)
         if fitted_size(status, extruder) == size and fitted_high_flow(status, extruder)
     ]
+
+
+#: The side the H2C's nozzle rack swaps hotends onto: physical extruder 0, the right.
+#: Upstream Bambuddy measured it from Bambu Studio's own dispatch (``bambu_mqtt.py``,
+#: 2026-08-14), and the H2C preset agrees: ``extruder_max_nozzle_count`` ["1", "6"] names
+#: the slicer's second extruder, which ``physical_extruder_map`` ["1", "0"] makes
+#: physical 0. ``PrinterStatus.nozzle_rack`` ids 0 and 1 are the two mounted hotends,
+#: and the higher ids are the rack's positions.
+RACK_SIDE = RIGHT
+#: The printer's sides in the slicer's extruder order: the H2C preset's
+#: ``physical_extruder_map`` is ["1", "0"], so the slicer's extruder 1 is the left.
+SLICER_ORDER = (LEFT, RIGHT)
+
+
+def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
+    """Whether each nozzle of ``size`` ``extruder`` can print with is High Flow: the one
+    mounted, and on the rack side every spare in the rack."""
+    found = []
+    if fitted_size(status, extruder) == size:
+        found.append(fitted_high_flow(status, extruder))
+    if extruder == RACK_SIDE:
+        found += [
+            len(slot.nozzle_type) > 1 and slot.nozzle_type[1] == "H"
+            for slot in status.nozzle_rack
+            if slot.id > LEFT and slot.nozzle_diameter == size
+        ]
+    return found
+
+
+def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | None:
+    """``extruder_nozzle_stats`` naming only the side that has a ``size`` nozzle (#834).
+
+    Bambu's H2C presets state one size on both extruders, and the slicer's "Auto For
+    Flush" grouping spreads the filaments over every extruder its nozzle stats offer —
+    the ``filament_map`` in the 3MF is not followed (#745). Queue item 159 was sliced
+    so, with a filament on the left 0.4 as if it were a 0.2, and paused with "the left
+    nozzle is not matched with slicing file". Bambu Studio avoids that by stating what
+    each side has: archive 36, which printed, carries ["Standard#0|High Flow#0",
+    "Standard#1"] and every filament on the right. Measured against the deployed slicer
+    (2026-09-30), this key in the 3MF steers its grouping the same way.
+
+    A standard nozzle of the size is preferred, since ScadBuddy slices standard flow
+    (#484); a High Flow one of the size still beats a side without the size, and #723
+    warns of it. When both sides or neither side has the size, or the status cannot be
+    read, this is ``None`` and the file is left as it was: the slicer keeps its own
+    choice, and nothing is refused on the mounted nozzles (#768). A side the printer
+    reports no size for counts as not having it; only the other side is then offered.
+    """
+    if status is None or not two_nozzles(status):
+        return None
+    found = {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
+    for has in (
+        {extruder for extruder, flows in found.items() if False in flows},
+        {extruder for extruder, flows in found.items() if flows},
+    ):
+        if len(has) == 1:
+            return [f"Standard#{int(extruder in has)}" for extruder in SLICER_ORDER]
+        if has:
+            return None
+    return None
 
 
 def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> FilamentOptions:

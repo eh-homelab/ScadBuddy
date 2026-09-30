@@ -19,9 +19,11 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.extruders import slicer_nozzle_stats
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.schema import ParamValue
@@ -116,7 +118,11 @@ async def generate_target(
 ) -> Target:
     """What the project file is laid out for at Generate time, before any printer is
     chosen: the project's last print, else the model's remembered printer and nozzle,
-    else the Settings default (:func:`target_for`, which ends at the fallback plate)."""
+    else the Settings default (:func:`target_for`, which ends at the fallback plate).
+
+    With a printer and nozzle it also states which of the printer's sides has that
+    nozzle now (#834), as the print does, so a print on the same printer and nozzles
+    reuses this file. An unreadable status states nothing, as the print's does."""
     remembered = await uploads.project_target(project_id)
     if remembered is not None:
         printer_id: int | None = remembered.printer_id
@@ -125,7 +131,15 @@ async def generate_target(
         choices = settings.model_print_choices.get(meta.slug)
         printer_id = (choices.printer_id if choices else None) or settings.printer_id
         nozzle = choices.nozzles[0].size if choices and choices.nozzles else None
-    return await target_for(client, settings, printer_id=printer_id, nozzle_diameter=nozzle)
+    stats = None
+    if printer_id is not None and nozzle is not None:
+        try:
+            stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzle)
+        except (ApiError, ValueError):
+            stats = None
+    return await target_for(
+        client, settings, printer_id=printer_id, nozzle_diameter=nozzle, nozzle_stats=stats
+    )
 
 
 async def file_into_project(
