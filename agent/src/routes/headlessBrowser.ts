@@ -87,7 +87,7 @@ export function registerHeadlessBrowserRoutes(app: Hono, deps: HeadlessBrowserRo
 
 declare module '../app.js' {
   interface AppDeps {
-    /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) answers 503 without it. */
+    /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) and the session limits (#790, routes/sessionLimits.ts) answer 503 without it. */
     settings?: SettingsRepo | undefined
   }
 }

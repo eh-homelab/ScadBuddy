@@ -7,29 +7,9 @@ import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
-import type { RemoteAddress, uiReadProblem } from './routes/guard.js'
+import type { RemoteAddress } from './routes/guard.js'
 import { ROUTES } from './routes/index.js'
-import type { PluginForwarder } from './plugins/forwarder.js'
-import type { PackageInstaller } from './plugins/packages/install.js'
-import type { PackageRepo } from './plugins/packages/store.js'
-import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
-import { type PluginTest, testPlugin } from './plugins/testConnection.js'
-import type { AuditRepo } from './audit/log.js'
 import type { TabHub } from './bridge/hub.js'
-import { auditWrites, RefusalCoalescer } from './audit/writes.js'
-import { registerApprovalRoutes } from './routes/approvals.js'
-import { registerAuditRoutes } from './routes/audit.js'
-import { registerBridgeRoute } from './routes/bridge.js'
-import { registerChatRoute } from './routes/chat.js'
-import { registerCredentialRoutes } from './routes/credentials.js'
-import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
-import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
-import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
-import { registerPluginRoutes } from './routes/plugins.js'
-import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
-import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
-import { registerSessionLimitsRoutes } from './routes/sessionLimits.js'
-import { registerSessionRoutes } from './routes/sessions.js'
 import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
 
@@ -66,15 +46,6 @@ export interface AppDeps {
   resolveHost?: Resolver
   /** Upper bound on each database step of /healthz (migrations, credential read). */
   healthTimeoutMs?: number
-  /** Clock for the connection-test cooldown; Date.now when omitted. */
-  now?: () => number
-  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
-  approvals?: ApprovalService
-  /**
-   * `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) and the session
-   * limits (#790) answer 503 without it.
-   */
-  settings?: SettingsRepo | undefined
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the

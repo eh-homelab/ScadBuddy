@@ -521,6 +521,7 @@ export const route: RouteModule = {
       origins: deps.origins,
       upgradeWebSocket: deps.upgradeWebSocket,
       ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
+      ...(deps.tabs ? { tabs: deps.tabs } : {}),
     })
   },
 }
