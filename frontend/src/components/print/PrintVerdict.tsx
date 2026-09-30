@@ -12,12 +12,12 @@ interface Props {
  * #755, #760 — the run's own refusals and nozzle advisories, shown in Checks before
  * Print. Print is held while an error stands; a warning is advisory.
  */
-export function NozzleVerdict({ verdict, error, onRetry }: Props) {
+export function PrintVerdict({ verdict, error, onRetry }: Props) {
   if (error) {
     return (
       <p
         role="alert"
-        data-testid="nozzle-verdict-failed"
+        data-testid="print-verdict-failed"
         className="mt-2 rounded-[6px] border border-warn/50 bg-warn/10 px-2.5 py-2 text-[12.5px] text-warn"
       >
         The check before Print could not run:{' '}
@@ -35,12 +35,12 @@ export function NozzleVerdict({ verdict, error, onRetry }: Props) {
   const warnings = verdict?.warnings ?? []
   if (errors.length === 0 && warnings.length === 0) return null
   return (
-    <ul className="mt-2 space-y-2" aria-label="Nozzles">
+    <ul className="mt-2 space-y-2" aria-label="Before Print">
       {errors.map((message) => (
         <li
           key={message}
           role="alert"
-          data-testid="nozzle-verdict-error"
+          data-testid="print-verdict-error"
           className="rounded-[6px] border border-warn/50 bg-warn/10 px-2.5 py-2 text-[12.5px] text-warn"
         >
           {message}
@@ -49,7 +49,7 @@ export function NozzleVerdict({ verdict, error, onRetry }: Props) {
       {warnings.map((warning) => (
         <li
           key={`${warning.kind}:${warning.message}`}
-          data-testid="nozzle-verdict-warning"
+          data-testid="print-verdict-warning"
           className="rounded-[6px] border border-accent/50 bg-accent/10 px-2.5 py-2 text-[12.5px] text-ink"
         >
           {warning.message}

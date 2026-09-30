@@ -1451,6 +1451,24 @@ def test_the_check_gives_the_runs_printer_refusal_word_for_word(
 
 
 @respx.mock
+def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
+    client: TestClient, model: str
+) -> None:
+    """#765 review: only the run's own refusals become the check's ``errors``. A 422 that
+    Bambuddy answers on a plain read is a failed check, not a verdict to show the user."""
+    output_id = prepared(client, model)
+    run_routes()
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(422, json={"detail": "model is required"})
+    )
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert check.status_code != 200, check.text
+    assert "errors" not in check.json()
+
+
+@respx.mock
 def test_the_check_refuses_nothing_when_both_nozzles_match(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

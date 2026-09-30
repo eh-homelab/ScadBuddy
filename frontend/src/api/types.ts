@@ -102,7 +102,7 @@ export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
-/** #755 — the run's nozzle verdict for the dialog's choices, before Print. */
+/** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 
