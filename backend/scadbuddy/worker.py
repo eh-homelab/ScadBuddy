@@ -307,6 +307,10 @@ def _health_server(
     )
 
 
+#: How often a worker evicts its piece cache when the upload sweep is off (seconds).
+WORKER_CACHE_EVICT_INTERVAL = 300.0
+
+
 async def _evict_periodically(blobs: CachedBlobStore, interval: float) -> None:
     """The worker's sweep: its piece cache, least recently used first, down to
     SCADBUDDY_WORKER_CACHE_MAX_BYTES. Best effort; the next pass retries."""
@@ -321,6 +325,17 @@ async def _evict_periodically(blobs: CachedBlobStore, interval: float) -> None:
             logger.info("evicted cached pieces", extra={"count": len(evicted)})
 
 
+def _start_eviction(blobs: object, sweep_interval: float) -> asyncio.Task[None] | None:
+    """Evict the piece cache on a timer whenever the worker's blobs are one: every
+    SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
+    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops it."""
+    if not isinstance(blobs, CachedBlobStore):
+        return None
+    interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
+    logger.info("evicting the piece cache every %.0f s", interval)
+    return asyncio.create_task(_evict_periodically(blobs, interval))
+
+
 async def run_worker(
     settings: Settings,
     *,
@@ -331,11 +346,7 @@ async def run_worker(
     stop = stop or asyncio.Event()
     deps, store = build_worker_deps(settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
-    evicting = (
-        asyncio.create_task(_evict_periodically(store.blobs, deps.config.asset_sweep_interval))
-        if isinstance(store.blobs, CachedBlobStore) and deps.config.asset_sweep_interval > 0
-        else None
-    )
+    evicting = _start_eviction(store.blobs, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)
