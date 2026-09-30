@@ -817,6 +817,13 @@ def test_a_json_body_missing_its_source_is_rejected_like_any_other_body(
     assert body["errors"][0]["loc"] == ["body", "source"]
 
 
+def _openscad_runs(log: Path) -> int:
+    """Runs the fake openscad logged, less the worker's `--version` probe at start."""
+    if not log.exists():
+        return 0
+    return sum(line != "--version" for line in log.read_text(encoding="utf-8").splitlines())
+
+
 def test_replacing_the_source_runs_openscad_once(
     client: TestClient, model: str, tmp_path: Path
 ) -> None:
@@ -827,11 +834,11 @@ def test_replacing_the_source_runs_openscad_once(
     replacement = 'width = 3;\nlabel = "x";\n'
     put = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
     assert put.status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
     # And the schema the check derived was kept, so opening the customizer adds none.
     assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
 
 def test_a_pasted_model_opens_without_deriving_its_schema_again(
@@ -843,7 +850,7 @@ def test_a_pasted_model_opens_without_deriving_its_schema_again(
     created = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
     assert created.status_code == 201
     assert client.get("/api/v1/models/pasted/schema").status_code == 200
-    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert _openscad_runs(log) == 1
 
 
 def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient) -> None:
@@ -954,7 +961,7 @@ def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
     replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge})
     assert replaced.status_code == 422
 
-    assert not log.exists(), "openscad ran for a body that was refused on shape"
+    assert _openscad_runs(log) == 0, "openscad ran for a body that was refused on shape"
 
 
 def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:

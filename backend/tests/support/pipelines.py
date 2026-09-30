@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
@@ -30,6 +30,7 @@ from scadbuddy.workflows.models import (
     LoadRequest,
     OutputRequest,
     PackRequest,
+    PieceOutcome,
     PieceRequest,
     PieceResult,
     PlateSize,
@@ -173,3 +174,35 @@ async def run_job(world: FakeWorld, job: Job, *, client: Client) -> None:
         await client.execute_workflow(
             TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
         )
+
+
+@workflow.defn(name="RenderPiece", sandboxed=False)
+class OldRenderPiece:
+    """A `RenderPiece` from a build before `PieceOutcome.piece_key`: it tells its waiters
+    an outcome without the key. It renders nothing: its result is `w` wide."""
+
+    def __init__(self) -> None:
+        self._waiting: list[str] = []
+
+    @workflow.signal
+    def wait_for_me(self, job_workflow_id: str) -> None:
+        self._waiting.append(job_workflow_id)
+
+    @workflow.run
+    async def run(self, req: PieceRequest) -> None:
+        await workflow.wait_condition(lambda: bool(self._waiting))
+        w = float(req.params.get("w", 10))
+        result = PieceResult(
+            result=JobResult(
+                model_3mf="blobs/old/model.3mf",
+                preview_glb="blobs/old/preview.glb",
+                parts=[],
+                colors=["#FF0000"],
+                bbox_mm=BoundingBox(min=(0, 0, 0), max=(w, w, 5), size=(w, w, 5)),
+            ),
+            log_tail=["an older build"],
+        )
+        for job in self._waiting:
+            await workflow.get_external_workflow_handle(job).signal(
+                "piece_finished", PieceOutcome(result=result)
+            )

@@ -271,12 +271,20 @@ class TemplatePipeline:
         self._outcomes: dict[str, PieceOutcome] = {}
         self._parts: dict[str, Part] = {}
         self._pieces: dict[str, asyncio.Task[PieceOutcome]] = {}
-        self._progress: list[workflow.ActivityHandle[Any]] = []
+        self._progress: asyncio.Task[None] | None = None
+        #: The pieces another job is rendering that this one waits on, by key.
+        self._waiting_on: list[str] = []
         self._job: Job | None = None
 
     @workflow.signal
     def piece_finished(self, outcome: PieceOutcome) -> None:
-        self._outcomes[outcome.piece_key] = outcome
+        key = outcome.piece_key
+        if not key and len(self._waiting_on) == 1:
+            # From a build before `piece_key` (draining in a deploy): the one piece
+            # waited on is the one that sent it. With several, the re-check restarts.
+            key = self._waiting_on[0]
+            outcome = outcome.model_copy(update={"piece_key": key})
+        self._outcomes[key] = outcome
 
     def part_of(self, key: str) -> Part:
         part = self._parts.get(key)
@@ -316,21 +324,28 @@ class TemplatePipeline:
 
     def project_later(self, **fields: Any) -> None:
         """`ctx.progress` is synchronous (§5.2): the write goes out without waiting.
-        A late one after the job settles is a no-op (`set_steps` guards the state)."""
-        self._progress.append(
-            workflow.start_activity(
-                "project",
-                self._projection(fields),
-                start_to_close_timeout=SHORT,
-                retry_policy=PROJECT_RETRY,
-            )
-        )
+        Each waits for the one before it, so they land in order (`set_steps` is
+        last-writer-wins). A late one after the job settles is a no-op."""
+        projection = self._projection(fields)
+        previous = self._progress
+
+        async def write() -> None:
+            if previous is not None:
+                await previous
+            with contextlib.suppress(ActivityError):
+                await workflow.execute_activity(
+                    "project",
+                    projection,
+                    start_to_close_timeout=SHORT,
+                    retry_policy=PROJECT_RETRY,
+                )
+
+        self._progress = asyncio.create_task(write())
 
     async def _settle_progress(self) -> None:
         """Let every progress write land before the final one, so it cannot overtake it."""
-        for handle in self._progress:
-            with contextlib.suppress(ActivityError):
-                await handle
+        if self._progress is not None:
+            await self._progress
 
     @workflow.run
     async def run(self, job: Job) -> None:
@@ -435,12 +450,16 @@ class TemplatePipeline:
             if is_cancelled_exception(error):
                 raise
             failure = _failure_of(error)
+            if loaded.version == "default":
+                return failure  # no line in a file the template does not have
             return failure.model_copy(
                 update={"error": pipeline_error_at(error, loaded.file, failure.error)}
             )
         except Exception as error:
             if is_cancelled_exception(error):
                 raise
+            if loaded.version == "default":
+                return Failure(error=f"{type(error).__name__}: {error}")
             return Failure(error=pipeline_error(error, loaded.file))
         return None
 
@@ -472,18 +491,22 @@ class TemplatePipeline:
                 )
             except WorkflowAlreadyStartedError:
                 piece = workflow.get_external_workflow_handle_for(RenderPiece.run, piece_id)
+                self._waiting_on.append(key)
                 try:
-                    await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
-                except FailureError as error:
-                    if not _target_gone(error):
-                        raise
-                    continue  # it closed in between; start it again
-                try:
-                    await workflow.wait_condition(
-                        lambda: key in self._outcomes, timeout=_waiter_recheck()
-                    )
-                except TimeoutError:
-                    continue  # it may have closed without telling us (terminated, timed out)
+                    try:
+                        await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
+                    except FailureError as error:
+                        if not _target_gone(error):
+                            raise
+                        continue  # it closed in between; start it again
+                    try:
+                        await workflow.wait_condition(
+                            lambda: key in self._outcomes, timeout=_waiter_recheck()
+                        )
+                    except TimeoutError:
+                        continue  # it may have closed without telling us (terminated, timed out)
+                finally:
+                    self._waiting_on.remove(key)
                 return self._outcomes[key]
             try:
                 return PieceOutcome(result=await child, piece_key=key)

@@ -9,14 +9,28 @@ from pathlib import Path
 
 import pytest
 from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
 from temporalio.worker import Worker
 
+from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.projection import workflow_id_for
 from scadbuddy.workflows import pipelines
-from scadbuddy.workflows.models import PieceRequest, PieceResult, piece_key
+from scadbuddy.workflows.models import (
+    OutputRequest,
+    PieceRequest,
+    PieceResult,
+    Projection,
+    piece_key,
+)
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
-from tests.support.pipelines import FakeWorld, a_job, activity_named, run_job
+from tests.support.pipelines import (
+    FakeWorld,
+    OldRenderPiece,
+    a_job,
+    activity_named,
+    run_job,
+)
 from tests.support.temporal import temporal_client
 
 pytestmark = pytest.mark.requires_temporal
@@ -259,3 +273,158 @@ async def test_a_pipeline_that_never_yields_times_out() -> None:
     # itself; never `done`.
     assert "done" not in settled
     assert timed_out or settled == ["failed"]
+
+
+async def test_progress_updates_land_in_the_order_they_were_made() -> None:
+    world = FakeWorld(
+        """\
+async def run(ctx, inputs):
+    a = await ctx.render("model.scad", w=1)
+    ctx.progress("one", done=1, total=2)
+    ctx.progress("two", done=2, total=2)
+    await ctx.output(plates=await ctx.pack([a]), name="x")
+"""
+    )
+    original = world.project
+
+    async def slow_first(projection: Projection) -> None:
+        if projection.steps and projection.steps[0].name == "one":
+            await asyncio.sleep(1)  # the first write is the slower one
+        await original(projection)
+
+    world.project = activity_named("project", slow_first)  # type: ignore[method-assign]
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(), client=client), timeout=60)
+    progress = [
+        p.steps[0].name
+        for p in world.projections
+        if p.state is None and p.steps and p.steps[0].name in ("one", "two")
+    ]
+    assert progress == ["one", "two"]
+
+
+async def test_a_default_pipeline_output_refused_is_its_bare_error() -> None:
+    world = FakeWorld()
+
+    async def refused(req: OutputRequest) -> PipelineOutput:
+        raise ApplicationError("the store is full", type="StoreFull", non_retryable=True)
+
+    world.write_output = activity_named("write_output", refused)  # type: ignore[method-assign]
+    async with temporal_client() as client:
+        await asyncio.wait_for(run_job(world, a_job(params={"w": 3}), client=client), timeout=60)
+    failure = world.final().failure
+    assert failure is not None
+    assert failure.error == "the store is full"  # no `<default pipeline>:N:`
+
+
+async def test_a_piece_from_an_older_build_answers_its_waiter() -> None:
+    """A `RenderPiece` still draining on the previous build sends its outcome without
+    `piece_key`: the one piece being waited on takes it."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    key = piece_key("demo", f"job:{job.id}", "model.scad", {"w": 12})
+    req = PieceRequest(
+        slug="demo",
+        revision=None,
+        scope=f"job:{job.id}",
+        file="model.scad",
+        params={"w": 12},
+        piece_key=key,
+    )
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, OldRenderPiece],
+            activities=world.activities(),
+        ):
+            await client.start_workflow("RenderPiece", req, id=f"piece-{key}", task_queue=queue)
+            await asyncio.wait_for(
+                client.execute_workflow(
+                    TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                ),
+                timeout=30,
+            )
+    final = world.final()
+    assert final.state == "done"
+    assert final.log_tail == ["an older build"]
+    assert world.pieces == []  # nothing rendered it again
+
+
+TWO = """\
+import asyncio
+
+async def run(ctx, inputs):
+    a, b = await asyncio.gather(ctx.render("model.scad", w=1), ctx.render("model.scad", w=2))
+    name = f"{a.piece_key}={a.bbox.size[0]:g} {b.piece_key}={b.bbox.size[0]:g}"
+    await ctx.output(plates=await ctx.pack([a, b]), name=name)
+"""
+
+#: The same two pieces, waited on in a known order: `w=1` first.
+TWO_IN_ORDER = """\
+import asyncio
+
+async def run(ctx, inputs):
+    first = asyncio.ensure_future(ctx.render("model.scad", w=1))
+    await asyncio.sleep(1)
+    b = await ctx.render("model.scad", w=2)
+    a = await first
+    name = f"{a.piece_key}={a.bbox.size[0]:g} {b.piece_key}={b.bbox.size[0]:g}"
+    await ctx.output(plates=await ctx.pack([a, b]), name=name)
+"""
+
+
+@pytest.mark.parametrize("released", [(2, 1), (1, 2)])
+async def test_a_job_waiting_on_two_pieces_gets_each_its_own(released: tuple[int, int]) -> None:
+    """Job B waits on both of job A's pieces. Released in either order, each of B's
+    Parts is its own piece's: an outcome routed by position fails one of the orders."""
+    world = FakeWorld(TWO)
+    gates = {1: asyncio.Event(), 2: asyncio.Event()}
+    started: set[int] = set()
+    original = world.cached_piece
+
+    async def held(req: PieceRequest) -> PieceResult | None:
+        w = int(req.params["w"])
+        started.add(w)
+        await gates[w].wait()
+        return await original(req)
+
+    world.cached_piece = activity_named("cached_piece", held)  # type: ignore[method-assign]
+    a, b = a_job(), a_job()
+    a.model_version = b.model_version = "abc1234"
+    keys = {w: piece_key("demo", "abc1234", "model.scad", {"w": w}) for w in (1, 2)}
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            ha = await client.start_workflow(
+                TemplatePipeline.run, a, id=workflow_id_for(a.id), task_queue=queue
+            )
+            async with asyncio.timeout(30):
+                while started != {1, 2}:
+                    await asyncio.sleep(0.05)
+                world.source = TWO_IN_ORDER  # B's pipeline; A has loaded its own
+                hb = await client.start_workflow(
+                    TemplatePipeline.run, b, id=workflow_id_for(b.id), task_queue=queue
+                )
+                for w in (1, 2):  # B waits on both of A's pieces
+                    piece = client.get_workflow_handle(f"piece-{keys[w]}")
+                    while not [
+                        e
+                        async for e in piece.fetch_history_events()
+                        if e.HasField("workflow_execution_signaled_event_attributes")
+                    ]:
+                        await asyncio.sleep(0.05)
+                first, second = released
+                gates[first].set()
+                await client.get_workflow_handle(f"piece-{keys[first]}").result()
+                gates[second].set()
+                await asyncio.gather(ha.result(), hb.result())
+    names = {o.job_id: o.name for o in world.outputs}
+    expected = f"{keys[1]}=1 {keys[2]}=2"
+    assert names == {a.id: expected, b.id: expected}
+    assert len(world.pieces) == 2  # rendered once each, by A

@@ -413,7 +413,7 @@ async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_th
         assert acts.calls == []
 
 
-async def test_params_that_are_not_a_mapping_fail_the_default_pipeline_at_its_line() -> None:
+async def test_params_that_are_not_a_mapping_fail_the_default_pipeline_without_a_location() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         acts = FakeActivities()
@@ -431,7 +431,7 @@ async def test_params_that_are_not_a_mapping_fail_the_default_pipeline_at_its_li
         last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
         assert last.state == "failed"
         assert last.failure is not None
-        assert last.failure.error.startswith("<default pipeline>:2: TypeError: ")
+        assert last.failure.error.startswith("TypeError: ")  # no line in code nobody wrote
         assert last.steps is not None and last.steps[0].state == "failed"
         assert acts.calls == []
 

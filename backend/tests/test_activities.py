@@ -26,7 +26,15 @@ from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo, render_key
+from scadbuddy.render.job_models import (
+    Job,
+    JobResult,
+    OutputRecord,
+    PartInfo,
+    PipelineOutput,
+    StepInfo,
+    render_key,
+)
 from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import CANCELLED_ERROR, JobProjection, workflow_id_for
 from scadbuddy.render.runner import ProcessOutput
@@ -343,6 +351,23 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
 # ── project ────────────────────────────────────────────────────────────────────
 
 
+def _output(name: str, key: str) -> PipelineOutput:
+    return PipelineOutput(
+        name=name,
+        result=_result(),
+        blob_keys=[key],
+        record=OutputRecord(
+            revision="r",
+            ui_api=None,
+            pipeline_api=1,
+            pipeline_version="v",
+            inputs_v=0,
+            plate_key="default",
+            parts=[key],
+        ),
+    )
+
+
 @pytest.fixture
 def projection(pg_conninfo: str) -> Iterator[JobProjection]:
     bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo))
@@ -429,6 +454,7 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
         steps=[StepInfo(name="render", state="done", done=1, total=1)],
         blob_key="piece-key",
         blob_keys=["piece-key", "output-x-0"],
+        outputs=[_output("house", "piece-key"), _output("garage", "output-x-0")],
     )
     await acts.project(done)
 
@@ -440,6 +466,7 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
     assert stored.diagnostics == _result().diagnostics
     assert stored.diagnostics_dropped == 2
     assert stored.steps == done.steps
+    assert stored.outputs == done.outputs  # both, in order
     assert {"piece-key", "output-x-0"} <= refs.referenced()
 
     # A second `done` (a retried activity) returns and changes nothing.
