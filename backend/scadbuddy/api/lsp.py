@@ -252,6 +252,9 @@ async def post_lsp_diagnostics(body: LspDiagnosticsRequest, state: StateDep) -> 
     binary = shutil.which(state.config.openscad_lsp)
     if binary is None:
         return LspDiagnostics(available=False)
+    # One step with the acquire below: nothing awaits in between, and an
+    # asyncio.Semaphore that is not locked() is acquired without yielding, so no
+    # other request can take the permit in the gap (as in `_serve`; review of #750).
     if state.language_servers.locked():
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,

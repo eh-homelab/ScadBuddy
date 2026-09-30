@@ -5,6 +5,8 @@ test (`requires_openscad_lsp`) checks those measurements against the real binary
 from __future__ import annotations
 
 import shutil
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -163,6 +165,36 @@ def test_a_full_budget_is_a_503_with_retry_after(settings: Settings) -> None:
         response = client.post("/api/v1/lsp/diagnostics", json={"source": "x"})
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "2"
+
+
+def test_requests_at_once_on_one_permit_fail_fast_rather_than_wait(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #750: the budget check and the acquire cannot be split by another
+    request, so of several at once exactly one gets the server and the rest get
+    the busy 503 straight away, not after the first one's timeout."""
+    monkeypatch.setattr(lsp_diagnostics, "DIAGNOSTICS_TIMEOUT", 2.0)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    start = threading.Barrier(4)
+    answers: list[tuple[str, float]] = []
+
+    def post_hang(client: TestClient) -> None:
+        start.wait()
+        began = time.monotonic()
+        response = client.post("/api/v1/lsp/diagnostics", json={"source": "HANG"})
+        assert response.status_code == 503
+        answers.append((response.json()["detail"], time.monotonic() - began))
+
+    with TestClient(app) as client:
+        threads = [threading.Thread(target=post_hang, args=(client,)) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    busy = [elapsed for detail, elapsed in answers if "in use" in detail]
+    assert len(answers) == 4
+    assert len(busy) == 3
+    assert max(busy) < 1.5
 
 
 @pytest.fixture
