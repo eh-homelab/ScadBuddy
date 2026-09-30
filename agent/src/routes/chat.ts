@@ -9,6 +9,7 @@ import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // The assistant panel's socket (#256, #300): `GET /api/v1/ai/chat`, upgraded
 // to a WebSocket that carries the panel protocol (frontend
@@ -501,4 +502,26 @@ export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = 
   }, intervalMs)
   timer.unref()
   return () => clearInterval(timer)
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** How often the chat socket re-reads the session list (SNAPSHOT_MS when omitted). */
+    chatSnapshotMs?: number
+  }
+}
+
+/** The assistant's chat socket (#256, #300), when `upgradeWebSocket` is given. */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerChatRoute(app, {
+      sessions: deps.sessions,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      upgradeWebSocket: deps.upgradeWebSocket,
+      ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
+      ...(deps.tabs ? { tabs: deps.tabs } : {}),
+    })
+  },
 }
