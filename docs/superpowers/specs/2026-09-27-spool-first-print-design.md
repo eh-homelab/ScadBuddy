@@ -320,6 +320,17 @@ filament/plate-temperature warning.
   Bambu's Generic (§4.3); plate differs from the last print (§4.4 — there is no
   plate/filament-temperature warning).
 
+### 4.6 Template print settings (#770)
+
+The resolver picks the process preset; the template may still say how it prints best.
+A template's `print_settings` (its `model.json`, keys and values allowlisted by
+`PRINT_SETTING_VALUES` in `library/catalogue.py`) go on every slice as
+`SlicePlan.process_overrides`, sent as the `SliceRequest`'s `process_overrides` over the
+resolved process preset, and are part of its `preset_key`. They are not a choice in the
+dialog. A downloaded 3MF gets the same settings in `project_settings.config`, listed in
+`different_settings_to_system` as edits to the system process. The print-flow spec
+(`2026-09-24-print-flow-design.md` §4) has the details.
+
 ## 5. Unknowns to test before building on them
 
 Run against the live Bambuddy before the implementation that depends on each. Results
