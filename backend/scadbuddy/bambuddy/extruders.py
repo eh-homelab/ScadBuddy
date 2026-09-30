@@ -112,8 +112,7 @@ def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
     standard), the same reading as :mod:`scadbuddy.bambuddy.hardware`."""
     if status is None or extruder >= len(status.nozzles):
         return False
-    nozzle_type = status.nozzles[extruder].nozzle_type or ""
-    return len(nozzle_type) > 1 and nozzle_type[1] == "H"
+    return status.nozzles[extruder].high_flow
 
 
 def high_flow_warnings(status: PrinterStatus | None, size: str) -> list[FilamentWarning]:
@@ -163,7 +162,7 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
         found.append(fitted_high_flow(status, extruder))
     if extruder == RACK_SIDE:
         found += [
-            len(slot.nozzle_type) > 1 and slot.nozzle_type[1] == "H"
+            slot.high_flow
             for slot in status.nozzle_rack
             if slot.id > LEFT and slot.nozzle_diameter == size
         ]

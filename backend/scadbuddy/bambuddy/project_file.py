@@ -13,6 +13,7 @@ the Settings printer or pipeline, else the fallback plate.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 
@@ -27,6 +28,8 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.schema import ParamValue
+
+logger = logging.getLogger(__name__)
 
 #: How many changed params the file name spells out before it stops.
 SUMMARY_PARAMS = 3
@@ -136,6 +139,7 @@ async def generate_target(
         try:
             stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzle)
         except (ApiError, ValueError):
+            logger.info("printer status unreadable; no nozzle is known")
             stats = None
     return await target_for(
         client, settings, printer_id=printer_id, nozzle_diameter=nozzle, nozzle_stats=stats
