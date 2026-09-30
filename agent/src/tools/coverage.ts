@@ -126,6 +126,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'POST /api/v1/print/library/{file_id}/run',
     ] as const
   ).map((operation) => ({ operation, reason: LIBRARY_PRINT_LATER })),
+  ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
+    (operation) => ({
+      operation,
+      reason:
+        "The print dialog's pre-submit nozzle verdict (#755). An agent's print_output run refuses the same " +
+        'verdict as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
+    }),
+  ),
   ...(
     [
       'GET /api/v1/print/library/{file_id}/thumbnail',

@@ -1,6 +1,6 @@
 """Slicing an output for print: the filament step's options, and the spool-first run.
 
-ScadBuddy owns no slicing settings. The print dialog's run (:func:`run_print`)
+ScadBuddy owns no slicing settings. The print dialog's run (:func:`execute_run`)
 derives every preset from the dialog's choices — spools, nozzles, quality and plate
 (spec 2026-09-27 §4) — and always slices then queues; there is no pipeline to run or
 choose from here. The send bar only uploads (#312); this is the only path that prints.
@@ -9,16 +9,19 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import _catalogue
+from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
+    ExtruderPlan,
     SlotSide,
     plan_extruders,
     slot_sides,
@@ -105,6 +108,11 @@ class PrintRunRequest(BaseModel):
     #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
     #: alongside it.
     options: PrintOptions = Field(default_factory=PrintOptions)
+    #: The caller's idempotency key for this print (#470): a new one (a UUID) per
+    #: deliberate Print, the same one on every retry of it. Part of the run's key, so a
+    #: retry re-attaches to its run while a reprint with the same choices is a new
+    #: print. Omitted (an older client), the key is the output and choices alone.
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PrintRunResult(BaseModel):
@@ -252,26 +260,129 @@ async def _spool_sides(
     return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
 
 
+async def _extruder_plan(
+    client: BambuddyClient,
+    source: PrintSource,
+    request: PrintRunRequest,
+    printer_id: int,
+    plate_ids: list[int],
+) -> tuple[ExtruderPlan, PrinterStatus | None, list[SpoolAssignment] | None]:
+    """:func:`plan_extruders` for ``request`` on ``printer_id``, with the printer status
+    and spool assignments read for it, so the run reuses them. Reads nothing that
+    uploads: the source's used slots come from its own 3MF or Bambuddy's plate read."""
+    printer_status = await _read_status(client, printer_id)
+    used = await source.used_slots(client, plate_ids)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
+    size = request.choices.nozzles[0].size
+    return (
+        plan_extruders(sides, printer_status, size=size, used_slots=used),
+        printer_status,
+        assignments,
+    )
+
+
+def _refusal(plan: ExtruderPlan) -> str:
+    """The one detail the run refuses ``plan``'s errors with, and the check repeats."""
+    return " ".join(plan.errors)
+
+
+class PrintCheck(BaseModel):
+    """What the nozzles make of the dialog's choices before Print (#755): the run's own
+    :func:`plan_extruders` verdict. ``errors`` holds the run's 422 detail word for word,
+    the reasons joined as the run joins them (#758 review); ``warnings`` what it would
+    carry back as advisories."""
+
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+
+
+async def check_print(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+) -> PrintCheck:
+    """The run's nozzle verdict for ``request``, with nothing uploaded, sliced or queued.
+
+    Only :func:`plan_extruders`' verdict: the other refusals need the catalogue or the
+    uploaded file, and the run still states them. With no plate or no printer there is
+    nothing to judge here, and the run says why."""
+    plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
+    printer_id = request.printer_id or settings.printer_id
+    if not plate_ids or printer_id is None:
+        return PrintCheck()
+    plan, _, _ = await _extruder_plan(client, source, request, printer_id, plate_ids)
+    return PrintCheck(errors=[_refusal(plan)] if plan.errors else [], warnings=plan.warnings)
+
+
+async def check_for_output(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+) -> PrintCheck:
+    """:func:`check_print` for an output ScadBuddy rendered."""
+    return await check_print(
+        client, OutputSource(store, uploads, meta, settings), settings, request
+    )
+
+
+async def check_for_library(
+    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
+) -> PrintCheck:
+    """:func:`check_print` for a file already in Bambuddy's library."""
+    return await check_print(client, await LibrarySource.load(client, file_id), settings, request)
+
+
+@dataclass(frozen=True)
+class PreparedRun:
+    """What :func:`prepare_run` checked, handed on to :func:`execute_run`."""
+
+    plate_ids: list[int]
+    printer_id: int
+    #: Read once, before the 202, and reused by the run rather than read again.
+    catalogue: _Catalogue
+    #: The printer's live status, read once for the nozzle checks (#469) and reused
+    #: by the run's hardware warnings; ``None`` when it was unreadable.
+    printer_status: PrinterStatus | None
+    #: The extruder plan the nozzle checks made; its warnings go on the result.
+    extruders: ExtruderPlan
+    #: The spool assignments the nozzle checks read, reused by the plates' read (#480);
+    #: ``None`` when they were not read or were unreadable, and the plates' read tries.
+    assignments: list[SpoolAssignment] | None
+
+
 async def run_print(
     client: BambuddyClient,
     source: PrintSource,
     settings: StoredSettings,
     request: PrintRunRequest,
 ) -> PrintRunResult:
-    """Slice with presets derived from the dialog's choices, then queue (spec §4).
+    """:func:`prepare_run` then :func:`execute_run`, in one request: a library file's
+    run (#313), which is not yet answered 202 (#470 moved only an output's)."""
+    prepared = await prepare_run(client, source, settings, request)
+    return await execute_run(client, source, settings, request, prepared)
 
-    A print into a project also records its printer and nozzle for that project
-    (:meth:`PrintSource.remember_project`), which is what the next Generate into it
-    lays its file out for.
 
-    Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
-    decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
-    (spec §6).
+async def prepare_run(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+) -> PreparedRun:
+    """Every refusal the request alone decides, before anything is uploaded (#470).
 
-    What the choices alone decide (nozzle sizes, printer and process preset) is
-    refused before the 3MF is uploaded. Every plate is then resolved before any is
-    sliced, so a slot error is a 422 with nothing on Bambuddy's queue, however many
-    plates the print has.
+    This is what ``POST .../run`` makes before it answers 202: the plates exist, a
+    printer is chosen and the resolver can serve it, the choices resolve to a
+    printer and process preset, and no printed filament could land on a nozzle of
+    another size (#469). Each is a read (the source's plates, ``/printers/``, the preset
+    catalogue, the printer's status and spool assignments), none waits on a slice, so
+    it stays well inside a proxy's timeout. What needs a plate's slots is left to
+    :func:`execute_run`, because only a library file answers those.
     """
     plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
     if not plate_ids:
@@ -288,28 +399,64 @@ async def run_print(
             "no printer is chosen and none is configured, so there is nothing to print on"
         )
     await _require_resolvable_printer(client, printer_id)
-    choices = request.choices
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
     # Read before the upload, so that what the choices alone refuse — mixed nozzle
     # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
     # library. Slot errors need the plate's slots, which only a library file answers,
-    # so those are still found after the upload, by `resolve` below.
+    # so those are still found after the upload, by `resolve` in `execute_run`. It is
+    # two GETs, the same the dialog's own choices read makes to open (`choices.py`).
     catalogue = await _catalogue(client)
-    refused = choice_errors(choices, catalogue)
+    refused = choice_errors(request.choices, catalogue)
     if refused:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
     # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
     # another size pauses the printer at the first layer, so such a run is refused.
-    printer_status = await _read_status(client, printer_id)
-    used = await source.used_slots(client, plate_ids)
-    sides, assignments = await _spool_sides(
-        client, request.filament_plan, used, printer_id, printer_status
+    extruders, printer_status, assignments = await _extruder_plan(
+        client, source, request, printer_id, plate_ids
     )
-    extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
     if extruders.errors:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(extruders))
+    return PreparedRun(
+        plate_ids=plate_ids,
+        printer_id=printer_id,
+        catalogue=catalogue,
+        printer_status=printer_status,
+        extruders=extruders,
+        assignments=assignments,
+    )
+
+
+async def execute_run(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+    prepared: PreparedRun,
+    before_enqueue: Callable[[], Awaitable[None]] | None = None,
+) -> PrintRunResult:
+    """Slice with presets derived from the dialog's choices, then queue (spec §4).
+
+    A print into a project also records its printer and nozzle for that project
+    (:meth:`PrintSource.remember_project`), which is what the next Generate into it
+    lays its file out for.
+
+    Always the slice-and-queue route: there is no pipeline to run. Bambuddy still
+    decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
+    (spec §6).
+
+    Runs after :func:`prepare_run`, in the background of a 202 for an output (#470):
+    it uploads, and waits on every slice. Every plate is resolved before any is sliced,
+    so a slot error is a 422 with nothing on Bambuddy's queue, however many plates the
+    print has. ``before_enqueue`` is awaited before each plate's ``POST /queue/``.
+    """
+    plate_ids = prepared.plate_ids
+    printer_id = prepared.printer_id
+    catalogue = prepared.catalogue
+    printer_status = prepared.printer_status
+    extruders = prepared.extruders
+    choices = request.choices
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
     project_id = chosen_project(request, settings)
@@ -344,7 +491,7 @@ async def run_print(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
-        assignments=assignments,
+        assignments=prepared.assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
@@ -394,6 +541,7 @@ async def run_print(
             copies=copies,
             project_id=project_id,
             options=print_options,
+            before_enqueue=before_enqueue,
         )
         sent = await source.record(library_file_id, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
@@ -422,23 +570,6 @@ async def run_print(
         printed.folder_id,
         copies=copies,
         warnings=warnings + hardware + extruders.warnings,
-    )
-
-
-async def run_for_output(
-    client: BambuddyClient,
-    store: OutputStore,
-    uploads: BambuddyUploadStore,
-    meta: OutputMeta,
-    settings: StoredSettings,
-    request: PrintRunRequest,
-    *,
-    stem: str | None = None,
-) -> PrintRunResult:
-    """:func:`run_print` for an output ScadBuddy rendered. ``stem`` names a copy uploaded
-    into a project's folder (:func:`project_filename`, #317)."""
-    return await run_print(
-        client, OutputSource(store, uploads, meta, settings, stem=stem), settings, request
     )
 
 

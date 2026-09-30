@@ -57,6 +57,8 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/choices",
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
+    "/api/v1/print/outputs/{output_id}/check",
+    "/api/v1/print/runs/{run_id}",
     "/api/v1/analyzers",
     "/api/v1/analyzers/run",
     "/api/v1/analyzers/fixes/preview",
@@ -105,6 +107,7 @@ EXPECTED_PATHS = {
     "/api/v1/print/library/{file_id}/choices",
     "/api/v1/print/library/{file_id}/filaments",
     "/api/v1/print/library/{file_id}/run",
+    "/api/v1/print/library/{file_id}/check",
 }
 
 

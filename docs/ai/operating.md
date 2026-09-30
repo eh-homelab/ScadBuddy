@@ -70,7 +70,7 @@ What the ingress must do:
 
 | Path | Service | Notes |
 |---|---|---|
-| `/api/v1/ai` (prefix) | agent `:8081` | REST, SSE (`/api/v1/ai/sessions/{id}/events`) and the WebSocket `/api/v1/ai/chat` |
+| `/api/v1/ai` (prefix) | agent `:8081` | REST, SSE (`/api/v1/ai/sessions/{id}/events`) and the WebSockets `/api/v1/ai/chat` and `/api/v1/ai/bridge` (the tab's socket for the `browser_*` tools, #254, [browser-bridge.md](browser-bridge.md#the-tabs-socket)) |
 | `/mcp` (prefix) | agent `:8081` | MCP Streamable HTTP (SSE) |
 | `/` (prefix) | backend `:8080` | everything else, including the backend's WebSocket `/api/v1/ws` |
 
@@ -83,7 +83,7 @@ What the ingress must do:
   NGINX out of the box. No special configuration required." Its default
   `proxy-read-timeout` is 60 s
   ([ingress-nginx, WebSockets](https://kubernetes.github.io/ingress-nginx/user-guide/miscellaneous/#websockets)).
-  The agent pings each chat socket every 25 s (`HEARTBEAT_MS`, `startHeartbeat`,
+  The agent pings each chat and bridge socket every 25 s (`HEARTBEAT_MS`, `startHeartbeat`,
   [`agent/src/routes/chat.ts`](../../agent/src/routes/chat.ts)), and the session event
   stream sends a comment every 20 s with `X-Accel-Buffering: no` (`SSE_KEEPALIVE_MS`,
   [`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)). Both
@@ -519,6 +519,14 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
   in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
   (§4.1) answer 503. Settings writes this table through §4.1's routes.
+
+- `ai_browser_pairings`: MCP clients the user paired with a tab by typing a code
+  (#254, spec §8.5, `20260929T1330Z_browser_pairings.sql`): who asked, the SHA-256 of
+  the code (never the code), the status (`pending`, `paired`, `denied`, `ended`), the
+  tab, wrong tries and the expiry. `PostgresPairingStore` in
+  [`agent/src/bridge/pairings.ts`](../../agent/src/bridge/pairings.ts); see
+  [browser-bridge.md](browser-bridge.md#pairing-spec-85). Without a database only chat
+  sessions reach a tab.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content

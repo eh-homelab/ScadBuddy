@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError, mayHaveRun } from '../api/client'
+import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
   ChoicesView,
   PrintOptions,
@@ -56,13 +56,18 @@ export function useRunPrint({
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
   /**
-   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection):
-   * the backend may have queued it anyway, so the dialog says so instead of offering
-   * Print again. Closing the dialog is the way back to it.
+   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection),
+   * or one that failed after it had tried to queue (`may_have_queued`): Bambuddy may
+   * have queued it anyway, so the dialog says so instead of offering Print again.
+   * Closing the dialog is the way back to it.
    */
   const [unanswered, setUnanswered] = useState<string | null>(null)
   /** Which `run()` may still update the dialog: bumped by each run. */
   const runAttempt = useRef(0)
+  /** Stops following the current run: the dialog unmounted, or was reset. */
+  const following = useRef<AbortController | null>(null)
+
+  useEffect(() => () => following.current?.abort(), [])
 
   // A refused run was refused for *these* choices; any change is worth another try.
   useEffect(() => {
@@ -105,6 +110,9 @@ export function useRunPrint({
     const printChoices = printChoicesOf(selection)
     if (!source || !choices || !printChoices) return
     const attempt = ++runAttempt.current
+    following.current?.abort()
+    const controller = new AbortController()
+    following.current = controller
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -118,15 +126,18 @@ export function useRunPrint({
         all_plates: plate === 'all',
         project_id: projectId,
         options,
+        // One per press: the same choices printed again are a new print, while
+        // runPrint's own retries of this press re-attach to its run (#470).
+        request_id: newRequestId(),
       }
-      const ran = await sourceApi(source).run(body)
+      const ran = await sourceApi(source).run(body, controller.signal)
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
-      if (attempt !== runAttempt.current) return
+      if (attempt !== runAttempt.current || controller.signal.aborted) return
       if (mayHaveRun(cause)) {
         setUnanswered((cause as ApiError).detail)
         return
@@ -140,6 +151,7 @@ export function useRunPrint({
   }
 
   function reset() {
+    following.current?.abort()
     setRunError(null)
     setRefused(false)
     setResult(null)

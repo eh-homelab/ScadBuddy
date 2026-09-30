@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, printRunPoll } from '../api/client'
 import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
@@ -184,6 +184,7 @@ describe('PrintPicker', () => {
       all_plates: false,
       project_id: null,
       options: {},
+      request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
 
@@ -317,6 +318,87 @@ describe('PrintPicker', () => {
   })
 })
 
+describe('PrintPicker · Nozzle verdict (#755)', () => {
+  const refusal =
+    'This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm ' +
+    "hotend in the rack. The slicer spreads a multi-color print across both, and ScadBuddy can't " +
+    'keep it on one side, so the other would pause it at the first layer. Fit a 0.2 mm nozzle on ' +
+    'both sides, or print in one color.'
+
+  it('says before Print what the run would refuse for the nozzles, and holds Print', async () => {
+    const checks = watch('POST', '/check')
+    const run = vi.spyOn(api, 'runPrint')
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', async ({ request }) => {
+        const body = (await request.json()) as { choices: { nozzles: { size: string }[] } }
+        const errors = body.choices.nozzles[0]?.size === '0.2' ? [refusal] : []
+        return HttpResponse.json({ errors, warnings: [] })
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+
+    const error = await screen.findByTestId('nozzle-verdict-error')
+    expect(error).toHaveTextContent(refusal)
+    expect(within(screen.getByTestId('print-checks')).getByTestId('nozzle-verdict-error')).toBe(error)
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+    expect(run).not.toHaveBeenCalled()
+    const last = checks.bodies.at(-1) as { choices: unknown; filament_plan: unknown; printer_id: unknown }
+    expect(last.choices).toMatchObject({ nozzles: [{ size: '0.2' }, { size: '0.2' }] })
+    expect(last.filament_plan).toMatchObject({ slots: expect.any(Array) })
+    expect(last.printer_id).toBe(choicesView.printer_id)
+  })
+
+  it('lists the nozzle advisories without holding Print', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            {
+              kind: 'side-unknown',
+              message: 'Only the right nozzle is 0.2 mm, and the slicer picks the extruder.',
+            },
+          ],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    expect(await screen.findByTestId('nozzle-verdict-warning')).toHaveTextContent(
+      'Only the right nozzle is 0.2 mm',
+    )
+    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+  })
+  it('says when the nozzle check could not run, and reads it again on request', async () => {
+    let failing = true
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        failing
+          ? HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+          : HttpResponse.json({ errors: [refusal], warnings: [] }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    const failed = await screen.findByTestId('nozzle-verdict-failed')
+    expect(failed).toHaveTextContent('The nozzle check could not run: Bambuddy did not answer')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+
+    failing = false
+    await user.click(within(failed).getByRole('button', { name: 'Check again' }))
+    expect(await screen.findByTestId('nozzle-verdict-error')).toHaveTextContent(refusal)
+    expect(screen.queryByTestId('nozzle-verdict-failed')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+  })
+})
+
 describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
   it('offers no per-slot preset override until Advanced is on', async () => {
     const { user } = renderPicker()
@@ -379,10 +461,66 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(run).toHaveBeenCalledTimes(2)
+    // #470: each press is its own print, so the server does not answer the second with
+    // the first's run.
+    const ids = run.mock.calls.map(([, body]) => body.request_id)
+    expect(ids[0]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[1]).toMatch(/^[0-9a-f]{32}$/)
+    expect(ids[0]).not.toBe(ids[1])
+  })
+
+  it('offers no Print after a failed run that had tried to queue (#470)', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        title: 'Internal Server Error',
+        status: 500,
+        detail: 'Plate 2 failed to slice after plate 1 was queued.',
+        may_have_queued: true,
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Plate 2 failed to slice after plate 1 was queued.')
+    expect(alert).toHaveTextContent(
+      "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice.",
+    )
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+  })
+
+  it('keeps Print after a failed run that never tried to queue, even a Bambuddy timeout', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(
+      new ApiError({
+        type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+        title: 'Gateway Timeout',
+        status: 504,
+        detail: 'could not reach Bambuddy to slice the plate: ReadTimeout',
+        may_have_queued: false,
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('could not reach Bambuddy to slice the plate: ReadTimeout')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 })
 
 describe('PrintPicker · A run that got no answer (#470)', () => {
+  // runPrint re-sends an unanswered press (same request_id) before it gives up.
+  beforeEach(() => {
+    printRunPoll.intervalMs = 1
+  })
+  afterEach(() => {
+    printRunPoll.intervalMs = 1000
+  })
+
   function runAnswers(answer: () => Response) {
     const calls = watch('POST', '/run')
     server.use(http.post('/api/v1/print/outputs/:id/run', answer))
@@ -417,7 +555,9 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       expect.any(String),
       'noopener',
     )
-    expect(bodies).toHaveLength(1)
+    // One press, re-sent while unanswered: every try is the same run on the server.
+    expect(bodies).toHaveLength(1 + printRunPoll.reattempts)
+    expect(new Set(bodies.map((body) => body['request_id'])).size).toBe(1)
     expect(onRan).not.toHaveBeenCalled()
   })
 
@@ -490,7 +630,21 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
       http.post('/api/v1/print/outputs/:id/run', async () => {
         calls += 1
         await new Promise<void>((resolve) => (release = resolve))
-        return HttpResponse.json(queuedResult)
+        // #470: the route answers with the run, here one already finished.
+        return HttpResponse.json(
+          {
+            id: 'run-1',
+            output_id: output.id,
+            status: 'succeeded',
+            created_at: '2026-09-28T10:00:00Z',
+            finished_at: '2026-09-28T10:00:01Z',
+            result: queuedResult,
+            error: null,
+            may_have_queued: false,
+            repeated: false,
+          },
+          { status: 202 },
+        )
       }),
     )
     const onClose = vi.fn()
@@ -1335,7 +1489,11 @@ describe('PrintPicker · A library file (#313)', () => {
     await user.click(screen.getByRole('radio', { name: /0\.2 mm/ }))
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
-    expect(run).toHaveBeenCalledWith(89, expect.objectContaining({ printer_id: expect.any(Number) }))
+    expect(run).toHaveBeenCalledWith(
+      89,
+      expect.objectContaining({ printer_id: expect.any(Number) }),
+      expect.any(AbortSignal),
+    )
     await waitFor(() =>
       expect(remember).toHaveBeenCalledWith(89, expect.objectContaining({ nozzles: expect.any(Array) })),
     )

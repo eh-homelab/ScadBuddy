@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import { clientMessage, parseServerEvent, type ClientMessage, type PageContext } from './protocol'
+import { TAB_ID } from '../tabId'
 import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
@@ -47,6 +48,8 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         // while disconnected, so this is the only one: a second would replay again
         // onto the feed and double every reply.
         live.current = true
+        // First, so the attach below and every message after it pair with this tab (#254).
+        t.send(clientMessage({ type: 'tab.bind', tabId: TAB_ID }))
         const active = latest.current.activeId
         if (active) {
           dispatch({ type: 'select', sessionId: active })
