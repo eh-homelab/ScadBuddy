@@ -189,7 +189,7 @@ DECLARED: dict[str, object] = {"pipeline": {"module": "pipeline/pipeline.py", "a
 
 @pytest.mark.parametrize(
     ("raw", "message"),
-    [("[]", "model.json"), ('{"description": "no name"}', "model.json")],
+    [('{"name": 3}', "model.json"), ('{"tags": "x"}', "model.json")],
 )
 async def test_a_model_json_that_is_no_template_is_refused(
     tmp_path: Path, raw: str, message: str
@@ -197,6 +197,18 @@ async def test_a_model_json_that_is_no_template_is_refused(
     paths = _template(tmp_path, {}, {})
     paths.model_meta("demo").write_text(raw, encoding="utf-8")
     assert message in (await _refused(paths)).message
+
+
+@pytest.mark.parametrize("raw", ["[]", '{"description": "no name"}'])
+async def test_a_model_json_the_catalogue_reads_loads_the_default(tmp_path: Path, raw: str) -> None:
+    """Read as `Catalogue.read_raw_meta` reads it: a non-object is empty, a missing name
+    is the slug; the catalogue lists such a template, so it renders too."""
+    paths = _template(tmp_path, {}, {})
+    paths.model_meta("demo").write_text(raw, encoding="utf-8")
+    loaded = await ActivityEnvironment().run(
+        _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
+    )
+    assert loaded.version == "default"
 
 
 async def test_a_pipeline_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
