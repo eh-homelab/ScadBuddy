@@ -7,13 +7,15 @@ for it and names the presets the print dialog would slice with, from the same re
 (``resolver.resolve``) and the model's remembered choices when it has any; otherwise
 the mounted nozzle's size and the default tier.
 
-Without a default printer, with Bambuddy unreachable, or when the resolver refuses
-(no spool for a colour, no preset for the size), the stored file is served unchanged:
-a download never fails for want of presets.
+A printer the resolver has no presets for, or a refusal (no spool for a colour, no
+preset for the size), still gets the re-plated file, on the placeholders. Without a
+default printer, with Bambuddy unreachable, or when the file does not fit the printer,
+the stored file is served unchanged: a download never fails for want of either.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -24,6 +26,7 @@ from typing import get_args
 from urllib.parse import quote
 
 from fastapi import Response
+from fastapi.responses import FileResponse
 
 from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -35,7 +38,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, download_filename
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, ZIP_TIMESTAMP, replate_3mf
-from scadbuddy.render.plate import PlateFitError, plate_for
+from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +84,16 @@ def with_presets(payload: bytes, presets: ProjectPresets) -> bytes:
 
 
 async def download_3mf(path: Path, meta: OutputMeta, settings: StoredSettings) -> Response:
-    """``path``'s 3MF as an attachment, for the default printer when there is one."""
-    payload = await for_default_printer(path.read_bytes(), meta, settings)
+    """``path``'s 3MF as an attachment, for the default printer when there is one.
+
+    The stored file itself, as a :class:`FileResponse` (so Range and conditional GET
+    still work), whenever nothing about it changes."""
     filename = download_filename(meta)
+    payload = await for_default_printer(path, meta, settings)
+    if payload is None:
+        return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=filename)
     quoted = quote(filename)
-    # Starlette's own FileResponse header, which the download used before #769.
+    # The header FileResponse writes for the same filename.
     disposition = (
         f'attachment; filename="{filename}"'
         if quoted == filename
@@ -96,25 +104,48 @@ async def download_3mf(path: Path, meta: OutputMeta, settings: StoredSettings) -
     )
 
 
-async def for_default_printer(payload: bytes, meta: OutputMeta, settings: StoredSettings) -> bytes:
-    """``payload`` re-plated for the default printer and naming its presets, or
-    ``payload`` itself when they cannot be known."""
+async def for_default_printer(
+    path: Path, meta: OutputMeta, settings: StoredSettings
+) -> bytes | None:
+    """``path``'s 3MF re-plated for the default printer and, when they resolve, naming
+    its presets; ``None`` when the stored file is served as it is.
+
+    The plate is fitted whenever the printer is known; only the preset names fall back
+    to the placeholders when the resolver cannot name them.
+    """
     if settings.printer_id is None:
-        return payload
+        return None
     try:
         async with client_for(settings) as client:
-            presets = await _presets(client, meta, settings, settings.printer_id)
-            if presets is None:
-                return payload
             # The plate the send path fits a file to, for the same printer.
             target = await target_for(client, settings, printer_id=settings.printer_id)
-        return with_presets(replate_3mf(payload, target.plate), presets)
-    except (ApiError, ValueError, PlateFitError) as error:
+            try:
+                presets = await _presets(client, meta, settings, settings.printer_id)
+            except (ApiError, ValueError) as error:
+                logger.info(
+                    "download keeps the preset placeholders",
+                    extra={"output_id": meta.id, "reason": str(error)},
+                )
+                presets = None
+    except (ApiError, ValueError) as error:
         logger.info(
-            "download served without the default printer's presets",
+            "download served as stored: the default printer is unreadable",
             extra={"output_id": meta.id, "reason": str(error)},
         )
-        return payload
+        return None
+    try:
+        return await asyncio.to_thread(_rewrite, path, target.plate, presets)
+    except (PlateFitError, ValueError) as error:
+        logger.info(
+            "download served as stored: it does not fit the default printer",
+            extra={"output_id": meta.id, "reason": str(error)},
+        )
+        return None
+
+
+def _rewrite(path: Path, plate: PlateGeometry, presets: ProjectPresets | None) -> bytes:
+    replated = replate_3mf(path.read_bytes(), plate)
+    return with_presets(replated, presets) if presets is not None else replated
 
 
 async def _presets(

@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 import psycopg
@@ -16,7 +17,8 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.render.bambu3mf import PRESET_PLACEHOLDER
+from scadbuddy.render.bambu3mf import PRESET_PLACEHOLDER, replate_3mf
+from scadbuddy.render.plate import PlateGeometry, plate_for
 from tests.api.test_print import printers_route
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -139,7 +141,7 @@ def test_an_unreachable_bambuddy_serves_the_stored_file(
 ) -> None:
     configure(client, printer_id=1)
     output_id = make_output(client, model)
-    respx.get(f"{API}/printers/1").mock(side_effect=httpx.ConnectError("refused"))
+    respx.route(host="bambuddy.test").mock(side_effect=httpx.ConnectError("refused"))
 
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
 
@@ -147,8 +149,29 @@ def test_an_unreachable_bambuddy_serves_the_stored_file(
     assert response.content == _stored(paths, model, output_id)
 
 
+def _item_transform(payload: bytes) -> str | None:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+    item = root.find(".//{*}item")
+    assert item is not None
+    return item.get("transform")
+
+
+def _assert_refitted_on_placeholders(content: bytes, stored: bytes, plate: PlateGeometry) -> None:
+    """Re-plated for the printer, with the preset names left as the file had them."""
+    assert content != stored
+    assert _item_transform(content) == _item_transform(replate_3mf(stored, plate))
+    settings = _project_settings(content)
+    assert settings["printer_settings_id"] == PRESET_PLACEHOLDER
+    assert settings["print_settings_id"] == PRESET_PLACEHOLDER
+    assert (
+        settings["printable_height"]
+        == _project_settings(replate_3mf(stored, plate))["printable_height"]
+    )
+
+
 @respx.mock
-def test_a_resolver_refusal_serves_the_stored_file(
+def test_a_resolver_refusal_still_refits_the_plate(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """No spool matches the render's red, so the slot has no filament preset."""
@@ -160,4 +183,40 @@ def test_a_resolver_refusal_serves_the_stored_file(
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
 
     assert response.status_code == 200
-    assert response.content == _stored(paths, model, output_id)
+    stored = _stored(paths, model, output_id)
+    _assert_refitted_on_placeholders(response.content, stored, plate_for("H2C"))
+
+
+@respx.mock
+def test_presets_bambuddy_cannot_read_still_refit_the_plate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _bambuddy()
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    stored = _stored(paths, model, output_id)
+    _assert_refitted_on_placeholders(response.content, stored, plate_for("H2C"))
+
+
+@respx.mock
+def test_a_printer_without_presets_still_gets_its_plate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The resolver names H2C presets only; an A1 mini still gets its own plate."""
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    printer = {**recording("printers.json")[0], "model": "A1 mini"}
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer]))
+    respx.get(f"{API}/printers/1").mock(return_value=httpx.Response(200, json=printer))
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    assert 'filename="demo-elan.3mf"' in response.headers["content-disposition"]
+    stored = _stored(paths, model, output_id)
+    _assert_refitted_on_placeholders(response.content, stored, plate_for("A1 mini"))

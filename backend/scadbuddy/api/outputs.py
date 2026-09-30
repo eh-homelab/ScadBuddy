@@ -268,7 +268,7 @@ async def delete_output(
 
 @router.get(
     "/outputs/{output_id}/model.3mf",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
