@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { httpRequestEnabled, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from './headlessBrowser.js'
@@ -17,7 +18,7 @@ import type { SettingsRepo } from './headlessBrowser.js'
 //
 // The PUT is a settings write (outward, spec §8.1), so it passes guard.ts
 // `uiRequestProblem`: from the UI's origin, through the HTTPS ingress, JSON
-// only. The store audits the write (credentials.ts SettingsStore.set).
+// only. The store audits the write as the UI user (credentials.ts SettingsStore.set).
 
 export type HttpRequestRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -70,7 +71,7 @@ export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps)
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    await settings.set(SETTING_HTTP_REQUEST, body.enabled)
+    await settings.set(SETTING_HTTP_REQUEST, body.enabled, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
     const view: HttpRequestSettingView = { enabled: body.enabled }
     return c.json(view)
   })

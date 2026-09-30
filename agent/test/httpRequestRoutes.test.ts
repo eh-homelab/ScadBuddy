@@ -14,9 +14,11 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 
 function setup(options: { ready?: boolean; settings?: boolean } = {}) {
   const values = new Map<string, unknown>()
+  const contexts: unknown[] = []
   const repo: SettingsRepo = {
     get: <T>(key: string) => Promise.resolve(values.get(key) as T),
-    set: (key, value) => {
+    set: (key, value, context) => {
+      contexts.push(context)
       values.set(key, value)
       return Promise.resolve()
     },
@@ -28,7 +30,7 @@ function setup(options: { ready?: boolean; settings?: boolean } = {}) {
     remoteAddress: () => '10.0.0.7',
     origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
   })
-  return { app, values }
+  return { app, values, contexts }
 }
 
 const get = (app: Hono) => app.request(URL_, { headers: { host: UI.host, 'x-forwarded-proto': 'https' } })
@@ -37,10 +39,12 @@ const put = (app: Hono, body: unknown, headers: Record<string, string> = UI) =>
 
 describe('the http_request setting', () => {
   it('is on until turned off, and reads back what was stored', async () => {
-    const { app, values } = setup()
+    const { app, values, contexts } = setup()
     expect(await (await get(app)).json()).toEqual({ enabled: true })
     const off = await put(app, { enabled: false })
     expect(off.status).toBe(200)
+    // Audited as the UI user, from the request's address.
+    expect(contexts[0]).toMatchObject({ surface: 'http', clientIp: '10.0.0.7' })
     expect(values.get(SETTING_HTTP_REQUEST)).toBe(false)
     expect(await (await get(app)).json()).toEqual({ enabled: false })
     await put(app, { enabled: true })
