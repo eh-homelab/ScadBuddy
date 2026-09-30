@@ -1,5 +1,6 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
 import { SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -20,7 +21,8 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 export type SettingsRepo = {
   get<T>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown): Promise<void>
+  /** `context` says who wrote it, for the audit row (credentials.ts SettingsStore.set). */
+  set(key: string, value: unknown, context?: AuditContext): Promise<void>
 }
 
 export type HeadlessBrowserRouteDeps = {
