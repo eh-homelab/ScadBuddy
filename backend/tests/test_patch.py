@@ -128,9 +128,30 @@ def test_lines_found_more_than_once_elsewhere_are_ambiguous() -> None:
 
 
 def test_a_second_file_is_refused() -> None:
-    diff = "--- a/one\n+++ b/one\n@@ -1 +1 @@\n-a\n+A\n--- a/two\n+++ b/two\n@@ -1 +1 @@\n-a\n+A\n"
+    one = "diff --git a/one b/one\nindex 1..2 100644\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-a\n+A\n"
+    two = one.replace("one", "two")
     with pytest.raises(PatchError, match="more than one file"):
+        apply_unified_diff(SOURCE, one + two)
+    with pytest.raises(PatchError, match="more than one file"):
+        headers = "--- a/one\n+++ b/one\n--- a/two\n+++ b/two\n"
+        apply_unified_diff(SOURCE, headers + "@@ -1 +1 @@\n-a\n+A\n")
+
+
+def test_a_second_file_with_no_diff_line_fails_and_says_why() -> None:
+    diff = "--- a/one\n+++ b/one\n@@ -1 +1 @@\n-a\n+A\n--- a/two\n+++ b/two\n@@ -1 +1 @@\n-a\n+A\n"
+    with pytest.raises(PatchError, match=r"hunk 1 .*a second file's header, send one file"):
         apply_unified_diff(SOURCE, diff)
+
+
+def test_header_lookalikes_before_the_next_hunk_are_hunk_lines() -> None:
+    # Review of #741: "-- fake" removed and "++ fake2" added as hunk 1's last lines,
+    # straight before hunk 2's @@, look like a second file's header. They are not.
+    diff = (
+        "--- a/model.scad\n+++ b/model.scad\n"
+        "@@ -1,2 +1,2 @@\n x\n--- fake\n+++ fake2\n"
+        "@@ -4,1 +4,1 @@\n-old\n+new\n"
+    )
+    assert apply_unified_diff("x\n-- fake\ny\nold\n", diff) == "x\n++ fake2\ny\nnew\n"
 
 
 def test_text_that_is_not_a_diff_is_refused() -> None:

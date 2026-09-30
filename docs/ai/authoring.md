@@ -35,7 +35,11 @@ Every edit, restore and create is one commit in the model's history
 or search/replace `edits`. The backend applies it to the source as it stands
 (`backend/scadbuddy/library/patch.py`):
 
-- File headers are skipped; a diff naming a second file is refused.
+- File headers are skipped; a diff naming a second file is refused. After the first
+  hunk a second file starts only at a `diff` line (`git diff`, `diff -ru`): a `---` then
+  `+++` pair there is a removed and an added line, even right before the next `@@`. A
+  second file pasted on with no `diff` line fails as a hunk that does not apply, and the
+  error says it may be a second file.
 - A hunk is tried at the line its header names, then at the one other place below the
   previous hunk where its old lines occur. Two such places is ambiguous and refused.
   There is no fuzz: a context line that differs is a conflict. At most 100 hunks

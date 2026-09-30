@@ -10,10 +10,17 @@ Unified diff, as GNU diff and ``git diff`` write it
 (https://www.gnu.org/software/diffutils/manual/html_node/Detailed-Unified.html). File
 headers (``diff --git``, ``index``, a ``---`` line followed by a ``+++`` one) are
 skipped, since the route already names the one file; a diff that names a second file
-is refused rather than half-applied. The hunk header's line counts are not trusted,
-only its start line: each hunk is tried where its header puts it, then, because a
-model writing a diff by hand often gets the numbers wrong, at the one other place
-below the previous hunk where its old-side lines occur. Two or more such places is
+is refused rather than half-applied. After the first hunk a second file starts only at
+a ``diff`` line, as ``git diff`` and ``diff -ru`` write one: a ``---`` then ``+++`` pair
+there is a removed and an added line, even straight before the next ``@@``, since a
+source line may begin ``--`` and the next hunk of the same file looks just like a
+second file's first (review of #741). A second file pasted on with no ``diff`` line
+still fails, as a hunk whose lines are not in the source, and that error says so.
+
+The hunk header's line counts are not trusted, only its start line: each hunk is tried
+where its header puts it, then, because a model writing a diff by hand often gets the
+numbers wrong, at the one other place below the previous hunk where its old-side lines
+occur. Two or more such places is
 ambiguous and refused. No fuzz: a context line that differs is a conflict, not
 something to guess past.
 
@@ -41,7 +48,7 @@ MAX_EDITS = 100
 MAX_HUNKS = 100
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-_FILE_HEADERS = ("diff --git ", "index ", "new file mode", "deleted file mode", "similarity ")
+_FILE_HEADERS = ("index ", "new file mode", "deleted file mode", "similarity ")
 
 
 class PatchError(ValueError):
@@ -62,6 +69,9 @@ class _Hunk:
     # "\ No newline at end of file" after that side's last line.
     old_unterminated: bool = False
     new_unterminated: bool = False
+    # Ends in a `---` then `+++` pair straight before the next `@@`: a second file's
+    # header, if the hunk does not apply.
+    ends_like_a_header: bool = False
 
 
 def apply_edits(source: str, edits: list[SearchReplace]) -> str:
@@ -86,22 +96,30 @@ def apply_edits(source: str, edits: list[SearchReplace]) -> str:
 def _parse(diff: str) -> list[_Hunk]:
     hunks: list[_Hunk] = []
     files = 0
+    # A `diff` line opened this file, so its `---`/`+++` pair is not another one.
+    opened = False
     current: _Hunk | None = None
     lines = diff.splitlines()
     for index, line in enumerate(lines):
         following = lines[index + 1] if index + 1 < len(lines) else ""
         after = lines[index + 2] if index + 2 < len(lines) else ""
-        # A file header is a `--- ` line then a `+++ ` one, before any hunk or with a
-        # hunk straight after it. Anywhere else `--- a` then `+++ b` removes "-- a"
-        # and adds "++ b". The @@ counts are not asked: a hand-written diff often
-        # gets them wrong (review of #741).
-        header_like = line.startswith("--- ") and following.startswith("+++ ")
-        if header_like and (current is None or _HUNK.match(after)):
+        # No hunk line starts with "diff ", so this one starts a file wherever it is.
+        if line.startswith("diff "):
             files += 1
             if files > 1:
                 raise PatchError("the diff changes more than one file; send one per file")
-            current = None
+            current, opened = None, True
             continue
+        header_like = line.startswith("--- ") and following.startswith("+++ ")
+        if header_like and current is None:
+            if not opened:
+                files += 1
+                if files > 1:
+                    raise PatchError("the diff changes more than one file; send one per file")
+            opened = False
+            continue
+        if header_like and current is not None and _HUNK.match(after):
+            current.ends_like_a_header = True
         if current is None and line.startswith(("+++ ", *_FILE_HEADERS)):
             continue
         header = _HUNK.match(line)
@@ -176,9 +194,14 @@ def apply_unified_diff(source: str, diff: str) -> str:
         if hunk.old and (at < floor or lines[at : at + len(hunk.old)] != hunk.old):
             found = _occurrences(lines, hunk.old, floor)
             if not found:
+                hint = (
+                    "; if its last two lines are a second file's header, send one file per patch"
+                    if hunk.ends_like_a_header
+                    else ""
+                )
                 raise PatchError(
                     f"hunk {hunk.number} (at line {hunk.old_start}): its context and removed "
-                    "lines are not in the source; read it again and rebuild the patch"
+                    f"lines are not in the source; read it again and rebuild the patch{hint}"
                 )
             if len(found) > 1:
                 raise PatchError(
