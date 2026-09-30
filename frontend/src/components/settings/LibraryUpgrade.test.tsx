@@ -11,6 +11,7 @@ import {
   setMockLibraryPin,
 } from '../../mocks/features/libraryUpgrade'
 import { mockModels, problem, replaceMockModel, setMockInvalidLibraries } from '../../mocks/handlers'
+import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LibraryUpgrade } from './LibraryUpgrade'
@@ -84,6 +85,19 @@ describe('LibraryUpgrade', () => {
     const gridfinity = await within(list).findByRole('listitem', { name: 'Gridfinity Bin' })
     expect(gridfinity).toHaveTextContent('Pinned to v2.1 at c0ffee0')
     expect(within(list).getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  it('offers a library pinned elsewhere while the panel is open (#766)', async () => {
+    renderPage(<LibraryUpgrade />)
+    const select = await screen.findByLabelText('Library')
+    expect(within(select).queryByRole('option', { name: 'threads' })).toBeNull()
+
+    setMockLibraryPin('gridfinity-bin', { name: 'threads', url: 'https://github.com/rcolyer/threads-scad.git', ref: 'v2.1', commit: 'c0ffee00'.repeat(5) })
+    // Re-sent until it lands: an event before the subscription is confirmed reaches no one.
+    await waitFor(() => {
+      emitRealtime('library.changed', ['libraries', 'model:gridfinity-bin'], { slug: 'gridfinity-bin', name: 'threads' })
+      expect(within(screen.getByLabelText('Library')).getByRole('option', { name: 'threads' })).toBeInTheDocument()
+    })
   })
 
   it('reads the models once, not again on every switch of library', async () => {
@@ -230,6 +244,40 @@ describe('LibraryUpgrade', () => {
     expect(select).toBeDisabled()
     await within(row('Name Keychain')).findByTestId('library-moved')
     await waitFor(() => expect(select).toBeEnabled())
+  })
+
+  it('holds the candidate ref while a move runs, but not while a check runs (#771)', async () => {
+    let release: () => void = () => {}
+    server.use(
+      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
+        await delay(300)
+        return undefined
+      }),
+      http.patch('/api/v1/models/:slug/libraries/:name', async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return undefined
+      }),
+    )
+    const { user } = await open()
+    const input = screen.getByLabelText('Candidate ref')
+
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    expect(input).toBeEnabled()
+    await within(row('Name Keychain')).findByTestId('library-check')
+
+    await user.click(screen.getByRole('checkbox', { name: 'Move Name Keychain' }))
+    await user.click(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' }))
+    await waitFor(() => expect(input).toBeDisabled())
+    // Typing into it changes nothing: the button keeps naming the ref the move uses.
+    await user.type(input, 'x')
+    expect(input).toHaveValue('v2.0.761')
+    expect(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' })).toBeInTheDocument()
+
+    release()
+    await within(row('Name Keychain')).findByTestId('library-moved')
+    await waitFor(() => expect(input).toBeEnabled())
   })
 
   it('shows a failing check with its diagnostics and log tail', async () => {
