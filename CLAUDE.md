@@ -152,9 +152,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
-- `backend/scadbuddy/store/` — the blob store: the directory-shaped `BlobStore`
-  Protocol, `LocalBlobStore` (a piece in `data/blobs/<piece_key>/`), `BlobRefs` (the
-  `blob_refs` table that keeps a blob alive) and `sweep_blobs` (the grace-period sweep).
+- `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
+  Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
+  `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
+  (the grace-period sweep). Phase 3 (#426, spec §6): `content.py`/`content_models.py`
+  (`ContentStore`, content-addressed keys over a backend), `index.py` (the Postgres index
+  with CAS), `archive.py` (a directory as one object), `cache.py` (`CachedBlobStore`, the
+  worker's bounded local copy), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
+  library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
+  (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
+  (`RemoteAssets`, uploads reaching workers). The API's `StoreBundle` that wires them
+  arrives with phase 3's #672; until then `getattr(state, "store", None)` is `None`.
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
@@ -169,9 +177,6 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `model.json`, with a legacy `presets.json` still read), uploads for `// file`
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes).
-- `backend/scadbuddy/store/` — the phase-1 local blob store: `local.py` (directory
-  blobs keyed by `piece_key`), `refs.py` (the Postgres `blob_refs` holders) and
-  `sweep_blobs`; phase 3 (#426) grows it.
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`

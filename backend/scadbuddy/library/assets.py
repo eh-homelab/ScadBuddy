@@ -316,8 +316,8 @@ class AssetStore:
     upload of the content, a re-upload included, and by every render or preset save
     that names it, `use`) and so the store's usage, which is ``count(*)`` and
     ``sum(size)`` over the table -- no scan, no running total to go stale, and every
-    replica reads the same numbers. The pool is the render queue's
-    (`PostgresJobStore.pool`), opened and migrated at startup; this store opens
+    replica reads the same numbers. The pool is the projection's
+    (`JobProjection.pool`), opened and migrated at startup; this store opens
     nothing of its own.
 
     A row never exists without its blob: `put` writes the blob before its insert
