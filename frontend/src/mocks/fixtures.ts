@@ -1,4 +1,5 @@
 import type {
+  BambuddyStatus,
   BambuddyTargets,
   FilamentOptions,
   PrintOptions,
@@ -192,7 +193,7 @@ export const MEDIA_PNG_BASE64 =
 export const MEDIA_MP4_BASE64 = 'AAAAGGZ0eXBpc29tAAACAGlzb21pc28y'
 
 function image(id: string, caption = ''): MediaView {
-  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, content_type: 'image/png', size: 67 }
+  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, readonly: false, content_type: 'image/png', size: 67 }
 }
 
 /** #274 — the template of mine with a gallery: three images and a video. */
@@ -213,6 +214,7 @@ export const media: Record<string, MediaView[]> = {
       caption: '',
       poster: null,
       missing: false,
+      readonly: false,
       content_type: 'image/png',
       size: 67,
     },
@@ -230,6 +232,7 @@ export const media: Record<string, MediaView[]> = {
       caption: 'Printing on an H2C',
       poster: 'd4e5f6a1b2c3-poster.png',
       missing: false,
+      readonly: false,
       content_type: 'video/mp4',
       size: 24,
     },
@@ -408,12 +411,16 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
+      description: 'A small tag for a **zip pull**, without the keyring hole.',
+      tags: ['small', 'zip pull'],
     },
     {
       id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
       name: 'Mum',
       origin: 'mine',
       params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      description: '',
+      tags: ['gift'],
       updated_at: '2026-09-20T10:00:00Z',
     },
     {
@@ -421,11 +428,20 @@ export const presets: Record<string, ParamPreset[]> = {
       name: 'Old engraving',
       origin: 'mine',
       params: { name: 'Ada', engrave_depth: 2 },
+      description: '',
+      tags: [],
       updated_at: '2026-09-19T10:00:00Z',
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    {
+      id: 'template-tiny',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10 },
+      description: '',
+      tags: [],
+    },
   ],
 }
 
@@ -607,20 +623,121 @@ export const outputs: Output[] = [
   },
 ]
 
+/**
+ * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what
+ * this mock deployment sets through `SCADBUDDY_*`. A reset goes back to the deployment's
+ * value, else the default.
+ */
+export const settingsDefaults = {
+  bambuddy_url: null,
+  bambuddy_web_urls: null,
+  public_url: null,
+  default_plate: null,
+  media_upload_max_bytes: 1024 * 1024 * 1024,
+  render_timeout: 120,
+  render_concurrency: 2,
+  solid_concurrency: 0,
+  render_queue_max: 0,
+  render_queue_depth_slo: 16,
+  render_latency_slo: 60,
+  check_concurrency: 1,
+  job_ttl: 86400,
+  preview_renders: true,
+  lsp_sessions: 4,
+  realtime_sockets: 256,
+  library_max_bytes: 200_000_000,
+  asset_max_total_bytes: 1_000_000_000,
+  asset_max_count: 10_000,
+  asset_sweep_grace: 7 * 86400,
+  asset_sweep_interval: 86400,
+  duplicate_staging_max_age: 3600,
+  fonts_catalogue_ttl: 86400,
+  event_log_retention_seconds: 86400,
+  event_log_retention_rows: 100_000,
+  log_level: 'INFO',
+} as const satisfies Partial<Settings>
+
+export const settingsDeployment: Record<string, unknown> = {
+  public_url: 'https://scadbuddy.internal.nullreference.io',
+  render_timeout: 300,
+  google_fonts_api_key: 'from-the-deployment',
+}
+
+/** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
+export const settingsApplies: NonNullable<Settings['applies']> = {
+  ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
+  bambuddy_api_key: 'live',
+  google_fonts_api_key: 'live',
+  render_concurrency: 'restart',
+  check_concurrency: 'restart',
+  lsp_sessions: 'restart',
+  realtime_sockets: 'restart',
+  preview_renders: 'restart',
+  asset_sweep_interval: 'restart',
+}
+
 export const settings: Settings = {
+  ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
   has_api_key: true,
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
-  pipeline_id: 1,
   printer_id: 1,
-  printer_preset: null,
-  process_preset: null,
-  filament_presets: [],
-  bed_type: null,
   default_plate: null,
   display_unit: 'mm',
-  media_upload_max_bytes: 1024 * 1024 * 1024,
+  last_project_id: null,
+  render_timeout: 300,
+  job_ttl: 3600,
+  has_google_fonts_api_key: false,
+  sources: {
+    ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
+    bambuddy_url: 'stored',
+    bambuddy_api_key: 'stored',
+    public_url: 'env',
+    render_timeout: 'env',
+    job_ttl: 'stored',
+    google_fonts_api_key: 'cleared',
+  },
+  applies: settingsApplies,
+  restart_required: [],
+  bootstrap: [
+    {
+      name: 'data_dir',
+      env_var: 'SCADBUDDY_DATA_DIR',
+      value: '/data',
+      source: 'default',
+      reason: 'The data volume. It is needed before any stored setting can be read.',
+    },
+    {
+      name: 'database_url',
+      env_var: 'SCADBUDDY_DATABASE_URL',
+      value: 'postgres.scadbuddy.svc:5432/scadbuddy',
+      source: 'env',
+      reason: 'Where the settings themselves are kept, so the UI cannot choose it; it is also a credential.',
+    },
+    {
+      name: 'openscad',
+      env_var: 'SCADBUDDY_OPENSCAD',
+      value: 'openscad',
+      source: 'default',
+      reason: 'The binary the server runs. Choosing it from a web form would let anyone who can reach the page run any program.',
+    },
+    {
+      name: 'version',
+      env_var: 'SCADBUDDY_VERSION',
+      value: 'v0.42.0',
+      source: 'env',
+      reason: 'A build stamp that /healthz reports, not a setting.',
+    },
+  ],
+  about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
+}
+
+export const bambuddyStatus: BambuddyStatus = {
+  version: '1.2.5.6',
+  capture_finish_photo: false,
+  settings_url: 'https://bambuddy.internal.nullreference.io/settings',
+  detail: null,
 }
 
 /**
@@ -691,33 +808,6 @@ export const targets: BambuddyTargets = {
     { id: 2, name: 'ScadBuddy', is_external: false },
     { id: 3, name: 'Keychains', is_external: false },
   ],
-  // Settings' "Slicer pipeline" list (the send bar's pipeline route), not the print dialog.
-  pipelines: [
-    {
-      id: 1,
-      name: 'Textured PEI · 0.20 mm · AMS',
-      bed_type: 'Textured PEI Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP252' },
-      filament_presets: [{ source: 'cloud', id: 'GFSA05_22' }],
-    },
-    {
-      id: 2,
-      name: 'Draft · 0.28 mm',
-      bed_type: 'Cool Plate',
-      target_kind: 'specific_printer',
-      target_printer_id: 1,
-      target_model_class: null,
-      fanout_strategy: 'max_parallel',
-      printer_preset: { source: 'cloud', id: 'GM041' },
-      process_preset: { source: 'cloud', id: 'GP260' },
-      filament_presets: [{ source: 'cloud', id: 'GFSB00_22' }],
-    },
-  ],
   printers: [
     { id: 1, name: '3DP-31B-598', model: 'H2C', is_active: true, nozzle_count: 2 },
     { id: 2, name: '3DP-77A-114', model: 'H2C', is_active: true, nozzle_count: 2 },
@@ -731,78 +821,27 @@ export const targets: BambuddyTargets = {
  */
 const QUEUE_URL = `${settings.bambuddy_url}/queue`
 
-/** A pipeline run mid-flight: both copies have reached the queue, neither has printed. */
-export const pipelineProgress: PrintProgress = {
-  route: 'pipeline',
-  stage: 'queued',
-  settled: false,
-  pipeline_run_id: 12,
-  slice_job_id: 21,
-  copies: 2,
-  copies_completed: 0,
-  copies_failed: 0,
-  copies_cancelled: 0,
-  copies_in_progress: 2,
-  error_message: null,
-  fix: null,
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: '3DP-31B-598',
-      queue_entry_id: 4472,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-    // A fan-out Bambuddy has not assigned yet: `assigned_printer_name` is null until it
-    // picks, which is a normal state and not a missing value to hide.
-    {
-      copy_index: 1,
-      printer_name: null,
-      queue_entry_id: 4473,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
-  bambuddy_url: QUEUE_URL,
-}
-
 /**
- * The real failed run, transcribed from `backend/tests/bambuddy/recordings/pipeline-run.json`
- * as `progress.from_run` normalises it. Its point is that Bambuddy's own fields all say
- * the run is fine — `status: "in_progress"`, `copies_in_progress: 1`, the one job still
- * `pending` — while `completed_at` and `error_message` say it is over. `settled` is the
- * backend's resolution of that contradiction, and the only reason the poll ever stops.
- * `fix` is chosen from `slice_job_id` set with `sliced_library_file_id` still null, not
- * from the wording of the message.
+ * A slice that failed, so no queue item was ever created. `fix` is chosen by the
+ * backend from *where* it failed (the slice), not from the wording of the message.
  */
-export const failedRunProgress: PrintProgress = {
-  route: 'pipeline',
+export const failedSliceProgress: PrintProgress = {
+  route: 'slice_queue',
   stage: 'failed',
   settled: true,
-  pipeline_run_id: 1,
   slice_job_id: 7,
+  queue_item_id: null,
   copies: 1,
   copies_completed: 0,
-  copies_failed: 0,
+  copies_failed: 1,
   copies_cancelled: 0,
-  copies_in_progress: 1,
+  copies_in_progress: 0,
   error_message:
     'Slice failed: The selected printer is not compatible with the process preset in the 3mf.',
   fix:
-    'Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix ' +
-    'the model, and print again.',
-  copies_detail: [
-    {
-      copy_index: 0,
-      printer_name: null,
-      queue_entry_id: null,
-      stage: 'queued',
-      message: null,
-      waiting_reason: null,
-    },
-  ],
+    'Bambuddy could not slice this plate. Change the plate or print settings, or fix the ' +
+    'model, and print again.',
+  copies_detail: [],
   bambuddy_url: QUEUE_URL,
 }
 
@@ -840,6 +879,14 @@ export const queuedSliceProgress: PrintProgress = {
 }
 
 export const FAILING_NAME = 'boom'
+
+/** A name the mock ends `cancelled` instead of `failed`, the way a job superseded by a newer request while running does. */
+export const CANCELLED_NAME = 'superseded'
+
+/** The backend's own wording (`render/projection.py` `CANCELLED_ERROR`), so the mock's `error`/`log_tail` match what a real cancelled job carries. */
+export const CANCELLED_ERROR = 'cancelled: every request for it was withdrawn'
+
+export const CANCELLED_LOG_TAIL = [CANCELLED_ERROR]
 
 /** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
 export const NOTED_NAME = 'alexandra'
@@ -946,6 +993,11 @@ export const filamentOptions: FilamentOptions = {
   spools: [
     {
       spool_id: 9,
+      // #469 — the right extruder is 0, the left 1. Printer 1 has the Filament Track
+      // Switch, so this is where the spool rests (AMS 0 on inlet B), not a constraint;
+      // tests give an unswitched printer its own options.
+      extruder: 0,
+      side: 'R',
       material: 'PETG',
       subtype: 'Basic',
       brand: 'Bambu Lab',
@@ -964,6 +1016,8 @@ export const filamentOptions: FilamentOptions = {
     },
     {
       spool_id: 21,
+      extruder: 0, // AMS 1 rests on inlet B too
+      side: 'R',
       material: 'PLA',
       subtype: 'Silk',
       brand: 'Bambu Lab',
@@ -983,6 +1037,8 @@ export const filamentOptions: FilamentOptions = {
     {
       // The AMS-HT: one spool, no slot number to name, and on the other inlet.
       spool_id: 22,
+      extruder: 1, // the HT rests on inlet A
+      side: 'L',
       material: 'PLA',
       subtype: 'Basic',
       brand: 'Bambu Lab',
@@ -1072,6 +1128,7 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
+  track_switch: true,
   // #78 — the H2C's two extruders, as `printers/{id}/status` reports them.
   nozzles: [
     { nozzle_type: 'HS00', nozzle_diameter: '0.2' },

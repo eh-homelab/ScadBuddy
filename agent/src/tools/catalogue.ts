@@ -16,6 +16,8 @@ export const catalogueTools: Tool[] = [
       'version, origin and upstream state.',
     input: z.object({}),
     risk: 'read',
+    source:
+      'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
     handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/models'), 'list models')),
   }),
@@ -25,6 +27,8 @@ export const catalogueTools: Tool[] = [
     description: "One model's metadata: name, description, tags, current version, libraries and upstream.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models/{slug}'],
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`)),
@@ -35,6 +39,8 @@ export const catalogueTools: Tool[] = [
     description: "A model's current OpenSCAD source.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "OpenSCAD source (code and comments) written by the model's author, imported from the web or pulled from an upstream",
     routes: ['GET /api/v1/models/{slug}/source'],
     handler: async ({ slug }, { backend }) =>
       text(
@@ -52,6 +58,8 @@ export const catalogueTools: Tool[] = [
       "model's directory, as a render would.",
     input: z.object({ source: z.string().max(1_000_000), slug: slug.optional() }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/check'],
     handler: async ({ source, slug }, { backend }) =>
       json(
@@ -187,6 +195,8 @@ export const catalogueTools: Tool[] = [
     description: "A model's README, as Markdown.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "the model's README, written by the model's author or imported with the model from the web",
     routes: ['GET /api/v1/models/{slug}/readme'],
     handler: async ({ slug }, { backend }) =>
       text(

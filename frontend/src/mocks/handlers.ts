@@ -10,7 +10,9 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LastProject,
   CatalogueLibrary,
+  InvalidLibraryEntry,
   MediaView,
   ModelPatch,
   ModelPrintChoices,
@@ -27,12 +29,15 @@ import type {
   Plate,
   PlateFit,
   PrintProgress,
+  PrintCheck,
   PrintRunRequest,
+  PrintRun,
   PrintRunResult,
   PrintOptions,
   PrintOptionsState,
   PrintOptionsUpdate,
   ProjectChoices,
+  ProjectFile,
   ProjectRequest,
   ProjectView,
   SendResult,
@@ -44,7 +49,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
 import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
@@ -62,7 +67,7 @@ import * as fixtures from './fixtures'
 const base = '/api/v1'
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
-const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
+export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
   filament_plan: [],
   nozzles: [],
@@ -71,7 +76,7 @@ const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
-function isNoModelChoices(choices: ModelPrintChoices): boolean {
+export function isNoModelChoices(choices: ModelPrintChoices): boolean {
   return (
     choices.printer_id == null &&
     !choices.filament_plan?.length &&
@@ -83,6 +88,8 @@ function isNoModelChoices(choices: ModelPrintChoices): boolean {
 
 const state = {
   models: [...fixtures.models] as ModelSummary[],
+  /** #470 — the print runs `POST /print/outputs/:id/run` answered, by id. */
+  printRuns: new Map<string, PrintRun>(),
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
   sources: {
@@ -93,17 +100,19 @@ const state = {
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
-  settings: { ...fixtures.settings } as Settings,
+  settings: structuredClone(fixtures.settings) as Settings,
   /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
+  /** #313 — per library-file choices, the store's `library_print_choices`. */
+  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
@@ -120,6 +129,8 @@ const state = {
   plates: {} as Record<string, NonNullable<Job['plates']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
+  /** #722 — each built-in's media overlay, read from its record on its first write. */
+  mediaOverlays: new Map<string, MediaOverlay>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -163,6 +174,15 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
@@ -198,6 +218,7 @@ export function resetMockState(): void {
   resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
+  state.printRuns = new Map()
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.sources = {
@@ -206,11 +227,12 @@ export function resetMockState(): void {
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
-  state.settings = { ...fixtures.settings }
+  state.settings = structuredClone(fixtures.settings)
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
+  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
@@ -223,11 +245,12 @@ export function resetMockState(): void {
   state.mergeFiles = {}
   state.plates = {}
   state.mediaFiles.clear()
+  state.mediaOverlays.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -280,14 +303,47 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
-/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+/** #274 — the upload limit in effect (#322: Settings can change it too). */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
 }
 
+/** #322 — seeds what the print dialog remembers, for the Remembered choices table. */
+export function setMockRemembered(remembered: {
+  modelChoices?: Record<string, ModelPrintChoices>
+  printerBedTypes?: Record<string, string>
+}): void {
+  if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
+  if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
+}
+
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
 export function setMockMedia(slug: string, media: MediaView[]): void {
-  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media, media_cover: null } : m))
+  state.mediaOverlays.delete(slug)
+}
+
+/** #217 — entries of a template's model.json `libraries` that are not pins, as hand-edited. */
+export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEntry[]): void {
+  state.models = state.models.map((m) =>
+    m.slug === slug ? { ...m, invalid_libraries: entries } : m,
+  )
+}
+
+/** #169 — every model as the mock has it now, for a feature module (`features/`). */
+export function mockModels(): readonly ModelSummary[] {
+  return state.models
+}
+
+/** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
+export function replaceMockModel(model: ModelSummary): ModelSummary {
+  state.models = state.models.map((m) => (m.slug === model.slug ? model : m))
+  return view(model)
+}
+
+/** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
+export function mockOutput(id: string): Output | undefined {
+  return state.outputs.find((o) => o.id === id)
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -463,13 +519,17 @@ function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: 
   return view(updated)
 }
 
-/** Job and output ids are 32 hex characters — the routes reject anything else. */
-function nextHexId(): string {
+/**
+ * Job and output ids are 32 hex characters — the routes reject anything else. One
+ * counter for every mock, feature modules (`features/`) included, reset by
+ * `resetMockState`.
+ */
+export function nextHexId(): string {
   state.seq += 1
   return state.seq.toString(16).padStart(32, '0')
 }
 
-function nextNumber(): number {
+export function nextNumber(): number {
   state.seq += 1
   return 8800 + state.seq
 }
@@ -582,22 +642,75 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function problem(status: number, title: string, detail?: string, extensions: object = {}) {
+/**
+ * #322 — what the print dialog remembers, as `GET /settings/remembered` answers it. The
+ * route is in `features/settings.ts`; the state is the print routes' own, so it is read here.
+ */
+export function mockRemembered() {
+  const dropEmpty = (options: PrintOptions | undefined) =>
+    Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== null && value !== undefined))
+  return {
+    model_print_choices: structuredClone(state.modelChoices),
+    printer_bed_types: { ...state.printerBedTypes },
+    print_options: dropEmpty(state.printOptions.global_options),
+    printer_print_options: structuredClone(state.printOptions.printers ?? {}),
+    model_print_options: structuredClone(state.printOptions.models ?? {}),
+  }
+}
+
+/** #322 — "Forget all": every remembered choice, and none of the settings. */
+export function forgetMockRemembered(): void {
+  state.modelChoices = {}
+  state.libraryChoices = {}
+  state.printerBedTypes = {}
+  state.printOptions.global_options = {}
+  state.printOptions.printers = {}
+  state.printOptions.models = {}
+}
+
+/**
+ * #313 — what the print dialog remembers for one Bambuddy library file. The routes are in
+ * `features/library.ts`; the state is here with the other remembered choices, so "Forget
+ * all" (`forgetMockRemembered`) drops it too.
+ */
+export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
+  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+}
+
+/** Remembers one library file's choices; the empty choice forgets them, as the store does. */
+export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
+  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
+  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  return mockLibraryChoices(fileId)
+}
+
+/**
+ * #322 — the settings the mock holds. Their routes are in `features/settings.ts`; the
+ * state stays here because the send, plate and upload routes read it too.
+ */
+export function mockSettings(): Settings {
+  return state.settings
+}
+
+export function setMockSettings(settings: Settings): void {
+  state.settings = settings
+}
+
+export function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 }
 
-
 /**
  * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
  * in core/problems.py answers every one with the same detail and puts the reason in
  * `errors`, so a caller reads the field's message there, never in `detail`.
  */
-function shapeRefusal(msg: string) {
+export function shapeRefusal(msg: string, loc: string[] = ['body', 'presets']) {
   return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
-    errors: [{ loc: ['body', 'presets'], msg }],
+    errors: [{ loc, msg }],
   })
 }
 
@@ -698,7 +811,7 @@ function sniffMedia(bytes: Uint8Array): SniffedMedia | undefined {
   return undefined
 }
 
-function legacyItem(): MediaView {
+function legacyItem(readonly: boolean): MediaView {
   return {
     id: 'thumbnail',
     file: 'thumbnail.png',
@@ -706,14 +819,71 @@ function legacyItem(): MediaView {
     caption: '',
     poster: null,
     missing: false,
+    readonly,
     content_type: 'image/png',
     size: 67,
   }
 }
 
-/** A model's media: a model with no `media` lists its own thumbnail as the legacy item. */
+/**
+ * A model's media: a model with no `media` lists its own thumbnail as the legacy item
+ * (a built-in's, as everything it ships, `readonly`).
+ */
 function mediaOf(model: ModelSummary): MediaView[] {
-  return model.media ?? (model.thumbnail_source === 'model' ? [legacyItem()] : [])
+  const legacy = model.thumbnail_source === 'model' ? [legacyItem(model.origin === 'builtin')] : []
+  return model.media ?? legacy
+}
+
+/**
+ * #722 — a built-in's media as `_media_listing` builds it: what it ships (read-only),
+ * then what was added to it, with the chosen cover moved to the front.
+ */
+interface MediaOverlay {
+  shipped: MediaView[]
+  added: MediaView[]
+  cover: string | null
+}
+
+function overlayOf(model: ModelSummary): MediaOverlay {
+  const known = state.mediaOverlays.get(model.slug)
+  if (known) return known
+  const listed = mediaOf(model)
+  return {
+    shipped: listed.filter((item) => item.readonly),
+    added: listed.filter((item) => !item.readonly),
+    cover: model.media_cover ?? null,
+  }
+}
+
+function listOverlay(overlay: MediaOverlay): Pick<ModelSummary, 'media' | 'media_cover'> {
+  const listed = [...overlay.shipped, ...overlay.added]
+  const chosen = listed.find((item) => item.id === overlay.cover)
+  if (!chosen || chosen === listed[0]) return { media: listed, media_cover: null }
+  return { media: [chosen, ...listed.filter((item) => item !== chosen)], media_cover: chosen.id }
+}
+
+/** A built-in's media write: kept outside its history, so no revision (`_overlay_change`). */
+function writeOverlay(model: ModelSummary, overlay: MediaOverlay): ModelSummary {
+  state.mediaOverlays.set(model.slug, overlay)
+  const listed = listOverlay(overlay)
+  const media = listed.media ?? []
+  const covered = media.some((item) => !item.missing && (item.kind === 'image' || item.poster))
+  const updated: ModelSummary = {
+    ...model,
+    ...listed,
+    // Without a cover of its own, whatever stood in (its preview) still does.
+    ...(covered || model.thumbnail_source === 'model' ? coverOf(model.slug, media) : {}),
+  }
+  state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
+  return updated
+}
+
+function shippedItem(slug: string, id: string) {
+  return problem(
+    403,
+    'Error',
+    `'${id}' is shipped with the built-in template '${slug}' and is read-only; only the media added to it can change`,
+  )
 }
 
 /** The first write gives the legacy item an id of its own, as `_edit_media` does. */
@@ -764,10 +934,8 @@ function writeMedia(
   })
 }
 
-/** The model a media write is for, or the problem the backend answers first. */
-function mediaTarget(slug: string, write: boolean): ModelSummary | Response {
-  const refused = write ? refuseBuiltin(slug) : undefined
-  if (refused) return refused
+/** The model media is read from or written to, or the 404. A built-in takes media too (#722). */
+function mediaTarget(slug: string): ModelSummary | Response {
   const model = state.models.find((m) => m.slug === slug)
   return model ?? problem(404, 'Not Found', `no model named '${slug}'`)
 }
@@ -795,7 +963,7 @@ async function stagedPart(form: FormData, name: string) {
  * `require_mine` in `api/models.py`: a built-in is refused before the model is even
  * looked up, with the backend's problem (403 is not in its title table, so "Error").
  */
-function refuseBuiltin(slug: string) {
+export function refuseBuiltin(slug: string) {
   return slug.startsWith('builtin:')
     ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
     : undefined
@@ -869,6 +1037,47 @@ function valueRefusal(slug: string, params: Record<string, ParamValue>) {
         { parameters: [key] },
       )
     }
+  }
+  return undefined
+}
+
+/**
+ * A preset's tags as the server keeps them (#327, `_clean_tags`): trimmed, inner
+ * whitespace collapsed, blanks dropped, each kept once ignoring case, in order.
+ */
+export function cleanTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+  for (const raw of tags) {
+    const tag = raw.trim().replace(/\s+/g, ' ')
+    // Upper then lower is the nearest JS gets to `str.casefold()` (ß with SS).
+    const key = tag.toUpperCase().toLowerCase()
+    if (tag && !seen.has(key)) {
+      seen.add(key)
+      cleaned.push(tag)
+    }
+  }
+  return cleaned
+}
+
+/**
+ * A preset's description and tags past their bounds, refused as FastAPI refuses a
+ * body it cannot parse (`shapeRefusal`), or undefined. The description is trimmed and
+ * the tags cleaned first, as pydantic does before it checks the bounds.
+ */
+function detailsRefusal(description: string | null | undefined, tags: string[] | null | undefined) {
+  // Lengths in code points, as Python counts them.
+  if ([...(description ?? '').trim()].length > MAX_PRESET_DESCRIPTION) {
+    return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
+  }
+  const cleaned = cleanTags(tags ?? [])
+  if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
+    return shapeRefusal(
+      `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
+    )
+  }
+  if (cleaned.some((tag) => tag.includes(','))) {
+    return shapeRefusal('a preset tag cannot contain a comma')
   }
   return undefined
 }
@@ -952,8 +1161,9 @@ export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
   ...aiPluginHandlers,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // Each feature's own mocks (`features/`), then the agent service's MCP OIDC routes;
+  // the rest of this list is the backend.
+  ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
@@ -1174,6 +1384,10 @@ export const handlers = [
       name: body.name,
       origin: 'mine',
       origin_url: null,
+      // #722: a built-in's list as it is shown, what was added to it included, all
+      // of it the copy's own.
+      media: upstream.media?.map((item) => ({ ...item, readonly: false })),
+      media_cover: null,
       // #179: the copy is the upstream's directory, so its thumbnail.png and
       // README.md come too; its outputs, and so any plate fallback, do not -- nor
       // its default-render preview, a derived file the copy gets rendered afresh.
@@ -1383,18 +1597,14 @@ export const handlers = [
         ) {
           return shapeRefusal(`'${preset.id}' is not a preset id`)
         }
-        if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
-          return shapeRefusal(
-            `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
-          )
-        }
-        const tags = preset.tags ?? []
-        if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
-          return shapeRefusal(
-            `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
-          )
-        }
-        cleaned.push({ ...preset, name })
+        const details = detailsRefusal(preset.description, preset.tags)
+        if (details) return details
+        cleaned.push({
+          ...preset,
+          name,
+          description: (preset.description ?? '').trim(),
+          tags: cleanTags(preset.tags ?? []),
+        })
       }
       if (cleaned.length > MAX_PRESETS) {
         return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
@@ -1444,6 +1654,8 @@ export const handlers = [
         name: preset.name,
         origin: 'template',
         params: preset.params ?? {},
+        description: preset.description ?? '',
+        tags: preset.tags ?? [],
       }))
       state.presets[slug] = [...shipped, ...saved]
     }
@@ -1460,7 +1672,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item || item.missing) return noMediaItem(slug, id)
@@ -1475,7 +1687,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/media/:id/poster`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, false)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const item = mediaOf(model).find((entry) => entry.id === id)
     if (!item?.poster) return problem(404, 'Not Found', `'${slug}' has no poster for '${id}'`)
@@ -1486,7 +1698,7 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/media`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const form = await request.formData()
     const upload = await stagedPart(form, 'file')
@@ -1527,11 +1739,18 @@ export const handlers = [
       caption: formText(form, 'caption') ?? '',
       poster: poster ? `${id}-poster.${poster.sniffed!.extension}` : null,
       missing: false,
+      readonly: false,
       content_type: kind.contentType,
       size: upload.size,
     }
     state.mediaFiles.set(`${slug}/${item.file}`, upload.bytes)
     if (poster && item.poster) state.mediaFiles.set(`${slug}/${item.poster}`, poster.bytes)
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      const added = writeOverlay(model, { ...overlay, added: [...overlay.added, item] })
+      await delay(120)
+      return HttpResponse.json(added)
+    }
     // Videos are not committed (the models' `.gitignore`); images and posters are.
     const files: ChangedFiles = [
       ...(item.kind === 'image' ? [{ status: 'A', path: `media/${item.file}` }] : []),
@@ -1548,9 +1767,16 @@ export const handlers = [
   http.patch(`${base}/models/:slug/media/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
     const { caption } = (await request.json()) as { caption: string }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const added = overlay.added.map((item) => (item.id === id ? { ...item, caption } : item))
+      return HttpResponse.json(writeOverlay(model, { ...overlay, added }))
+    }
     const media = mediaOf(model)
     if (!media.some((item) => item.id === id)) return noMediaItem(slug, id)
     const updated = writeMedia(
@@ -1564,15 +1790,25 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/media/order`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
-    const { ids } = (await request.json()) as { ids: string[] }
-    const media = mediaOf(model)
+    const { ids: named } = (await request.json()) as { ids: string[] }
+    // A built-in's shipped items keep their place: their ids are passed over (#722).
+    const overlay = model.origin === 'builtin' ? overlayOf(model) : undefined
+    const shipped = new Set(overlay?.shipped.map((item) => item.id))
+    const ids = named.filter((id) => !shipped.has(id))
+    const media = overlay ? overlay.added : mediaOf(model)
     const byId = new Map(media.map((item) => [item.id, item]))
     const permutation =
       ids.length === media.length && new Set(ids).size === ids.length && ids.every((id) => byId.has(id))
     if (!permutation) {
-      return problem(422, 'Unprocessable Content', 'the order must name every media item exactly once')
+      const what = overlay ? 'added media item' : 'media item'
+      return problem(422, 'Unprocessable Content', `the order must name every ${what} exactly once`)
+    }
+    if (overlay) {
+      return HttpResponse.json(
+        writeOverlay(model, { ...overlay, added: ids.map((id) => byId.get(id)!) }),
+      )
     }
     const updated = writeMedia(
       slug,
@@ -1583,11 +1819,57 @@ export const handlers = [
     return HttpResponse.json(updated)
   }),
 
+  // #722 — the cover: a template of mine's first item; a built-in's a choice of its own.
+  http.put(`${base}/models/:slug/media/cover`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = mediaTarget(slug)
+    if (model instanceof Response) return model
+    const { id } = (await request.json()) as { id: string | null }
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (id === null) return HttpResponse.json(writeOverlay(model, { ...overlay, cover: null }))
+      const listed = [...overlay.shipped, ...overlay.added]
+      if (!listed.some((item) => item.id === id)) return noMediaItem(slug, id)
+      const cover = listed[0]?.id === id ? null : id
+      return HttpResponse.json(writeOverlay(model, { ...overlay, cover }))
+    }
+    if (id === null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        "a template's cover is its first item: name the one to move there",
+      )
+    }
+    const media = mediaOf(model)
+    const chosen = media.find((item) => item.id === id)
+    if (!chosen) return noMediaItem(slug, id)
+    if (media[0] === chosen) return HttpResponse.json(view(model))
+    const updated = writeMedia(
+      slug,
+      `Make ${id} the cover of ${slug}`,
+      [],
+      converted([chosen, ...media.filter((item) => item !== chosen)]),
+    )
+    return HttpResponse.json(updated)
+  }),
+
   http.delete(`${base}/models/:slug/media/:id`, ({ params }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
-    const model = mediaTarget(slug, true)
+    const model = mediaTarget(slug)
     if (model instanceof Response) return model
+    if (model.origin === 'builtin') {
+      const overlay = overlayOf(model)
+      if (overlay.shipped.some((item) => item.id === id)) return shippedItem(slug, id)
+      if (!overlay.added.some((item) => item.id === id)) return noMediaItem(slug, id)
+      return HttpResponse.json(
+        writeOverlay(model, {
+          added: overlay.added.filter((item) => item.id !== id),
+          shipped: overlay.shipped,
+          cover: overlay.cover === id ? null : overlay.cover,
+        }),
+      )
+    }
     const media = mediaOf(model)
     const gone = media.find((item) => item.id === id)
     if (!gone) return noMediaItem(slug, id)
@@ -1623,7 +1905,7 @@ export const handlers = [
     const media = mediaOf(model)
     const legacy = media.length === 0 || (media.length === 1 && media[0]!.id === 'thumbnail')
     const id = nextMediaId()
-    const cover: MediaView = { ...legacyItem(), id, file: `${id}.png` }
+    const cover: MediaView = { ...legacyItem(false), id, file: `${id}.png` }
     const updated = reviseModel(
       slug,
       `Set ${slug} thumbnail`,
@@ -1634,7 +1916,7 @@ export const handlers = [
         thumbnail_source: 'model',
         thumbnail_output_id: null,
         media: legacy
-          ? [legacyItem()]
+          ? [legacyItem(false)]
           : [cover, ...converted(media[0]!.kind === 'image' ? media.slice(1) : media)],
         thumbnail_preview_id: null,
       },
@@ -1823,8 +2105,12 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const body = (await request.json()) as ParamPresetCreate
+    // The details' bounds are the body's shape: refused before the route looks up
+    // the model, as FastAPI parses the body first.
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, body.params ?? {}, null)
     if (refused) return refused
@@ -1833,6 +2119,8 @@ export const handlers = [
       name,
       origin: 'mine',
       params: body.params ?? {},
+      description: (body.description ?? '').trim(),
+      tags: cleanTags(body.tags ?? []),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
@@ -1850,11 +2138,14 @@ export const handlers = [
     const name = body.name.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name, source.params, null)
     if (refused) return refused
+    // Everything but the name is the original's, its description and tags too.
     const copy: ParamPreset = {
       id: nextHexId(),
       name,
       origin: 'mine',
       params: { ...source.params },
+      description: source.description,
+      tags: [...source.tags],
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
@@ -1865,10 +2156,12 @@ export const handlers = [
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const id = String(params['id'])
+    const body = (await request.json()) as ParamPresetUpdate
+    const details = detailsRefusal(body.description, body.tags)
+    if (details) return details
     if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
     const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
     if (!existing) return problem(404, 'Preset not found')
-    const body = (await request.json()) as ParamPresetUpdate
     const name = body.name?.trim().replace(/\s+/g, ' ')
     const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
     if (refused) return refused
@@ -1876,6 +2169,12 @@ export const handlers = [
       ...existing,
       name: name ?? existing.name,
       params: body.params ?? existing.params,
+      // Each detail given replaces the old one; an empty one clears it.
+      description:
+        body.description === undefined || body.description === null
+          ? existing.description
+          : body.description.trim(),
+      tags: body.tags === undefined || body.tags === null ? existing.tags : cleanTags(body.tags),
       updated_at: new Date().toISOString(),
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
@@ -2084,35 +2383,20 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
+  http.post(`${base}/outputs/:id/send`, async ({ params }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
     if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
+    // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
     const libraryFileId = copyIn(output, null)
-    const queued = body.mode === 'queue'
-    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
-    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
-    state.outputs = state.outputs.map((o) =>
-      o.id === id
-        ? {
-            ...o,
-            pipeline_run_id: pipelineRunId,
-            queue_item_id: queueItemId,
-          }
-        : o,
-    )
     const result: SendResult = {
-      mode: body.mode,
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
-      pipeline_run_id: pipelineRunId,
-      queue_item_id: queueItemId,
-      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
         ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
         : null,
@@ -2179,9 +2463,38 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true'
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
@@ -2228,7 +2541,7 @@ export const handlers = [
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -2241,7 +2554,7 @@ export const handlers = [
           },
         ]
       : []
-    return HttpResponse.json({
+    const result = {
       route: 'slice_queue',
       library_file_id: libraryFileId,
       printer_id: body.printer_id ?? null,
@@ -2253,7 +2566,37 @@ export const handlers = [
       project_id: projectId,
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
-    } satisfies PrintRunResult)
+    } satisfies PrintRunResult
+    // #470: the server answers 202 with a run. This one has already finished, so the
+    // client reads its result without polling; GET /print/runs/:id answers it too.
+    const now = new Date().toISOString()
+    const run: PrintRun = {
+      id: `run-${nextNumber()}`,
+      output_id: output.id,
+      status: 'succeeded',
+      created_at: now,
+      finished_at: now,
+      result,
+      error: null,
+      may_have_queued: false,
+      repeated: false,
+    }
+    state.printRuns.set(run.id, run)
+    return HttpResponse.json(run, { status: 202 })
+  }),
+
+  http.get(`${base}/print/runs/:id`, ({ params }) => {
+    const run = state.printRuns.get(String(params['id']))
+    return run ? HttpResponse.json(run) : problem(404, 'Not Found', `there is no print run ${params['id']}`)
+  }),
+
+  /**
+   * #755 — the run's nozzle verdict before Print. The mock printer's nozzles never
+   * refuse anything; a test that needs a verdict answers this route itself.
+   */
+  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+    if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
+    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
   }),
 
   // --- #79 projects -----------------------------------------------------------------
@@ -2300,6 +2643,40 @@ export const handlers = [
     return HttpResponse.json(saved)
   }),
 
+  // #317 — the project both pickers open on.
+  http.put(`${base}/print/projects/last`, async ({ request }) => {
+    const body = (await request.json()) as LastProject
+    state.lastProjectId = body.project_id ?? null
+    return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
+  }),
+
+  // #317 — Generate with a project files the editable 3MF in its folder, once per
+  // (folder, target): the same project again answers with the file already there.
+  http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id: number }
+    const project = state.projects.find((p) => p.id === body.project_id)
+    if (!project) return problem(404, 'Not Found', `no project ${body.project_id}`)
+    const folderId = project.folder_id ?? nextNumber()
+    state.projects = state.projects.map((p) =>
+      p.id === project.id ? { ...p, folder_id: folderId, folder_name: p.folder_name ?? p.name } : p,
+    )
+    const before = output.library_files?.length ?? 0
+    const libraryFileId = copyIn(output, folderId)
+    const after = state.outputs.find((o) => o.id === output.id)?.library_files?.length ?? 0
+    await delay(100)
+    return HttpResponse.json({
+      project_id: project.id,
+      folder_id: folderId,
+      library_file_id: libraryFileId,
+      filename: `${output.slug}.3mf`,
+      created: after > before,
+      bambuddy_url: `${state.settings.bambuddy_url}/projects/${project.id}`,
+      edit_url: null,
+    } satisfies ProjectFile)
+  }),
+
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
@@ -2325,12 +2702,6 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    if (output.pipeline_run_id) {
-      return HttpResponse.json({
-        ...fixtures.pipelineProgress,
-        pipeline_run_id: output.pipeline_run_id,
-      } satisfies PrintProgress)
-    }
     if (output.queue_item_id) {
       return HttpResponse.json({
         ...fixtures.queuedSliceProgress,
@@ -2417,12 +2788,14 @@ export const handlers = [
     const libraries = current.some((row) => row.name === name)
       ? current.map((row) => (row.name === name ? pin : row))
       : [...current, pin]
-    const updated = { ...model, libraries }
+    // As the backend's `pin_library`: the pin takes the place of any entry of that name.
+    const invalid = (model.invalid_libraries ?? []).filter((entry) => entry.name !== name)
+    const updated = { ...model, libraries, invalid_libraries: invalid }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
 
-  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const name = String(params['name'])
     const refused = refuseBuiltin(slug)
@@ -2430,16 +2803,38 @@ export const handlers = [
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const current = model.libraries ?? []
-    if (!current.some((row) => row.name === name)) {
+    const invalid = model.invalid_libraries ?? []
+    const at = new URL(request.url).searchParams.get('index')
+    if (at !== null) {
+      // #217 — that invalid entry alone, as the backend's `unpin_library(index=)`.
+      const index = Number(at)
+      if (!invalid.some((entry) => entry.index === index && entry.name === name)) {
+        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'; nothing was removed`)
+      }
+      await delay(50)
+      const updated = {
+        ...model,
+        invalid_libraries: invalid
+          .filter((entry) => entry.index !== index)
+          .map((entry) =>
+            entry.index !== null && entry.index > index ? { ...entry, index: entry.index - 1 } : entry,
+          ),
+      }
+      state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+      return HttpResponse.json(view(updated))
+    }
+    if (![...current, ...invalid].some((row) => row.name === name)) {
       return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
     }
     await delay(50)
-    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    const updated = {
+      ...model,
+      libraries: current.filter((row) => row.name !== name),
+      invalid_libraries: invalid.filter((entry) => entry.name !== name),
+    }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
   }),
-
-  http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
   http.get(`${base}/ai/settings/headless-browser`, () =>
@@ -2453,32 +2848,6 @@ export const handlers = [
     }
     state.headlessBrowser = body.enabled
     return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
-  http.put(`${base}/settings`, async ({ request }) => {
-    const body = (await request.json()) as {
-      bambuddy_url?: string | null
-      bambuddy_api_key?: string
-      public_url?: string | null
-      library_folder_id?: number | null
-      pipeline_id?: number | null
-      printer_id?: number | null
-      display_unit?: Settings['display_unit'] | null
-    }
-    state.settings = {
-      ...state.settings,
-      ...body,
-      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
-      media_upload_max_bytes: state.settings.media_upload_max_bytes,
-      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
-      has_api_key:
-        body.bambuddy_api_key === undefined
-          ? state.settings.has_api_key
-          : body.bambuddy_api_key.length > 0,
-    }
-    delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
-    await delay(120)
-    return HttpResponse.json(state.settings)
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
@@ -2543,25 +2912,6 @@ export const handlers = [
     // result pass in tests and break in the browser.
     const { defaults, global_options, printers, models } = state.printOptions
     return HttpResponse.json({ defaults, global_options, printers, models })
-  }),
-
-  http.post(`${base}/settings/test`, async () => {
-    await delay(200)
-    if (!state.settings.bambuddy_url?.startsWith('http')) {
-      return problem(409, 'Conflict', 'no Bambuddy URL is configured')
-    }
-    if (!state.settings.has_api_key) {
-      return HttpResponse.json({
-        ok: false,
-        detail: "Bambuddy refused the API key when asked to list the printers. The key needs the 'Read Status' scope",
-        printers: [],
-      })
-    }
-    return HttpResponse.json({
-      ok: true,
-      detail: 'Connected. Bambuddy reports 3DP-31B-598.',
-      printers: fixtures.targets.printers,
-    })
   }),
 
   http.get(`${base}/settings/targets`, () => {

@@ -414,11 +414,39 @@ A test asserts both lists are identical, apart from browser-only tools. A CI che
 when an operation in `backend/openapi.json` has neither a tool nor an explicit allowlist
 entry.
 
+As wired (#255, `agent/src/tools/harness.ts`): every session's queries get the harness
+projection, bound to the session owner's principal, and a `tierOf` that maps
+`mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
+outward call that the seam approved runs at once, because the harness projection tells
+`runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+arguments with its own bundled zod 4.4.3, which refused any call that left out a
+`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
+therefore offers such top-level fields as optional, with the same default in the JSON
+Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
+`sdkShape`; `agent/test/harnessWiring.test.ts`).
+
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
 choice the way the print dialog opens, then slices and queues behind a single approval.
 (It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
 pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
+
+As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
+`POST /api/v1/models/{slug}/dependencies`, which reports each `include <…>`/`use <…>`
+as resolved (file and library) or unresolved (reason, and a catalogue or installed
+library to pin), resolved as OpenSCAD's lexer and `find_valid_path` resolve them
+against the model's own pins, and lists `font = "…"` literals with their missing
+families (`backend/scadbuddy/library/includes.py`). A target outside the model's
+directory and its checkouts (absolute, `../`, or through a symbolic link) is unresolved
+without its existence being checked, and a report is capped in statements and library
+lookups, with `truncated` past the caps (review of #740). A missing font family is
+enforced by the backend, not the tool: the render and preset routes answer 422 for a `// font`
+value whose family fontconfig does not resolve, and `POST /api/v1/fonts/install`
+answers 500 when the family still does not resolve after the install; "already
+installed" uses the same outline, scalable filter (review of #740)
+(`backend/scadbuddy/api/params.py` `require_installed_fonts`,
+`backend/scadbuddy/library/fonts.py`). Details and sources: `docs/ai/dependencies.md`.
 
 ### 5.2 Browser tools
 
@@ -428,6 +456,24 @@ WebSocket and awaits the result, with a timeout. If no tab is paired it returns 
 ("no browser attached"). The tab reports which handlers are live on each route change.
 Unavailable handlers return an error instead of disappearing, so the session's tool list
 stays stable. Details are in #254.
+
+As built (#254; tab side PR #339, agent side its follow-up; `docs/ai/browser-bridge.md`):
+every tool of the tab's catalogue (`frontend/src/agent/catalog.ts`) is a registry tool
+`browser_<name>` (`agent/src/tools/browser.ts`), plus `browser_status` and
+`browser_pair`. They are in `ALL_TOOLS`, so both projections serve them and the two lists
+stay equal: the harness gets them bound to the turn's session, `/mcp` callers reach the
+tab they paired. A tool is never below the tab's tier, and anything that moves or changes
+the tab is at least `write` (`navigate` and `open_model` are raised from the tab's
+`read`); `browser_open_print_dialog` is `outward`, so it is gated like any outward tool,
+and the dialog's confirmation stays user-only in the tab. The tab opens
+`GET /api/v1/ai/bridge` (`agent/src/routes/bridge.ts`, same gate as the chat socket) while
+the assistant is available, says `hello` with its tab id (128 random bits per page load,
+in memory only), route and live tools, and `state` on every change; the agent sends
+`call`, the tab answers `result` from `AgentBridge.call()`. A call waits 30 s, or a
+tool's own `timeout_ms` plus 10 s; with no tab it answers "no browser attached: …" with
+the reason. Tabs are held per process: a call reaches a tab whose socket is on the same
+replica, and otherwise says it is not connected (follow-up). `screenshot()` stays out,
+as PR #339 decided.
 
 ### 5.3 Headless browser (#349)
 
@@ -666,6 +712,22 @@ including `disabled`. Where it is enforced:
 The mode is a database setting, changed in Settings, and changing it counts as a
 settings write, so it needs approval.
 
+As built (#255): two `ai_settings` keys, `mcp_auth_mode` (`"bearer"` or `"disabled"`;
+unset means `bearer`) and `mcp_anonymous_cap` (`"read"`, `"write"` or `"outward"`; unset
+means `outward`). `oidc` is on while the OIDC configuration (`mcp_oidc`, #262) is
+enabled, and then wins over `mcp_auth_mode`, even over `"disabled"`; a stored `"oidc"`
+without it reads as `bearer`. They are read on every `/mcp` request, so a change
+applies on every replica without a restart. An unknown value fails closed, to `bearer`
+or a `read` cap, and a failed read serves `bearer` with no verifiable token. The agent
+logs a warning while the mode is `disabled`, once per change of the settings (the
+banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettings`.
+Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
+(`agent/src/routes/mcpAuthMode.ts`, #251), behind the interim gate for settings writes
+(`routes/guard.ts`) until approvals cover settings writes. Both keys change in one
+transaction, as a compare-and-set against the values the page showed (`409` otherwise).
+`PUT` does not set `oidc`; while OIDC is enabled `GET` reports `oidc` with the stored mode
+beside it. The UI confirms before allowing calls without a token.
+
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
 - **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`
@@ -737,6 +799,27 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 driving someone's open tab is more invasive than calling tools, so `disabled` mode does
 not skip pairing.
 
+As built (#254; `agent/src/bridge/`, `docs/ai/browser-bridge.md`):
+
+- **Chat sessions.** The panel names its tab on every chat-socket connection
+  (`tab.bind`), and each session it starts or sends to (or attaches to while it has no
+  connected tab) is paired with that tab, in memory (`TabHub.pairSession`). The last tab
+  the user sent from wins.
+- **External agents.** The token is a short code in the style of the device
+  authorization grant ([RFC 8628 §3.3][rfc8628]): `browser_pair` stores a pending row in
+  `ai_browser_pairings` (migration `20260929T1330Z_browser_pairings.sql`) and returns
+  the code once; only its SHA-256 is kept. Every connected tab shows the request, naming
+  the MCP token that asked, and the user types the code into the tab the agent should
+  drive. Typing it, rather than only clicking Allow, ties the acceptance to the agent
+  the user is talking to. The code is single-use, lives 5 minutes, and allows 5 tries;
+  requests are capped per principal (3) and overall (20). The accepted pairing binds the
+  principal to that tab, one tab per principal (a partial unique index), until the user
+  disconnects it in the tab, 8 hours pass, or the tab reloads (a new tab id). The prompt
+  is user-only, so a paired agent's own `click`/`fill` cannot accept another.
+- **Replicas.** Pairing rows are shared through Postgres, and every replica re-reads the
+  pending requests for its tabs every 3 s, so the prompt appears wherever the tab is
+  connected; a call itself reaches only a tab on the caller's replica (§5.2).
+
 ### 8.6 Threat model (summary)
 
 | Threat | Mitigation |
@@ -799,6 +882,10 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
+  As built (#526): the harness does not load it yet. Every query runs with `tools: []`
+  (§4.4), which leaves no `Skill` or `Agent` tool, so its skills and subagents would be
+  listed but unusable; exposing them needs those tools and a tier for them (§8.1)
+  first (`agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has
@@ -894,6 +981,7 @@ Each of these is in §3.2 until verified.
 [rfc8707]: https://www.rfc-editor.org/rfc/rfc8707
 [rfc6750]: https://www.rfc-editor.org/rfc/rfc6750
 [rfc9068]: https://www.rfc-editor.org/rfc/rfc9068
+[rfc8628]: https://www.rfc-editor.org/rfc/rfc8628#section-3.3
 [mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
 [mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject

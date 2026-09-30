@@ -1,12 +1,17 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
+import { resetAiAvailability } from '../agent/chat/availability'
 import { api } from '../api/client'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
+
+/** Bambuddy's "Test connection", as against a plugin endpoint's (RemotePluginsPanel). */
+const bambuddyTest = () =>
+  within(screen.getByRole('region', { name: 'Connection' })).getByRole('button', { name: 'Test connection' })
 
 /** The form seeds itself from the server, so wait for the URL to arrive. */
 async function seeded() {
@@ -50,7 +55,7 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     expect(await screen.findByRole('status')).toHaveTextContent('3DP-31B-598')
   })
 
@@ -67,21 +72,31 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
   })
 
-  it('offers the folders and pipelines Bambuddy reports', async () => {
+  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
     renderPage(<SettingsPage />)
     await seeded()
     expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
     // Bambuddy's ids are integers, so the <select> values are their decimal strings.
-    expect(screen.getByLabelText('Library folder')).toHaveValue('2')
-    expect(screen.getByLabelText('Slicer pipeline')).toHaveValue('1')
+    expect(screen.getByLabelText('Inbox folder, for sends without a project')).toHaveValue('2')
     expect(screen.getByLabelText('Printer')).toHaveValue('1')
-    expect(
-      screen.getByRole('option', { name: 'Textured PEI · 0.20 mm · AMS' }),
-    ).toBeInTheDocument()
+    // #312: printing is the Print dialog's, which derives its own presets.
+    expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
+  })
+
+  it('never sends a pipeline', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '')
+    await user.click(screen.getByRole('button', { name: 'Save Printing defaults' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toEqual({ printer_id: null })
+    put.mockRestore()
   })
 
   it('sends the key only when one was typed', async () => {
@@ -89,15 +104,17 @@ describe('SettingsPage', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    const url = screen.getByLabelText('Bambuddy URL')
+    await user.type(url, '/')
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).not.toHaveProperty('bambuddy_api_key')
     await waitFor(() => expect(screen.getByText(/Saved at/)).toBeInTheDocument())
 
     await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
-    expect(put.mock.calls[1]?.[0]).toMatchObject({ bambuddy_api_key: 'secret' })
+    expect(put.mock.calls[1]?.[0]).toEqual({ bambuddy_api_key: 'secret' })
     put.mockRestore()
   })
 
@@ -106,7 +123,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.type(screen.getByLabelText('API key'), 'secret')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(screen.getByLabelText('API key')).toHaveValue(''))
     expect(screen.getByText(/Saved at/)).toBeInTheDocument()
   })
@@ -119,7 +136,7 @@ describe('SettingsPage', () => {
     const select = screen.getByLabelText('Default plate')
     await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
     await user.selectOptions(select, 'A1 mini')
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
     expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
@@ -140,7 +157,7 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
     expect(getDisplayUnit()).toBe('mm')
 
-    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
     await waitFor(() => expect(getDisplayUnit()).toBe('in'))
     expect(put.mock.calls[0]?.[0]).toMatchObject({ display_unit: 'in' })
     expect((await api.getSettings()).display_unit).toBe('in')
@@ -220,7 +237,7 @@ describe('SettingsPage, live (#269)', () => {
     await waitFor(() => expect(field).not.toHaveValue(''))
     await user.clear(field)
     await user.type(field, 'https://tested.test')
-    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    await user.click(bambuddyTest())
     await screen.findByRole('status')
 
     // The test saved the form; this is that save's own event.
@@ -230,20 +247,32 @@ describe('SettingsPage, live (#269)', () => {
     expect(field).toHaveValue('https://tested.test')
   })
 
-  it('shows the assistant plugin sections only while AI is available', async () => {
+  it('shows the assistant plugin sections only while the agent says AI is available', async () => {
+    // Availability is the agent's own answer at /api/v1/ai/status (useAiAvailability).
+    server.use(
+      http.get('/api/v1/ai/status', () =>
+        HttpResponse.json({
+          available: false,
+          state: 'disabled',
+          ai: 'disabled (no Claude credential)',
+          reason: 'No Claude credential is configured yet.',
+        }),
+      ),
+    )
+    resetAiAvailability()
     const hidden = renderPage(<SettingsPage />)
     await seeded()
+    await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Plugin endpoints' })).not.toBeInTheDocument()
     hidden.unmount()
 
-    vi.stubEnv('VITE_MOCK_API', '1')
-    try {
-      renderPage(<SettingsPage />)
-      expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
-      expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
-      expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
-    } finally {
-      vi.unstubAllEnvs()
-    }
+    // The default handler answers as available.
+    server.resetHandlers()
+    resetAiAvailability()
+    renderPage(<SettingsPage />)
+    expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+    expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
   })
 })

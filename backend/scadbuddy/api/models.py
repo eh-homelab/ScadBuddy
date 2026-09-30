@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    IMPORT_CONCURRENCY,
     AssetsDep,
     CatalogueDep,
     CheckoutsDep,
@@ -33,7 +34,9 @@ from scadbuddy.api.deps import (
     ConfigDep,
     EventsDep,
     FetcherDep,
+    FontsDep,
     HistoryDep,
+    ImportsDep,
     InstallsDep,
     LibrariesDep,
     OutputsDep,
@@ -106,6 +109,7 @@ from scadbuddy.library.upstream import (
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
+    ResolverBusyError,
     fetch_model,
 )
 from scadbuddy.render.jobs import resolve_source
@@ -728,6 +732,20 @@ async def _create(
     return record
 
 
+#: What a 503 from a full import budget says to wait. A fetch ends within
+#: `IMPORT_TIMEOUT`, most within a second or two.
+IMPORT_RETRY_AFTER = 5
+
+
+def _import_busy(why: str) -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"{why}; try again in {IMPORT_RETRY_AFTER} s",
+        headers={"Retry-After": str(IMPORT_RETRY_AFTER)},
+        retry_after=IMPORT_RETRY_AFTER,
+    )
+
+
 class UrlImport(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to the model's source")
     name: str | None = Field(
@@ -750,18 +768,39 @@ class UrlImport(BaseModel):
         "refusal is a 422, and an address that is not public reads the same as one that "
         "did not answer."
     ),
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                f"{IMPORT_CONCURRENCY} imports are already fetching on this replica, or "
+                "its resolver threads are all busy (library installs share them); retry "
+                "after `Retry-After` seconds"
+            )
+        }
+    },
 )
 async def import_model(
     body: UrlImport,
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
+    imports: ImportsDep,
     events: EventsDep,
 ) -> ModelRecord:
-    try:
-        imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
-    except ImportRefusedError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    # No await between the check and the acquire, so nothing can take the permit in
+    # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
+    # spend its wait against the client's patience, not the import's deadline.
+    if imports.locked():
+        raise _import_busy(f"{IMPORT_CONCURRENCY} imports are already fetching on this replica")
+    async with imports:
+        try:
+            imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
+        except ImportRefusedError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except ResolverBusyError:
+            # Library installs vet clone URLs on the same resolver threads. None free
+            # is decided before the host is looked up, so it says nothing about the
+            # host: the same retry as a full import budget, not the refusal.
+            raise _import_busy("every resolver thread on this replica is busy") from None
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(
@@ -844,6 +883,7 @@ async def patch_model(
     assets: AssetsDep,
     presets: PresetsDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ModelRecord:
     require_mine(slug)
     # The record, not only existence: a model.json that no longer reads as metadata is
@@ -858,6 +898,7 @@ async def patch_model(
             config=config,
             assets=assets,
             fetcher=fetcher,
+            fonts=fonts,
         )
         patch.presets = with_keys(patch.presets)
     update = partial(catalogue.update, slug, patch)

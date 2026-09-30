@@ -156,6 +156,16 @@ class PrintEvent(BaseEvent):
     slug: str
 
 
+class PrintRunEvent(BaseEvent):
+    """A print run (#470) was accepted or ended: re-read ``GET /print/runs/{run_id}``.
+    Published on the output's ``print:<output id>`` topic, beside ``print.progress``."""
+
+    kind: Literal["print.run"] = "print.run"
+    output_id: str
+    slug: str
+    run_id: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -181,10 +191,10 @@ class FontInstalled(BaseEvent):
 SettingsSection = Literal[
     "connection",
     "print_options",
-    "model_pipeline",
     "model_choices",
     "printer_bed_type",
     "last_project",
+    "remembered",
 ]
 
 
@@ -232,6 +242,7 @@ Event = Annotated[
     | UpstreamAvailable
     | OutputEvent
     | PrintEvent
+    | PrintRunEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled
@@ -381,6 +392,10 @@ class EventBus(Protocol):
 
     async def aclose(self) -> None:
         """Close every subscription, ending each consumer's iteration."""
+        ...
+
+    def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
+        """Call ``listener`` on the publishing thread for every event; returns its remover."""
         ...
 
 

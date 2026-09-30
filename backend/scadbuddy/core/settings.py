@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
+from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -71,8 +75,8 @@ class Settings(BaseSettings):
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
-    # The largest media upload (#274). Environment only: GET /settings reports it
-    # read-only, and nothing stores an override.
+    # The largest media upload (#274). Env-seeded like the rest (#322): Settings can
+    # change it, and the upload gate reads the value in effect on every request.
     media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
@@ -88,9 +92,33 @@ class Settings(BaseSettings):
     # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    # SCADBUDDY_BAMBUDDY_WEB_URLS: comma-separated URLs browsers reach Bambuddy at
+    # (#775), when `bambuddy_url` is one only the server can (an in-cluster Service).
+    # The first is where links point; the others are other hostnames of the same
+    # Bambuddy, which a link follows when ScadBuddy is framed by one of them.
+    # Unset, links use `bambuddy_url`.
+    bambuddy_web_urls: str | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
+    # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
+    # besides the public URL's — the LAN hostname when the public URL is an SSO
+    # proxy, say. A browser's `Origin` on the realtime socket must be one of them
+    # (`api/realtime.py`, #266); with only the public URL, whichever other hostname
+    # the same deployment answers on shows "Live updates unavailable". Not a stored
+    # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
+    # pages may reach the server, so it belongs to the deployment.
+    allowed_origins: str = ""
+
+    @field_validator("bambuddy_web_urls")
+    @classmethod
+    def _web_urls_are_http(cls, value: str | None) -> str | None:
+        for url in split_urls(value):
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                raise ValueError(f"SCADBUDDY_BAMBUDDY_WEB_URLS: {url!r} is not an http(s) URL")
+        return value
+
     # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
@@ -139,6 +167,18 @@ class Settings(BaseSettings):
     # scadbuddy.worker` as its own Deployment and leaves this off.
     temporal_worker_inprocess: bool = False
 
+    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @classmethod
+    def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
+        # As `database_url`: a value that is only whitespace would read as "set" (the
+        # Temporal path) with a garbage address. Only the address may be empty.
+        name = f"SCADBUDDY_{(info.field_name or '').upper()}"
+        if value != value.strip():
+            raise ValueError(f"{name} must not start or end with whitespace: {value!r}")
+        if not value and info.field_name != "temporal_address":
+            raise ValueError(f"{name} must not be empty")
+        return value
+
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.
@@ -155,6 +195,16 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    @field_validator("log_level")
+    @classmethod
+    def _log_level_known(cls, value: str) -> str:
+        level = value.strip().upper()
+        if level not in LOG_LEVELS:
+            raise ValueError(
+                f"SCADBUDDY_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, not {value!r}"
+            )
+        return level
+
     # Stamped into the image by .github/workflows/build-image.yml
     # (SCADBUDDY_REVISION / SCADBUDDY_VERSION build args): the commit and the
     # image tag this process was built from. /healthz reports both, and that is
@@ -162,6 +212,11 @@ class Settings(BaseSettings):
     # pinned is the one serving — see docs in README.md, "Deploying".
     revision: str = "unknown"
     version: str = "dev"
+
+    @property
+    def allowed_origin_list(self) -> list[str]:
+        """`SCADBUDDY_ALLOWED_ORIGINS` split on commas, blanks dropped."""
+        return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
 
     @field_validator("revision")
     @classmethod
@@ -221,6 +276,141 @@ class Settings(BaseSettings):
         if self.frontend_dir is not None:
             return self.frontend_dir if self.frontend_dir.is_dir() else None
         return _first_directory(REPO_ROOT / "frontend" / "dist", CONTAINER_FRONTEND_DIR)
+
+
+#: What ``log_level`` takes: the standard library's own level names.
+LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+#: The fields the UI cannot set (#322), each with the reason Settings shows beside it.
+#: Every other field of :class:`Settings` is env-seeded: ``SCADBUDDY_<FIELD>`` seeds it,
+#: a value saved in the UI wins, and a reset goes back to the environment, then the
+#: default. ``tests/test_settings_coverage.py`` fails when a field is neither, so an
+#: environment-only setting cannot slip in unnoticed.
+BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "data_dir": "The data volume. It is needed before any stored setting can be read.",
+        "database_url": (
+            "Where the settings themselves are kept, so the UI cannot choose it; it is also a"
+            " credential."
+        ),
+        "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "allowed_origins": (
+            "Which pages may open the realtime socket. Like the agent's trusted proxies, it"
+            " decides who can reach the server, so it belongs to the deployment."
+        ),
+        "seed_models_dir": "Image layout, fixed when the image is built.",
+        "seed_libraries_dir": "Image layout, fixed when the image is built.",
+        "frontend_dir": "Image layout, fixed when the image is built.",
+        "openscad": (
+            "The binary the server runs. Choosing it from a web form would let anyone who can"
+            " reach the page run any program, and the verified OpenSCAD facts are tied to the"
+            " image's own build."
+        ),
+        "openscad_lsp": (
+            "The binary the server runs for the editor. Choosing it from a web form would let"
+            " anyone who can reach the page run any program."
+        ),
+        "temporal_address": (
+            "Where renders run (#424). The render workers (`python -m scadbuddy.worker`) take"
+            " it from their own environment, so the deployment points the API and its workers"
+            " together; a form only the API reads would split them."
+        ),
+        "temporal_namespace": "Paired with the Temporal address; set with it by the deployment.",
+        "temporal_task_queue_render": (
+            "Paired with the Temporal address: the API and the render workers must name the"
+            " same queue, and only the deployment sets both."
+        ),
+        "temporal_worker_inprocess": (
+            "Whether this process runs a render worker at all, decided by how the deployment"
+            " is laid out (one replica, or a separate worker Deployment)."
+        ),
+        "revision": "A build stamp that /healthz reports, not a setting.",
+        "version": "A build stamp that /healthz reports, not a setting.",
+    }
+)
+
+#: The env-seeded fields, in declaration order.
+ENV_SEEDED: Final = tuple(name for name in Settings.model_fields if name not in BOOTSTRAP_FIELDS)
+
+#: Env-seeded fields that are credentials: written, never read back (only "set").
+SECRET_FIELDS: Final = frozenset({"bambuddy_api_key", "google_fonts_api_key"})
+
+Applies = Literal["live", "restart"]
+
+#: When a changed value takes effect in a running process (#322). ``live`` is at once,
+#: on every replica (``api/runtime.py`` applies it on ``settings.changed``); ``restart``
+#: is at the next start, and until then ``GET /settings`` lists the field in
+#: ``restart_required``. A new env-seeded field must say which it is.
+APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
+    {
+        # Read from the store on every use.
+        "bambuddy_url": "live",
+        "bambuddy_api_key": "live",
+        "bambuddy_web_urls": "live",
+        "public_url": "live",
+        "default_plate": "live",
+        # The upload gate asks for the value in effect on every request.
+        "media_upload_max_bytes": "live",
+        # Read from the queue's config by each job, poll or admission check.
+        "render_timeout": "live",
+        "job_ttl": "live",
+        "solid_concurrency": "live",
+        "render_queue_max": "live",
+        "render_queue_depth_slo": "live",
+        "render_latency_slo": "live",
+        # Sizes the worker tasks and the thumbnail pool, which are built at start.
+        "render_concurrency": "restart",
+        # Semaphores: resizing one with permits out would over- or under-admit.
+        "check_concurrency": "restart",
+        "lsp_sessions": "restart",
+        "realtime_sockets": "restart",
+        # Decides at start whether the preview scheduler runs at all.
+        "preview_renders": "restart",
+        # Decides at start whether the periodic sweep runs at all.
+        "asset_sweep_interval": "restart",
+        # Attributes of the stores that read them on every use.
+        "library_max_bytes": "live",
+        "asset_max_total_bytes": "live",
+        "asset_max_count": "live",
+        "asset_sweep_grace": "live",
+        "duplicate_staging_max_age": "live",
+        "event_log_retention_seconds": "live",
+        "event_log_retention_rows": "live",
+        # A key change swaps the client and refetches the catalogue.
+        "google_fonts_api_key": "live",
+        "fonts_catalogue_ttl": "live",
+        "log_level": "live",
+    }
+)
+
+
+def split_urls(value: str | None) -> list[str]:
+    """A comma-separated URL list, blanks dropped, each without its trailing slash."""
+    return [url.strip().rstrip("/") for url in (value or "").split(",") if url.strip()]
+
+
+def env_var(name: str) -> str:
+    """The environment variable that seeds ``name``."""
+    return f"SCADBUDDY_{name.upper()}"
+
+
+def check_value(name: str, value: Any) -> Any:
+    """``value`` for the env-seeded field ``name``, coerced, or ``ValueError`` naming it.
+
+    The bounds are the ones a deployment's ``SCADBUDDY_<FIELD>`` meets: the field's own
+    type and validators on :class:`Settings`, then :class:`Config`'s checks. Every other
+    field is left at its default for the check, so a failure is this field's.
+    """
+    probe = Settings.model_construct()
+    try:
+        Settings.__pydantic_validator__.validate_assignment(probe, name, value)
+    except ValidationError as error:
+        message = error.errors()[0]["msg"].removeprefix("Value error, ")
+        if not message.startswith(env_var(name)):
+            message = f"{env_var(name)}: {message}"
+        raise ValueError(message) from None
+    probe.to_config()
+    return getattr(probe, name)
 
 
 def _first_directory(*candidates: Path) -> Path | None:

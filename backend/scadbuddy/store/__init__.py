@@ -31,14 +31,29 @@ class BlobStore(Protocol):
     def touched_at(self, key: str) -> float: ...
 
 
+def _touched_at(store: BlobStore, key: str) -> float | None:
+    """The blob's `touched_at`, or None when there is none to read: gone since
+    `keys()` (another sweep took it), or failing (EACCES, ESTALE; logged)."""
+    try:
+        return store.touched_at(key)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.exception("could not read an unreferenced blob's touch", extra={"key": key})
+        return None
+
+
 def sweep_blobs(
     store: BlobStore, refs: BlobRefs, *, grace: float, now: float | None = None
 ) -> list[str]:
     """Remove every blob nothing references that has not been touched for ``grace``.
 
-    A claimant calls `dir_for` (which touches the blob's mtime) before `refs.add`, so
-    a blob claimed between this sweep's `referenced()` snapshot and its `keys()` loop
-    is still within the grace window and survives."""
+    What protects a blob being claimed is the grace window, not exclusion. A claimant
+    calls `dir_for` (which touches the blob) before `refs.add`, and the sweep re-reads
+    the touch right before it removes a blob, so a claim landing after its
+    `referenced()` snapshot or after its first read survives. A same-key claim that
+    lands between that re-read and the removal (about one syscall wide) can still lose
+    its directory; `dir_for` then recreates it empty."""
     cutoff = (now if now is not None else time.time()) - grace
     kept = refs.referenced()
     removed: list[str] = []
@@ -46,17 +61,18 @@ def sweep_blobs(
     for key in blob_keys:
         if key in kept:
             continue
-        try:
-            touched = store.touched_at(key)
-        except FileNotFoundError:
-            continue  # gone since `keys()`: another sweep took it
-        if touched > cutoff:
+        touched = _touched_at(store, key)
+        if touched is None or touched > cutoff:
+            continue
+        touched = _touched_at(store, key)  # a claimant's `dir_for` touches first
+        if touched is None or touched > cutoff:
             continue
         try:
             store.remove(key)
         except OSError:
-            # One blob that cannot go (EACCES, EBUSY) must not keep every other one.
-            logger.exception("could not remove a blob", extra={"key": key})
+            # Logged and skipped, like the other sweeps: one blob that cannot go
+            # (EACCES, EBUSY) must not keep every one after it.
+            logger.exception("could not remove an unreferenced blob", extra={"key": key})
             continue
         removed.append(key)
     return removed

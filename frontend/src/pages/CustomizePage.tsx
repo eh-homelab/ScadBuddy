@@ -31,6 +31,7 @@ import {
   type ParamValues,
 } from '../lib/params'
 import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
+import type { SnapshotOptions } from '../lib/snapshot'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
@@ -212,6 +213,15 @@ export function CustomizePage() {
   }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+  const captureImage = useCallback(
+    async (options: SnapshotOptions) => captureRef.current?.captureImage(options) ?? null,
+    [],
+  )
+  const viewSize = useCallback(
+    () => captureRef.current?.viewSize() ?? { width: 0, height: 0 },
+    [],
+  )
+  const cameraView = useCallback(() => captureRef.current?.cameraView() ?? null, [])
 
   // #254 — the parameter the agent last touched: the panel shows its tab, and the row
   // gets the highlight once it is on screen.
@@ -265,7 +275,10 @@ export function CustomizePage() {
       // What the template changed from the parameters it was given (#285).
       notes: settledJob?.notes ?? [],
       // The log only earns its tokens when something went wrong.
-      log_tail: settledJob?.status === 'failed' ? (settledJob.log_tail ?? []).slice(-20) : undefined,
+      log_tail:
+        settledJob?.status === 'failed' || settledJob?.status === 'cancelled'
+          ? (settledJob.log_tail ?? []).slice(-20)
+          : undefined,
       plate: plateFit?.plate.name ?? null,
       fits: fitProblems.length === 0,
       fit_problems: fitProblems,
@@ -692,6 +705,11 @@ export function CustomizePage() {
               upToDate={upToDate}
               output={output}
               capture={capture}
+              captureImage={captureImage}
+              viewSize={viewSize}
+              cameraView={cameraView}
+              model={modelState.data}
+              onModelChanged={modelState.setData}
               fit={fit}
               fitProblems={misfit}
               onPrinterModel={setPrinterModel}

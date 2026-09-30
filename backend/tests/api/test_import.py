@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.models import MAX_SOURCE_CHARS
+from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR
+from scadbuddy.api.models import IMPORT_RETRY_AFTER, MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import url_import
+from scadbuddy.library.url_import import resolve_host as real_resolve_host
 
 RAW_URL = "https://raw.githubusercontent.com/someone/models/main/Gridfinity%20Bin.scad"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -162,3 +167,48 @@ def test_an_import_never_targets_a_built_in(client: TestClient) -> None:
 
     assert response.status_code == 201
     assert (response.json()["slug"], response.json()["origin"]) == ("builtin-bin", "mine")
+
+
+def test_an_import_over_the_fetch_budget_is_a_503_with_retry_after(client: TestClient) -> None:
+    getattr(client.app.state, STATE_ATTR).imports = asyncio.Semaphore(0)  # type: ignore[attr-defined]
+
+    with respx.mock(assert_all_called=False) as mock:
+        response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == str(IMPORT_RETRY_AFTER)
+    assert response.json()["retry_after"] == IMPORT_RETRY_AFTER
+    assert not mock.calls
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_an_import_with_every_resolver_thread_busy_is_a_503_not_the_refusal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Library installs share the import's resolver threads: with none free, the
+    import is told to retry, not that the host is not public."""
+    monkeypatch.setattr(url_import, "resolve_host", real_resolve_host)
+    taken = 0
+    while url_import._RESOLVER_SLOTS.acquire(blocking=False):
+        taken += 1
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    finally:
+        url_import._RESOLVER_SLOTS.release(taken)
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == str(IMPORT_RETRY_AFTER)
+    assert "resolver" in response.json()["detail"]
+    assert not mock.calls
+    assert client.get("/api/v1/models").json() == []
+
+
+@respx.mock
+def test_every_import_gives_its_fetch_permit_back(client: TestClient) -> None:
+    respx.get(RAW_URL).mock(return_value=httpx.Response(404))
+    for _ in range(IMPORT_CONCURRENCY + 1):
+        assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 422
+
+    respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
+    assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 201

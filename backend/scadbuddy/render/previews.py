@@ -109,7 +109,7 @@ async def render_preview(
         work.mkdir(parents=True)
         try:
             raw = work / RAW_RENDER_NAME
-            with staged_assets(schema, {}, source.scad.parent, assets) as params:
+            async with staged_assets(schema, {}, source.scad.parent, assets) as params:
                 await render_3mf(source.scad, schema, params, raw, config=config)
                 parts = extruder_order(
                     await asyncio.to_thread(split_by_material, raw), schema, params

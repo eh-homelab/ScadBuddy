@@ -136,6 +136,21 @@ class Config:
             raise ValueError(
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
+        # #322: bounds a value saved in Settings meets too, so they are said here once.
+        for name, value in (
+            ("SCADBUDDY_RENDER_TIMEOUT", self.render_timeout),
+            ("SCADBUDDY_JOB_TTL", self.job_ttl),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be more than 0, not {value}")
+        if self.check_concurrency < 1:
+            raise ValueError(
+                f"SCADBUDDY_CHECK_CONCURRENCY must be at least 1, not {self.check_concurrency}"
+            )
+        if self.fonts_catalogue_ttl < 0:
+            raise ValueError(
+                f"SCADBUDDY_FONTS_CATALOGUE_TTL must be at least 0, not {self.fonts_catalogue_ttl}"
+            )
         for name, value in (
             ("SCADBUDDY_SOLID_CONCURRENCY", self.solid_concurrency),
             ("SCADBUDDY_RENDER_QUEUE_MAX", self.render_queue_max),
@@ -303,6 +318,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         duplicate_staging_max_age=_float_or(
             source.get("SCADBUDDY_DUPLICATE_STAGING_MAX_AGE"), DEFAULT_DUPLICATE_STAGING_MAX_AGE
         ),
+        temporal_address=source.get("SCADBUDDY_TEMPORAL_ADDRESS") or "",
+        temporal_namespace=source.get("SCADBUDDY_TEMPORAL_NAMESPACE") or DEFAULT_TEMPORAL_NAMESPACE,
+        temporal_task_queue_render=source.get("SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER")
+        or DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     )
 
 

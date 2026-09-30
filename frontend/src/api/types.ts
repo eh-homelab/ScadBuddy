@@ -76,15 +76,29 @@ export type InstalledFamily = Schemas['InstalledFamily']
 /** #93 — third-party OpenSCAD libraries: the curated catalogue, and each model's own pins. */
 export type CatalogueLibrary = Schemas['CatalogueLibrary']
 export type ModelLibrary = Schemas['ModelLibrary']
+/** #217 — a `libraries` entry in model.json that is not a pin, and why. */
+export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
 export type LibraryPinRequest = Schemas['LibraryPinRequest']
+/** #169 — the upgrade flow: who pins a library, a candidate ref's check, and a re-pin. */
+export type LibraryUser = Schemas['LibraryUser']
+export type LibraryCheck = Schemas['LibraryCheck']
+export type LibraryCheckRequest = Schemas['LibraryCheckRequest']
+export type LibraryRepinRequest = Schemas['LibraryRepinRequest']
+export type InstalledLibrary = Schemas['InstalledLibrary']
 export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']
 export type ConnectionTest = Schemas['ConnectionTest']
+/** #322 — one Bambuddy scope's result in the connection test. */
+export type ScopeCheck = Schemas['ScopeCheck']
+/** #322 — where an env-seeded setting's value comes from. */
+export type SettingSource = NonNullable<Settings['sources']>[string]
+export type BootstrapValue = Schemas['BootstrapValue']
+export type RememberedChoices = Schemas['RememberedChoices']
+export type BambuddyStatus = Schemas['BambuddyStatus']
 export type BambuddyTargets = Schemas['BambuddyTargets']
 export type BambuddyFolder = Schemas['Folder']
-export type BambuddyPipeline = Schemas['Pipeline']
 export type BambuddyPrinter = Schemas['Printer']
 export type PresetRef = Schemas['PresetRef']
 export type SidebarLink = Schemas['SidebarLink']
@@ -94,6 +108,9 @@ export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
+/** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
+export type PrintCheck = Schemas['PrintCheck']
+export type PrintRun = Schemas['PrintRun']
 
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
@@ -123,6 +140,11 @@ export type ModelPrintChoices = Schemas['ModelPrintChoices']
 export type PrinterBedType = Schemas['PrinterBedType']
 export type OutputPlate = Schemas['OutputPlate']
 
+/** #313 — the Library page's listing, and one row of it. */
+export type LibraryListing = Schemas['LibraryListing']
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFolderView = Schemas['LibraryFolderView']
+
 /**
  * #89 — run tracking.
  *
@@ -143,6 +165,8 @@ export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
 export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
+export type ProjectFile = Schemas['ProjectFile']
+export type LastProject = Schemas['LastProject']
 export type AttachResult = Schemas['AttachResult']
 
 /** #81 — the build volume the preview draws and checks the model against. */
@@ -150,9 +174,24 @@ export type Plate = Schemas['PlateView']
 export type PlateCatalogue = Schemas['PlateCatalogue']
 export type PlateFit = Schemas['PlateFit']
 
+/**
+ * #284 — the print analyzers (#461, `backend/scadbuddy/api/analyzers.py`): a run over
+ * the request the print dialog would send, and the report it answers with.
+ */
+export type AnalysisRun = Schemas['AnalysisRun']
+export type AnalysisRequest = Schemas['AnalysisRequest']
+export type AnalysisReport = Schemas['AnalysisReport']
+export type AnalyzerDiagnostic = Schemas['AnalyzerDiagnostic']
+export type AnalyzerSeverity = AnalyzerDiagnostic['severity']
+export type AnalyzerSource = Schemas['Source']
+export type DiagnosticLocation = Schemas['DiagnosticLocation']
+export type ScopeRef = Schemas['ScopeRef']
+/** A decision about a finding at a scope; `DecisionCreate` records an ignore or a suppression. */
+export type AnalyzerDecision = Schemas['Decision']
+export type DecisionCreate = Schemas['DecisionCreate']
+
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
-export type SendMode = SendResult['mode']
 
 /**
  * A view model, not a wire type: the API returns a flat `parameters` list plus the

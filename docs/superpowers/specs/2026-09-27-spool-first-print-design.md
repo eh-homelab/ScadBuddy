@@ -35,6 +35,14 @@ and changed it went with the picker.
 Converting the send bar to spool-first is tracked as its own follow-up,
 eh-homelab/ScadBuddy#312.
 
+**Superseded by #312 (2026-09-28): the send bar no longer queues.** `POST
+/outputs/{id}/send` only uploads the 3MF to the library, laid out for the Settings
+printer, and attaches the edit link. Its queue mode, copies and print options are gone,
+and so are Settings' default pipeline, the raw slicer-preset settings, the pipeline
+progress route and ScadBuddy's Bambuddy pipeline client calls. The print dialog's run
+(§4) is the only path that prints. The amendment 2 paragraph above describes the state
+before #312.
+
 ## 1. Scope
 
 This is project 1 of 3:
@@ -191,6 +199,57 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
+**Extruder per filament (#469).** Left at the 3MF's default `filament_map_mode: "Auto
+For Flush"` the slicer spread filaments over both extruders and sliced both for the
+chosen size, which paused queue item 108 with HMS 05FE8053 ("the left nozzle is not
+matched"). ScadBuddy can't pin a filament to an extruder: measured through Bambuddy's
+slicer on 2026-09-28, a Manual `filament_map` in `project_settings.config` is ignored
+(`slice_info` still reads `2 1`), and one at plate level in `model_settings.config`
+crashes the slicer (SIGSEGV) whatever its values. So the run refuses, before upload, the
+prints the mounted nozzles would pause. Extruders are physical: 0 is the right (main), 1
+the left, and `status.nozzles` is indexed the same way.
+
+- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …"). A
+  single-nozzle printer whose one nozzle is another size is refused the same way ("The
+  nozzle is 0.4 mm, not 0.2 mm. …"): nothing about it is unknown.
+- **A side counts as fitted with the size when the rack holds a spare of it** (§6: the
+  printer swaps the rack hotend matching the sliced size onto the extruder; queue item
+  108's rack held no spare 0.2). Rack ids 0 and 1 are the mounted pair, mirroring
+  `nozzles`, so the spares are the other ids; each serves one side. So with both sides
+  0.4 and one 0.2 in the rack (the 2026-09-27 rack), a one-color 0.2 print runs and a
+  two-color one is refused naming the rack; with a 0.2 mounted on the right and another
+  in the rack, a two-color 0.2 print runs. The filament step carries the spares as
+  `rack`, so the dialog mirrors it. Measured 2026-09-29 (§5, queue item 150): the printer
+  swaps the spare on at print start and prints, rather than pausing.
+- **One side fitted with it** (the nozzles differ, or one spare serves one side): more than one filament is a 422,
+  since the slicer spreads them across both. One filament prints, with a warning that
+  the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
+  plates being printed (the parts' extruders in the local 3MF's `model_settings.config`),
+  not the whole model.
+- **One side fitted with it, the other unreported:** a single-nozzle printer (X1C, P1S,
+  A1: an empty second `nozzles` entry, no AMS wired left, no switch) prints any number of
+  filaments. On a printer with a left side, that side is unknown: a warning, not a 422.
+- **Both fitted with it:** any filament prints on either.
+- **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
+  switch routes any AMS to either nozzle (user ruling, 2026-09-28). A spool's side, from
+  `ams_switch_inlet` (inlet A left, B right, as upstream `fts_routing.py`), is shown
+  only as "rests on L/R".
+- **Without the switch**, each AMS is wired to one side: the external holder's tray
+  (assignment `ams_id` 255, tray 0 left, tray 1 right), else `ams_extruder_map`, where
+  anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
+  a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
+  0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
+  never pre-selects it — unless the rack holds a spare of the size, which the printer
+  can swap onto that side.
+- Nozzles the printer doesn't report refuse nothing and warn. Nor does an unreadable
+  `/inventory/assignments`: every spool's side is then unknown. With no status it isn't
+  read.
+- `extruders.plan_extruders` decides all of it, from one status read per run, right
+  after #472's `choice_errors` in `run_for_output`. Only the nozzle **diameter** is
+  compared, not its flow type (HS vs HH).
+- A per-color extruder choice is possible only once Bambuddy's slicer honors a filament
+  map; the upstream report is drafted, not filed.
+
 ### 4.4 Plate
 
 Preselect order (amendment 4): the printer's last print's `bed_type` (§3) → ScadBuddy's
@@ -262,6 +321,23 @@ The follow-up real prints failed at the printer because of #469.
 Also found:
 - #470: the run POST can outlive the 60 s ingress timeout. The client gets a 504 while the item is still queued, so a retry double-queues.
 - #476: the sliced plate thumbnail shows the model's authored colors, not the chosen spools'. The sliced `filament_colour` is correct.
+
+### Acceptance after #538 (2026-09-29)
+
+Rerun against the deployed builds `sha-74f634f` and later, which include #538's refusals and hotend-rack handling. The printer was fitted with a 0.4 mm nozzle on each side and held one spare 0.2 mm hotend in its rack. Each run used a `name-keychain` output, Fine, and manual start, and the user started each print on the printer.
+
+| Check | Result | Measured value |
+|---|---|---|
+| Two colors at 0.2 are refused before upload | **Pass** | 422, nothing uploaded: "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one spare 0.2 mm hotend in the rack… Fit a 0.2 mm nozzle on both sides, or print in one color." |
+| One color at 0.2 uses the rack's spare | **Pass** | Queue item 150: sliced at 0.2, `0.08mm High Quality`. At start the printer reported 0.2 on the right and 0.4 on the left, swapped in from the rack, and completed 03:55 to 04:43 UTC with no HMS. |
+| One color at 0.4 prints | **Pass** | Queue item 151: sliced at 0.4, `0.12mm High Quality`, completed 03:24 to 03:49 UTC. |
+| Two colors at 0.4 print | **Fail** | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Queued 02:13 UTC; as a manual start it waited until the user started it, at 13:15 UTC, and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." Both sides were 0.4 mm, but the right was standard (`HS01`) and the left High Flow (`HH01`), and both were sliced as standard. #538's refusal compares size only; tracked in #723. |
+
+This closes #469 for sides that differ in size: that case (queue item 108) is now refused before upload, and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
+
+Also found:
+- Each run POST still outlives the 60 s ingress timeout, giving a 504 while the item queues (#470). Every run above was checked on Bambuddy's queue rather than retried.
+- A one-color print needs a one-color output. Two plate slots are two filaments to the slicer even on the same spool, so the multi-color refusal applies (by design).
 
 ## 6. What Bambuddy decides, and ScadBuddy does not
 

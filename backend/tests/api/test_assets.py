@@ -4,25 +4,48 @@ from __future__ import annotations
 
 import io
 import json
-import os
-import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.assets import MAX_ASSET_BYTES
+from scadbuddy.library.assets import MAX_ASSET_BYTES, AssetStore
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
-from tests.conftest import MODEL_SLUG
+from tests.conftest import MODEL_SLUG, UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+
+
+def test_an_upload_store_without_its_database_is_a_503_problem(tmp_path: Path) -> None:
+    """The server never starts without a database (#401), but a store built without
+    one answers a problem naming it rather than an unexplained 500 (#591)."""
+    app = create_app(
+        Settings(
+            data_dir=tmp_path / "data",
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    setattr(app.state, STATE_ATTR, replace(state, assets=AssetStore(state.paths.assets)))
+    # No lifespan: nothing here may dial the (unused) database.
+    response = TestClient(app, raise_server_exceptions=False).get("/api/v1/assets/usage")
+    assert response.status_code == 503, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    problem = response.json()
+    assert problem["type"] == DATABASE_REQUIRED_PROBLEM
+    assert "SCADBUDDY_DATABASE_URL" in problem["detail"]
+
 
 # The fake openscad exports `width` and `label` (initial "hi"); the annotation is
 # ScadBuddy's own overlay, so it turns `label` into a file parameter.
@@ -324,10 +347,13 @@ def _svg(n: int) -> bytes:
     ).encode()
 
 
-def _age(paths: DataPaths, asset_id: str, seconds: float) -> None:
-    then = time.time() - seconds
-    for path in paths.assets.glob(f"{asset_id}.*"):
-        os.utime(path, (then, then))
+def _age(conninfo: str, asset_id: str, seconds: float) -> None:
+    """Make the upload look last used ``seconds`` ago: its row's ``last_used_at`` (#591)."""
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (seconds, asset_id),
+        )
 
 
 @pytest.fixture
@@ -384,7 +410,7 @@ def test_a_preset_refuses_a_file_value_that_is_not_an_upload(client: TestClient)
 
 
 def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
-    app: FastAPI, client: TestClient, paths: DataPaths
+    app: FastAPI, client: TestClient, paths: DataPaths, pg_conninfo: str
 ) -> None:
     in_output, in_preset, in_job, unused = (str(_upload(client, _svg(n))["id"]) for n in range(4))
     render = f"/api/v1/models/{MODEL_SLUG}/render"
@@ -405,7 +431,7 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     other = client.post(render, json={"params": {"label": in_job}})
     wait_for_job(client, other.json()["job_id"])
     for asset_id in (in_output, in_preset, in_job, unused):
-        _age(paths, asset_id, 30 * 86400)
+        _age(pg_conninfo, asset_id, 30 * 86400)
 
     assert sweep_assets(state) == [unused]
 
@@ -417,11 +443,11 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
 
 @pytest.mark.parametrize(("interval", "swept"), [(86400.0, True), (0.0, False)])
 def test_the_boot_sweeps_unless_the_sweep_is_off(
-    settings: Settings, paths: DataPaths, file_model: str, interval: float, swept: bool
+    settings: Settings, pg_conninfo: str, file_model: str, interval: float, swept: bool
 ) -> None:
     with TestClient(create_app(settings)) as first:
         asset_id = str(_upload(first, _svg(1))["id"])
-    _age(paths, asset_id, 30 * 86400)
+    _age(pg_conninfo, asset_id, 30 * 86400)
 
     booted = settings.model_copy(update={"asset_sweep_interval": interval})
     with TestClient(create_app(booted)) as second:
@@ -429,17 +455,21 @@ def test_the_boot_sweeps_unless_the_sweep_is_off(
     assert found == (404 if swept else 200)
 
 
-def test_the_boot_recounts_the_upload_store(
-    app: FastAPI, paths: DataPaths, file_model: str
+def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
+    settings: Settings, paths: DataPaths, file_model: str
 ) -> None:
-    """A ledger left stale by files changed while the process was down (#390)."""
-    state = getattr(app.state, STATE_ATTR)
-    state.assets.ledger_path.write_text(
-        json.dumps({"count": 42, "bytes": 4242, "dirty": False}), encoding="utf-8"
-    )
-    with TestClient(app) as test_client:
+    """No backfill (#591): the usage is the rows, whatever an old ledger says, and the
+    boot's sweep removes the ledger and the sidecars; an upload writes neither."""
+    ledger = paths.assets.with_name(f".{paths.assets.name}.usage.json")
+    sidecar = paths.assets / f"{'e' * 64}.json"
+    for path in (ledger, sidecar):
+        path.write_text(json.dumps({"count": 42, "bytes": 4242, "dirty": False}))
+    with TestClient(create_app(settings)) as test_client:
         usage = test_client.get("/api/v1/assets/usage").json()
+        uploaded = _upload(test_client, _svg(1))
     assert (usage["count"], usage["bytes"]) == (0, 0)
+    assert not ledger.exists() and not sidecar.exists()
+    assert [p.name for p in paths.assets.iterdir()] == [f"{uploaded['id']}.svg"]
 
 
 def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:

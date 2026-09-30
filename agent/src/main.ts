@@ -1,8 +1,9 @@
-import { serve } from '@hono/node-server'
+import { serve, upgradeWebSocket } from '@hono/node-server'
+import { WebSocketServer } from 'ws'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
-import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
@@ -24,10 +25,17 @@ import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
+import { AuditLog } from './audit/log.js'
+import { auditedTokenStore } from './audit/writes.js'
+import { TabHub } from './bridge/hub.js'
+import { PostgresPairingStore } from './bridge/pairings.js'
+import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
+import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
+import type { ToolServices } from './tools/registry.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -35,6 +43,8 @@ import { PendingActionStore } from './tools/pending.js'
 const PORT = 8081
 /** How often approvals nobody is waiting on are expired (approvals/service.ts). */
 const APPROVAL_SWEEP_MS = 30_000
+/** How often audit rows past their retention are deleted (audit/log.ts). */
+const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
 
 const config = loadConfig()
 
@@ -98,7 +108,21 @@ const database = config.databaseUrl
 // by the next /healthz or API call instead of stopping the pod.
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
-const settings = database ? new SettingsStore(database.sql) : undefined
+// The audit log of AI actions (#258, audit/log.ts). Its input hashes use the
+// approvals' key, so a tool call's row carries the same hash as its approval.
+// The settings store audits its own writes into it, so it comes second; the
+// log reads its retention through the thunk.
+
+const audit = database
+  ? new AuditLog({
+      sql: database.sql,
+      settings: (): SettingsStore | undefined => settings,
+      ...(kek.ok ? { hashKey: approvalHashKey(kek.kek) } : {}),
+      onError: (err, entry) =>
+        console.error(`audit log: could not record ${entry.kind} ${entry.action}:`, (err as Error).message),
+    })
+  : undefined
+const settings: SettingsStore | undefined = database ? new SettingsStore(database.sql, audit) : undefined
 // OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
 // its metadata and JWKS caches for the process.
 const oidcRepo = settings
@@ -117,6 +141,27 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
+// `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
+// `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
+// (routes/mcpAuthMode.ts), so both report the same thing. A read that throws
+// makes /mcp fail closed (mcp/http.ts).
+const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo)
+// The registry's services (#251), shared by /mcp and every session's
+// in-process tools. `pending` is swapped for the ai_approvals store below once
+// the sessions (and so the approval service) exist.
+const toolServices: ToolServices = {
+  backend,
+  pending: new PendingActionStore(),
+  pollIntervalMs: 1000,
+  renderWaitMs: 10 * 60_000,
+  publicBaseUrl: config.publicUrl,
+}
+// The browser bridge (#254, bridge/hub.ts): the tabs connected over
+// /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
+// one through `ai_browser_pairings` (spec §8.5).
+const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined })
+toolServices.browser = tabs
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -124,13 +169,11 @@ const paths = { stateDir: DEFAULT_STATE_DIR }
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
 
-// One store for Settings (routes/mcpTokens.ts) and /mcp.
-const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
+// One store for Settings (routes/mcpTokens.ts) and /mcp. Mint and revoke are
+// recorded in the audit log (#258), whichever of the two makes them.
+const tokens =
+  database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
 
-// Sessions (#300) and their approvals (#258). Nothing starts a session over
-// HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
-// expiry sweep are live so that approvals left pending by a restart can be
-// seen, decided or expired.
 // Whether the headless browser's Chromium can keep its sandbox in this pod
 // (harness/headlessSandbox.ts): probed once, on the first turn that uses the
 // browser, and said loudly either way.
@@ -147,15 +190,27 @@ const chromiumSandbox = (): Promise<boolean> =>
     return probe.available
   }))
 
+// Sessions (#300) and their approvals (#258): started from the assistant
+// panel's socket (routes/chat.ts) and the session routes (routes/sessions.ts).
+// The approval routes and the expiry sweep also serve approvals left pending
+// by a restart.
 const sessions =
   database && credentials
     ? new SessionManager({
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // ScadBuddy's tools and their tiers (tools/harness.ts). ScadBuddy's own
+        // plugin (plugins/scadbuddy) is not loaded: with `tools: []`
+        // (harness/options.ts) a query has no Skill or Agent tool to use its
+        // skills and subagents (test/harnessWiring.test.ts). The plugins
+        // below (remote, packages, the headless browser's vendored one) are.
+        ...harnessTools(toolServices),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
+        // Every tool call a turn makes, and every approval decision (#258).
+        ...(audit ? { audit } : {}),
         // Enabled plugins (#297), per turn, through the loopback forwarder.
         ...(plugins
           ? {
@@ -177,9 +232,17 @@ const sessions =
         },
       })
     : undefined
+// MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
+// the in-memory store above, whose actions are never confirmed.
+if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+})
+// Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
+const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('audit retention sweep failed:', (err as Error).message),
 })
 
 const app = createApp({
@@ -193,12 +256,16 @@ const app = createApp({
   packageInstaller,
   settings,
   tokens: database ? tokens : undefined,
+  aiSettings: settings,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
-  origins: originPolicy(config.publicUrl, config.trustedProxies),
-  ...(sessions ? { approvals: sessions.approvals } : {}),
+  origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
+  ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
+  ...(audit ? { audit } : {}),
+  upgradeWebSocket,
+  tabs,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -209,33 +276,25 @@ const app = createApp({
   mcp: {
     tools: ALL_TOOLS,
     resources,
-    services: {
-      backend,
-      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
-      // database, an in-memory store whose actions are never confirmed.
-      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
-      pollIntervalMs: 1000,
-      renderWaitMs: 10 * 60_000,
-      publicBaseUrl: config.publicUrl,
-    },
+    services: toolServices,
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
-    // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
-    // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
-    // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
-    authSettings: async () => {
-      const oidc = await oidcRepo?.get()
-      return oidc?.enabled ? { ...DEFAULT_MCP_AUTH, mode: 'oidc', oidc } : DEFAULT_MCP_AUTH
-    },
+    ...(audit ? { audit } : {}),
+    authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
-const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {
+// The chat socket (routes/chat.ts). A frame is one panel message; 256 KiB
+// covers the largest (a 32k-character message plus its page context).
+const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
+const stopHeartbeat = startHeartbeat(wss)
+
+const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
       `database ${database ? 'configured' : 'not configured (AI disabled)'}; ` +
@@ -248,11 +307,21 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     stopSweeper?.()
+    stopRetention?.()
+    stopHeartbeat()
+    tabs.close()
+    // 1001 "going away": the panel reconnects to another replica or after the restart.
+    for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
+    // A peer that never answers the close frame would hold server.close() for
+    // ws's 30 s close timeout, past the 10 s deadline.
+    setTimeout(() => {
+      for (const socket of wss.clients) socket.terminate()
+    }, 2_000).unref()
     // Running turns stop; their pending approvals stay pending (approvals/service.ts).
     sessions?.abortAll()
     void shutdown({
-      // End the /mcp sessions first: their standing SSE streams would
-      // otherwise hold server.close() until the deadline.
+      // End the /mcp sessions and the session event streams first: their
+      // standing SSE responses would otherwise hold server.close() until the deadline.
       closeSessions: async () => {
         await app.close()
         resources.close()

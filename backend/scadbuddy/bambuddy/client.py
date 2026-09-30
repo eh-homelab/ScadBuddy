@@ -6,7 +6,7 @@ than read off the design spec:
 * ``/api/v1/printers`` **404s** — only ``/api/v1/printers/`` exists, and it answers
   with a bare list whose ``id`` is an integer.
 * ``/api/v1/library/folders`` and ``/api/v1/external-links/`` also answer with bare
-  lists, while ``/api/v1/slicer-pipelines/`` wraps its rows in ``{"pipelines": [...]}``.
+  lists.
 * **Reading** folders is that slashless path; **creating** one is
   ``/api/v1/library/folders/`` **with** the slash. Both routes are real here.
 * ``/api/v1/printers/available-filaments`` takes a *required* ``model`` query
@@ -44,12 +44,9 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     InventoryRemain,
     LibraryFile,
+    LibraryListRow,
+    LibraryPlates,
     LocalPresetCatalogue,
-    Pipeline,
-    PipelineList,
-    PipelineRun,
-    PipelineRunList,
-    PipelineRunRequest,
     PresetCatalogue,
     Printer,
     PrinterMedia,
@@ -68,6 +65,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import split_urls
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
@@ -89,18 +87,25 @@ class BambuddyConfig:
     upload_timeout: float = DEFAULT_UPLOAD_TIMEOUT
     slice_timeout: float = DEFAULT_SLICE_TIMEOUT
     slice_poll_interval: float = DEFAULT_SLICE_POLL
+    #: Where a browser reaches Bambuddy (#775); ``base_url`` when unset.
+    web_base_url: str | None = None
 
     @classmethod
     def from_settings(cls, settings: StoredSettings) -> BambuddyConfig:
         if not settings.bambuddy_url:
             raise not_configured("no Bambuddy URL is configured; set one in Settings")
-        return cls(base_url=settings.bambuddy_url.rstrip("/"), api_key=settings.bambuddy_api_key)
+        web = split_urls(settings.bambuddy_web_urls)
+        return cls(
+            base_url=settings.bambuddy_url.rstrip("/"),
+            api_key=settings.bambuddy_api_key,
+            web_base_url=web[0] if web else None,
+        )
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{API_PREFIX}{path}"
 
     def web_url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
+        return f"{self.web_base_url or self.base_url}{path}"
 
 
 class BambuddyClient:
@@ -224,30 +229,6 @@ class BambuddyClient:
             "GET", "/library/folders", scope=Scope.MANAGE_LIBRARY, what=what
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
-
-    async def pipelines(self) -> list[Pipeline]:
-        response = await self._send(
-            "GET",
-            "/slicer-pipelines/",
-            scope=Scope.MANAGE_QUEUE,
-            what="list the slicer pipelines",
-        )
-        return PipelineList.model_validate(response.json()).pipelines
-
-    async def pipeline(self, pipeline_id: int) -> Pipeline:
-        """``GET /api/v1/slicer-pipelines/{id}`` — the presets and target of one pipeline.
-
-        Needed by the send path, not just for display: a send that carries print options
-        has to slice and queue itself, and this is where it reads the presets, bed type
-        and target to do that with.
-        """
-        response = await self._send(
-            "GET",
-            f"/slicer-pipelines/{pipeline_id}",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"read slicer pipeline {pipeline_id}",
-        )
-        return Pipeline.model_validate(response.json())
 
     async def presets(self) -> PresetCatalogue:
         response = await self._send(
@@ -529,6 +510,18 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        """``GET /library/files?folder_id=`` — the files directly in one folder (#317)."""
+        what = f"list the files in library folder {folder_id}"
+        response = await self._send(
+            "GET",
+            "/library/files",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id},
+        )
+        return [LibraryFile.model_validate(row) for row in self._rows(response, what=what)]
+
     async def library_file(self, file_id: int) -> LibraryFile:
         """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
         response = await self._send(
@@ -538,6 +531,35 @@ class BambuddyClient:
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
+
+    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
+        """``GET /library/files/`` — one folder's files, or the root's without one
+        (``include_root`` defaults to true). One read, however many files: Bambuddy
+        does not paginate it."""
+        what = (
+            "list the library files"
+            if folder_id is None
+            else f"list the files of library folder {folder_id}"
+        )
+        response = await self._send(
+            "GET",
+            "/library/files/",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id} if folder_id is not None else None,
+        )
+        return [LibraryListRow.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def library_plates(self, file_id: int) -> LibraryPlates:
+        """``GET /library/files/{id}/plates`` — the plates Bambuddy reads out of the
+        file, with whether each has a cover image."""
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}/plates",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read the plates of library file {file_id}",
+        )
+        return LibraryPlates.model_validate(response.json())
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
@@ -610,38 +632,7 @@ class BambuddyClient:
                 )
             await asyncio.sleep(self.config.slice_poll_interval)
 
-    # --- pipelines and queue -------------------------------------------------
-
-    async def run_pipeline(self, pipeline_id: int, request: PipelineRunRequest) -> PipelineRun:
-        """Slice and queue ``copies`` prints.
-
-        A blocking eligibility issue answers 409 with Bambuddy's eligibility report;
-        ``map_response`` passes that body through verbatim. ``request.force`` runs anyway.
-        """
-        response = await self._send(
-            "POST",
-            f"/slicer-pipelines/{pipeline_id}/run",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"run slicer pipeline {pipeline_id}",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
-        return PipelineRun.model_validate(response.json())
-
-    async def pipeline_run(self, run_id: int) -> PipelineRun:
-        """``GET /api/v1/pipeline-runs/{run_id}`` — the single-run read.
-
-        Not ``/slicer-pipelines/{id}/runs``: that is a list, and following one run
-        through it would mean paging past every other run of the same pipeline. This
-        route also needs no pipeline id, which matters because an output records the
-        run it produced and not the pipeline it came from.
-        """
-        response = await self._send(
-            "GET",
-            f"/pipeline-runs/{run_id}",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"read pipeline run {run_id}",
-        )
-        return PipelineRun.model_validate(response.json())
+    # --- queue ---------------------------------------------------------------
 
     async def queue_item(self, item_id: int) -> QueueItem:
         response = await self._send(
@@ -651,16 +642,6 @@ class BambuddyClient:
             what=f"read queue item {item_id}",
         )
         return QueueItem.model_validate(response.json())
-
-    async def pipeline_runs(self, pipeline_id: int, *, limit: int = 10) -> PipelineRunList:
-        response = await self._send(
-            "GET",
-            f"/slicer-pipelines/{pipeline_id}/runs",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"list the runs of slicer pipeline {pipeline_id}",
-            params={"limit": limit},
-        )
-        return PipelineRunList.model_validate(response.json())
 
     async def enqueue(self, item: QueueItemCreate) -> QueueItem:
         """``POST /api/v1/queue/`` with the whole ``PrintQueueItemCreate``.
@@ -676,6 +657,29 @@ class BambuddyClient:
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())
+
+    # --- the connection test (#322) -------------------------------------------
+
+    async def version(self) -> str:
+        """``GET /api/v1/updates/version``, which Bambuddy serves without a key."""
+        response = await self._send(
+            "GET", "/updates/version", scope=Scope.READ_STATUS, what="read Bambuddy's version"
+        )
+        return str(response.json().get("version") or "unknown")
+
+    async def capture_finish_photo(self) -> bool:
+        """Bambuddy's ``capture_finish_photo`` setting (``GET /api/v1/settings/``, which
+        needs ``SETTINGS_READ``: Read Status for a key)."""
+        what = "read Bambuddy's settings"
+        response = await self._send("GET", "/settings/", scope=Scope.READ_STATUS, what=what)
+        value = response.json().get("capture_finish_photo")
+        if not isinstance(value, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "Bambuddy's settings carry no capture_finish_photo, so this Bambuddy may be"
+                " older than the setting",
+            )
+        return value
 
     # --- projects ------------------------------------------------------------
 

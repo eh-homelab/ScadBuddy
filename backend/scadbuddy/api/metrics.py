@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
 from fastapi import APIRouter, Response
 
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.core.metrics import CONTENT_TYPE_LATEST
+from scadbuddy.library.assets import AssetStoreUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +16,11 @@ router = APIRouter(tags=["health"])
 
 def refresh_asset_metrics(state: AppState) -> None:
     """The upload store's usage gauges (#296), read per scrape. A failed read keeps
-    the last values rather than failing the scrape."""
+    the last values rather than failing the scrape, as the render queue's gauges do
+    when their store is unavailable -- a database error, or no database at all."""
     try:
         usage = state.assets.usage()
-    except OSError:
+    except (OSError, psycopg.Error, AssetStoreUnavailableError):
         logger.exception("could not read the upload store's usage")
         return
     state.metrics.assets_stored.set(usage.count)
