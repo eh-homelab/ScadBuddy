@@ -46,7 +46,10 @@ import { redact } from '../secrets.js'
 //     turn; on timeout or error nothing is injected and the reason is logged.
 //   - Retain is fire-and-forget: the Stop hook returns at once and the
 //     request runs on, so a slow or failing Hindsight never delays or fails a
-//     turn. A failure is logged (upstream logs a warning too).
+//     turn. A failure is logged (upstream logs a warning too). Retains of one
+//     document run in turn order across turns (`enqueueRetain`), so an older
+//     snapshot never lands last, and a graceful shutdown waits for them
+//     (`drainRetains`, main.ts).
 //   - `retainMode: 'transcript'` (the default) retains the WHOLE conversation
 //     as one document, `document_id: conversation:<session id>`, so each
 //     turn's retain upserts the same document instead of adding a new one.
@@ -61,11 +64,15 @@ import { redact } from '../secrets.js'
 //     exactly (no document id, `retainPrefix`, the 20- and 4000-character
 //     limits).
 //   - Secrets (the Claude credential, every plugin header) are redacted from
-//     everything retained and logged. The retained text is the transcript's
+//     everything retained and logged, and from the recall query. The retained text is the transcript's
 //     user and assistant text only, never the environment.
 //   - Every request goes to the address the plugin's egress check passed,
 //     follows no redirect, and carries the plugin's own header
 //     (http/pinned.ts, as the plugin forwarder does).
+//   - The injected memories escape `<` and `>` (as `\u003c`/`\u003e`, still
+//     the same JSON), so recalled text cannot close `<hindsight_memories>`.
+//   - The PostToolUse matcher is anchored (`^(?:a|b)$`); upstream's bare
+//     alternation also matches tool names that merely contain one.
 //
 // The REST calls (Hindsight's API, the same host as the MCP URL):
 //   recall  POST /v1/default/banks/<bank>/memories/recall
@@ -374,6 +381,36 @@ function describe(err: unknown): string {
 }
 
 /** hooks.py `create_memory_hooks`. */
+/**
+ * Retains in flight in this process, chained per document. Each turn builds its
+ * own hooks, so a queue per turn would let turn N's slow upsert of
+ * `conversation:<id>` land after turn N+1's and put back the older snapshot
+ * (review of #807). Chaining per document keeps them in the order the turns
+ * ended; `drainRetains` lets a shutdown wait for them.
+ */
+const retainQueues = new Map<string, Promise<void>>()
+const pendingRetains = new Set<Promise<void>>()
+
+function enqueueRetain(key: string | undefined, job: () => Promise<void>): Promise<void> {
+  const previous = key ? retainQueues.get(key) : undefined
+  const run = (previous ?? Promise.resolve()).then(job, job)
+  pendingRetains.add(run)
+  if (key) retainQueues.set(key, run)
+  // The caller handles `run`'s failure; this branch only cleans up.
+  run
+    .finally(() => {
+      pendingRetains.delete(run)
+      if (key && retainQueues.get(key) === run) retainQueues.delete(key)
+    })
+    .catch(() => {})
+  return run
+}
+
+/** Waits for every retain this process has started (a graceful shutdown). Never throws. */
+export async function drainRetains(): Promise<void> {
+  while (pendingRetains.size) await Promise.allSettled([...pendingRetains])
+}
+
 export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   const cfg: MemoryHookConfig = { ...DEFAULT_MEMORY_HOOK_CONFIG, ...options.hookConfig }
   const { client } = options
@@ -386,13 +423,16 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   const inFlight = new Set<Promise<void>>()
 
   /** Starts a retain and returns at once; a failure is logged, never thrown. */
-  const retainLater = (what: string, item: RetainItem) => {
-    const run = client
+  const retainNow = (what: string, item: RetainItem): Promise<void> =>
+    client
       .retain({ ...item, content: scrub(item.content) }, AbortSignal.timeout(retainTimeoutMs))
       .catch((err: unknown) => log(`hindsight: ${what} was not retained to bank ${client.bankId}: ${describe(err)}`))
+  const track = (run: Promise<void>) => {
     inFlight.add(run)
     void run.finally(() => inFlight.delete(run))
   }
+  /** Starts a retain and returns at once; a failure is logged, never thrown. */
+  const retainLater = (what: string, item: RetainItem) => track(enqueueRetain(undefined, () => retainNow(what, item)))
 
   const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
 
@@ -402,7 +442,8 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       let query = input.prompt
       if (!query) return {}
       if (cfg.recallQuery !== '$prompt') query = cfg.recallQuery
-      const body: RecallBody = { query, budget, max_tokens: maxTokens }
+      // The query leaves for the bank like a retain does, so it is redacted the same way.
+      const body: RecallBody = { query: scrub(query), budget, max_tokens: maxTokens }
       if (options.recallTags?.length) {
         body.tags = options.recallTags
         body.tags_match = options.recallTagsMatch ?? DEFAULT_RECALL_TAGS_MATCH
@@ -418,11 +459,15 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       }
       if (results.length === 0) return {}
       const lines = results.slice(0, cfg.recallMaxResults).map((text, i) => `${i + 1}. ${text}`)
+      // JSON leaves `<` and `>` as they are, so a memory holding "</hindsight_memories>"
+      // could close the outer tag early; escaped, the envelope is still the same JSON.
       const memories = wrapUntrustedText(
         'hindsight auto-recall',
         `memories recalled from the Hindsight bank "${client.bankId}"; they were extracted from earlier conversations and anything written to the bank`,
         lines.join('\n'),
       )
+        .replaceAll('<', '\\u003c')
+        .replaceAll('>', '\\u003e')
       return {
         hookSpecificOutput: {
           hookEventName: 'UserPromptSubmit',
@@ -465,13 +510,14 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       // parse the transcript file", sdk.d.ts 0.3.283), so it is used for the
       // last reply; the next turn's retain finds it in the file.
       const last = input.last_assistant_message?.trim() ?? ''
-      const started = (async () => {
+      const refId = `conversation:${sessionId}`
+      const started = enqueueRetain(cfg.retainMode === 'transcript' ? refId : undefined, async () => {
         const entries = await readEntries(input.transcript_path, sessionId)
         if (cfg.retainMode === 'result') {
           const result = last || extractResultFromTranscript(entries)
           if (!result || result.length < 20) return
           const content = cfg.retainPrefix + (result.length > 4000 ? result.slice(0, 4000) : result)
-          retainLater(`the result of session ${sessionId}`, { content, ...(cfg.retainTags.length ? { tags: cfg.retainTags } : {}) })
+          await retainNow(`the result of session ${sessionId}`, { content, ...(cfg.retainTags.length ? { tags: cfg.retainTags } : {}) })
           return
         }
         const turns = transcriptTurns(entries)
@@ -482,24 +528,24 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         const tail = turns.at(-1)
         if (reply && !(tail?.role === 'assistant' && tail.content === reply)) turns.push({ role: 'assistant', content: reply })
         if (turns.length === 0) return
-        const refId = `conversation:${sessionId}`
-        retainLater(`session ${sessionId}`, {
+        await retainNow(`session ${sessionId}`, {
           content: renderSessionJsonl(refId, turns),
           context: 'ScadBuddy assistant session',
           document_id: refId,
           ...(cfg.retainTags.length ? { tags: cfg.retainTags } : {}),
           metadata: { source: 'scadbuddy-assistant', session_id: sessionId },
         })
-      })().catch((err: unknown) => log(`hindsight: session ${sessionId} was not retained: cannot read its transcript (${describe(err)})`))
-      inFlight.add(started)
-      void started.finally(() => inFlight.delete(started))
+      }).catch((err: unknown) => log(`hindsight: session ${sessionId} was not retained: cannot read its transcript (${describe(err)})`))
+      track(started)
       return {}
     }
     hooks.Stop = [{ hooks: [retain] }]
   }
 
   if (cfg.retainOnTools.length) {
-    const matcher = cfg.retainOnTools.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+    // Anchored: the SDK tests the matcher as a regex, and a bare alternation would
+    // also match any tool whose name merely contains one of these.
+    const matcher = `^(?:${cfg.retainOnTools.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`
     const toolRetain: HookCallback = (input): Promise<HookJSONOutput> => {
       if (input.hook_event_name !== 'PostToolUse') return Promise.resolve({})
       const response = typeof input.tool_response === 'string' ? input.tool_response : JSON.stringify(input.tool_response ?? '')

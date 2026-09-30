@@ -31,6 +31,7 @@ import { TabHub } from './bridge/hub.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
+import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
@@ -323,6 +324,8 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
       // End the /mcp sessions and the session event streams first: their
       // standing SSE responses would otherwise hold server.close() until the deadline.
       closeSessions: async () => {
+        // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
+        await drainRetains()
         await app.close()
         resources.close()
         await events?.close()
