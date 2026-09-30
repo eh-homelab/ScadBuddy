@@ -19,10 +19,14 @@ import { defineTool, json, ToolError, type Tool } from './registry.js'
  * the image installs, one `// color` parameter per extruder in extruder order,
  * every solid in a `color()`, and `$fn` under [Hidden].
  *
- * Measured 2026-09-29 in the scadbuddy image's OpenSCAD: `--backend=Manifold -o
- * out.3mf` renders one manifold object whose triangles are all on "Color 1"
- * (266) and "Color 2" (738), none on "Default"; `-o model.param` exports the
- * eight parameters in groups Size, Label and Colours.
+ * Measured 2026-09-29 on this exact string in the Dockerfile's `base` stage
+ * (OpenSCAD 2026.09.28 plus the image's fonts), and re-measured for the #752
+ * review: `--backend=Manifold -o out.3mf` renders one manifold object whose
+ * triangles are all on "Color 1" (266) and "Color 2" (738), none on "Default";
+ * `-o model.param` exports the eight parameters in groups Size, Label and
+ * Colours. The counts hold only for that build and DejaVu Sans Bold: after an
+ * image bump, write BLANK_TEMPLATE to model.scad and run both commands in
+ * `docker build --target base` again.
  */
 export const BLANK_TEMPLATE = [
   '// A new ScadBuddy template: a plate with a raised label. Replace this line',
