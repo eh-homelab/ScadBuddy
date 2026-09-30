@@ -136,6 +136,17 @@ describe('render limits', () => {
     expect(() => limiter.acquire('p')()).not.toThrow()
   })
 
+  it('keeps only the window\'s starts when it refuses for renders in flight (#774)', () => {
+    let now = 0
+    const limiter = new RenderLimiter({ concurrent: 2, perWindow: 3, windowMs: 1000, holdMs: 1000 }, () => now)
+    const starts = () => (limiter as unknown as { started: Map<string, number[]> }).started.get('p')
+    limiter.acquire('p')
+    limiter.acquire('p')
+    now = 1500
+    expect(() => limiter.acquire('p')).toThrow(/still running/)
+    expect(starts()).toBeUndefined()
+  })
+
   it('drops a principal once nothing is in flight or in its window', () => {
     let now = 0
     const limiter = new RenderLimiter({ concurrent: 2, perWindow: 3, windowMs: 1000, holdMs: 1000 }, () => now)

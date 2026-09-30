@@ -1698,7 +1698,8 @@ class Catalogue:
     ) -> ModelRecord:
         """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
         as one revision. ``name`` is a bare ``.scad`` file name other than the model's
-        own source, which only :meth:`write_source` writes; the route checks that.
+        own source, which only :meth:`write_source` writes (a ``ValueError`` here; the
+        route answers it with a 409 before calling).
 
         The schema derived from ``model.scad`` is dropped too: an ``include`` can
         bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
@@ -1708,6 +1709,10 @@ class Catalogue:
         the history's write lock, when there is one), so two new files at once cannot
         both pass (PR #752 review).
         """
+        if name == SOURCE_NAME:
+            # The route refuses it with a 409 first; this keeps any other caller off
+            # the model's source too, which only `write_source` parse-checks (#773).
+            raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
         self._require(slug)
         path = self.paths.model_dir(slug) / name
 

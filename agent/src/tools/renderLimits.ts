@@ -53,6 +53,9 @@ export class RenderLimiter {
     this.sweep(now)
     const recent = (this.started.get(principal) ?? []).filter((t) => t > now - this.limits.windowMs)
     const running = this.inFlight.get(principal) ?? 0
+    // Both refusals keep only the window's starts, so neither lets old ones pile up (#774).
+    if (recent.length > 0) this.started.set(principal, recent)
+    else this.started.delete(principal)
     if (running >= this.limits.concurrent) {
       throw new ToolError(
         `not rendered: ${running} of your renders are still running, the most at once ` +
@@ -61,7 +64,6 @@ export class RenderLimiter {
     }
     if (recent.length >= this.limits.perWindow) {
       const seconds = Math.ceil((recent[0]! + this.limits.windowMs - now) / 1000)
-      this.started.set(principal, recent)
       throw new ToolError(
         `not rendered: ${recent.length} renders in the last ${this.limits.windowMs / 60_000} min is ` +
           `the most allowed. Try again in ${seconds}s, or stop and tell the user what is not converging.`,

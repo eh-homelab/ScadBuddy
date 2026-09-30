@@ -88,6 +88,12 @@ def test_the_main_source_is_written_only_through_put_source(client: TestClient) 
     upload(client)
     assert put(client, "model.scad", "cube(1);\n").status_code == 409
     assert client.delete(f"/api/v1/models/{SLUG}/files/model.scad").status_code == 409
+    # And the catalogue itself refuses it, for any caller but the route (#773).
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="write_source"):
+        state.catalogue.write_file(SLUG, "model.scad", "cube(1);\n")
+    with pytest.raises(ValueError, match="write_source"):
+        state.catalogue.write_file(SLUG, "model.scad", None)
 
 
 @pytest.mark.parametrize("name", ["../model.json", ".hidden.scad", "README.md", "sub%2Fx.scad"])

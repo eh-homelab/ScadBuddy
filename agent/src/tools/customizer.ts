@@ -69,6 +69,12 @@ function settled(status: JobStatus['status']): boolean {
  * aborted) until it settles, fails to answer, or `holdMs` passes, so its
  * render-limit slot is held while the backend still runs it (PR #752 review).
  * It outlives the call, so it uses no call signal, and it never rejects.
+ *
+ * This holds on however the wait ended: a job handed back still running, the call
+ * aborted, or `getJob` failing once in `waitForJob`. That errs toward holding, since
+ * the render may still be running and a released slot would let a second one start
+ * beside it. The hold ends when a poll shows the job settled or gone, when the backend
+ * cannot be reached, or after `holdMs` (30 min) at most (#774).
  */
 async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
   const deadline = Date.now() + holdMs
