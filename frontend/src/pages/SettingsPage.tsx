@@ -195,10 +195,16 @@ export function SettingsPage() {
   // empty the Blob store choice shows, sends and compares the local store instead.
   const bambuddyStoreReady = value('bambuddy_url') !== '' && value('library_folder_id') !== ''
   const chosenBackend = bambuddyStoreReady ? value('store_backend') : 'local'
+  // What a Projects & files save sends: its own inbox against the saved URL, never
+  // another section's unsaved draft (a Connection edit is not this save's to commit).
+  const projectsBackend =
+    settings && baseline(settings, 'bambuddy_url') !== '' && value('library_folder_id') !== ''
+      ? value('store_backend')
+      : 'local'
 
   const changed = (name: FieldName): boolean => {
     if (!settings) return false
-    if (name === 'store_backend') return chosenBackend !== baseline(settings, name)
+    if (name === 'store_backend') return projectsBackend !== baseline(settings, name)
     if (isSecret(name)) return value(name) !== '' || clearing.includes(name)
     return value(name) !== baseline(settings, name)
   }
@@ -243,7 +249,7 @@ export function SettingsPage() {
     for (const name of fieldsOf(id, settings)) {
       if (!changed(name)) continue
       if (name === 'store_backend') {
-        body[name] = chosenBackend
+        body[name] = projectsBackend
         continue
       }
       if (isSecret(name)) {
@@ -261,7 +267,13 @@ export function SettingsPage() {
     }
     // A Connection save that loses the Bambuddy URL takes the store back to local with it,
     // or the server would refuse the save (it never keeps an unready Bambuddy store).
-    if (id === 'connection' && !bambuddyStoreReady && changed('store_backend')) {
+    // Only this save's own change counts: another section's unsaved draft does not.
+    if (
+      id === 'connection' &&
+      changed('bambuddy_url') &&
+      value('bambuddy_url') === '' &&
+      settings.store_backend === 'bambuddy'
+    ) {
       body.store_backend = 'local'
     }
     return body as SettingsUpdate
@@ -326,8 +338,7 @@ export function SettingsPage() {
       // Resetting what the Bambuddy store needs takes the store back to local with it, as a
       // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
       const fallBack =
-        (name === 'bambuddy_url' || name === 'library_folder_id') &&
-        (chosenBackend === 'bambuddy' || settings?.store_backend === 'bambuddy')
+        (name === 'bambuddy_url' || name === 'library_folder_id') && settings?.store_backend === 'bambuddy'
       const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
       reseed.current = fallBack ? [name, 'store_backend'] : [name]
       settingsState.setData(next)
@@ -671,17 +682,34 @@ export function SettingsPage() {
                 error={errors.bambuddy_render_api_key}
                 help="A second key with Manage Library only. Render workers run template code and hold this key alone."
               >
-                <input
-                  id="bambuddy-render-key"
-                  type="password"
-                  value={value('bambuddy_render_api_key')}
-                  autoComplete="off"
-                  onChange={(event) => setField('bambuddy_render_api_key', event.target.value)}
-                  placeholder={
-                    settings.has_render_api_key ? 'A key is stored. Paste a new one to replace it.' : 'Paste the key'
-                  }
-                  className="sb-field sb-num"
-                />
+                <div className="flex gap-2">
+                  <input
+                    id="bambuddy-render-key"
+                    type="password"
+                    value={value('bambuddy_render_api_key')}
+                    autoComplete="off"
+                    onChange={(event) => setField('bambuddy_render_api_key', event.target.value)}
+                    placeholder={
+                      clearing.includes('bambuddy_render_api_key')
+                        ? 'Cleared when you save.'
+                        : settings.has_render_api_key
+                          ? 'A key is stored. Paste a new one to replace it.'
+                          : 'Paste the key'
+                    }
+                    className="sb-field sb-num"
+                  />
+                  {settings.has_render_api_key && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={clearing.includes('bambuddy_render_api_key')}
+                      onClick={() => clearSecret('bambuddy_render_api_key')}
+                      {...USER_ONLY}
+                    >
+                      Remove key
+                    </Button>
+                  )}
+                </div>
                 {settings.render_key_fallback && (
                   <p
                     role="status"
