@@ -35,6 +35,7 @@ import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**
  * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
@@ -132,8 +133,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     async () => (open && unanswered !== null ? await api.getSettings() : null),
     [open, unanswered !== null],
   )
-  // As typed in Settings: a trailing slash would make `…//queue` below.
-  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
+  const bambuddyUrl = bambuddyBase(webUrls(settings.data))
 
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
@@ -269,7 +269,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
+            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
               Open in queue
             </Button>
           </>

@@ -137,6 +137,7 @@ class StoredSettings(BambuddyIds):
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     public_url: str | None = None
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
@@ -185,6 +186,7 @@ class SettingsPatch(BaseModel):
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
