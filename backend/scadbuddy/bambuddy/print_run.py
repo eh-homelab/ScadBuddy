@@ -20,7 +20,7 @@ from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
-from scadbuddy.bambuddy.extruders import high_flow_warnings, with_sides
+from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -412,6 +412,8 @@ async def execute_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
+        # Only the side with the nozzle is offered to the slicer (#834).
+        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles[0].size),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last

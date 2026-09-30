@@ -2,28 +2,47 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
+import { cursorPosition, DEFAULT_PAGE_SIZE, page, PAGED, pageInput, StaleCursorError } from './pagination.js'
 
 // History (issue #251): versions, diff, source at a commit, restore, and a
 // duplicate's upstream status/merge/dismiss/detach. Every write here is itself
 // a revision, so it is `write`, reversible through history (spec §8.1).
 // Routes: backend/scadbuddy/api/{versions,upstream}.py over library/history.py.
 
+/** The backend's cap on one versions read (`limit` ≤ 500 in backend/openapi.json). */
+const HISTORY_WINDOW = 500
+
 export const historyTools: Tool[] = [
   defineTool({
     name: 'list_versions',
-    description: "A model's revision history, newest first: commit id, message and time.",
-    input: z.object({ slug, limit: z.number().int().min(1).max(500).optional() }),
+    description:
+      "A model's revision history, newest first: commit id, message and time. Only the newest " +
+      `${HISTORY_WINDOW} revisions can be paged to, and \`total\` is null while more may follow.` + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
       'revision messages written by model authors or upstreams',
     routes: ['GET /api/v1/models/{slug}/versions'],
-    handler: async ({ slug, limit }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }),
-          `list versions of ${slug}`,
-        ),
-      ),
+    handler: async ({ slug, ...args }, { backend }) => {
+      // The backend takes a limit, not a cursor: read only as far as this page, plus a
+      // page of slack for revisions made since the cursor was issued (they push its
+      // item down) and one more to know whether there is a next; not the whole window.
+      // More revisions than the slack push the item past that read, which is not
+      // staleness: read the whole window before calling the cursor stale (#841 review).
+      const size = args.limit ?? DEFAULT_PAGE_SIZE
+      const read = (limit: number) =>
+        ok(backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }), `list versions of ${slug}`)
+      const listed = (versions: { commit: string }[], limit: number) =>
+        page(versions, { slug, ...args }, (v) => v.commit, 'list_versions', { complete: versions.length < limit })
+      const limit = Math.min(HISTORY_WINDOW, cursorPosition(args.cursor, 'list_versions') + 2 * size + 1)
+      const versions = await read(limit)
+      try {
+        return json(listed(versions, limit))
+      } catch (err) {
+        if (!(err instanceof StaleCursorError) || versions.length < limit || limit === HISTORY_WINDOW) throw err
+        return json(listed(await read(HISTORY_WINDOW), HISTORY_WINDOW))
+      }
+    },
   }),
 
   defineTool({

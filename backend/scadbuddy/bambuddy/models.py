@@ -251,6 +251,13 @@ class NozzleInfo(BambuddyModel):
     nozzle_type: str = ""
     nozzle_diameter: str = ""
 
+    @property
+    def high_flow(self) -> bool:
+        """Whether this is a High Flow nozzle: the second letter of ``nozzle_type`` is
+        the flow (``HH01`` High Flow, ``HS01`` standard), inferred from the codes present."""
+        nozzle_type = self.nozzle_type or ""
+        return len(nozzle_type) > 1 and nozzle_type[1] == "H"
+
 
 class NozzleRackSlot(NozzleInfo):
     """A slot of an H2-series nozzle rack — what ``nozzle_rack_choice`` picks from."""

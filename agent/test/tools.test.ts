@@ -762,7 +762,7 @@ describe("tools for #324's routes", () => {
       http.get(`${BACKEND}/api/v1/assets/usage`, () => HttpResponse.json({ count: 1, bytes: 2, max_count: 0, max_total_bytes: 0 })),
     )
     expect(firstText(await runTool(tool('get_render_diagnostics'), { slug: 'box' }, ctx()))).toEqual({ warnings: [{ line: 3 }] })
-    expect(firstText(await runTool(tool('list_installed_libraries'), {}, ctx()))).toEqual([{ name: 'BOSL2', commit: 'c', used_by: ['box'] }])
+    expect(firstText(await runTool(tool('list_installed_libraries'), {}, ctx()))).toEqual({ items: [{ name: 'BOSL2', commit: 'c', used_by: ['box'] }], next_cursor: null, total: 1 })
     expect(firstText(await runTool(tool('get_asset_usage'), {}, ctx()))).toMatchObject({ count: 1 })
   })
 
@@ -1167,5 +1167,89 @@ describe('dependencies: include resolution and fonts (#253)', () => {
     const render = await runTool(tool('render_model'), { slug: 'box', params: { font: 'Pacifico' } }, ctx())
     expect(render.isError).toBe(true)
     expect(JSON.stringify(render.content)).toContain('default font instead')
+  })
+})
+
+describe('list_versions paging (#837)', () => {
+  const history = Array.from({ length: 120 }, (_, i) => ({
+    commit: `c${String(i).padStart(3, '0')}`,
+    short: `c${i}`,
+    message: `revision ${i}`,
+    author: 'a',
+    date: '2026-09-30T00:00:00Z',
+    current: i === 0,
+    files: [],
+    agent: null,
+  }))
+
+  it('asks the backend for no more history than the page needs, and knows when it has it all', async () => {
+    const limits: number[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        limits.push(limit)
+        return HttpResponse.json(history.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      items: { commit: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items.map((v) => v.commit)).toEqual(history.slice(0, 10).map((v) => v.commit))
+    expect(first.total).toBeNull()
+    const second = firstText(
+      await runTool(tool('list_versions'), { slug: 'box', limit: 10, cursor: first.next_cursor }, ctx()),
+    ) as { items: { commit: string }[] }
+    expect(second.items.map((v) => v.commit)).toEqual(history.slice(10, 20).map((v) => v.commit))
+    // A page and a page of slack, plus one: never the whole 500-revision window.
+    expect(limits).toEqual([21, 31])
+
+    // A history shorter than the read is known complete: its total is exact.
+    const whole = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 100 }, ctx())) as {
+      total: number | null
+      next_cursor: string | null
+    }
+    expect(limits.at(-1)).toBe(201)
+    expect(whole.total).toBe(120)
+    expect(whole.next_cursor).toEqual(expect.any(String))
+  })
+
+  it('reads the whole window, rather than calling the cursor stale, when new revisions push its item past the read', async () => {
+    let served = history
+    const limits: number[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        limits.push(limit)
+        return HttpResponse.json(served.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      next_cursor: string
+    }
+    // 40 revisions land ahead of the cursor's item: more than the read's slack.
+    const fresh = Array.from({ length: 40 }, (_, i) => ({ ...history[0]!, commit: `n${String(i).padStart(3, '0')}` }))
+    served = [...fresh, ...history]
+    const second = firstText(
+      await runTool(tool('list_versions'), { slug: 'box', limit: 10, cursor: first.next_cursor }, ctx()),
+    ) as { items: { commit: string }[] }
+    expect(second.items.map((v) => v.commit)).toEqual(history.slice(10, 20).map((v) => v.commit))
+    expect(limits).toEqual([21, 31, 500])
+  })
+
+  it("refuses a cursor issued for another model's history", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/:slug/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        return HttpResponse.json(history.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      next_cursor: string
+    }
+    const other = await runTool(tool('list_versions'), { slug: 'lid', limit: 10, cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
   })
 })

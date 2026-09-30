@@ -227,6 +227,25 @@ class TestReplate:
         assert settings["filament_map"] == ["1", "1"]
         assert settings["filament_map_mode"] == "Auto For Flush"
 
+    def test_replating_states_which_extruders_have_the_nozzle(self, written: Path) -> None:
+        """#834: the key the slicer groups filaments by, and its newer twin, which it
+        reads first; Bambu Studio writes both."""
+        stats = ["Standard#0", "Standard#1"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2", nozzle_stats=stats
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["extruder_nozzle_stats"] == stats
+        assert settings["extruder_nozzle_stats_new"] == stats
+
+    def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "extruder_nozzle_stats" not in settings
+        assert "extruder_nozzle_stats_new" not in settings
+
     def test_replating_without_a_nozzle_keeps_the_placeholder(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:
