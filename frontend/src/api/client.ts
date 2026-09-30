@@ -17,6 +17,7 @@ import type {
   FontCatalogue,
   FontFamily,
   HeadlessBrowserSetting,
+  HttpRequestSetting,
   AiSessionView,
   SessionLimits,
   InstalledFamily,
@@ -1127,6 +1128,18 @@ export const api = {
 
   putHeadlessBrowserSetting: (enabled: boolean) =>
     request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /**
+   * The assistant's `http_request` tool (#827), served by the agent service. On by
+   * default. Fails (404 or 503) when there is no agent or no AI database.
+   */
+  getHttpRequestSetting: () => request<HttpRequestSetting>('/ai/settings/http-request'),
+
+  putHttpRequestSetting: (enabled: boolean) =>
+    request<HttpRequestSetting>('/ai/settings/http-request', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),

@@ -229,7 +229,7 @@ export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>)
   const base = run.tierOf ?? (() => undefined)
   if (!run.remotePlugins?.length) return base
   const plugins = pluginTierResolver(run.remotePlugins)
-  return (toolName) => plugins(toolName) ?? base(toolName)
+  return (toolName, input) => plugins(toolName) ?? base(toolName, input)
 }
 
 /** `promise`'s value, or undefined once `signal` aborts first. */
@@ -272,7 +272,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     const remember = run.headlessBrowser.rememberOrigin
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
-    tierOf = (name) => browserTierOf(name) ?? ownTiers(name)
+    tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
     guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
     const inner = gate
     if (inner) {

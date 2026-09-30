@@ -685,6 +685,68 @@ origins or files", as built. Details and measurements are in
   a seccomp profile that allows user namespaces, not `RuntimeDefault`
   ([headless-browser.md](headless-browser.md#sandbox)).
 
+## HTTP request tool (#827)
+
+The assistant has no shell (`tools: []`) and refuses plugins that start a process, so
+"curl" is a built-in tool: `mcp__scadbuddy_http__http_request`, an in-process SDK MCP
+server in [`agent/src/harness/httpRequest.ts`](../../agent/src/harness/httpRequest.ts),
+with `mcp__scadbuddy_http__http_response_read` beside it to page through a saved body.
+It is offered to session turns only, not over `/mcp`.
+
+**Reach is open until the sandbox. Decided by the owner on 2026-09-30 (#827).** The
+tool may reach the internet and the LAN: private ranges (`10/8`, `172.16/12`,
+`192.168/16`, `fc00::/7`), loopback, `*.internal` names, and plain `http:` to any host,
+since LAN services are mostly plain http. There is deliberately **no private-range
+block**; security for this tool is to come from running it in a sandbox, and until then
+anything on the agent pod's network is reachable, including the backend, Bambuddy and
+other cluster services. The one refusal it shares with every URL the agent fetches is
+`assertHostAllowed()` ([Egress check](#egress-check-on-gateway-urls)): link-local
+addresses and the cloud metadata hosts, where a node's own cloud credentials live.
+Every hop goes through `assertHttpUrl()` (http or https, no `user:password@`) and
+`assertHostAllowed()`, and connects to exactly the address that was checked
+(`pinnedRequestOptions()` in [`agent/src/http/pinned.ts`](../../agent/src/http/pinned.ts)),
+so a name re-pointed between check and connect reaches nothing new.
+
+- **Tiers by method.** `GET` and `HEAD` are `read` and run at once; `POST`, `PUT`,
+  `PATCH` and `DELETE` are `outward` and park for a human approval bound to the exact
+  input, like every outward tool. This is the one tool whose tier reads its input:
+  `TierResolver` takes the call's input (`permissions.ts`), and `httpTierOf()` answers
+  `outward` for any method it does not recognise, before the schema has validated it.
+- **Only the model's headers.** The request is built from the tool input alone: no
+  user agent, no cookies, no proxy variables, nothing from the agent's environment. The
+  Claude credential lives in Claude Code's per-query `env`, which this code never reads.
+- **Never the agent-actor header.** A request naming `X-ScadBuddy-Agent-Session` (any
+  case) is refused, as are `Host`, `Content-Length`, `Transfer-Encoding` and the other
+  connection-level headers Node sets itself.
+- **Never the turn's secrets.** A header value (`Authorization`, `Cookie` or any other),
+  the URL or the body that contains the Claude credential or a plugin's header token
+  (the same list the event log is redacted of) is refused, so an injected instruction
+  cannot make the model send its own credential anywhere. Other tokens the model was
+  given for a LAN service are sent as given.
+- **Limits.** One deadline for the whole request, redirects included: `timeout_ms`,
+  default 30 s, at most 120 s. At most 5 redirects. The body is read up to 20 MiB and
+  returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
+  body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
+  newest kept) and read in pages of up to 1 MiB, text as text and anything else as
+  base64.
+- **Redirects** follow fetch's rules: a 303, or a 301/302 after a `POST`, becomes a
+  `GET` with no body. `Authorization`, `Cookie` and `Proxy-Authorization` are dropped
+  when a redirect leaves the origin, and a 307/308 that would re-send an approved
+  outward method to another origin is returned to the model instead of followed.
+- **Untrusted.** Every result is wrapped in the `untrusted_data` envelope
+  ([Prompt-injection hardening](#prompt-injection-hardening-258)) with the source
+  naming the response's host.
+- **Audited.** Every request, each redirect hop its own row, is an `http` row in the
+  audit log: the method as the action, the tier, and `{method, scheme, host, status,
+  size_bytes, redirect?}` as the summary, never a path, a header or a body. The tool
+  call itself is also a `tool_call` row, whose input summary is scrubbed like any
+  other (`Authorization` and `Cookie` headers are blanked by name).
+- **On by default, and a user-only switch.** `ai_settings` key `http_request_enabled`;
+  anything but a stored `false` is on. It is set through
+  `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
+  behind `uiRequestProblem` like the other AI settings writes, and the write is audited
+  as a `settings` row. Settings → AI shows it as "Let the assistant make HTTP requests".
+
 ## Browser bridge and pairing (#254)
 
 The `browser_*` tools act in the user's own tab. How they are built is
@@ -751,6 +813,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
 | `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
+| `http` | `httpRequestServer()` (`harness/httpRequest.ts`) | every request the `http_request` tool makes, each redirect hop its own row (#827): method, scheme, host, status and size; never a path, a header or a body; refused requests included |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
@@ -950,6 +1013,13 @@ From the merged code and PR bodies:
     §8.3.
 12. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
     without its sandbox** (see above).
+13. **The `http_request` tool's reach is open until it runs in a sandbox** (#827,
+    decided 2026-09-30; [HTTP request tool](#http-request-tool-827)). A `GET` runs
+    without a human, so injected content can make the model read anything on the
+    pod's network, and put data it already holds into a URL's query string. The
+    turn's own secrets are refused in any request, and every request is audited, but
+    neither is a network boundary; an egress NetworkPolicy on the pod, or the sandbox,
+    is.
 
 ## Spec §3.2 items still open
 

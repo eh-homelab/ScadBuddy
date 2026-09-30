@@ -235,6 +235,14 @@ export interface HeadlessBrowserSetting {
 }
 
 /**
+ * The agent service's switch for the assistant's `http_request` tool (#827,
+ * `GET/PUT /api/v1/ai/settings/http-request`). On by default.
+ */
+export interface HttpRequestSetting {
+  enabled: boolean
+}
+
+/**
  * #790 — what a new assistant session may spend in all (USD) and how many turns one
  * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
  * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.
