@@ -1,12 +1,19 @@
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
+import { AGENT_ACTOR_HEADER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
-import { type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
-import { SESSION_STATUSES } from '../sessions/protocol.js'
+import {
+  MAX_SESSION_BUDGET_USD,
+  type SessionManager,
+  SessionError,
+  type SessionRecord,
+} from '../sessions/manager.js'
+import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/sessions (#300): the same sessions as the chat socket
 // (routes/chat.ts), over plain HTTP, for anything that is not the panel: a
@@ -31,6 +38,16 @@ import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } fr
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
+//   POST /api/v1/ai/sessions/:id/fork             {title?} → 201 {session}: a new session with the
+//                                                 transcript so far and a fresh budget, owned by
+//                                                 the browser user; counted against the new-session
+//                                                 limit (429). The panel's "Continue in a new chat"
+//                                                 (#790). #793 adds `up_to`, the socket message and audit.
+//   POST /api/v1/ai/sessions/:id/budget           {add_usd} → {session}: adds to that session's
+//                                                 budget (#790). User-only and owner-only
+//                                                 (manager.ts raiseBudget): a request with the
+//                                                 headless browser's agent-actor marker is refused,
+//                                                 and no tool reaches it. Audited, refusals included.
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
 // status is used as it is (404, 403, 409, 429, 400).
@@ -48,7 +65,11 @@ export type SessionView = {
   id: string
   title: string
   origin: SessionRecord['origin']
-  owner: SessionRecord['owner']
+  owner: SeenOwner
+  /** A live handoff offer (sessions/manager.ts `handoff`): to whom, until when. */
+  offer: { to: SeenOwner; until: string } | null
+  /** The session is offered to the viewer, who may accept or decline it. */
+  offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
   turns: number
@@ -59,12 +80,20 @@ export type SessionView = {
   updated_at: string
 }
 
-export function sessionView(s: SessionRecord): SessionView {
+/**
+ * A session as `viewer` is shown it. The browser user (these routes, the
+ * panel) sees every principal's id; an MCP caller (tools/sessions.ts) sees
+ * only its own, and anyone else by kind and a label that does not name them
+ * (sessions/protocol.ts `ownerSeenBy`, PR #715 review).
+ */
+export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>): SessionView {
   return {
     id: s.id,
     title: s.title,
     origin: s.origin,
-    owner: s.owner,
+    owner: ownerSeenBy(viewer, s.owner),
+    offer: s.offer ? { to: ownerSeenBy(viewer, s.offer.to), until: s.offer.until } : null,
+    offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
     turns: s.turns,
@@ -81,6 +110,8 @@ const StartBody = z.strictObject({
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
+const ForkBody = z.strictObject({ title: z.string().max(200).optional() })
+const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
@@ -165,7 +196,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(status ? { status: status as SessionRecord['status'] } : {}),
         ...(limit ? { limit } : {}),
       })
-      return c.json({ sessions: list.map(sessionView) })
+      return c.json({ sessions: list.map((one) => sessionView(one, BROWSER_USER)) })
     }),
   )
 
@@ -183,13 +214,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
       })
-      return c.json({ session: sessionView(session), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
+      return c.json({ session: sessionView(session, BROWSER_USER), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
     }),
   )
 
   app.get(
     `${base}/:id`,
-    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER)))),
+    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER))),
   )
 
   app.post(
@@ -215,8 +246,37 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/handoff`,
     limit,
     route('write', async (c, sessions) =>
-      c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER))),
+      c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
     ),
+  )
+
+  app.post(
+    `${base}/:id/fork`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, ForkBody, {})
+      if (!body.ok) return body.response
+      const child = await sessions.fork(idOf(c), BROWSER_USER, {
+        ...(body.value.title ? { title: body.value.title } : {}),
+        rateLimited: true,
+      })
+      return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
+    }),
+  )
+
+  app.post(
+    `${base}/:id/budget`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, BudgetBody, undefined)
+      if (!body.ok) return body.response
+      const session = await sessions.raiseBudget(idOf(c), BROWSER_USER, body.value.add_usd, {
+        surface: 'http',
+        clientIp: deps.remoteAddress(c),
+        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
+      })
+      return c.json({ session: sessionView(session, BROWSER_USER) })
+    }),
   )
 
   app.get(
@@ -265,4 +325,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       })
     }),
   )
+}
+
+/** The session routes (#300); their event streams end when the app closes. */
+export const route: RouteModule = {
+  register(app, deps, shutdown) {
+    registerSessionRoutes(app, {
+      sessions: deps.sessions,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      shutdown,
+    })
+  },
 }

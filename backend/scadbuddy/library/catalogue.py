@@ -148,7 +148,16 @@ class ModelNotFoundError(KeyError):
 
 
 class SidecarNotFoundError(KeyError):
-    """The model exists, but the thumbnail or README being removed does not."""
+    """The model exists, but the sidecar being removed does not: the thumbnail, the
+    README, a named sidecar file, or a sibling `.scad` file (`write_file`, #252)."""
+
+
+class TooManySourceFilesError(ValueError):
+    """A new ``.scad`` file for a model that already holds the most it may (#252)."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
 
 
 class MediaNotFoundError(KeyError):
@@ -174,6 +183,18 @@ class MediaReadOnlyError(ValueError):
 
 class ModelExistsError(ValueError):
     pass
+
+
+class StaleVersionError(RuntimeError):
+    """An edit made against a revision the model has since moved past (#252): the
+    caller read ``expected`` and the model is at ``current`` now."""
+
+    def __init__(self, slug: str, expected: str, current: str | None) -> None:
+        super().__init__(
+            f"{slug!r} is at {current[:7] if current else 'no revision'}, not {expected[:7]}"
+        )
+        self.expected = expected
+        self.current = current
 
 
 class LibraryNotDeclaredError(KeyError):
@@ -395,6 +416,9 @@ class Catalogue:
     ) -> None:
         self.paths = paths
         self.history = history
+        #: Held while `write_file` counts a model's `.scad` files and adds one, so two
+        #: new files cannot both pass the cap, git history or not (PR #752 review).
+        self._source_files_lock = threading.Lock()
         #: Where a template of mine's media list is; None with no database, when
         #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
         self.media_store = media_store
@@ -1617,8 +1641,15 @@ class Catalogue:
         *,
         message: str | None = None,
         merge_base: str | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Replace a model's ``.scad`` as one revision.
+
+        ``expected_version`` is the revision the caller based the edit on (#252's
+        ``apply_patch``): unless the model is still at it (a full id, or a prefix of
+        one), :class:`StaleVersionError` with nothing written. Checked under the
+        history's write lock, so no other write can land between the check and this
+        one. Not with ``merge_base``, whose own check is the upstream's.
 
         The hook the paste/edit path (#92) calls: everything that rewrites model
         source goes through here so it is versioned exactly once. The derived
@@ -1639,7 +1670,9 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._write_edit(slug, source, message or f"Edit {slug} source")
+            self._write_edit(
+                slug, source, message or f"Edit {slug} source", expected_version=expected_version
+            )
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -1653,31 +1686,58 @@ class Catalogue:
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
 
-    def _write_edit(self, slug: str, source: str, message: str) -> None:
+    def _write_edit(
+        self, slug: str, source: str, message: str, *, expected_version: str | None = None
+    ) -> None:
         """A plain edit: written under the history's write lock, with its commit (#370),
         so it cannot land between another write's check and its write -- a merge's
         ``still_applies``, say -- nor be overwritten by one before it is committed.
 
         Failures as :meth:`_commit`: a failed commit after the write is logged, not
         raised. When the lock itself cannot be had, the edit is written without it
-        and only its revision is lost, as it always was.
+        and only its revision is lost, as it always was -- except an edit with an
+        ``expected_version``, which is only ever written once that has been checked.
+        Such an edit is only ever written WITH its revision, too: when the commit
+        fails, the old source is put back under the same lock and the error raised,
+        since a base check against a revision that never moved would pass a second
+        edit over this one unseen (review of #741).
         """
-        if self.history is None or not self.history.available:
+        history = self.history
+        if history is None or not history.available:
+            if expected_version is not None:
+                raise GitUnavailableError("model history is unavailable, so no base can be checked")
             self._replace_source(slug, source)
             self.notify_change(slug)
             return
         started = written = False
+        previous: str | None = None
 
         def write() -> None:
-            nonlocal started, written
+            nonlocal started, written, previous
+            if expected_version is not None:
+                current = history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
+                try:
+                    previous = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    raise ModelNotFoundError(slug) from None
             started = True
             self._replace_source(slug, source)
             written = True
 
+        def undo() -> None:
+            nonlocal written
+            if written and previous is not None:
+                self._replace_source(slug, previous)
+                written = False
+
         try:
-            self.history.commit(message, slug, prepare=write)
+            history.commit(message, slug, prepare=write, rollback=undo)
         except (GitError, OSError):
             if started and not written:
+                raise
+            if expected_version is not None:
                 raise
             if not started:
                 self._replace_source(slug, source)
@@ -1698,6 +1758,69 @@ class Catalogue:
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+    # ── the other source files of a multi-file model (#252) ───────────────────
+
+    def source_files(self, slug: str) -> list[Path]:
+        """Every ``.scad`` file at the top of the model's directory, ``model.scad``
+        included, by name. What ``include``/``use`` of a sibling reads, and what a
+        render's source version hashes (``render/provenance.py``)."""
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+        return sorted(
+            (path for path in directory.glob("*.scad") if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.name,
+        )
+
+    def write_file(
+        self,
+        slug: str,
+        name: str,
+        content: str | None,
+        *,
+        message: str | None = None,
+        max_files: int | None = None,
+    ) -> ModelRecord:
+        """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
+        as one revision. ``name`` is a bare ``.scad`` file name other than the model's
+        own source, which only :meth:`write_source` writes (a ``ValueError`` here; the
+        route answers it with a 409 before calling).
+
+        The schema derived from ``model.scad`` is dropped too: an ``include`` can
+        bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
+        removal of a file that is not there, with nothing committed.
+        :class:`TooManySourceFilesError` for a new file when the model already holds
+        ``max_files``, counted and written under a lock of the catalogue's own (and
+        the history's write lock, when there is one), so two new files at once cannot
+        both pass (PR #752 review).
+        """
+        if name == SOURCE_NAME:
+            # The route refuses it with a 409 first; this keeps any other caller off
+            # the model's source too, which only `write_source` parse-checks (#773).
+            raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
+        self._require(slug)
+        path = self.paths.model_dir(slug) / name
+
+        def change() -> None:
+            if content is None:
+                if not path.is_file():
+                    raise SidecarNotFoundError(name)
+                path.unlink()
+            else:
+                with self._source_files_lock:
+                    if max_files is not None and not path.is_file():
+                        count = len(self.source_files(slug))
+                        if count >= max_files:
+                            raise TooManySourceFilesError(count)
+                    try:
+                        write_atomic(path, content.encode())
+                    except FileNotFoundError:
+                        raise ModelNotFoundError(slug) from None
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+        verb = "Remove" if content is None else "Edit"
+        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
 

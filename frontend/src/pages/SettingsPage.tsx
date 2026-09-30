@@ -11,6 +11,7 @@ import type { McpAuthMode } from '../api/mcpTokens'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -21,6 +22,7 @@ import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
+import { formatBytes } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -37,19 +39,6 @@ import {
 } from './settings/fields'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { useLeaveGuard } from './settings/useLeaveGuard'
-
-/** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */
-function formatBytes(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`
-  const units = ['kB', 'MB', 'GB', 'TB']
-  let value = bytes / 1000
-  let unit = 0
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000
-    unit += 1
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
-}
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -973,6 +962,8 @@ export function SettingsPage() {
               </p>
             </div>
             <HeadlessBrowserSetting />
+            {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
+            <SessionLimitsSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}

@@ -190,10 +190,15 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   variable the backend reads; the one origin allowed to write) and
   `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
   env vars; AI settings live in the database.
-  `src/app.ts` is the Hono server (`/healthz`, `/api/v1/ai/status`, plus
-  `src/routes/credentials.ts` for `/api/v1/ai/credentials`, and the assistant's
-  WebSocket `/api/v1/ai/chat` and `/api/v1/ai/sessions` in `src/routes/chat.ts` and
-  `src/routes/sessions.ts`, backed by `SessionManager`). Every route that must know "is this the UI's origin"
+  `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
+  `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
+  an edit to `app.ts`: among them `credentials.ts` (`/api/v1/ai/credentials`),
+  `status.ts` (`/api/v1/ai/status`), and the assistant's WebSocket `/api/v1/ai/chat` and
+  `/api/v1/ai/sessions` in `chat.ts` and `sessions.ts`, backed by `SessionManager`. A
+  dependency only that group needs is declared in its own file, by augmenting `AppDeps`
+  (#508); one several groups share (`sessions`, `upgradeWebSocket`) stays in `app.ts`.
+  A route module imports only types from `app.ts` (`routes/index.ts` loads them while
+  `app.ts` loads). Every route that must know "is this the UI's origin"
   (credential writes, `/mcp`, and the chat socket and session routes under `/api/v1/ai/*`) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options

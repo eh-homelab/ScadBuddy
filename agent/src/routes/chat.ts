@@ -9,6 +9,7 @@ import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // The assistant panel's socket (#256, #300): `GET /api/v1/ai/chat`, upgraded
 // to a WebSocket that carries the panel protocol (frontend
@@ -41,7 +42,10 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 //                            pair with their tab automatically")
 //
 // A refused operation comes back as an `error` event naming the session and
-// the SessionError/ApprovalError code; the socket stays open.
+// the SessionError/ApprovalError code; the socket stays open. A send refused
+// because the budget is spent is preceded by a `session.budget` event (#790).
+// Raising a budget and forking are HTTP routes (routes/sessions.ts), not
+// socket messages.
 //
 // The upgrade passes guard.ts `uiRequestProblem` first: a browser always sends
 // `Origin` on a WebSocket handshake, and it must be the UI's (spec §8.4: "An
@@ -352,6 +356,11 @@ export class ChatConnection {
           return
       }
     } catch (err) {
+      // A spent budget comes with the numbers, so the panel's meter and its
+      // "used its budget" state are right even for a session whose log has none.
+      if (sessionId && err instanceof SessionError && err.budget) {
+        this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
+      }
       this.emit(errorEvent(err, sessionId, this.log))
     }
   }
@@ -493,4 +502,26 @@ export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = 
   }, intervalMs)
   timer.unref()
   return () => clearInterval(timer)
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** How often the chat socket re-reads the session list (SNAPSHOT_MS when omitted). */
+    chatSnapshotMs?: number
+  }
+}
+
+/** The assistant's chat socket (#256, #300), when `upgradeWebSocket` is given. */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerChatRoute(app, {
+      sessions: deps.sessions,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      upgradeWebSocket: deps.upgradeWebSocket,
+      ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
+      ...(deps.tabs ? { tabs: deps.tabs } : {}),
+    })
+  },
 }

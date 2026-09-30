@@ -267,7 +267,13 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
   low.setRequestHandler(SubscribeRequestSchema, (req, extra) =>
     audited('subscribe', req.params.uri, extra, async () => {
       const principal = principalOf(extra)
-      const { uri } = resolve(req.params.uri, principal)
+      const { def, vars, uri } = resolve(req.params.uri, principal)
+      // Who may see it, beyond the tier (catalog.ts `readToSubscribe`): the
+      // same answer a read would give, and no hint of what it holds.
+      if (def.readToSubscribe) {
+        const seen = await run(def, vars, principal, extra).catch(() => undefined)
+        if (!seen || seen.isError) throw notFound(req.params.uri)
+      }
       try {
         subscriptions.add(uri)
       } catch (err) {

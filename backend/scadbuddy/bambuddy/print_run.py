@@ -20,13 +20,7 @@ from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
-from scadbuddy.bambuddy.extruders import (
-    ExtruderPlan,
-    SlotSide,
-    plan_extruders,
-    slot_sides,
-    with_sides,
-)
+from scadbuddy.bambuddy.extruders import high_flow_warnings, with_sides
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -43,7 +37,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import (
@@ -184,7 +178,8 @@ async def filament_options(
         options.nozzles = []
         return options
     options.nozzles = printer_status.nozzles
-    # Each loaded spool's side, so the picker can mark one whose nozzle differs (#469).
+    # Each loaded spool's side, as a label in the picker (#469); nothing is checked
+    # against it (#768).
     return with_sides(options, printer_status)
 
 
@@ -228,59 +223,12 @@ def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | N
 
 
 async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
-    """The printer's live status, read once per run (#469); unreadable is ``None``."""
+    """The printer's live status, read once per run; unreadable is ``None``."""
     try:
         return await client.printer_status(printer_id)
     except (ApiError, ValueError):
-        logger.info("printer status unreadable; no nozzle or extruder is known")
+        logger.info("printer status unreadable; no nozzle is known")
         return None
-
-
-async def _spool_sides(
-    client: BambuddyClient,
-    plan: FilamentPlan,
-    used: set[int],
-    printer_id: int,
-    printer_status: PrinterStatus | None,
-) -> tuple[list[SlotSide], list[SpoolAssignment] | None]:
-    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469), and
-    the assignments read for it, so the plates' read reuses them (#480).
-
-    With no printer status no side can be told, so the assignments aren't read; and an
-    unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
-    status does, rather than failing a run that used to succeed. Either way the
-    assignments are ``None``, and the plates' read tries them itself."""
-    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
-    assignments: list[SpoolAssignment] | None = None
-    if printer_status is not None:
-        try:
-            assignments = await client.spool_assignments()
-        except (ApiError, ValueError):
-            logger.info("spool assignments unreadable; no spool's side is known")
-    return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
-
-
-async def _extruder_plan(
-    client: BambuddyClient,
-    source: PrintSource,
-    request: PrintRunRequest,
-    printer_id: int,
-    plate_ids: list[int],
-) -> tuple[ExtruderPlan, PrinterStatus | None, list[SpoolAssignment] | None]:
-    """:func:`plan_extruders` for ``request`` on ``printer_id``, with the printer status
-    and spool assignments read for it, so the run reuses them. Reads nothing that
-    uploads: the source's used slots come from its own 3MF or Bambuddy's plate read."""
-    printer_status = await _read_status(client, printer_id)
-    used = await source.used_slots(client, plate_ids)
-    sides, assignments = await _spool_sides(
-        client, request.filament_plan, used, printer_id, printer_status
-    )
-    size = request.choices.nozzles[0].size
-    return (
-        plan_extruders(sides, printer_status, size=size, used_slots=used),
-        printer_status,
-        assignments,
-    )
 
 
 class RunRefusalError(ApiError):
@@ -294,15 +242,10 @@ class RunRefusalError(ApiError):
         super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
 
 
-def _refusal(plan: ExtruderPlan) -> str:
-    """The one detail the run refuses ``plan``'s errors with, and the check repeats."""
-    return " ".join(plan.errors)
-
-
 class PrintCheck(BaseModel):
-    """What the run makes of the dialog's choices before Print (#755, #760). ``errors``
-    holds the run's 422 detail word for word (#758 review); ``warnings`` the nozzle
-    advisories it would carry back."""
+    """What the run would refuse for the dialog's choices before Print (#755, #760).
+    ``errors`` holds the run's 422 detail word for word (#758 review); ``warnings`` what
+    it would carry back as advisories."""
 
     errors: list[str] = Field(default_factory=list)
     warnings: list[FilamentWarning] = Field(default_factory=list)
@@ -318,8 +261,11 @@ async def check_print(
 
     It is :func:`prepare_run` itself (#760), so the check makes every refusal the run
     makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
-    the catalogue refuses, nozzles that do not fit — in the run's own words. What needs
-    the uploaded file is still found by the run. Only the run's own refusals
+    the catalogue refuses — in the run's own words. It no longer refuses by the mounted
+    nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
+    slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
+    the size (#723). What needs the uploaded file is still found by the run. Only the
+    run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the check,
     as it would fail the run. With no printer chosen or configured there is nothing to
     judge, and the run says why."""
@@ -329,7 +275,10 @@ async def check_print(
         prepared = await prepare_run(client, source, settings, request)
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
-    return PrintCheck(warnings=prepared.extruders.warnings)
+    # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
+    return PrintCheck(
+        warnings=high_flow_warnings(prepared.printer_status, request.choices.nozzles[0].size)
+    )
 
 
 async def check_for_output(
@@ -361,14 +310,9 @@ class PreparedRun:
     printer_id: int
     #: Read once, before the 202, and reused by the run rather than read again.
     catalogue: _Catalogue
-    #: The printer's live status, read once for the nozzle checks (#469) and reused
-    #: by the run's hardware warnings; ``None`` when it was unreadable.
+    #: The printer's live status, read once for the run's hardware warnings; ``None``
+    #: when it was unreadable.
     printer_status: PrinterStatus | None
-    #: The extruder plan the nozzle checks made; its warnings go on the result.
-    extruders: ExtruderPlan
-    #: The spool assignments the nozzle checks read, reused by the plates' read (#480);
-    #: ``None`` when they were not read or were unreadable, and the plates' read tries.
-    assignments: list[SpoolAssignment] | None
 
 
 async def run_print(
@@ -393,10 +337,10 @@ async def prepare_run(
 
     This is what ``POST .../run`` makes before it answers 202: the plates exist, a
     printer is chosen and the resolver can serve it, the choices resolve to a
-    printer and process preset, and no printed filament could land on a nozzle of
-    another size (#469). Each is a read (the source's plates, ``/printers/``, the preset
-    catalogue, the printer's status and spool assignments), none waits on a slice, so
-    it stays well inside a proxy's timeout. What needs a plate's slots is left to
+    printer and process preset. The mounted nozzles are not checked (#768): the printer
+    handles its nozzles itself. Each is a read (the source's plates, ``/printers/``, the
+    preset catalogue, the printer's status), none waits on a slice, so it stays well
+    inside a proxy's timeout. What needs a plate's slots is left to
     :func:`execute_run`, because only a library file answers those.
     """
     plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
@@ -423,20 +367,11 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
-    # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
-    # another size pauses the printer at the first layer, so such a run is refused.
-    extruders, printer_status, assignments = await _extruder_plan(
-        client, source, request, printer_id, plate_ids
-    )
-    if extruders.errors:
-        raise RunRefusalError(_refusal(extruders))
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
         catalogue=catalogue,
-        printer_status=printer_status,
-        extruders=extruders,
-        assignments=assignments,
+        printer_status=await _read_status(client, printer_id),
     )
 
 
@@ -467,7 +402,6 @@ async def execute_run(
     printer_id = prepared.printer_id
     catalogue = prepared.catalogue
     printer_status = prepared.printer_status
-    extruders = prepared.extruders
     choices = request.choices
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
@@ -503,7 +437,6 @@ async def execute_run(
         printer_id=printer_id,
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
-        assignments=prepared.assignments,
     )
     for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
@@ -539,6 +472,7 @@ async def execute_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
+    hardware += high_flow_warnings(printer_status, choices.nozzles[0].size)
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
     warnings: list[FilamentWarning] = []
@@ -581,7 +515,7 @@ async def execute_run(
         project_id,
         printed.folder_id,
         copies=copies,
-        warnings=warnings + hardware + extruders.warnings,
+        warnings=warnings + hardware,
     )
 
 

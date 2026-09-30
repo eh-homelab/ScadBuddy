@@ -20,6 +20,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
@@ -465,6 +466,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     grants = postgres_grants(app_settings.database_url) if app_settings.database_url else None
     # Closed by the lifespan, after everything else has stopped.
     app.state.agent_grants = grants
+    # Inside the gate: a commit made for the agent is authored as the agent (#252).
+    app.add_middleware(AgentAuthorship)
     app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.

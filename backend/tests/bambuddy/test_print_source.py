@@ -71,7 +71,6 @@ async def test_a_library_file_is_its_plates_and_its_filaments(bambuddy: Bambuddy
 
     assert await source.plate_ids(bambuddy) == [1, 2]
     assert source.colours == ["#0047BB", "#FF1493"]
-    assert await source.used_slots(bambuddy, [1, 2]) == {1, 2}
     assert source.options_slug is None
     assert (await source.file_to_read(bambuddy)).id == 67
     printed = await source.file_to_print(
@@ -105,33 +104,6 @@ async def test_a_library_files_colors_drop_the_alpha_bambuddy_reads(
 
 
 @respx.mock
-async def test_a_plates_used_slots_are_the_ones_bambuddy_marks_used(
-    bambuddy: BambuddyClient,
-) -> None:
-    _file(67, "3mf")
-    respx.get(f"{API}/library/files/67/plates").mock(
-        return_value=httpx.Response(200, json=recording("library-plates-multi.json"))
-    )
-    both = recording("filament-requirements.json")
-    second_unused = {
-        **both,
-        "plate_id": 1,
-        "filaments": [both["filaments"][0], {**both["filaments"][1], "used_in_plate": False}],
-    }
-    respx.get(f"{API}/library/files/67/filament-requirements", params={"plate_id": 1}).mock(
-        return_value=httpx.Response(200, json=second_unused)
-    )
-    respx.get(f"{API}/library/files/67/filament-requirements").mock(
-        return_value=httpx.Response(200, json=both)
-    )
-
-    source = await LibrarySource.load(bambuddy, 67)
-
-    assert await source.used_slots(bambuddy, [1]) == {1}
-    assert await source.used_slots(bambuddy, [1, 2]) == {1, 2}
-
-
-@respx.mock
 async def test_a_file_with_no_plates_or_filaments_is_one_plate_one_filament(
     bambuddy: BambuddyClient,
 ) -> None:
@@ -150,7 +122,6 @@ async def test_a_file_with_no_plates_or_filaments_is_one_plate_one_filament(
     assert await source.plate_ids(bambuddy) == [1]
     assert source.colours == [UNKNOWN_COLOUR]
     assert len(source.colours) == 1
-    assert await source.used_slots(bambuddy, [1]) == {1}
 
 
 @respx.mock
@@ -194,7 +165,6 @@ async def test_an_stl_is_one_plate_of_one_filament(bambuddy: BambuddyClient) -> 
 
     assert await source.plate_ids(bambuddy) == [1]
     assert len(source.colours) == 1
-    assert await source.used_slots(bambuddy, [1]) == {1}
 
 
 @respx.mock

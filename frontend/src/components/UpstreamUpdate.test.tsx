@@ -63,7 +63,8 @@ describe('UpstreamUpdateButton (#160)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
 
     await vi.waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith('merge'))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    // done() calls onChanged before React commits setOpen(false), so the dialog can still be there.
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect((await api.getModel(COPY)).upstream_state).toBe('current')
     expect(await api.getSource(COPY)).toBe(theirs)
     expect((await api.listVersions(COPY))[0]?.message).toBe(`Merge ${UPSTREAM} into ${COPY}`)

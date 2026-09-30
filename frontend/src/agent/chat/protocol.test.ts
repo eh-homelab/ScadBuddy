@@ -31,6 +31,7 @@ const valid: ServerEvent[] = [
   { v: 1, type: 'session.status', sessionId: 's1', status: 'waiting_approval' },
   { v: 1, type: 'session.result', sessionId: 's1', costUsd: 0.02, turns: 3 },
   { v: 1, type: 'error', message: 'boom' },
+  { v: 1, type: 'memory', sessionId: 's1', turnId: 'u1', action: 'recall', bank: 'b', outcome: 'ok', count: 3 },
 ]
 
 describe('parseServerEvent', () => {
@@ -57,6 +58,7 @@ describe('parseServerEvent', () => {
     // §8.2: only outward steps pause for approval.
     ['an approval for a write step', { v: 1, type: 'approval.required', sessionId: 's1', id: 'a', tool: 't', summary: 's', risk: 'write' }],
     ['an approval without a summary', { v: 1, type: 'approval.required', sessionId: 's1', id: 'a', tool: 't', summary: '', risk: 'outward' }],
+    ['a memory event with an unknown action', { v: 1, type: 'memory', sessionId: 's1', turnId: 'u1', action: 'forget', bank: 'b', outcome: 'ok' }],
     ['a negative cost', { v: 1, type: 'session.result', sessionId: 's1', costUsd: -1, turns: 1 }],
     ['an unknown origin', { v: 1, type: 'session.started', sessionId: 's1', origin: 'email', owner }],
     ['an empty session id', { v: 1, type: 'session.status', sessionId: '', status: 'idle' }],

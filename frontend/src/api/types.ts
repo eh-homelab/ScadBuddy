@@ -153,6 +153,13 @@ export type LibraryFolderView = Schemas['LibraryFolderView']
  * hand-kept copy would drift the moment it gains a state.
  */
 export type PrintProgress = Schemas['PrintProgress']
+/** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
+export type PrintSummary = Schemas['PrintSummary']
+export type PrintPage = Schemas['PrintPage']
+export type PrintDetail = Schemas['PrintDetail']
+/** #311 — the print detail page's two writes. */
+export type PrintAgain = Schemas['PrintAgain']
+export type PrinterMedia = Schemas['PrinterMedia']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
 export type PrintStage = PrintProgress['stage']
@@ -225,4 +232,25 @@ export interface Problem {
  */
 export interface HeadlessBrowserSetting {
   enabled: boolean
+}
+
+/**
+ * #790 — what a new assistant session may spend in all (USD) and how many turns one
+ * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
+ * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.
+ */
+export interface SessionLimits {
+  budget_usd: number
+  max_turns: number
+}
+
+/** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
+export interface AiSessionView {
+  id: string
+  title: string
+  parent_id: string | null
+  turns: number
+  cost_usd: number
+  budget_usd: number
+  running: boolean
 }

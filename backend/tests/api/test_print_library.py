@@ -215,29 +215,6 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
 
 
 @respx.mock
-def test_the_nozzle_refusals_apply_to_a_library_file(client: TestClient) -> None:
-    """#469 on a library file: two filaments, a 0.2 on the right and a 0.4 on the left."""
-    configure(client)
-    library_file(89)
-    run_routes()
-    sliced = slice_routes()
-
-    response = client.post(
-        "/api/v1/print/library/89/run",
-        json={
-            **body(),
-            "filament_plan": {
-                "slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]
-            },
-        },
-    )
-
-    assert response.status_code == 422, response.text
-    assert "The slicer spreads a multi-color print across both" in response.json()["detail"]
-    assert not sliced.called
-
-
-@respx.mock
 def test_the_choices_are_remembered_per_library_file(client: TestClient) -> None:
     configure(client)
     library_file(89)
@@ -277,8 +254,12 @@ def test_a_remembered_printer_that_is_gone_falls_through(client: TestClient) -> 
 
 
 @respx.mock
-def test_the_check_gives_a_library_files_nozzle_refusal(client: TestClient) -> None:
-    """#755 on a library file: the check answers what the run would refuse."""
+def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
+    client: TestClient,
+) -> None:
+    """#768 on a library file: two filaments, a 0.2 on the right and a 0.4 on the left,
+    which #755's check used to refuse. The run no longer judges the mounted nozzles, so
+    the check says nothing, and slices nothing."""
     configure(client)
     library_file(89)
     run_routes()
@@ -289,8 +270,7 @@ def test_the_check_gives_a_library_files_nozzle_refusal(client: TestClient) -> N
     }
 
     check = client.post("/api/v1/print/library/89/check", json=request)
-    run = client.post("/api/v1/print/library/89/run", json=request)
 
     assert check.status_code == 200, check.text
-    assert check.json()["errors"] == [run.json()["detail"]]
+    assert check.json() == {"errors": [], "warnings": []}
     assert not sliced.called

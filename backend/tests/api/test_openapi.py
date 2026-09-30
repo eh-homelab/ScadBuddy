@@ -17,6 +17,10 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/upstream/dismiss",
     "/api/v1/models/{slug}/upstream/detach",
     "/api/v1/models/{slug}/source",
+    "/api/v1/models/{slug}/files",
+    "/api/v1/models/{slug}/files/{name}",
+    "/api/v1/models/{slug}/source/patch",
+    "/api/v1/lsp/diagnostics",
     "/api/v1/models/{slug}/schema",
     "/api/v1/models/{slug}/thumbnail",
     "/api/v1/models/{slug}/media",
@@ -43,6 +47,7 @@ EXPECTED_PATHS = {
     "/api/v1/outputs/{output_id}/edit",
     "/api/v1/outputs/{output_id}/geometry",
     "/api/v1/outputs/{output_id}/model.3mf",
+    "/api/v1/outputs/{output_id}/preview.glb",
     "/api/v1/outputs/{output_id}/thumbnail",
     "/api/v1/outputs/{output_id}/plates",
     "/api/v1/outputs/{output_id}/plates/{index}/thumbnail",
@@ -94,13 +99,18 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/dependencies",
     "/api/v1/models/{slug}/diagnostics",
     "/api/v1/jobs/{job_id}/views/{view}.png",
+    "/api/v1/jobs/{job_id}/colours.png",
     "/api/v1/outputs/{output_id}/views/{view}.png",
+    "/api/v1/prints",
+    "/api/v1/prints/{archive_id}",
     "/api/v1/prints/{archive_id}/timelapse",
     "/api/v1/prints/{archive_id}/photos/{filename}",
     "/api/v1/prints/{archive_id}/thumbnail",
     "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
     "/api/v1/prints/{archive_id}/files/sliced",
     "/api/v1/prints/{archive_id}/files/source",
+    "/api/v1/prints/{archive_id}/reprint",
+    "/api/v1/prints/{archive_id}/timelapse/pull",
     "/api/v1/print/library",
     "/api/v1/print/library/{file_id}/plates",
     "/api/v1/print/library/{file_id}/thumbnail",
@@ -161,6 +171,13 @@ def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
     for case in ("merge_base", "`current`", "`gone`", "kept changing", "retry"):
         assert case in conflict, case
         assert case in merge["description"], case
+
+
+def test_the_download_documents_only_a_3mf(tmp_path: Path) -> None:
+    """#769: it answers a FileResponse or a rewritten one, and either is a 3MF."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+    download = paths["/api/v1/outputs/{output_id}/model.3mf"]["get"]
+    assert set(download["responses"]["200"]["content"]) == {"model/3mf"}
 
 
 def test_the_view_routes_document_a_png(tmp_path: Path) -> None:

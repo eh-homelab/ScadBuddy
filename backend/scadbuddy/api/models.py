@@ -23,7 +23,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from scadbuddy.api.deps import (
     IMPORT_CONCURRENCY,
@@ -53,7 +53,7 @@ from scadbuddy.api.params import require_valid_presets
 from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
-from scadbuddy.core.paths import is_builtin
+from scadbuddy.core.paths import DataPaths, is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.assets import with_samples
 from scadbuddy.library.catalogue import (
@@ -65,6 +65,7 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
     SidecarNotFoundError,
+    StaleVersionError,
     meta_from_raw,
 )
 from scadbuddy.library.history import (
@@ -84,6 +85,13 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.patch import (
+    MAX_EDITS,
+    PatchError,
+    SearchReplace,
+    apply_edits,
+    apply_unified_diff,
+)
 from scadbuddy.library.presets import PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
@@ -257,6 +265,50 @@ class SourceUpdate(BaseModel):
         max_length=MAX_SUBJECT,
         description="What the revision is called in the history; a default when omitted",
     )
+    base: str | None = Field(
+        default=None,
+        pattern=COMMIT_ID_PATTERN,
+        description=(
+            "The revision this replacement was made from (the model's `version` when its "
+            "source was read). When given and the model has moved on since, 409 with the "
+            "`current` revision, writing nothing"
+        ),
+    )
+
+
+class SourcePatch(BaseModel):
+    """`POST /models/{slug}/source/patch` (#252): a unified diff or search/replace edits
+    against the revision named by `base`."""
+
+    base: str = Field(
+        pattern=COMMIT_ID_PATTERN,
+        description=(
+            "The revision the patch was made against: the model's `version` when its "
+            "source was read. 409 with the `current` revision when the model has moved on"
+        ),
+    )
+    patch: str | None = Field(
+        default=None,
+        max_length=MAX_SOURCE_CHARS,
+        description="A unified diff of the model's source (`git diff` or `diff -u` output)",
+    )
+    edits: list[SearchReplace] | None = Field(
+        default=None,
+        max_length=MAX_EDITS,
+        description="Search/replace edits, applied in order; each search must occur once",
+    )
+    message: str | None = Field(
+        default=None,
+        max_length=MAX_SUBJECT,
+        description="What the revision is called in the history; a default when omitted",
+    )
+    force: bool = Field(default=False, description="Save even when the parse check fails")
+
+    @model_validator(mode="after")
+    def _one_kind(self) -> SourcePatch:
+        if (self.patch is None) == (self.edits is None):
+            raise ValueError("give exactly one of `patch` and `edits`")
+        return self
 
 
 class ReadmeUpdate(BaseModel):
@@ -1106,12 +1158,77 @@ async def put_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the source still has conflict markers; resolve every conflict first",
         )
-    library_path = await resolve_search_path(fetcher, partial(model_search_path, paths, slug))
-    checked = await _guard_source(
+    if merge_base is not None and body.base is not None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "`base` and `merge_base` cannot be combined: a merge is checked against its upstream",
+        )
+    if body.base is not None:
+        _require_base(slug, body.base, await asyncio.to_thread(catalogue.version, slug))
+    return await _save_source(
+        slug,
         body.source,
-        config=replace(config, library_path=library_path),
+        message=body.message,
         # Either spelling forces, as on `POST /models`.
         force=force or body.force,
+        merge_base=merge_base,
+        expected_version=body.base,
+        catalogue=catalogue,
+        paths=paths,
+        config=config,
+        checks=checks,
+        events=events,
+        fetcher=fetcher,
+    )
+
+
+def _stale(slug: str, base: str, current: str | None) -> ApiError:
+    """The 409 of an edit made against a revision the model has moved past (#252).
+    ``current`` is an extension member (RFC 9457 §3.2), so a client can read the new
+    source and rebuild its edit without another round trip to find the revision."""
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        f"{slug!r} has moved on: it is at {current[:7] if current else 'no revision'}, "
+        f"and this edit was made against {base[:7]}. Read the source again and rebuild the edit",
+        base=base,
+        current=current,
+    )
+
+
+def _require_base(slug: str, base: str, current: str | None) -> None:
+    """A cheap early refusal, before the parse check; `write_source` checks again under
+    the history's write lock."""
+    if current is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable, so the edit's base cannot be checked",
+        )
+    if not current.startswith(base):
+        raise _stale(slug, base, current)
+
+
+async def _save_source(
+    slug: str,
+    source: str,
+    *,
+    message: str | None,
+    force: bool,
+    merge_base: str | None,
+    expected_version: str | None,
+    catalogue: Catalogue,
+    paths: DataPaths,
+    config: Config,
+    checks: asyncio.Semaphore,
+    events: EventBus,
+    fetcher: CheckoutFetcher,
+) -> ModelRecord:
+    """Parse-check ``source`` against the model's directory, write it as one revision
+    and store the schema the check derived: `PUT /source` and `POST /source/patch`."""
+    library_path = await resolve_search_path(fetcher, partial(model_search_path, paths, slug))
+    checked = await _guard_source(
+        source,
+        config=replace(config, library_path=library_path),
+        force=force,
         limit=checks,
         # The model's own directory, so a replacement that includes a sibling file is
         # checked — and has its schema derived — against the files it will really see.
@@ -1119,8 +1236,15 @@ async def put_source(
     )
     try:
         record = await asyncio.to_thread(
-            catalogue.write_source, slug, body.source, message=body.message, merge_base=merge_base
+            catalogue.write_source,
+            slug,
+            source,
+            message=message,
+            merge_base=merge_base,
+            expected_version=expected_version,
         )
+    except StaleVersionError as error:
+        raise _stale(slug, error.expected, error.current) from None
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
@@ -1153,6 +1277,73 @@ async def put_source(
 def announce_source_change(events: EventBus, slug: str) -> None:
     emit(events, SourceChanged(slug=slug))
     emit(events, ModelEvent(kind="model.updated", slug=slug))
+
+
+@router.post(
+    "/models/{slug}/source/patch",
+    response_model=ModelRecord,
+    summary="Patch a model's source as one revision",
+    description=(
+        "Applies a unified diff (`patch`) or search/replace `edits` to the model's source "
+        "as it stands, then saves the result as `PUT /models/{slug}/source` does: parse "
+        "check (skipped with `force`), one revision named by `message`, schema re-derived. "
+        "`base` is the revision the patch was made against; when the model has moved on "
+        "since, 409 with the `current` revision and nothing written, checked again under "
+        "the history's write lock. A hunk or edit that does not apply is a 422 naming it, "
+        "with nothing written (#252)."
+    ),
+    responses={409: {"description": "The model is no longer at `base`; `current` names it"}},
+)
+async def patch_source(
+    slug: SlugPath,
+    body: SourcePatch,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    checks: ChecksDep,
+    events: EventsDep,
+    fetcher: FetcherDep,
+) -> ModelRecord:
+    require_mine(slug)
+    require_model_exists(catalogue, slug)
+    current = await asyncio.to_thread(catalogue.version, slug)
+    _require_base(slug, body.base, current)
+    try:
+        source = await asyncio.to_thread(paths.model_source(slug).read_text, encoding="utf-8")
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except UnicodeDecodeError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"the source of {slug!r} is not UTF-8 text"
+        ) from None
+    try:
+        # `to_thread`: a diff whose hunks miss their lines scans the source per hunk,
+        # CPU the event loop should not wait on (review of #741).
+        if body.patch is not None:
+            patched = await asyncio.to_thread(apply_unified_diff, source, body.patch)
+        else:
+            assert body.edits is not None  # the model validator's guarantee
+            patched = await asyncio.to_thread(apply_edits, source, body.edits)
+    except PatchError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"the patch does not apply: {error}"
+        ) from None
+    _require_within_cap(patched, "the patched source")
+    return await _save_source(
+        slug,
+        patched,
+        message=body.message,
+        force=body.force,
+        merge_base=None,
+        # The full id the base matched, so the check under the lock is exact.
+        expected_version=current,
+        catalogue=catalogue,
+        paths=paths,
+        config=config,
+        checks=checks,
+        events=events,
+        fetcher=fetcher,
+    )
 
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")

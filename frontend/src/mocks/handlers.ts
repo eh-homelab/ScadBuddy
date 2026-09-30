@@ -28,6 +28,9 @@ import type {
   ParamValue,
   Plate,
   PlateFit,
+  PrintAgain,
+  PrintDetail,
+  PrintPage,
   PrintProgress,
   PrintCheck,
   PrintRunRequest,
@@ -129,6 +132,10 @@ const state = {
   plates: {} as Record<string, NonNullable<Job['plates']>>,
   /** #274 — uploaded media bytes by `<slug>/<file>`; the fixtures' are served by kind. */
   mediaFiles: new Map<string, ArrayBuffer>(),
+  /** #311 — archives whose printer timelapse was pulled, by archive id -> file name. */
+  pulledTimelapses: new Map<number, string>(),
+  /** #311 — the queue items "Print again" made, newest last. */
+  reprints: [] as { archive_id: number; queue_item_id: number }[],
   /** #722 — each built-in's media overlay, read from its record on its first write. */
   mediaOverlays: new Map<string, MediaOverlay>(),
   catalogueOffline: false,
@@ -245,6 +252,8 @@ export function resetMockState(): void {
   state.mergeFiles = {}
   state.plates = {}
   state.mediaFiles.clear()
+  state.pulledTimelapses.clear()
+  state.reprints = []
   state.mediaOverlays.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
@@ -949,6 +958,41 @@ function mediaBytes(slug: string, file: string, kind: MediaView['kind']): ArrayB
   if (stored) return stored
   const base64 = kind === 'video' ? fixtures.MEDIA_MP4_BASE64 : fixtures.MEDIA_PNG_BASE64
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer
+}
+
+/** The `PrintSummary` half of a fixture print: what the list serves. */
+function printSummary(print: PrintDetail): PrintPage['items'][number] {
+  const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
+  return summary
+}
+
+/** `api/print_history.py` `_matches`. */
+function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
+  const status = query.get('status')
+  if (status !== null && print.status !== status) return false
+  const printer = query.get('printer_id')
+  if (printer !== null && print.printer_id !== Number(printer)) return false
+  const archive = fixtures.printArchives[print.archive_id]
+  // The backend's `_day`: when it started, else (for a deleted archive) first seen.
+  const day = (print.started_at ?? archive?.first_seen)?.slice(0, 10) ?? null
+  const from = query.get('from')
+  const to = query.get('to')
+  if ((from !== null || to !== null) && day === null) return false
+  if (from !== null && day !== null && day < from) return false
+  if (to !== null && day !== null && day > to) return false
+  const slug = query.get('slug')
+  if (slug !== null && print.slug !== slug) return false
+  const q = query.get('q')?.toLowerCase()
+  if (q) {
+    const haystack = [
+      print.output_name ?? '',
+      print.slug,
+      archive?.print_name ?? '',
+      JSON.stringify(print.provenance.params),
+    ]
+    if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
+  }
+  return true
 }
 
 /** A multipart file part as `_staged` reads it: absent, or sent empty, is none. */
@@ -2367,6 +2411,141 @@ export const handlers = [
     })
   }),
 
+  http.get(`${base}/outputs/:id/preview.glb`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const [x, y, z] = output.bbox_mm.size
+    const glb = keychainGlb(output.colors ?? ['#9AA4B2'], { x, y, z })
+    return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #308 — the prints API, filtered and paged as `api/print_history.py` does.
+  http.get(`${base}/prints`, ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const limit = Number(query.get('limit') ?? 50)
+    const cursor = query.get('cursor')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
+      return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
+    }
+    const matches = fixtures.prints.filter((print) => printMatches(print, query))
+    const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
+    const items = after.slice(0, limit).map(printSummary)
+    const last = items.at(-1)
+    return HttpResponse.json({
+      items,
+      next_cursor: after.length > limit && last ? String(last.archive_id) : null,
+    } satisfies PrintPage)
+  }),
+
+  http.get(`${base}/prints/:archiveId`, ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
+    const pulled = state.pulledTimelapses.get(print.archive_id)
+    const remote = (fixtures.printerFiles[print.archive_id] ?? []).filter((file) => file.name !== pulled)
+    return HttpResponse.json({
+      ...print,
+      has_timelapse: print.has_timelapse || pulled !== undefined,
+      media:
+        pulled === undefined
+          ? print.media
+          : {
+              ...print.media,
+              timelapse: { url: `/api/v1/prints/${print.archive_id}/timelapse`, info: null, poster_frames: [] },
+            },
+      printer_media:
+        wantsPrinter && print.status !== 'deleted_in_bambuddy'
+          ? { archive_id: print.archive_id, printer_id: print.printer_id, local_timelapse: null, remote_files: remote, warnings: [] }
+          : null,
+    } satisfies PrintDetail)
+  }),
+
+  // #311 — "Print again": `POST /queue/` with the archive, on its printer.
+  http.post(`${base}/prints/:archiveId/reprint`, ({ params }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so it cannot be printed again`)
+    }
+    const queued = { archive_id: print.archive_id, queue_item_id: 200 + state.reprints.length }
+    state.reprints.push(queued)
+    return HttpResponse.json(
+      {
+        queue_item_id: queued.queue_item_id,
+        printer_id: print.printer_id ?? 1,
+        bambuddy_url: 'https://bambuddy.example/queue',
+      } satisfies PrintAgain,
+      { status: 201 },
+    )
+  }),
+
+  // #311 — "Pull timelapse from printer": `timelapse/select`, 404 for a name the printer lacks.
+  http.post(`${base}/prints/:archiveId/timelapse/pull`, async ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    if (print.status === 'deleted_in_bambuddy') {
+      return problem(409, 'Conflict', `archive ${print.archive_id} was deleted in Bambuddy, so no timelapse can be attached to it`)
+    }
+    const { filename } = (await request.json()) as { filename: string }
+    if (!(fixtures.printerFiles[print.archive_id] ?? []).some((file) => file.name === filename)) {
+      return problem(404, 'Not Found', `Bambuddy has no such resource when asked to attach a timelapse: Timelapse '${filename}' not found on printer`)
+    }
+    state.pulledTimelapses.set(print.archive_id, filename)
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  // #307 — the timelapse, with Range as Bambuddy's FileResponse answers it.
+  http.get(`${base}/prints/:archiveId/timelapse`, ({ params, request }) => {
+    const id = Number(params['archiveId'])
+    const print = fixtures.prints.find((p) => p.archive_id === id)
+    if (!print || (print.media.timelapse === null && !state.pulledTimelapses.has(id))) {
+      return problem(404, 'Not Found', `archive ${String(params['archiveId'])} has no timelapse`)
+    }
+    const bytes = new Uint8Array(mediaBytes('', '', 'video'))
+    const range = /^bytes=(\d+)-(\d*)$/.exec(request.headers.get('Range') ?? '')
+    if (!range) {
+      return HttpResponse.arrayBuffer(bytes.buffer, {
+        headers: { 'Content-Type': 'video/mp4', 'Accept-Ranges': 'bytes' },
+      })
+    }
+    const start = Number(range[1])
+    const end = Math.min(range[2] ? Number(range[2]) : bytes.length - 1, bytes.length - 1)
+    if (start >= bytes.length) {
+      return new HttpResponse(null, { status: 416, headers: { 'Content-Range': `bytes */${bytes.length}` } })
+    }
+    return HttpResponse.arrayBuffer(bytes.slice(start, end + 1).buffer, {
+      status: 206,
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+      },
+    })
+  }),
+
+  // #307 — the sliced file and slicer project Bambuddy kept.
+  ...['files/sliced', 'files/source'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer, {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      })
+    }),
+  ),
+
+  ...['thumbnail', 'photos/:name', 'plates/:index/thumbnail'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } })
+    }),
+  ),
+
   // #83 — every ScadBuddy render is one plate; a test overrides this for a multi-plate 3MF.
   http.get(`${base}/outputs/:id/plates`, ({ params }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
@@ -2591,8 +2770,8 @@ export const handlers = [
   }),
 
   /**
-   * #755 — the run's nozzle verdict before Print. The mock printer's nozzles never
-   * refuse anything; a test that needs a verdict answers this route itself.
+   * #755 — the check before Print. The run checks no mounted nozzle (#768), so it
+   * refuses nothing here; a test that needs a verdict answers this route itself.
    */
   http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')

@@ -211,6 +211,18 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(await m.list(browser)).toHaveLength(2)
   })
 
+  it('counts a fork as a new session (PR #715 review)', async () => {
+    m.abortAll()
+    const { runner } = scriptedRunner(() => next)
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, newSessions: { max: 2, windowMs: 60_000 } })
+    const { session } = await m.start(browser, { origin: 'chat' })
+    // The scripted runner writes no SDK transcript; the fork needs one.
+    await m.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    await m.fork(session.id, browser)
+    await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'rate_limited' })
+    expect(await m.list(browser)).toHaveLength(2)
+  })
+
   it('refuses writes without the UI origin, reads from another site, and unknown sessions', async () => {
     const bare = await app.request('/api/v1/ai/sessions', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })
     expect(bare.status).toBe(403)
@@ -299,6 +311,17 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     const stop = await app.request(`/api/v1/ai/sessions/${session.id}/interrupt`, { method: 'POST', headers: UI })
     expect(await stop.json()).toEqual({ interrupted: true })
     await waitIdle(session.id)
+  })
+
+  it('settles once the aborted turns have appended their last events (#802)', async () => {
+    next = { hang: true }
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'wait' })
+    m.abortAll()
+    await m.settled()
+    // Nothing left to append: a shutdown may close the database now.
+    const events = await m.events.read(session.id, 0)
+    expect(events.at(-1)?.event).toMatchObject({ type: 'session.status', status: 'idle' })
+    await expect(m.settled()).resolves.toBeUndefined()
   })
 
   it('takes over a session another principal controls', async () => {

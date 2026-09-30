@@ -39,7 +39,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const repo = new SettingsOidcConfigRepo(new SettingsStore(db.sql), (d) => problems.push(d))
       expect(await repo.get()).toBeUndefined()
       const config = { ...defaultOidcConfig(idp.issuer), enabled: true, tier_claim: 'groups', audience: 'scadbuddy' }
-      await repo.put(config)
+      await repo.put(config, { actor: { kind: 'system', id: 'test', label: 'test' }, surface: 'system' as const })
       expect(await repo.get()).toEqual(config)
       const [row] = await db.sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${OIDC_SETTINGS_KEY}`
       expect(row?.value).toEqual(config)

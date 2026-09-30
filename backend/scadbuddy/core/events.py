@@ -215,6 +215,34 @@ class AnalyzerDecisionEvent(BaseEvent):
     action: Literal["recorded", "removed"]
 
 
+SessionBusKind = Literal[
+    "session.started",
+    "session.owner",
+    "session.waiting",
+    "session.done",
+    "session.message",
+]
+
+SessionStatus = Literal["running", "waiting_input", "waiting_approval", "idle", "done", "failed"]
+
+
+class SessionBusEvent(BaseEvent):
+    """An AI agent session changed (#300, AI spec §7: ``session.*`` "from the agent
+    side"). The agent service publishes these itself
+    (``agent/src/sessions/busEvents.ts``): NOTIFY only, never into ``events``, so
+    they are not replayed. Declared here so this process decodes them instead of
+    logging each as undecodable; they go to no WebSocket topic (``realtime.py``),
+    since the UI follows a session over the agent's own socket, which checks who
+    may see it. ``seq`` is the session's event-log position, ``replica`` the
+    publishing agent process."""
+
+    kind: SessionBusKind
+    session_id: str
+    seq: int
+    status: SessionStatus | None = None
+    replica: str | None = None
+
+
 #: The resync marker's kind. Every subscription receives it, whatever its filter.
 RESYNC_KIND = "bus.resync"
 
@@ -248,6 +276,7 @@ Event = Annotated[
     | FontInstalled
     | SettingsChanged
     | AnalyzerDecisionEvent
+    | SessionBusEvent
     | BusResync,
     Field(discriminator="kind"),
 ]
