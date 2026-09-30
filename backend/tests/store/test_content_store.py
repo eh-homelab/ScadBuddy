@@ -131,7 +131,9 @@ def _age(pool: Pool, *keys: str) -> None:
         )
 
 
-async def test_the_sweep_leaves_another_backends_rows_alone(tmp_path: Path, pool: Pool) -> None:
+async def test_the_sweep_leaves_another_backends_rows_alone(
+    tmp_path: Path, pool: Pool, caplog: pytest.LogCaptureFixture
+) -> None:
     store = local_content(tmp_path / "remote", pool)
     foreign = BlobRef(sha256="0" * 64, kind="piece", backend="bambuddy", backend_id="42", size=1)
     store.index.put("switched", foreign, slug="demo", meta={})
@@ -140,6 +142,17 @@ async def test_the_sweep_leaves_another_backends_rows_alone(tmp_path: Path, pool
     assert await sweep_content(store, BlobRefs(pool), grace=3600, now=time.time()) == ["stale"]
     assert store.index.get("switched") is not None
     assert [s.key async for s in store.list(SCOPE)] == []
+    assert await store.stat("switched") is None  # not this backend's to check
+    await store.delete("switched")  # nothing of this backend's to delete
+    assert store.index.get("switched") is not None
+    # A put over the switched key lands here and leaves the old object where it is.
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.store.content"):
+        ref = await store.put("piece", b"new", name="p", scope=SCOPE, key="switched")
+    named = store.index.get("switched")
+    assert named is not None and named.ref == ref and ref.backend == "local"
+    assert [r.message for r in caplog.records if getattr(r, "key", None) == "switched"] == [
+        "left a replaced blob on another backend"
+    ]
 
 
 class _RefusingBackend(LocalContentBackend):
