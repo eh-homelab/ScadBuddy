@@ -296,7 +296,10 @@ def test_the_temporal_ui_url_is_empty_by_default_and_seeded_by_its_variable(
     assert Settings().temporal_ui_url == "https://temporal.lan"
 
 
-@pytest.mark.parametrize("value", ["javascript:alert(1)", "temporal.lan", "ftp://temporal.lan"])
+@pytest.mark.parametrize(
+    "value",
+    ["javascript:alert(1)", "temporal.lan", "ftp://temporal.lan", "https://", "http:// x"],
+)
 def test_a_temporal_ui_url_that_is_not_http_is_refused_by_name(
     value: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -160,7 +161,13 @@ class Settings(BaseSettings):
         # It becomes a link on the Settings page, so only an http(s) URL is one.
         if value is None or not value.strip():
             return None
-        if not value.startswith(("http://", "https://")):
+        parts = urlsplit(value)
+        # A host, and no whitespace anywhere: "https://" or "http:// x" is no link.
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.netloc
+            or any(char.isspace() for char in value)
+        ):
             raise ValueError(f"SCADBUDDY_TEMPORAL_UI_URL must be an http(s) URL, not {value!r}")
         return value
 
