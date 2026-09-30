@@ -420,8 +420,12 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: The folder the file sits in (``FileResponse``); the blob store deletes only files
+    #: in a `Work/` folder it made (spec 2026-09-27 §6.3).
+    folder_id: int | None = None
     #: SHA-256 of the file (``FileResponse.file_hash``). For a sliced file it equals the
-    #: ``content_hash`` of the archive of each print of it (#306).
+    #: ``content_hash`` of the archive of each print of it (#306). The blob store still
+    #: checks its own digest of what it reads back.
     file_hash: str | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.

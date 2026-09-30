@@ -29,3 +29,20 @@ def config() -> BambuddyConfig:
 async def bambuddy(config: BambuddyConfig) -> Any:
     async with BambuddyClient(config) as client:
         yield client
+
+
+def recorded_schema(name: str) -> dict[str, Any]:
+    spec = json.loads(
+        (RECORDINGS / "openapi" / "scadbuddy-routes.json").read_text(encoding="utf-8")
+    )
+    schema: dict[str, Any] = spec["components"]["schemas"][name]
+    return schema
+
+
+def shaped(schema: str, **values: Any) -> dict[str, Any]:
+    """A response body built inline for a call the live instance was never asked to make
+    (a POST; see recordings/README.md), checked field by field against Bambuddy's
+    recorded schema so a misspelt field fails here rather than in production."""
+    unknown = set(values) - set(recorded_schema(schema)["properties"])
+    assert not unknown, f"{schema} has no field {sorted(unknown)}"
+    return values

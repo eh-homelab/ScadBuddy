@@ -168,11 +168,19 @@ async def sweep_library_checkouts(state: AppState) -> list[str]:
     return removed
 
 
+async def drop_swept_assets(state: AppState, removed: list[str]) -> None:
+    """The store's copies of what `sweep_assets` just removed from the volume."""
+    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
+    if store is not None and store.remote_assets is not None and removed:
+        await store.remote_assets.drop(removed)
+
+
 async def _sweep_assets_logged(state: AppState) -> None:
     # Best effort, like the boot's other sweeps: a store or volume error skips this
     # sweep (removing nothing it could not prove unused) and the next one retries.
     try:
-        await asyncio.to_thread(sweep_assets, state)
+        removed = await asyncio.to_thread(sweep_assets, state)
+        await drop_swept_assets(state, removed)
     except Exception:
         logger.exception("could not sweep unused uploads")
 

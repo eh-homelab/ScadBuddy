@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.assets import AssetStore, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.job_models import Job, JobNotFoundError, now
@@ -35,7 +35,11 @@ from scadbuddy.render.jobs import (
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
-from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
+from scadbuddy.store.assets import RemoteAssets
+from scadbuddy.store.content import BlobScope, template_title
+from scadbuddy.store.fonts import FontMirror, wanted_families
+from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     Failure,
     PieceRequest,
@@ -64,6 +68,9 @@ class WorkerDeps:
     fetcher: CheckoutFetcher | None = None
     thumbnail_executor: Executor | None = None
     metrics: Metrics | None = None
+    snapshots: SnapshotStore | None = None
+    fonts_mirror: FontMirror | None = None
+    remote_assets: RemoteAssets | None = None
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -120,6 +127,29 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
         notes=list(output.notes),
         missing_files=list(output.missing_files),
     )
+
+
+async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
+    """Where the piece's blob goes: its template's folder, named by `model.json`.
+
+    Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
+    """
+    title = await asyncio.to_thread(template_title, Path(prepared.scad).parent, req.slug)
+    return BlobScope(slug=req.slug, title=title)
+
+
+async def _checkout(blobs: BlobStore, key: str) -> str | None:
+    """The piece an earlier stage published, for this stage to continue; its sha is the
+    publish baseline. Non-retryable when the store lost it: a retry would find nothing
+    either, and the next submit renders the piece from the start."""
+    try:
+        return await _heartbeating(asyncio.create_task(blobs.checkout(key)))
+    except PieceStateLostError:
+        raise ApplicationError(
+            f"piece {key} is no longer in the store; an earlier stage's output was lost",
+            type="PieceStateLost",
+            non_retryable=True,
+        ) from None
 
 
 def _write_piece(work: Path, piece: PieceResult) -> None:
@@ -192,31 +222,53 @@ class RenderActivities:
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
-        """The piece as a finished render left it, so it is never rendered in place again.
-        Only for a piece with a revision: without one the key stands for a live source
-        that can change under it (as `keep_render` refused it). The marker is written
-        atomically but not fsynced, so a power loss can leave it naming a file the
-        crash emptied."""
+        """The piece as a finished render left it, so it is never rendered in place again."""
         blobs = self.deps.blobs
-        if req.revision is None or not blobs.exists(req.piece_key):
+        # Phase 1's guard (85b83de0) stays: without a revision the key stands for a
+        # live source that can change under it.
+        if req.revision is None:
+            return None
+        if not await _heartbeating(asyncio.create_task(blobs.fetch(req.piece_key))):
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 
     @activity.defn(name="prepare")
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
+        if d.snapshots is not None and req.revision is not None:
+            found = await _heartbeating(
+                asyncio.create_task(d.snapshots.materialize(req.slug, req.revision))
+            )
+            if not found and (d.history is None or not d.history.available):
+                # Nothing to export it from here, and no retry will find it: fail the
+                # piece now. The next submit's `pin` (on the API, with git) stores it.
+                raise ApplicationError(
+                    f"the template's source at {req.revision} is no longer in the store;"
+                    " render again",
+                    type=SnapshotUnavailableError.__name__,
+                    non_retryable=True,
+                )
         try:
             with timed_stage(d.metrics)("source"):
-                prepared, _ = await prepare_source(
-                    req.slug,
-                    req.revision,
-                    config=d.config,
-                    paths=d.paths,
-                    history=d.history,
-                    fetcher=d.fetcher,
+                prepared, _ = await _heartbeating(
+                    asyncio.create_task(
+                        prepare_source(
+                            req.slug,
+                            req.revision,
+                            config=d.config,
+                            paths=d.paths,
+                            history=d.history,
+                            fetcher=d.fetcher,
+                        )
+                    )
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
+        if d.fonts_mirror is not None:
+            # Only the families this template could name: a fresh worker does not
+            # download the whole font library for its first piece.
+            families = await asyncio.to_thread(wanted_families, prepared.scad.parent, req.params)
+            await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         return PrepareResult(
             version=prepared.version,
             scad=str(prepared.scad),
@@ -227,6 +279,13 @@ class RenderActivities:
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
         d = self.deps
+        # It renders into a directory it never fetched: the compare-and-swap baseline is
+        # what the index holds now, and the directory is no hit until this publishes.
+        baseline = await d.blobs.checkout_fresh(req.piece_key)
+        if d.remote_assets is not None:
+            await _heartbeating(
+                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
+            )
         work = asyncio.create_task(
             render_main(
                 _prepared(prepared),
@@ -243,6 +302,13 @@ class RenderActivities:
             output = await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
+            )
+        )
         return _main_result(output)
 
     @activity.defn(name="render_solids")
@@ -250,6 +316,12 @@ class RenderActivities:
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> None:
         d = self.deps
+        # The main 3MF may have been rendered on another worker.
+        baseline = await _checkout(d.blobs, req.piece_key)
+        if d.remote_assets is not None:
+            await _heartbeating(
+                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
+            )
         work = asyncio.create_task(
             render_solids_stage(
                 _prepared(prepared),
@@ -267,12 +339,21 @@ class RenderActivities:
             await _heartbeating(work)
         except OpenSCADError as error:
             raise _failure(error) from None
+        # Against the sha this stage checked out, so a zombie attempt is refused.
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
+            )
+        )
 
     @activity.defn(name="finish_piece")
     async def finish_piece(
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> PieceResult:
         d = self.deps
+        baseline = await _checkout(d.blobs, req.piece_key)
         source = _prepared(prepared)
         work = d.blobs.dir_for(req.piece_key)
         try:
@@ -299,6 +380,13 @@ class RenderActivities:
         piece = PieceResult(result=result, log_tail=main.log_tail)
         # Last, and atomically: from here on the piece is answered by `cached_piece`.
         await asyncio.to_thread(_write_piece, work, piece)
+        await _heartbeating(
+            asyncio.create_task(
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
+            )
+        )
         return piece
 
     @activity.defn(name="render_preview_png")

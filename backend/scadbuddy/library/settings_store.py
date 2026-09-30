@@ -45,6 +45,7 @@ from pydantic import (
 
 from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
 from scadbuddy.render.pg_store import migrate
@@ -60,6 +61,15 @@ DisplayUnit = Literal["mm", "in"]
 #: which the environment's value does not override.
 SettingSource = Literal["stored", "env", "default", "cleared"]
 
+#: The fields a render worker reads (spec §9): the store and the key it uses. The full
+#: key only when no render key is stored, as the fallback.
+RENDER_FIELDS = (
+    "store_backend",
+    "bambuddy_url",
+    "bambuddy_render_api_key",
+    "bambuddy_api_key",
+    "library_folder_id",
+)
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
 #: Settings rows #312 retired with the slicer pipeline. A load already ignores them, as
@@ -90,6 +100,10 @@ def _nullable(name: str) -> bool:
 #: The env-seeded fields a clear can hold (a JSON ``null`` row). The rest are numbers,
 #: switches or a level, which only a reset puts back.
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
+
+
+class StoreNotReadyError(ValueError):
+    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs."""
 
 
 class BambuddyIds(BaseModel):
@@ -138,6 +152,12 @@ class StoredSettings(BambuddyIds):
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
     bambuddy_web_urls: str | None = None
+    #: The Manage-Library-only key render workers hold (spec 2026-09-27 §9). Stored
+    #: exactly as `bambuddy_api_key` is (the backend has no secret store; see
+    #: tests/api/test_settings.py), written from Settings, never sent to the browser.
+    bambuddy_render_api_key: str | None = None
+    #: Where blobs live. Read at process start by the API and every worker.
+    store_backend: StoreBackend = "local"
     public_url: str | None = None
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
@@ -168,6 +188,14 @@ class StoredSettings(BambuddyIds):
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
 
+    def render_bambuddy_key(self) -> tuple[str | None, bool]:
+        """The key render workers use, and whether it is the full key by fallback. With
+        no key at all there is nothing to fall back to: ``(None, False)``, as the view's
+        ``render_key_fallback``."""
+        if self.bambuddy_render_api_key:
+            return self.bambuddy_render_api_key, False
+        return self.bambuddy_api_key, self.bambuddy_api_key is not None
+
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it; ``reset`` names
@@ -187,6 +215,7 @@ class SettingsPatch(BaseModel):
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
     bambuddy_web_urls: str | None = None
+    bambuddy_render_api_key: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -221,6 +250,13 @@ class SettingsPatch(BaseModel):
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     log_level: str | None = None
+
+    #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
+    #: change applies at the next one; a reset puts one back on the deployment's value.
+    store_backend: StoreBackend | None = None
+    store_max_total_bytes: int | None = None
+    store_max_count: int | None = None
+    worker_cache_max_bytes: int | None = None
 
     #: Env-seeded fields to put back on the deployment's value.
     reset: list[str] = Field(default_factory=list)
@@ -325,6 +361,10 @@ class SettingsStore:
     def _source(self, name: str) -> SettingSource:
         return "env" if name in self.defaults.model_fields_set else "default"
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        return self._pool
+
     def snapshot(self) -> SettingsSnapshot:
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
@@ -386,9 +426,18 @@ class SettingsStore:
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
         reset = changes.pop("reset", [])
-        for secret in ("bambuddy_api_key", "google_fonts_api_key"):
+        for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
+        if changes.get("store_backend") == "bambuddy":
+            current = self.load()
+            url = changes.get("bambuddy_url", current.bambuddy_url)
+            inbox = changes.get("library_folder_id", current.library_folder_id)
+            if not url or inbox is None:
+                raise StoreNotReadyError(
+                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
+                    " saved first"
+                )
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
@@ -538,4 +587,40 @@ def _put_entry(conn: Connection[DictRow], name: str, key: str, value: object) ->
         " ON CONFLICT (name) DO UPDATE"
         " SET value = settings.value || EXCLUDED.value, updated_at = now()",
         (name, key, Jsonb(value)),
+    )
+
+
+class RenderStoreSettings(BaseModel):
+    """What a render worker knows of the settings, and nothing more (spec §9)."""
+
+    store_backend: StoreBackend = "local"
+    bambuddy_url: str | None = None
+    api_key: str | None = None
+    #: True when `api_key` is the full key because no render key is stored.
+    key_is_fallback: bool = False
+    library_folder_id: int | None = None
+
+
+def load_render_store_settings(
+    pool: ConnectionPool[Connection[DictRow]], defaults: Settings
+) -> RenderStoreSettings:
+    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
+        ).fetchall()
+    values: dict[str, Any] = {
+        name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS
+    }
+    for row in rows:
+        # A JSON null is a field cleared in Settings: it beats the environment's seed.
+        values[row["name"]] = row["value"]
+    stored = StoredSettings.model_validate(values)
+    key, fallback = stored.render_bambuddy_key()
+    return RenderStoreSettings(
+        store_backend=stored.store_backend,
+        bambuddy_url=stored.bambuddy_url,
+        api_key=key,
+        key_is_fallback=fallback,
+        library_folder_id=stored.library_folder_id,
     )

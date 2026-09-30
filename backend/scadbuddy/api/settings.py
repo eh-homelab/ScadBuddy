@@ -13,6 +13,7 @@ from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
+from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
     APPLIES,
@@ -28,6 +29,7 @@ from scadbuddy.library.settings_store import (
     SettingsPatch,
     SettingsSnapshot,
     StoredSettings,
+    StoreNotReadyError,
 )
 
 router = APIRouter(tags=["settings"])
@@ -65,6 +67,11 @@ class SettingsView(BaseModel):
     has_api_key: bool = False
     #: As saved (comma-separated); the first is where Bambuddy links point (#775).
     bambuddy_web_urls: str | None = None
+    has_render_api_key: bool = False
+    #: True while render workers would hold the full key (spec §9): a key is stored and
+    #: no render key is. The Settings page shows a persistent warning.
+    render_key_fallback: bool = False
+    store_backend: StoreBackend = "local"
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -92,6 +99,9 @@ class SettingsView(BaseModel):
     asset_sweep_grace: float
     asset_sweep_interval: float
     duplicate_staging_max_age: float
+    store_max_total_bytes: int
+    store_max_count: int
+    worker_cache_max_bytes: int
     has_google_fonts_api_key: bool = False
     fonts_catalogue_ttl: float
     event_log_retention_seconds: float
@@ -250,6 +260,9 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
     return SettingsView(
         bambuddy_url=stored.bambuddy_url,
         has_api_key=bool(stored.bambuddy_api_key),
+        has_render_api_key=bool(stored.bambuddy_render_api_key),
+        render_key_fallback=bool(stored.bambuddy_api_key) and not stored.bambuddy_render_api_key,
+        store_backend=stored.store_backend,
         bambuddy_web_urls=stored.bambuddy_web_urls,
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,
@@ -281,7 +294,10 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
     ``settings.changed``) on every other replica."""
-    store.save(patch)
+    try:
+        store.save(patch)
+    except StoreNotReadyError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = store.snapshot()
     apply_runtime(state, snapshot.runtime)
     return _view(snapshot, state)

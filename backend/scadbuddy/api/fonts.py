@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import EventsDep, FontsDep
+from scadbuddy.api.deps import EventsDep, FontsDep, StateDep
 from scadbuddy.core.events import FontInstalled, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.fonts import (
@@ -120,7 +120,9 @@ async def get_catalogue(
         "would silently fall back to the default font (#253)."
     ),
 )
-async def install_font(body: InstallRequest, fonts: FontsDep, events: EventsDep) -> InstalledFamily:
+async def install_font(
+    body: InstallRequest, fonts: FontsDep, events: EventsDep, state: StateDep
+) -> InstalledFamily:
     try:
         installed = await fonts.install(body.family, force=body.force)
     except FontNotFoundError as exc:
@@ -139,4 +141,14 @@ async def install_font(body: InstallRequest, fonts: FontsDep, events: EventsDep)
             files=exc.files,
         ) from exc
     emit(events, FontInstalled(family=installed.family))
+    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
+    if store is not None and store.fonts is not None:
+        try:
+            await store.fonts.publish(body.family)
+        except Exception:
+            # The family is installed here; the next boot's `backfill` publishes it, so
+            # a Bambuddy error does not fail an install that worked.
+            logger.exception(
+                "could not publish an installed font family", extra={"family": body.family}
+            )
     return installed

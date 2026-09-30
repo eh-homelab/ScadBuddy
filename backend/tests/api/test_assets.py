@@ -7,6 +7,8 @@ import json
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -16,6 +18,7 @@ from PIL import Image
 
 from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES, AssetStore
 from scadbuddy.main import create_app, sweep_assets
@@ -481,3 +484,50 @@ def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
     finally:
         assert deps.thumbnail_executor is not None
         deps.thumbnail_executor.shutdown()
+
+
+# -- the upload's mirror to the blob store -----------------------------------------
+
+
+class _RemoteAssets:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.mirrored: list[tuple[str, str, str]] = []
+
+    async def mirror(self, assets: Any, meta: Any, *, slug: str, title: str) -> None:
+        if self.fail:
+            raise ApiError(502, "Bambuddy is unreachable")
+        self.mirrored.append((meta.id, slug, title))
+
+
+def _with_remote_assets(app: FastAPI, remote: _RemoteAssets) -> None:
+    state = getattr(app.state, STATE_ATTR)
+    store = getattr(state, "store", None)
+    if store is None:
+        state.store = SimpleNamespace(remote_assets=remote)
+    else:
+        store.remote_assets = remote
+
+
+def test_an_upload_is_mirrored_to_the_store_under_its_template(
+    app: FastAPI, client: TestClient, paths: DataPaths, file_model: str
+) -> None:
+    paths.model_source(file_model).with_name("model.json").write_text(
+        json.dumps({"name": "Demo"}), encoding="utf-8"
+    )
+    remote = _RemoteAssets()
+    _with_remote_assets(app, remote)
+    meta = _upload(client, HEART_SVG)
+    assert remote.mirrored == [(meta["id"], file_model, "Demo")]
+
+
+def test_a_failed_mirror_fails_the_upload_with_its_problem(
+    app: FastAPI, client: TestClient
+) -> None:
+    _with_remote_assets(app, _RemoteAssets(fail=True))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Bambuddy is unreachable"

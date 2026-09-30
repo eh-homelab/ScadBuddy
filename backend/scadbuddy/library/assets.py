@@ -493,6 +493,33 @@ class AssetStore:
             )
         return meta
 
+    def adopt(self, meta: AssetMeta, data: bytes) -> None:
+        """Keep an asset fetched from the blob store exactly as it was stored elsewhere.
+
+        No caps: the upload that created it was checked against them. The bytes must be
+        the id, so a damaged or substituted download never becomes a render's input.
+        """
+        if hashlib.sha256(data).hexdigest() != meta.id or len(data) != meta.size:
+            raise AssetRejectedError(f"the fetched file does not match asset {meta.id}")
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
+            blob = self.blob_path(meta)
+            if not blob.is_file():
+                self.root.mkdir(parents=True, exist_ok=True)
+                _write_atomically(blob, data)
+            now = datetime.now(UTC)
+            conn.execute(
+                "INSERT INTO assets"
+                " (id, name, kind, size, width, height, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
+                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
+            )
+
+    def ids(self) -> list[str]:
+        """Every blob this root holds, by id."""
+        return sorted(self._blobs())
+
     def _remove_legacy_files(self) -> None:
         """What the file-based store left (#591): a ``<id>.json`` metadata sidecar per
         asset, and the running total and the flock beside the store. Nothing reads
@@ -609,6 +636,11 @@ def _write_atomically(path: Path, payload: bytes) -> None:
 
 def _ids_in(data: bytes) -> set[str]:
     return {match.decode("ascii") for match in _ID_IN_TEXT.findall(data)}
+
+
+def asset_ids_in(params: Mapping[str, object]) -> set[str]:
+    """Every asset id a render's parameters could name (as loose as the sweep's scan)."""
+    return _ids_in(json.dumps(params, sort_keys=True).encode())
 
 
 def _ids_in_archive(archive: Path) -> set[str]:

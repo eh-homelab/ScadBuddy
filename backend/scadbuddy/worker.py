@@ -75,6 +75,7 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
     projection.open()
     assets = AssetStore(
         paths.assets,
+        projection.pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
