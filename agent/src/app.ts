@@ -27,6 +27,7 @@ import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headl
 import { registerPluginRoutes } from './routes/plugins.js'
 import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
 import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
+import { registerSessionLimitsRoutes } from './routes/sessionLimits.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import { type RemoteAddress, uiReadProblem } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
@@ -94,7 +95,10 @@ export type AppDeps = {
   now?: () => number
   /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
   approvals?: ApprovalService
-  /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) answers 503 without it. */
+  /**
+   * `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) and the session
+   * limits (#790) answer 503 without it.
+   */
   settings?: SettingsRepo | undefined
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
@@ -137,6 +141,11 @@ function tokenVerb(method: string, path: string): string | undefined {
   if (method === 'POST' && path === '/api/v1/ai/mcp-tokens') return 'mint'
   if (method === 'DELETE' && path.startsWith('/api/v1/ai/mcp-tokens/')) return 'revoke'
   return undefined
+}
+
+/** A raise of one session's budget (routes/sessions.ts); no other session route is recorded here. */
+function budgetVerb(method: string, path: string): string | undefined {
+  return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
 }
 
 /** Which plugin requests are writes; connection tests are not. */
@@ -331,6 +340,9 @@ export function createApp(deps: AppDeps): AgentApp {
     app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
     // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
     app.use('/api/v1/ai/plugins/*', auditWrites({ ...writes, kind: 'plugin', verb: pluginVerb }))
+    // Refused or failed raises of a session's budget (#790); a raise that
+    // lands is recorded by the manager (sessions/manager.ts raiseBudget).
+    app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))
   }
 
   registerAuditRoutes(app, {
@@ -407,6 +419,13 @@ export function createApp(deps: AppDeps): AgentApp {
   })
 
   registerHeadlessBrowserRoutes(app, {
+    settings: deps.settings,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerSessionLimitsRoutes(app, {
     settings: deps.settings,
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,

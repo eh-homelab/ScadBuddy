@@ -498,13 +498,15 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
   The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts));
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
+  which Settings writes through `PUT /api/v1/ai/settings/session-limits`
+  ([§8](#8-per-query-limits));
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
   `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
-  `PUT /api/v1/ai/mcp/oidc` writes.
-  No route writes them yet.
+  `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no
+  route yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
   through the chat socket and the session routes (README, "Sessions and the
@@ -539,10 +541,38 @@ The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCAD
 
 Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 USD)
 (`DEFAULT_MAX_TURNS` and `DEFAULT_MAX_BUDGET_USD` in
-[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)). The comment there calls
-them "placeholders until Settings stores per-session caps". Sessions read their caps
+[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)). Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
-#377 body, "Budget and turns").
+#377 body, "Budget and turns"): each turn gets what is left as `maxBudgetUsd`.
+
+Settings → Assistant → **Assistant chat limits** sets both (#790): "Session budget
+(USD)", 0.01 to 100, stored in cents, and "Max turns per reply", 1 to 200
+(`GET`/`PUT /api/v1/ai/settings/session-limits`,
+[`agent/src/routes/sessionLimits.ts`](../../agent/src/routes/sessionLimits.ts), behind
+`uiReadProblem`/`uiRequestProblem`). Each key written is a `settings` audit row as the
+browser user. A change applies to sessions created after it; existing sessions keep
+their budget and turn cap.
+
+When a session's budget runs out, the assistant panel says so once ("This chat used
+its $1.00 budget.") and offers:
+
+- **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` copies the transcript
+  into a new session with the current Settings budget, owned by the browser user, and
+  the panel switches to it. It counts against the new-session limit (`429`). #793 adds
+  forking from a given message (`up_to`), a socket message and an audit row.
+- **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
+  (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
+  (take one over first), and never past $100. A request with the headless browser's
+  agent-actor marker (`X-ScadBuddy-Agent-Session`) is refused, no tool calls it, and
+  the panel's button carries `data-agent-user-only`, so the browser bridge cannot press
+  it. A raise is a `settings` audit row with action `session_budget_usd` and the
+  session id; refused and failed attempts are recorded from the route's status.
+- **Start a new chat.**
+
+The panel's session header shows "$0.74 of $1.00" and warns from 80%. The numbers come
+from the session's events: `session.started` and `session.result` carry `budgetUsd`,
+and `session.budget` is sent after a raise and before a send is refused because the
+budget is spent. Money is shown in cents, in the panel and in the agent's error text.
 
 ## 9. Plugin packages (#297)
 

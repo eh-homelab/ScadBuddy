@@ -100,4 +100,22 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
     await settle()
     expect(m.events.watchedSessions()).toBe(0)
   })
+
+  it('answers a send to a spent session with its numbers, then the refusal (#790)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    await db.sql`UPDATE ai_sessions SET cost_usd = 1.0160000001 WHERE id = ${session.id}`
+    const out: { type: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(
+      JSON.stringify(clientMessage({ type: 'user.message', sessionId: session.id, text: 'more', context: { route: '/' } })),
+    )
+    const answered = out.filter((e) => e.type === 'session.budget' || e.type === 'error')
+    expect(answered).toEqual([
+      { v: 1, type: 'session.budget', sessionId: session.id, costUsd: 1.0160000001, budgetUsd: 1 },
+      expect.objectContaining({ type: 'error', sessionId: session.id, code: 'budget_exhausted', message: expect.stringContaining('($1.02 of $1.00)') }),
+    ])
+    connection.close()
+  })
 })

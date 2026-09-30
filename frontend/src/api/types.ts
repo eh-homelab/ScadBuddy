@@ -226,3 +226,24 @@ export interface Problem {
 export interface HeadlessBrowserSetting {
   enabled: boolean
 }
+
+/**
+ * #790 — what a new assistant session may spend in all (USD) and how many turns one
+ * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
+ * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.
+ */
+export interface SessionLimits {
+  budget_usd: number
+  max_turns: number
+}
+
+/** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
+export interface AiSessionView {
+  id: string
+  title: string
+  parent_id: string | null
+  turns: number
+  cost_usd: number
+  budget_usd: number
+  running: boolean
+}

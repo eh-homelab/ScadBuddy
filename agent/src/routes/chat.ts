@@ -41,7 +41,10 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 //                            pair with their tab automatically")
 //
 // A refused operation comes back as an `error` event naming the session and
-// the SessionError/ApprovalError code; the socket stays open.
+// the SessionError/ApprovalError code; the socket stays open. A send refused
+// because the budget is spent is preceded by a `session.budget` event (#790).
+// Raising a budget and forking are HTTP routes (routes/sessions.ts), not
+// socket messages.
 //
 // The upgrade passes guard.ts `uiRequestProblem` first: a browser always sends
 // `Origin` on a WebSocket handshake, and it must be the UI's (spec §8.4: "An
@@ -352,6 +355,11 @@ export class ChatConnection {
           return
       }
     } catch (err) {
+      // A spent budget comes with the numbers, so the panel's meter and its
+      // "used its budget" state are right even for a session whose log has none.
+      if (sessionId && err instanceof SessionError && err.budget) {
+        this.emit(event({ type: 'session.budget', sessionId, ...err.budget }))
+      }
       this.emit(errorEvent(err, sessionId, this.log))
     }
   }

@@ -700,6 +700,7 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 | `approval` | `ApprovalService` (`approvals/service.ts`) | approved, denied, expired, cancelled, and approved-but-voided |
 | `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
+| `settings` | `SessionManager.raiseBudget()` (`sessions/manager.ts`); refusals by `auditWrites()` | a raise of one session's budget (#790), action `session_budget_usd`, with the session id and the old and new budget; refused and failed attempts from the route's status |
 | `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
