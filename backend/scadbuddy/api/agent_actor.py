@@ -4,10 +4,12 @@ The agent service can drive ScadBuddy's own UI in a headless Chromium for sessio
 that have no user tab. Clicking *Send* or *Print* there is a harmless ``write``-tier
 click as far as the harness can tell, but the request it makes is outward, and outward
 actions always need a human approval (§8.2). So the backend enforces it itself: every
-request from the headless context carries the **agent-actor marker**, an
-``X-ScadBuddy-Agent-Session`` header set through Playwright's ``extraHTTPHeaders``
-(``agent/src/harness/headlessBrowser.ts`` ``AGENT_ACTOR_HEADER``), and this gate lets
-such a request through only when it cannot change anything outward:
+request from the headless context to the backend carries the **agent-actor marker**,
+an ``X-ScadBuddy-Agent-Session`` header added by the agent's request guard
+(``agent/src/harness/headlessBrowser.ts`` ``AGENT_ACTOR_HEADER``,
+``redirectGuardSource``; it is sent to the backend's origin only, never to the other
+origins a session may be allowed to open), and this gate lets such a request through
+only when it cannot change anything outward:
 
 - ``GET``, ``HEAD`` and ``OPTIONS`` always pass;
 - any other method passes only for a route in :data:`AGENT_ALLOWED_WRITES`, the
@@ -47,8 +49,9 @@ runs :data:`GRANT_SQL` against the agent's real schema.
 The marker is not authentication. A request without it is exactly as trusted as today
 (§4.3); forging one can only get a request refused. Measured on the pinned
 ``@playwright/mcp`` 0.0.82 (``agent/test/headlessBrowser.server.test.ts``): the header
-reaches every request the page makes, and a page ``fetch`` that sets the same header
-itself arrives with the session's value, not its own.
+reaches every request the page makes to the backend and none to another origin, and a
+page ``fetch`` that sets the same header itself arrives with the session's value, not
+its own.
 """
 
 from __future__ import annotations
@@ -85,6 +88,8 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "POST /api/v1/models/{slug}/duplicate",
     "PATCH /api/v1/models/{slug}",
     "PUT /api/v1/models/{slug}/source",
+    "PUT /api/v1/models/{slug}/files/{name}",
+    "DELETE /api/v1/models/{slug}/files/{name}",
     "POST /api/v1/models/{slug}/source/patch",
     "PUT /api/v1/models/{slug}/readme",
     "DELETE /api/v1/models/{slug}/readme",

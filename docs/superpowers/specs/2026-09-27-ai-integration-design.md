@@ -928,6 +928,14 @@ As built (#254; `agent/src/bridge/`, `docs/ai/browser-bridge.md`):
 | Runaway agent | `maxTurns`, per-session budget, render rate limits, interrupt from any watcher |
 | Headless browser used to click past an approval, or to reach other origins or files (#349) | Agent-actor marker refused on outward routes without an approved action; origin allow-list plus the backend check (the allow-list alone is not a boundary, §3.1); `browser_run_code_unsafe`, `browser_evaluate` and the file tools disallowed; isolated context per session; off by default (§5.3) |
 
+As built for #252's guardrails: `render_model` is bounded per principal, at most 2
+renders in flight and 30 started in any 10 minutes, in memory, on top of the backend's
+render timeout and queue (`agent/src/tools/renderLimits.ts`; `docs/ai/security.md`,
+"Render limits"). The same PR adds the other `.scad` files of a multi-file model
+(`GET/PUT/DELETE /api/v1/models/{slug}/files/{name}`, `write` tools, each write one
+revision) and `create_from_template` (a blank template, or a duplicate of a bundled
+example).
+
 ## 9. Persistence and credentials
 
 All AI state lives in the #241 database, in `ai_*` tables owned and migrated by the

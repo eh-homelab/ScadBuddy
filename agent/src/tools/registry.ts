@@ -8,6 +8,7 @@ import type { SessionManager } from '../sessions/manager.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
+import type { RenderLimiter } from './renderLimits.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -49,6 +50,8 @@ export type ToolServices = {
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
+  /** Bounds the renders each principal starts (renderLimits.ts, #252); the process default when unset. */
+  renderLimiter?: RenderLimiter
   /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
   sessions?: SessionManager | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
