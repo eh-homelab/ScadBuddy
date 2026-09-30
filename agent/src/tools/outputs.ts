@@ -87,6 +87,24 @@ export const outputTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_output_preview',
+    description:
+      "An output's preview mesh as a binary glTF (model/gltf-binary), embedded as a base64 resource; " +
+      'when it is too large to inline, a link to fetch it instead.',
+    input: z.object({ output_id: outputId }),
+    risk: 'read',
+    routes: ['GET /api/v1/outputs/{output_id}/preview.glb'],
+    handler: async ({ output_id }, ctx) =>
+      binary(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', { params: { path: { output_id } }, parseAs: 'stream' }),
+        `get preview of ${output_id}`,
+        ctx,
+        { path: `/api/v1/outputs/${output_id}/preview.glb`, name: `${output_id}.glb`, fallbackType: 'model/gltf-binary' },
+        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb`, bytes, mimeType),
+      ),
+  }),
+
+  defineTool({
     name: 'get_output_plates',
     description: "The plates in an output's 3MF: objects, colours and slots per plate.",
     input: z.object({ output_id: outputId }),

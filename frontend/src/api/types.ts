@@ -153,6 +153,13 @@ export type LibraryFolderView = Schemas['LibraryFolderView']
  * hand-kept copy would drift the moment it gains a state.
  */
 export type PrintProgress = Schemas['PrintProgress']
+/** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
+export type PrintSummary = Schemas['PrintSummary']
+export type PrintPage = Schemas['PrintPage']
+export type PrintDetail = Schemas['PrintDetail']
+/** #311 — the print detail page's two writes. */
+export type PrintAgain = Schemas['PrintAgain']
+export type PrinterMedia = Schemas['PrinterMedia']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
 export type PrintStage = PrintProgress['stage']

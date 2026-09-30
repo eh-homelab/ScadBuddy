@@ -653,7 +653,11 @@ class BambuddyClient:
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
-            what=f"queue library file {item.library_file_id}",
+            what=(
+                f"queue archive {item.archive_id}"
+                if item.library_file_id is None
+                else f"queue library file {item.library_file_id}"
+            ),
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())

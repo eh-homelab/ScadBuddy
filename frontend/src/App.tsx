@@ -6,6 +6,8 @@ import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { LibraryPage } from './pages/LibraryPage'
+import { PrintDetailPage } from './pages/PrintDetailPage'
+import { PrintsPage, TemplatePrintsPage } from './pages/PrintsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { VersionsPage } from './pages/VersionsPage'
 
@@ -56,7 +58,10 @@ export function App() {
         />
         <Route path="m/:slug/history" element={<HistoryPage />} />
         <Route path="m/:slug/versions" element={<VersionsPage />} />
+        <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
+        <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
+        <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="library" element={<LibraryPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
