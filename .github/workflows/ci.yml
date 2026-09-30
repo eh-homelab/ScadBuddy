@@ -890,8 +890,8 @@ jobs:
 
       # The backend and its pinned `temporal` CLI, for a template's pipeline check
       # (`SCADBUDDY_PIPELINE_IMAGE`; spec 2026-09-27 §5.5): `base` has no Python.
-      # Read-only from the same cache, which the `backend` job's test-image build
-      # writes.
+      # Read-only from the same cache, which an earlier run's `image` job wrote
+      # (its test-image build, mode=max), as for `base` above.
       - name: Build the pipeline image (Dockerfile `test` stage)
         if: ${{ steps.select.outputs.count != '0' }}
         uses: docker/build-push-action@v7
