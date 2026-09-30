@@ -330,6 +330,17 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
   )
 }
 
+/** #169 — every model as the mock has it now, for a feature module (`features/`). */
+export function mockModels(): readonly ModelSummary[] {
+  return state.models
+}
+
+/** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
+export function replaceMockModel(model: ModelSummary): ModelSummary {
+  state.models = state.models.map((m) => (m.slug === model.slug ? model : m))
+  return view(model)
+}
+
 /** An output as the mock has it now, for a feature module (`features/`) that answers about one. */
 export function mockOutput(id: string): Output | undefined {
   return state.outputs.find((o) => o.id === id)
@@ -952,7 +963,7 @@ async function stagedPart(form: FormData, name: string) {
  * `require_mine` in `api/models.py`: a built-in is refused before the model is even
  * looked up, with the backend's problem (403 is not in its title table, so "Error").
  */
-function refuseBuiltin(slug: string) {
+export function refuseBuiltin(slug: string) {
   return slug.startsWith('builtin:')
     ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
     : undefined

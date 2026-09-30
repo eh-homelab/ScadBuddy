@@ -22,6 +22,11 @@ import type {
   CatalogueLibrary,
   LibraryListing,
   LibraryPinRequest,
+  InstalledLibrary,
+  LibraryCheck,
+  LibraryCheckRequest,
+  LibraryRepinRequest,
+  LibraryUser,
   MediaView,
   ModelPatch,
   LastProject,
@@ -1012,6 +1017,31 @@ export const api = {
   pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
     request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
       method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  /** #169 — library checkouts on the volume, with the models whose live pins read each. */
+  listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
+
+  /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
+  listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
+
+  /**
+   * #169 — a dry run of re-pinning: clones `name` at `ref` from the model's own pin URL
+   * and parse-checks the model against it. Nothing is recorded. It holds the server's
+   * checkout gate for the whole check, so callers run one at a time, on request.
+   */
+  checkModelLibrary: (slug: string, name: string, body: LibraryCheckRequest, signal?: AbortSignal) =>
+    request<LibraryCheck>(`/models/${seg(slug)}/libraries/${seg(name)}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal,
+    }),
+
+  /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
+  repinModelLibrary: (slug: string, name: string, body: LibraryRepinRequest) =>
+    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+      method: 'PATCH',
       body: JSON.stringify(body),
     }),
 

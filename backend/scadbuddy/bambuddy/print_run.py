@@ -231,8 +231,19 @@ async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus
         return None
 
 
+class RunRefusalError(ApiError):
+    """A 422 the run decides itself before anything is uploaded (#765 review).
+
+    Kept apart from a 422 Bambuddy answers on a plain read, which ``errors.py`` passes
+    through as an :class:`ApiError` of the same status: the check says this one before
+    Print, and lets that one fail the check as an outage."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
+
+
 class PrintCheck(BaseModel):
-    """What the run would refuse for the dialog's choices before Print (#755).
+    """What the run would refuse for the dialog's choices before Print (#755, #760).
     ``errors`` holds the run's 422 detail word for word (#758 review); ``warnings`` what
     it would carry back as advisories."""
 
@@ -246,13 +257,23 @@ async def check_print(
     settings: StoredSettings,
     request: PrintRunRequest,
 ) -> PrintCheck:
-    """The run's verdict for ``request``, with nothing uploaded, sliced or queued.
+    """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
-    This was the run's nozzle verdict, and the run no longer checks the mounted nozzles
-    (#768): measured by the maintainer's test print, 2026-09-29, a two-colour print
-    sliced for 0.2 mm printed through the one 0.2 mm nozzle. So nothing is refused or
-    warned about here; the run's other refusals need the catalogue or the uploaded
-    file, and the run still states them."""
+    It is :func:`prepare_run` itself (#760), so the check makes every refusal the run
+    makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
+    the catalogue refuses — in the run's own words. It no longer judges the mounted
+    nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
+    slice through the one 0.2 mm nozzle. What needs
+    the uploaded file is still found by the run. Only the run's own refusals
+    (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the check,
+    as it would fail the run. With no printer chosen or configured there is nothing to
+    judge, and the run says why."""
+    if (request.printer_id or settings.printer_id) is None:
+        return PrintCheck()
+    try:
+        await prepare_run(client, source, settings, request)
+    except RunRefusalError as refused:
+        return PrintCheck(errors=[refused.detail])
     return PrintCheck()
 
 
@@ -323,8 +344,7 @@ async def prepare_run(
         # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
         # to queue, and every route below reads the first plate's outcome. Read
         # from the local 3MF before anything touches Bambuddy.
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        raise RunRefusalError(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
     printer_id = request.printer_id or settings.printer_id
@@ -342,9 +362,7 @@ async def prepare_run(
     catalogue = await _catalogue(client)
     refused = choice_errors(request.choices, catalogue)
     if refused:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
-        )
+        raise RunRefusalError(" ".join(error.message for error in refused))
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,
@@ -503,19 +521,16 @@ async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -
     resolver knows (``PRINTER_MODEL``)."""
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     if printer is None:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        raise RunRefusalError(
             f"Bambuddy has no printer {printer_id}. Pick another printer.",
         )
     if not printer.is_active:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        raise RunRefusalError(
             f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
             "another printer.",
         )
     if (printer.model or "").upper() != PRINTER_MODEL:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        raise RunRefusalError(
             f"ScadBuddy can only choose slicer presets for a Bambu Lab {PRINTER_MODEL} so "
             f"far, and {printer.name}'s model is {printer.model or 'not reported'}.",
         )

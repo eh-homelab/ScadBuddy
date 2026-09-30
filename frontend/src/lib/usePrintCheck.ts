@@ -23,8 +23,8 @@ export interface PrintCheckState {
 }
 
 /**
- * #755 — the run's nozzle verdict for the print the dialog would send, read before
- * Print (`POST …/check`, the same `plan_extruders` the run refuses with). The choices
+ * #755, #760 — what the run would refuse for the print the dialog would send, read
+ * before Print (`POST …/check`, the run's own pre-upload refusals). The choices
  * settle for as long as the analyzers' do before it is read. `request: null` reads
  * nothing.
  */
