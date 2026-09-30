@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
+import type { AuditContext } from '../src/audit/log.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { mcpAuthSettings, SETTING_MCP_ANONYMOUS_CAP, SETTING_MCP_AUTH_MODE } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfigRepo } from '../src/auth/oidc.js'
 import { type McpAuthView, registerMcpAuthModeRoutes } from '../src/routes/mcpAuthMode.js'
@@ -16,14 +18,18 @@ const UI = { origin: 'https://scadbuddy.test', 'x-forwarded-proto': 'https' }
 /** `ai_settings` in memory: what credentials.ts `SettingsStore` offers. */
 function memorySettings(initial: Record<string, unknown> = {}) {
   const map = new Map<string, unknown>(Object.entries(initial))
+  const contexts: AuditContext[] = []
   return {
     map,
+    contexts,
     get: async <T>(key: string) => map.get(key) as T | undefined,
     setMany: async (
       values: Record<string, unknown>,
       check: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
+      context: AuditContext,
     ) => {
       if (!(await check({ get: async <T>(key: string) => map.get(key) as T | undefined }))) return false
+      contexts.push(context)
       for (const [key, value] of Object.entries(values)) map.set(key, value)
       return true
     },
@@ -106,6 +112,12 @@ describe('/api/v1/ai/mcp/auth', () => {
     expect(await res.json()).toEqual({ mode: 'oidc', configured_mode: 'disabled', anonymous_cap: 'read' })
     expect(store.map.get(SETTING_MCP_AUTH_MODE)).toBe('disabled')
     await expect(connect(app)).rejects.toThrow()
+  })
+
+  it('audits the save as the browser user over HTTP, not as ScadBuddy (#831)', async () => {
+    const { fetch, store } = setup()
+    expect((await put(fetch, { mode: 'disabled', anonymous_cap: 'read', expected: DEFAULTS })).status).toBe(200)
+    expect(store.contexts).toEqual([{ actor: UI_ACTOR, surface: 'http', clientIp: INGRESS }])
   })
 
   it('saves both keys, and /mcp applies them on the next request', async () => {
