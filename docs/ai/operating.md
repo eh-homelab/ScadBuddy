@@ -158,6 +158,7 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
+| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → the backend (and its aliases) only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond the backend's that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.

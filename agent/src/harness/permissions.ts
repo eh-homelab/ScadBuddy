@@ -19,9 +19,19 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 // Without a gate (a bare harness run) needs_approval is a DENY whose message
 // says the action needs approval, so an outward tool can never run unattended.
 //
-// Before the tier, an optional InputGuard may DENY a call by its arguments
-// (the headless browser's origin allow-list and file names, #349); that
-// denial holds at every tier and is never parked for approval.
+// Before the tier, an optional InputGuard may judge a call by its arguments
+// (the headless browser's origins and file names, #349, headlessBrowser.ts
+// `browserInputGuard`). It may:
+//   - DENY it: that holds at every tier and is never parked for approval;
+//   - make it OUTWARD for this input, whatever the tool's own tier (a
+//     navigation to an allowed origin not yet approved in the session), so it
+//     parks for approval like any outward call;
+//   - REWRITE its input (an alias of the backend's origin onto the backend's):
+//     the call is then allowed at its tier and canUseTool hands the SDK the
+//     new input as `updatedInput`, which the tool runs with (sdk.d.ts,
+//     0.3.283, `PermissionResult`; measured for a plugin tool in
+//     test/headlessBrowser.e2e.test.ts). The hook passes such a call on
+//     without a verdict, as it does every allowed one.
 //
 // It is enforced twice, as spec §8.2 asks ("the SDK permission callback and a
 // PreToolUse hook"):
@@ -57,23 +67,35 @@ export type RiskTier = (typeof RISK_TIERS)[number]
  */
 export type TierResolver = (toolName: string, input?: unknown) => RiskTier | undefined
 
+/** What an InputGuard says about one call; undefined means "nothing to add". */
+export type GuardVerdict =
+  /** Must not run, whatever its tier. */
+  | { deny: string }
+  /** Outward for this input: needs a human approval, whatever the tool's tier. */
+  | { outward: string }
+  /** Allowed at the tool's tier, run with this input instead. */
+  | { input: Record<string, unknown> }
+
 /**
- * Refuses a call by its INPUT, whatever its tier: the reason it must not run,
- * or undefined. The headless browser's origin and file-name checks
- * (headlessBrowser.ts `browserInputProblem`, #349) are one.
+ * Judges a call by its INPUT (see the header). The headless browser's origin
+ * and file-name checks (headlessBrowser.ts `browserInputGuard`, #349) are one.
  */
-export type InputGuard = (toolName: string, input: unknown) => string | undefined
+export type InputGuard = (toolName: string, input: unknown) => GuardVerdict | undefined
 
 export type ToolDecision =
-  | { decision: 'allow'; tier: RiskTier }
+  /** `input`, when set, is what the tool runs with instead of its own. */
+  | { decision: 'allow'; tier: RiskTier; input?: Record<string, unknown> }
   | { decision: 'needs_approval'; tier: RiskTier; reason: string }
   | { decision: 'deny'; tier: RiskTier; reason: string }
 
 export function decide(toolName: string, tierOf: TierResolver, input?: unknown, guard?: InputGuard): ToolDecision {
   const tier = tierOf(toolName, input) ?? 'outward'
-  const refused = guard?.(toolName, input)
-  if (refused !== undefined) return { decision: 'deny', tier, reason: refused }
-  if (tier === 'read' || tier === 'write') return { decision: 'allow', tier }
+  const verdict = guard?.(toolName, input)
+  if (verdict && 'deny' in verdict) return { decision: 'deny', tier, reason: verdict.deny }
+  if (verdict && 'outward' in verdict) return { decision: 'needs_approval', tier: 'outward', reason: verdict.outward }
+  if (tier === 'read' || tier === 'write') {
+    return verdict && 'input' in verdict ? { decision: 'allow', tier, input: verdict.input } : { decision: 'allow', tier }
+  }
   return {
     decision: 'needs_approval',
     tier,
@@ -137,8 +159,8 @@ export function makeCanUseTool(
     const decision = decide(toolName, tierOf, input, guard)
     onDecision?.(toolName, decision)
     // The SDK passes the input to the tool from `updatedInput` when set; an
-    // allowed call gets its own input back unchanged.
-    if (decision.decision === 'allow') return { behavior: 'allow', updatedInput: input }
+    // allowed call gets its own input back unchanged, unless the guard rewrote it.
+    if (decision.decision === 'allow') return { behavior: 'allow', updatedInput: decision.input ?? input }
     if (decision.decision === 'deny') return { behavior: 'deny', message: decision.reason }
     if (!gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
     try {

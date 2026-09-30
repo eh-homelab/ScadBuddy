@@ -73,7 +73,8 @@ export const TOOLS = {
   fill: tool({
     description:
       'Fallback for UI no other tool covers: type a value into the visible field with this label ' +
-      '(a text box, number box, select or slider). Never fills a password or API key.',
+      "(a text box, number box, select or slider). A select takes an option's value or its visible label. " +
+      'Never fills a password or API key.',
     risk: 'write',
     scope: 'global',
     input: z

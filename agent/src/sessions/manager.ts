@@ -19,7 +19,7 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { browserTierOf, browserToolsGuide, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import {
   HTTP_SERVER,
@@ -30,6 +30,7 @@ import {
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
+import { loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -114,9 +115,12 @@ import { PostgresSessionStore } from './store.js'
 // or on two — cannot both win; the loser gets SessionError 'busy' (spec §6:
 // "a send while a turn is running gets a clear error"). The running turn
 // renews the lease every `renewMs`; if its replica dies, the lease runs out
-// after `leaseMs` and the session can be sent to again. The same renewal reads
-// `interrupt_requested`, which is how an interrupt reaches a turn running on
-// another replica.
+// after `leaseMs` and the session can be sent to again, and the reaper
+// (`reapExpired`, every 30 s from main.ts) ends that turn: an interrupted event
+// and the session back to idle, since its own finish() never ran. The same
+// renewal reads `interrupt_requested`, which is how an interrupt reaches a turn
+// running on another replica. On SIGTERM, `stopTurns` drains: no new turn,
+// running ones may finish, the rest are aborted and waited for.
 //
 // Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
 // call parks the turn in `waiting_approval` until a human decides
@@ -321,11 +325,17 @@ export type SessionManagerDeps = {
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
-   * is the one origin the browser may open.
+   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA;
+   * `publicUrl` and `uiOrigins` (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)
+   * are rewritten onto it; `browserAllowedOrigins`
+   * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
+   * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
    */
   headlessBrowser?: {
     backendUrl: string
+    publicUrl?: string
+    uiOrigins?: string
+    browserAllowedOrigins?: string
     /** Tests only: a Chromium other than the pinned one. */
     executablePath?: string
     /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
@@ -500,7 +510,12 @@ type LocalTurn = {
    * SDK's last transcript appends, so interrupt() leaves it alone and says so.
    */
   settling: boolean
+  /** The turn's run, final events included, its claim released; it never rejects (startTurn's `done`). */
+  done?: Promise<TurnOutcome>
 }
+
+/** What a send gets while the service drains for a restart (`drain`). */
+export const RESTARTING = 'the agent service is restarting; send again in a moment'
 
 export class SessionManager {
   readonly store: PostgresSessionStore
@@ -513,6 +528,8 @@ export class SessionManager {
   private readonly renewMs: number
   /** Turns running in THIS process, by session id. */
   private readonly active = new Map<string, LocalTurn>()
+  /** Set by `drain`: a restart is coming, so no new turn starts here. */
+  private draining = false
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
@@ -684,6 +701,7 @@ export class SessionManager {
   async send(id: string, principal: Owner, text: string, options: SendOptions = {}): Promise<Turn> {
     const prompt = text.trim()
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
+    if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
     const turnId = randomUUID()
     const [claimed] = await this.deps.sql.unsafe<Row[]>(
@@ -714,6 +732,7 @@ export class SessionManager {
    */
   async resumeApproved(approval: ApprovalRecord, by: Owner): Promise<ResumeResult> {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
+    if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
     const [claimed] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_sessions
@@ -801,6 +820,7 @@ export class SessionManager {
       .finally(() => {
         if (this.active.get(id) === local) this.active.delete(id)
       })
+    local.done = done
     return { turnId, done }
   }
 
@@ -962,6 +982,7 @@ export class SessionManager {
               ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
             })
           : undefined
+      const hb = this.deps.headlessBrowser
       const gate = this.approvals.gate({
         sessionId: id,
         turnId,
@@ -975,16 +996,26 @@ export class SessionManager {
           ? await this.deps.headlessBrowser.sandbox()
           : false
       const browser =
-        this.deps.headlessBrowser && browserSetting === true
+        hb && browserSetting === true
           ? {
               ...(sandbox ? { sandbox: true } : {}),
               sessionId: id,
-              backendUrl: this.deps.headlessBrowser.backendUrl,
+              backendUrl: hb.backendUrl,
+              ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+              ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
+              ...(hb.browserAllowedOrigins
+                ? {
+                    browserAllowedOrigins: hb.browserAllowedOrigins,
+                    // Approved once per origin per session, in Postgres, so a
+                    // later turn (on any replica) does not ask again.
+                    approvedOrigins: await loadApprovedOrigins(sql, id),
+                    rememberOrigin: (origin: string, approvalId: string | undefined) =>
+                      rememberApprovedOrigin(sql, id, origin, approvalId),
+                  }
+                : {}),
               dir: sessionBrowserDir(this.deps.paths, id),
               tmpDir: sessionBrowserTmpDir(id),
-              ...(this.deps.headlessBrowser.executablePath
-                ? { executablePath: this.deps.headlessBrowser.executablePath }
-                : {}),
+              ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
             }
           : undefined
       browserDirs = browser !== undefined
@@ -1001,8 +1032,9 @@ export class SessionManager {
         tierOf,
         approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
-        // user's messages are instructions; tool results are data.
-        systemPromptAppend: UNTRUSTED_CONTENT_POLICY,
+        // user's messages are instructions; tool results are data. Then which
+        // browser each browser_* tool drives.
+        systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
         ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
@@ -1560,5 +1592,95 @@ export class SessionManager {
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
   abortAll(): void {
     for (const { controller } of this.active.values()) controller.abort(new Error(SHUTTING_DOWN))
+  }
+
+  /**
+   * Once every turn running now has finished, its last events appended: what a
+   * shutdown waits for after abortAll(), before it closes the database those appends
+   * use (#802).
+   */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.active.values()].map((turn) => turn.done))
+  }
+
+  /** From now on no turn starts in this process: sends get `busy` (RESTARTING). */
+  drain(): void {
+    this.draining = true
+  }
+
+  /**
+   * A restart's end of the turns running here (main.ts, on SIGTERM): no new
+   * turn starts, the running ones get `graceMs` to finish on their own, then
+   * the rest are aborted, and each gets up to `abortWaitMs` more to record
+   * that it stopped (finish(): the interrupted event, the session's status,
+   * the claim released). Without that wait the pool closed under them, and a
+   * session was left `running` with no event saying why (2026-09-30, a deploy
+   * mid-turn). Resolves once every turn has ended or the waits are up.
+   */
+  async stopTurns({ graceMs, abortWaitMs }: { graceMs: number; abortWaitMs: number }): Promise<void> {
+    this.drain()
+    const ended = () => this.settled()
+    const within = (ms: number, work: Promise<unknown>) =>
+      Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
+    await within(graceMs, ended())
+    if (this.active.size === 0) return
+    this.abortAll()
+    await within(abortWaitMs, ended())
+  }
+
+  /**
+   * Ends the turns whose lease ran out: their process died before finish()
+   * (a SIGKILL, an OOM, a pool closed under them), so nothing else would say
+   * the turn stopped. A send could already take such a session over (its
+   * claim accepts an expired lease), but until then its row said `running`
+   * and its log had no end. A live turn renews its lease every `renewMs`, so
+   * an expired one is dead. One UPDATE, so two replicas' reapers never both
+   * take the same row. The session goes to `waiting_approval` when an
+   * approval is still pending (a shutdown keeps those for after the restart,
+   * #258), otherwise `idle`; approved-but-unused approvals of the dead turn
+   * are revoked, as finish() does on a shutdown. Returns the sessions reaped.
+   */
+  async reapExpired(): Promise<string[]> {
+    const rows = await this.deps.sql<{ id: string; status: SessionStatus }[]>`
+      UPDATE ai_sessions s
+      SET status = CASE
+            WHEN s.status = 'done' THEN 'done'
+            WHEN EXISTS (SELECT 1 FROM ai_approvals a WHERE a.session_id = s.id AND a.decision IS NULL)
+              THEN 'waiting_approval'
+            ELSE 'idle'
+          END,
+          turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
+      WHERE s.turn_id IS NOT NULL AND s.lease_until <= now()
+      RETURNING s.id, s.status`
+    for (const { id, status } of rows) {
+      await this.approvals.revokeUnused(id, 'the turn ended')
+      await this.events.append(id, [
+        event({
+          type: 'error',
+          sessionId: id,
+          code: 'interrupted',
+          message: 'the turn was interrupted (the agent service restarted)',
+        }),
+        event({ type: 'session.status', sessionId: id, status }),
+      ])
+    }
+    return rows.map((r) => r.id)
+  }
+
+  /** Runs `reapExpired` now and every `intervalMs` (main.ts), like the approval sweeper. */
+  startReaper(
+    intervalMs: number,
+    options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {},
+  ): () => void {
+    const ready = options.ready ?? (() => Promise.resolve(true))
+    const sweep = () => {
+      ready()
+        .then((ok) => (ok ? this.reapExpired() : []))
+        .catch(options.onError ?? (() => {}))
+    }
+    sweep()
+    const timer = setInterval(sweep, intervalMs)
+    timer.unref()
+    return () => clearInterval(timer)
   }
 }
