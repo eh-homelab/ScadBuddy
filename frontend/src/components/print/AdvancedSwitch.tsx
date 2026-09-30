@@ -4,8 +4,10 @@ type Props = {
 }
 
 /**
- * Simple offers the tiers; Advanced adds the full process list, per-side flow and a
- * per-slot filament preset override.
+ * Simple shows only what the user has to choose (#768): the printer when there is more
+ * than one, the spools and Print. Advanced adds the nozzles with per-side flow, the full
+ * process list, the plate type, the print options, the project, copies and a per-slot
+ * filament preset override; Simple sends their defaults.
  */
 export function AdvancedSwitch({ value, onToggle }: Props) {
   return (
@@ -31,7 +33,7 @@ export function AdvancedSwitch({ value, onToggle }: Props) {
         />
       </button>
       <span id="print-advanced-help" className="text-[12px] text-faint">
-        Pick any process, the flow per side and a preset per slot.
+        Choose the nozzle, process, plate, options, project and copies.
       </span>
     </div>
   )

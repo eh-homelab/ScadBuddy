@@ -65,14 +65,23 @@ One dialog, in the place the current one lives. Every step follows one pattern:
 **offer everything you own, mark what is on the printer, warn rather than block, and
 let Advanced override.**
 
+**Simple mode shows only what the user has to choose (#768):** the printer, when there
+is more than one; the spools; which plate, for a multi-plate file; and Print, beside the
+Checks. Nozzles, quality, plate type, print options, project and copies are Advanced
+steps. In Simple mode they still send their defaults: the nozzle size and tier this
+model last printed with, else 0.4 mm and Standard; the plate type from the printer's
+last print, else the remembered or default one (§4.4); the remembered copies; and the
+project the page passed in (the Customize page's own project choice), else the last
+project printed to (`last_project_id`), as the Library page's prints use.
+
 | Step | Simple mode | Advanced mode adds |
 |---|---|---|
 | 1. Plate slots | One row per color in the model — for "All plates", every color any plate uses — each pre-matched to the nearest spool (the existing `suggest`). | — |
-| 2. Spools | Any active spool from inventory. Loaded spools are marked with printer + AMS slot and listed first. An unloaded spool is allowed and warned: "Jade White PLA isn't loaded — load it before this prints." | Override the filament preset per slot, from the presets compatible with the chosen nozzle size. |
-| 3. Nozzles | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." | Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
-| 4. Quality | Fine / Standard / Draft (§4.2). | Bambu's full H2C process list for the chosen size. |
-| 5. Plate | Every H2C plate type; preselected from the printer's last print (§4.4). | — |
-| 6. Print options | Bambuddy's queue-item options with Bambuddy's defaults, exactly as `PrintOptionsDisclosure` shows them today (#88). Queue behavior — manual start, waiting for filament — is Bambuddy's. | — |
+| 2. Spools | Any active spool from inventory. Loaded spools are marked with printer + AMS slot (and the side they feed) and listed first. An unloaded spool is allowed and warned: "Jade White PLA isn't loaded — load it before this prints." | Override the filament preset per slot, from the presets compatible with the chosen nozzle size. |
+| 3. Nozzles | Not shown: the remembered size, else 0.4 mm. | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
+| 4. Quality | Not shown: the remembered tier, else Standard. | Fine / Standard / Draft (§4.2), or Bambu's full H2C process list for the chosen size. |
+| 5. Plate | Not shown: preselected from the printer's last print (§4.4). | Every H2C plate type. |
+| 6. Print options, project, copies | Not shown: Bambuddy's defaults, the page's project (else the last one printed to), the remembered copies. | Bambuddy's queue-item options with Bambuddy's defaults, exactly as `PrintOptionsDisclosure` shows them today (#88); the project; copies. Queue behavior — manual start, waiting for filament — is Bambuddy's. |
 | 7. Print | Slice through Bambuddy, then queue. | — |
 
 ## 3. What each step reads
@@ -199,56 +208,46 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
-**Extruder per filament (#469).** Left at the 3MF's default `filament_map_mode: "Auto
-For Flush"` the slicer spread filaments over both extruders and sliced both for the
-chosen size, which paused queue item 108 with HMS 05FE8053 ("the left nozzle is not
-matched"). ScadBuddy can't pin a filament to an extruder: measured through Bambuddy's
-slicer on 2026-09-28, a Manual `filament_map` in `project_settings.config` is ignored
-(`slice_info` still reads `2 1`), and one at plate level in `model_settings.config`
-crashes the slicer (SIGSEGV) whatever its values. So the run refuses, before upload, the
-prints the mounted nozzles would pause. Extruders are physical: 0 is the right (main), 1
-the left, and `status.nozzles` is indexed the same way.
+**Extruder per filament (#469, #768).** The run does not check the mounted nozzles.
+From #538 until #768 it refused, before upload, a size neither mounted nozzle (nor a
+rack spare) had, a multi-color print when only one side had the size, and a spool on
+the side with another size, and it warned when a side was unreported or a mounted
+nozzle of the size was High Flow. Those rested on the premise that the slicer spreads
+a multi-color print across both extruders (queue item 108 paused with HMS 05FE8053,
+"the left nozzle is not matched", with no spare 0.2 in the rack). Measured by the
+maintainer's test print, 2026-09-29: a two-colour print sliced for 0.2 mm printed
+through the one 0.2 mm nozzle while the other extruder had a different size fitted. The
+printer handles its nozzles itself, and the H2C swaps hotends from its rack (§6), so
+those refusals and warnings are gone, from the run, the check before Print (#755) and
+the dialog alike. One stays, by the owner's ruling on #772: a mounted High Flow nozzle
+of the sliced size is an `hf-unsupported` warning (#723; queue item 149 paused on it),
+never a refusal, since a print may be set up before its nozzle is fitted. The dialog
+shows it, like every nozzle message, in Advanced mode only.
 
-- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …"). A
-  single-nozzle printer whose one nozzle is another size is refused the same way ("The
-  nozzle is 0.4 mm, not 0.2 mm. …"): nothing about it is unknown.
-- **A side counts as fitted with the size when the rack holds a spare of it** (§6: the
-  printer swaps the rack hotend matching the sliced size onto the extruder; queue item
-  108's rack held no spare 0.2). Rack ids 0 and 1 are the mounted pair, mirroring
-  `nozzles`, so the spares are the other ids; each serves one side. So with both sides
-  0.4 and one 0.2 in the rack (the 2026-09-27 rack), a one-color 0.2 print runs and a
-  two-color one is refused naming the rack; with a 0.2 mounted on the right and another
-  in the rack, a two-color 0.2 print runs. The filament step carries the spares as
-  `rack`, so the dialog mirrors it. Measured 2026-09-29 (§5, queue item 150): the printer
-  swaps the spare on at print start and prints, rather than pausing.
-- **One side fitted with it** (the nozzles differ, or one spare serves one side): more than one filament is a 422,
-  since the slicer spreads them across both. One filament prints, with a warning that
-  the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
-  plates being printed (the parts' extruders in the local 3MF's `model_settings.config`),
-  not the whole model.
-- **One side fitted with it, the other unreported:** a single-nozzle printer (X1C, P1S,
-  A1: an empty second `nozzles` entry, no AMS wired left, no switch) prints any number of
-  filaments. On a printer with a left side, that side is unknown: a warning, not a 422.
-- **Both fitted with it:** any filament prints on either.
+That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
+project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL
+H2C 0.2 nozzle`, `Bambu PLA Basic @BBL H2C 0.2 nozzle` for the second filament,
+`nozzle_diameter` `["0.2","0.2"]`, Standard flow on both sides, and `filament_map`
+`["1","1"]` under `"Auto For Flush"`: both filaments on one extruder. The run's presets
+for a Fine 0.2 run are the same, and the print run's upload now writes the same
+project-level map (`bambu3mf.one_extruder_map`). Bambuddy's headless slicer was
+measured on 2026-09-28 to keep that map and still spread two filaments onto two nozzles
+(#745), so whether a ScadBuddy slice lands on one nozzle is still to be measured on a
+real print.
+
+What stays is a label. Extruders are physical: 0 is the right (main), 1 the left, and
+`status.nozzles` is indexed the same way. The filament step marks each loaded spool
+with the side it feeds, and lists the mounted nozzles, as information only:
+
 - **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
   switch routes any AMS to either nozzle (user ruling, 2026-09-28). A spool's side, from
   `ams_switch_inlet` (inlet A left, B right, as upstream `fts_routing.py`), is shown
   only as "rests on L/R".
 - **Without the switch**, each AMS is wired to one side: the external holder's tray
   (assignment `ams_id` 255, tray 0 left, tray 1 right), else `ams_extruder_map`, where
-  anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
-  a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
-  0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
-  never pre-selects it — unless the rack holds a spare of the size, which the printer
-  can swap onto that side.
-- Nozzles the printer doesn't report refuse nothing and warn. Nor does an unreadable
-  `/inventory/assignments`: every spool's side is then unknown. With no status it isn't
-  read.
-- `extruders.plan_extruders` decides all of it, from one status read per run, right
-  after #472's `choice_errors` in `run_for_output`. Only the nozzle **diameter** is
-  compared, not its flow type (HS vs HH).
-- A per-color extruder choice is possible only once Bambuddy's slicer honors a filament
-  map; the upstream report is drafted, not filed.
+  anything but 0 or 1 is unknown, and the badge is left off.
+- The `not-installed` warning (§4.5) still says when no hotend of the chosen size is
+  anywhere in the rack, mounted or spare. It is advisory, never a 422.
 
 ### 4.4 Plate
 
@@ -333,11 +332,15 @@ Rerun against the deployed builds `sha-74f634f` and later, which include #538's 
 | One color at 0.4 prints | **Pass** | Queue item 151: sliced at 0.4, `0.12mm High Quality`, completed 03:24 to 03:49 UTC. |
 | Two colors at 0.4 print | **Fail** | Queue item 149: sliced at 0.4, 0.12 mm layers, colors `#BECF00` / `#00B1B7`, `manual_start: true`. Queued 02:13 UTC; as a manual start it waited until the user started it, at 13:15 UTC, and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." Both sides were 0.4 mm, but the right was standard (`HS01`) and the left High Flow (`HH01`), and both were sliced as standard. #538's refusal compares size only; tracked in #723. |
 
-This closes #469 for sides that differ in size: that case (queue item 108) is now refused before upload, and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
+This closed #469 for sides that differ in size: that case (queue item 108) was refused before upload (withdrawn by #768, below), and the rack swap that #538 assumed is confirmed. Sides that match in size but differ in type still pause at layer 0 (item 149), so the acceptance does not pass until #723 lands and a two-color print is rerun.
 
 Also found:
 - Each run POST still outlives the 60 s ingress timeout, giving a 504 while the item queues (#470). Every run above was checked on Bambuddy's queue rather than retried.
 - A one-color print needs a one-color output. Two plate slots are two filaments to the slicer even on the same spool, so the multi-color refusal applies (by design).
+
+### The maintainer's test print (2026-09-29, #768)
+
+A two-colour print sliced for 0.2 mm printed through the one 0.2 mm nozzle, while the other extruder had a different size fitted. #538's multi-color refusal (first row of the table above) refused exactly that, so the run no longer checks the mounted nozzles at all (§4.3).
 
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
