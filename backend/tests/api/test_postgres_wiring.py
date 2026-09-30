@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg_pool import PoolTimeout
 
+from scadbuddy.analyzers.component import DECISIONS
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.core.events import Event, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -60,7 +61,7 @@ def test_two_replicas_each_hear_every_event_once(
             _wait(partial(_connected, bus))
             bus.add_listener(heard[name].append)
 
-        assert first.put("/api/v1/settings", json={"pipeline_id": 3}).status_code == 200
+        assert first.put("/api/v1/settings", json={"printer_id": 3}).status_code == 200
 
         _wait(lambda: len(changed("one")) >= 1 and len(changed("other")) >= 1)
         time.sleep(0.5)  # a duplicate would have arrived by now
@@ -111,7 +112,7 @@ def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo
         assert created.status_code == 201, created.text
         listed = client.get("/api/v1/analyzers/decisions").json()
 
-    assert isinstance(app.state.scadbuddy.decisions, PostgresDecisionStore)
+    assert isinstance(app.state.scadbuddy.components.get(DECISIONS), PostgresDecisionStore)
     assert [row["id"] for row in listed] == [created.json()["id"]]
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()

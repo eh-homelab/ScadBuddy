@@ -1,4 +1,6 @@
-import type { Context } from 'hono'
+import type { Context, MiddlewareHandler } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
+import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import {
   checkOrigin,
   effectiveRequest,
@@ -24,11 +26,15 @@ import {
 //      (SCADBUDDY_PUBLIC_URL), or both the same loopback origin from a loopback
 //      peer. Comparing Origin with Host alone would not do: under DNS rebinding
 //      both carry the attacker's name (src/http/origins.ts explains).
-//   3. PUT bodies as `Content-Type: application/json` only. This stops a
+//   3. JSON bodies as `Content-Type: application/json` only. This stops a
 //      cross-origin HTML form (which cannot send JSON without a CORS preflight
 //      this service never answers); it does nothing against a same-origin or
-//      rebound page, which is what 2 is for. (The POST and DELETE routes read
-//      no body.)
+//      rebound page, which is what 2 is for. Here for PUT; the POST routes
+//      that read a body check it where they read it, answering 415: the
+//      session routes (routes/sessions.ts `jsonBody`: POST /api/v1/ai/sessions,
+//      …/:id/messages) and the approval decisions (routes/approvals.ts). An
+//      empty POST body is not checked, since it carries nothing. Every body
+//      is size-capped before it is read (`jsonBodyLimit` below).
 //
 // Browsers send `Origin` on every POST, PUT and DELETE (Fetch standard), so a
 // write without one did not come from a page.
@@ -120,3 +126,26 @@ export function uiReadProblem(
 }
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+/**
+ * The largest JSON body a UI write route reads. It is derived from the longest
+ * message the routes accept (sessions/clientProtocol.ts MESSAGE_MAX, in UTF-16
+ * code units) at its worst encoding: a BMP character is at most 3 bytes as
+ * UTF-8, and at most 6 as a JSON `\uXXXX` escape, so 6 bytes per code unit
+ * (192 000 bytes for 32 000), plus 64 KiB for the rest of the body (a title,
+ * the JSON around them). Any schema-valid message fits, whatever its script;
+ * nothing larger is buffered or parsed.
+ */
+export const JSON_BODY_MAX = MESSAGE_MAX * 6 + 64 * 1024
+
+/**
+ * Refuses a body over `maxSize` with 413 before the route reads it: by
+ * `Content-Length` when there is one, and otherwise (chunked) by counting as
+ * it streams, stopping at the limit (hono/body-limit).
+ */
+export function jsonBodyLimit(maxSize = JSON_BODY_MAX): MiddlewareHandler {
+  return bodyLimit({
+    maxSize,
+    onError: (c) => c.json({ detail: `request body is larger than ${maxSize} bytes` }, 413),
+  })
+}

@@ -72,7 +72,7 @@ def record_sliced(store, output_id, library_file_id, sliced: SlicedCopy) -> Outp
 - The route `POST /api/v1/outputs/{id}/project-file`, body `{"project_id": int}`, returns `{"project_id", "folder_id", "library_file_id", "created": bool}`.
 - It resolves the folder via `folder_for(client, project_id)`, creating the project folder the way `ensure_project` does if it is missing. The target comes from `StoredSettings.project_pipelines[str(project_id)]`, then `pipeline_for(slug)`, then `default_plate`, then the fallback. It calls `ensure_uploaded(..., folder_id=)` and then `attach_edit_link`.
 - A new `StoredSettings.project_pipelines: dict[str, int]` is written by `run_for_output` whenever a print runs with a project.
-- New in `backend/scadbuddy/bambuddy/projects.py`: `async def media_folder_for(client, project_id: int) -> int`. It returns the id of the `Media` subfolder (`parent_id` = the project folder, `project_id` set), creating it if missing. It is not used by #317's UI; it exists for #309.
+- `media_folder_for` (the project folder's `Media` subfolder) is left to #309, which adds it with locking when it wires it up; #317 does not ship it.
 - Frontend:
   - the Customize page gets a `ProjectPicker` (reuse the component; `No project` option; default `last_project_id`);
   - after Generate succeeds with a project, call the route and show "Saved to <project>" with an "Open in Bambuddy" link;

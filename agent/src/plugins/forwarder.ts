@@ -3,15 +3,21 @@ import {
   createServer,
   type IncomingHttpHeaders,
   type IncomingMessage,
-  request as httpRequest,
   type OutgoingHttpHeaders,
   type Server,
   type ServerResponse,
 } from 'node:http'
-import { request as httpsRequest } from 'node:https'
-import { type AddressInfo, isIP, type LookupFunction } from 'node:net'
-import { plainAddress } from '../http/origins.js'
-import { harnessToolName, headerSecretVariants, type LoadedPlugins, type RemotePlugin } from './registry.js'
+import type { AddressInfo } from 'node:net'
+import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
+import { markUntrustedContent, wrapUntrustedText } from '../safety/untrusted.js'
+import {
+  type CheckedPlugin,
+  HINDSIGHT_PLUGIN,
+  harnessToolName,
+  headerSecretVariants,
+  type LoadedPlugins,
+  type RemotePlugin,
+} from './registry.js'
 
 // The loopback forwarder between Claude Code and plugin endpoints (#297).
 //
@@ -42,6 +48,19 @@ import { harnessToolName, headerSecretVariants, type LoadedPlugins, type RemoteP
 //     with another's, and a `tools/call` is refused for a disabled or hidden
 //     tool, or for one whose raw name differs from the `tool_tiers` entry its
 //     harness name matches.
+//   - marks every tools/call result as untrusted data (#258,
+//     `rewriteMessages`): Claude Code puts a plugin's result straight into the
+//     model's context, so it gets the same envelope as ScadBuddy's own tools.
+//     The ids of the calls a route has forwarded are kept on the ROUTE, not
+//     the request, and every 200 JSON or SSE body the route answers with is
+//     rewritten against them: the MCP client matches a response to its
+//     request by id alone, whichever stream carries it (its own POST's, another
+//     POST's, or the standalone GET stream), so a plugin cannot get a result
+//     past the rewrite by answering elsewhere. An SSE stream is split the way
+//     the spec reads it (a line ends at CRLF, CR or LF), and while a route has
+//     calls in flight an event whose data is not JSON is withheld: the plugin
+//     cannot smuggle a result in a block the forwarder cannot parse but the
+//     client can.
 //
 // The token is a per-registration capability (144 random bits), released
 // when the run ends. It is on Claude Code's command line (the SDK passes MCP
@@ -60,7 +79,12 @@ type Route = {
   filterTools: boolean
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
+  /** The requests this route has forwarded whose responses are rewritten, on whichever stream they arrive. */
+  rewrites: Rewrites
 }
+
+/** Request ids remembered per route; the oldest is forgotten past this (a client's ids only grow). */
+export const MAX_TRACKED_IDS = 4096
 
 export const MAX_BODY_BYTES = 4 * 1024 * 1024
 const REQUEST_HEADERS = ['content-type', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id']
@@ -139,6 +163,10 @@ function fail(res: ServerResponse, status: number, message: string): void {
   res.end(JSON.stringify({ error: message }))
 }
 
+function isRewritable(type: string): boolean {
+  return type.startsWith('application/json') || type.startsWith('text/event-stream')
+}
+
 function pick(headers: IncomingHttpHeaders, names: readonly string[]): OutgoingHttpHeaders {
   const out: OutgoingHttpHeaders = {}
   for (const name of names) {
@@ -148,29 +176,108 @@ function pick(headers: IncomingHttpHeaders, names: readonly string[]): OutgoingH
   return out
 }
 
-/** Rewrites each JSON-RPC response to a tools/list request in `ids`. */
-function rewriteMessages(payload: unknown, ids: Set<unknown>, route: Route): unknown {
+/** The requests whose responses are rewritten: tools/list ids, and tools/call ids with their tool. */
+export type Rewrites = { lists: Set<unknown>; calls: Map<unknown, string> }
+
+function remember<K, V>(map: Map<K, V>, key: K, value: V): void {
+  if (map.size >= MAX_TRACKED_IDS) map.delete(map.keys().next().value as K)
+  map.set(key, value)
+}
+
+/**
+ * Splits an SSE stream into event blocks the way the spec (and the MCP client's
+ * `eventsource-parser`) reads it: a line ends at CRLF, CR or LF, and an empty
+ * line ends an event. Line endings come out normalised to LF. A trailing CR is
+ * held back until the next chunk says whether it was half a CRLF.
+ */
+export class SseBlocks {
+  private pending = ''
+  private carry = false
+
+  /** The complete event blocks in the stream so far, without their terminating blank line. */
+  feed(chunk: string): string[] {
+    let text = (this.carry ? '\r' : '') + chunk
+    this.carry = text.endsWith('\r')
+    if (this.carry) text = text.slice(0, -1)
+    this.pending += text.replace(/\r\n|\r/g, '\n')
+    const blocks: string[] = []
+    let at: number
+    while ((at = this.pending.indexOf('\n\n')) !== -1) {
+      blocks.push(this.pending.slice(0, at))
+      this.pending = this.pending.slice(at + 2)
+    }
+    return blocks
+  }
+}
+
+/** Where a plugin tool's content comes from, for the untrusted-data envelope. */
+export function pluginSource(plugin: Pick<RemotePlugin, 'name'>): string {
+  return `the remote plugin "${plugin.name}", a third-party MCP server; its results can carry anything its operator or its data sources wrote`
+}
+
+/**
+ * Rewrites each JSON-RPC response to a request in `rewrites`:
+ *   - tools/list: disabled and colliding tools dropped (`filterToolList`);
+ *   - tools/call (#258): the result's content marked as untrusted data, as
+ *     ScadBuddy's own tool results are (safety/untrusted.ts
+ *     `markUntrustedContent`: text in the envelope, a preamble before each
+ *     image, audio or blob), under the name the model knows the tool by
+ *     (`mcp__<plugin>__<tool>`); a JSON-RPC error's message is wrapped too,
+ *     since Claude Code hands it to the model as the tool's error.
+ */
+export function rewriteMessages(payload: unknown, rewrites: Rewrites, route: Pick<Route, 'plugin' | 'collided'>): unknown {
   const one = (m: unknown): unknown => {
-    if (!isRecord(m) || !ids.has(m.id) || !isRecord(m.result) || !Array.isArray(m.result.tools)) return m
-    return { ...m, result: { ...m.result, tools: filterToolList(route, m.result.tools) } }
+    if (!isRecord(m)) return m
+    if (rewrites.lists.has(m.id) && isRecord(m.result) && Array.isArray(m.result.tools)) {
+      return { ...m, result: { ...m.result, tools: filterToolList(route, m.result.tools) } }
+    }
+    const raw = rewrites.calls.get(m.id)
+    if (raw === undefined) return m
+    const tool = `mcp__${route.plugin.name}__${harnessToolName(raw)}`
+    const source = pluginSource(route.plugin)
+    if (isRecord(m.result) && Array.isArray(m.result.content)) {
+      return { ...m, result: { ...m.result, content: markUntrustedContent(m.result.content, tool, source) } }
+    }
+    if (isRecord(m.error) && typeof m.error.message === 'string') {
+      return { ...m, error: { ...m.error, message: wrapUntrustedText(tool, source, m.error.message) } }
+    }
+    return m
   }
   return Array.isArray(payload) ? payload.map(one) : one(payload)
 }
 
-/** Rewrites one SSE event block (without its terminating blank line). */
-function rewriteSseEvent(block: string, ids: Set<unknown>, route: Route): string {
-  const lines = block.split(/\r?\n/)
+/**
+ * Rewrites one SSE event block (without its terminating blank line). Undefined
+ * means the block is withheld: its data is not JSON while the route has tool
+ * calls in flight, so it could be a reply the rewrite cannot see but the
+ * client would parse (the same rule as a JSON body that is not JSON).
+ */
+export function rewriteSseEvent(block: string, ids: Rewrites, route: Pick<Route, 'plugin' | 'collided'>): string | undefined {
+  const lines = block.split(/\r\n|\r|\n/)
   const data = lines.filter((l) => l.startsWith('data:')).map((l) => l.slice(5).replace(/^ /, ''))
   if (data.length === 0) return block
   let parsed: unknown
   try {
     parsed = JSON.parse(data.join('\n'))
   } catch {
-    return block
+    return ids.calls.size > 0 ? undefined : block
   }
-  const rewritten = rewriteMessages(parsed, ids, route)
-  if (rewritten === parsed) return block
-  return [...lines.filter((l) => !l.startsWith('data:')), `data: ${JSON.stringify(rewritten)}`].join('\n')
+  // Guarded like the JSON-body path: a shape the rewrite cannot handle is
+  // withheld while a call is in flight, never thrown into the stream's handler.
+  let data_: string
+  try {
+    const rewritten = rewriteMessages(parsed, ids, route)
+    if (rewritten === parsed) return block
+    data_ = JSON.stringify(rewritten)
+  } catch {
+    return ids.calls.size > 0 ? undefined : block
+  }
+  return [...lines.filter((l) => !l.startsWith('data:')), `data: ${data_}`].join('\n')
+}
+
+/** The JSON-RPC error a call gets when its reply was withheld. */
+function withheldError(id: unknown, why: string): string {
+  return JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32603, message: `ScadBuddy: ${why}` } })
 }
 
 export class PluginForwarder {
@@ -198,7 +305,13 @@ export class PluginForwarder {
   /** Registers a plugin whose endpoint passed the egress check at `address`. */
   register(plugin: RemotePlugin, address: string, options: ForwardOptions = {}): Registration {
     const token = randomBytes(18).toString('base64url')
-    this.routes.set(token, { plugin, address, filterTools: options.filterTools ?? true, collided: new Set() })
+    this.routes.set(token, {
+      plugin,
+      address,
+      filterTools: options.filterTools ?? true,
+      collided: new Set(),
+      rewrites: { lists: new Set(), calls: new Map() },
+    })
     return {
       url: `http://127.0.0.1:${this.port}/p/${token}`,
       release: () => {
@@ -227,7 +340,9 @@ export class PluginForwarder {
     if (!['POST', 'GET', 'DELETE'].includes(method)) return fail(res, 405, 'method not allowed')
 
     let body: Buffer | undefined
-    const toolListIds = new Set<unknown>()
+    const { rewrites } = route
+    /** This request's own tools/call ids: the replies it is expected to carry. */
+    const own = new Set<unknown>()
     if (method === 'POST') {
       const read = await readBody(req)
       if (read === 'too large') return fail(res, 413, 'request body too large')
@@ -241,7 +356,10 @@ export class PluginForwarder {
       const messages = (Array.isArray(parsed) ? parsed : [parsed]) as JsonRpc[]
       for (const m of messages) {
         if (!isRecord(m)) continue
-        if (m.method === 'tools/list' && route.filterTools && m.id !== undefined) toolListIds.add(m.id)
+        if (m.method === 'tools/list' && route.filterTools && m.id !== undefined && m.id !== null) {
+          if (rewrites.lists.size >= MAX_TRACKED_IDS) rewrites.lists.delete(rewrites.lists.values().next().value)
+          rewrites.lists.add(m.id)
+        }
         if (m.method === 'tools/call' && isRecord(m.params) && typeof m.params.name === 'string') {
           const refusal = callRefusal(route, m.params.name)
           if (refusal !== undefined) {
@@ -252,35 +370,20 @@ export class PluginForwarder {
             )
             return
           }
+          if (m.id !== undefined && m.id !== null) {
+            remember(rewrites.calls, m.id, m.params.name)
+            own.add(m.id)
+          }
         }
       }
     }
 
     const target = new URL(route.plugin.url)
-    const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname
-    const address = plainAddress(route.address)
-    const family = isIP(address) === 6 ? 6 : 4
-    // Pinned: the checked address, whatever the name resolves to now.
-    const lookup = ((_host: string, opts: { all?: boolean }, cb: (...args: unknown[]) => void) => {
-      if (opts.all) cb(null, [{ address, family }])
-      else cb(null, address, family)
-    }) as unknown as LookupFunction
     const headers: OutgoingHttpHeaders = { ...pick(req.headers, REQUEST_HEADERS), host: target.host }
     if (route.plugin.header) headers[route.plugin.header.name] = route.plugin.header.value
     if (body) headers['content-length'] = body.length
 
-    const send = target.protocol === 'https:' ? httpsRequest : httpRequest
-    const upstream = send({
-      protocol: target.protocol,
-      hostname,
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: `${target.pathname}${target.search}`,
-      method,
-      headers,
-      lookup,
-      agent: false,
-      ...(target.protocol === 'https:' && isIP(hostname) === 0 ? { servername: hostname } : {}),
-    })
+    const upstream = requestFor(target)({ ...pinnedRequestOptions(target, route.address), method, headers })
     res.on('close', () => {
       if (!res.writableFinished) upstream.destroy()
     })
@@ -302,20 +405,36 @@ export class PluginForwarder {
       }
       const out = pick(up.headers, RESPONSE_HEADERS)
       const type = String(up.headers['content-type'] ?? '').toLowerCase()
-      if (toolListIds.size === 0 || status !== 200) {
+      // A tool call's reply the rewrite cannot mark (#258): an error status (the
+      // MCP client folds the body into the error the model reads) or a body
+      // that is neither JSON nor SSE. Withheld; the status and session header
+      // stay, so a client still sees a 404's expired session.
+      if (own.size > 0 && (status !== 200 || !isRewritable(type))) {
+        up.resume()
+        const kept = pick(up.headers, ['mcp-session-id'])
+        res.writeHead(status === 200 ? 502 : status, { ...kept, 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: `plugin answered a tool call with HTTP ${status} (${type || 'no content type'}); ScadBuddy does not pass that reply on` }))
+        return
+      }
+      if (status !== 200) {
         res.writeHead(status, out)
         up.pipe(res)
         return
       }
+      // Every 200 JSON or SSE body goes through the rewrite, GET streams
+      // included: a response is matched to its request by id, on any stream.
       if (type.startsWith('application/json')) {
         const chunks: Buffer[] = []
         up.on('data', (c: Buffer) => chunks.push(c))
         up.on('end', () => {
           let text = Buffer.concat(chunks).toString('utf8')
           try {
-            text = JSON.stringify(rewriteMessages(JSON.parse(text), toolListIds, route))
+            text = JSON.stringify(rewriteMessages(JSON.parse(text), rewrites, route))
           } catch {
-            // not JSON: pass through as is
+            // Not JSON: passed through for a listing, withheld from a tool call (#258).
+            if (own.size > 0) {
+              return fail(res, 502, 'plugin answered a tool call with a body that is not JSON; ScadBuddy does not pass it on')
+            }
           }
           res.writeHead(status, out)
           res.end(text)
@@ -324,18 +443,33 @@ export class PluginForwarder {
       }
       if (type.startsWith('text/event-stream')) {
         res.writeHead(status, out)
-        let pending = ''
+        const blocks = new SseBlocks()
         up.setEncoding('utf8')
         up.on('data', (chunk: string) => {
-          pending += chunk
-          let at: RegExpExecArray | null
-          while ((at = /\r?\n\r?\n/.exec(pending)) !== null) {
-            const block = pending.slice(0, at.index)
-            pending = pending.slice(at.index + at[0].length)
-            res.write(`${rewriteSseEvent(block, toolListIds, route)}\n\n`)
+          for (const block of blocks.feed(chunk)) {
+            const rewritten = rewriteSseEvent(block, rewrites, route)
+            if (rewritten !== undefined) {
+              res.write(`${rewritten}\n\n`)
+              continue
+            }
+            // Withheld (#258). On a stream that carries no call's reply (the
+            // standalone GET stream) the block is dropped; on a POST's stream the
+            // replies its own calls wait for may have been in it, so they get an
+            // error instead of a wait that ends in the client's timeout, and the
+            // stream ends here.
+            if (own.size === 0) continue
+            for (const id of own) {
+              res.write(`data: ${withheldError(id, 'the plugin answered with an event that is not JSON; ScadBuddy does not pass it on')}\n\n`)
+            }
+            own.clear()
+            up.removeAllListeners('data')
+            up.destroy()
+            res.end()
+            return
           }
         })
-        up.on('end', () => res.end(pending))
+        // What is left is an unterminated event, which no client dispatches.
+        up.on('end', () => res.end())
         return
       }
       res.writeHead(status, out)
@@ -358,6 +492,12 @@ export type PluginsForRun = {
   problems: string[]
   /** Header values and their bare tokens, for redaction. */
   secrets: string[]
+  /**
+   * The enabled `hindsight` plugin with the address its check passed, when this
+   * run loaded one: the endpoint, bank and header of the session manager's
+   * automatic memory (memory/hindsight.ts). Never given to Claude Code.
+   */
+  hindsight?: CheckedPlugin
   release(): void
 }
 
@@ -367,6 +507,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     plugin,
     registration: forwarder.register(plugin, address),
   }))
+  const hindsight = loaded.plugins.find(({ plugin }) => plugin.name === HINDSIGHT_PLUGIN)
   return {
     plugins: registrations.map(({ plugin, registration }) => ({
       name: plugin.name,
@@ -376,6 +517,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     })),
     problems: loaded.problems,
     secrets: loaded.plugins.flatMap(({ plugin }) => (plugin.header ? headerSecretVariants(plugin.header.value) : [])),
+    ...(hindsight ? { hindsight } : {}),
     release: () => {
       for (const { registration } of registrations) registration.release()
     },

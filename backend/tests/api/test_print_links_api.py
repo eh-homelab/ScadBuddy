@@ -95,46 +95,17 @@ def test_attaching_a_queue_item_that_is_not_the_outputs_does_not_link_it(
 
 
 @respx.mock
-def test_attaching_links_the_outputs_pipeline_run_entries(client: TestClient, model: str) -> None:
-    configure(client)
-    output_id = make_output(client, model)
-    state(client).outputs.record_send(output_id, pipeline_run_id=1, print_route="pipeline")
-    run = recording("pipeline-run.json")
-    run["jobs"] = [{**run["jobs"][0], "queue_entry_id": 90, "status": "completed"}]
-    respx.get(f"{API}/pipeline-runs/1").mock(return_value=httpx.Response(200, json=run))
-    for item, archive in ((90, 32), (500, 99)):
-        respx.get(f"{API}/queue/{item}").mock(
-            return_value=httpx.Response(
-                200, json={**recording("queue-item.json"), "id": item, "archive_id": archive}
-            )
-        )
-    respx.post(f"{API}/projects/7/add-queue").mock(return_value=httpx.Response(200))
-    respx.post(f"{API}/projects/7/add-archives").mock(return_value=httpx.Response(200))
-
-    response = client.post(
-        f"/api/v1/print/outputs/{output_id}/project",
-        json={"project_id": 7, "queue_item_ids": [90, 500]},
-    )
-
-    assert response.status_code == 200
-    links = state(client).print_links
-    assert [link.archive_id for link in asyncio.run(links.for_output(output_id))] == [32]
-
-
-@respx.mock
-def test_attaching_entries_already_linked_does_not_read_the_run_again(
+def test_attaching_an_item_already_linked_to_the_output_links_it(
     client: TestClient, model: str
 ) -> None:
-    """The UI attaches once the progress read has settled, and that read linked the
-    run's entries: they are the output's without asking Bambuddy again (#522 review)."""
+    """A queue item the output's links name is the output's, even when its record no
+    longer carries that item's id (#522 review)."""
     configure(client)
     output_id = make_output(client, model)
-    state(client).outputs.record_send(output_id, pipeline_run_id=1, print_route="pipeline")
     links = state(client).print_links
     asyncio.run(
         links.record(output_id, PrintLink(archive_id=32, matched_by="queue_item", queue_item_id=90))
     )
-    run = respx.get(f"{API}/pipeline-runs/1").mock(return_value=httpx.Response(500))
     respx.get(f"{API}/queue/90").mock(
         return_value=httpx.Response(
             200, json={**recording("queue-item.json"), "id": 90, "archive_id": 32}
@@ -150,5 +121,4 @@ def test_attaching_entries_already_linked_does_not_read_the_run_again(
 
     assert response.status_code == 200
     assert response.json()["archive_ids"] == [32]
-    assert not run.called
     assert [link.archive_id for link in asyncio.run(links.for_output(output_id))] == [32]

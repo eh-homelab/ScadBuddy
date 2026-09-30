@@ -83,10 +83,10 @@ def test_a_split_part_is_not_edge_checked_so_it_raises_nothing() -> None:
 def test_a_flat_ceiling_is_past_the_default_support_threshold_with_a_fix() -> None:
     [found] = _run(OVERHANGS, geometry=geometry_of(tee()))
     assert found.severity == "info"
-    # The bar's whole underside, 30 x 10 mm: the stem is a separate closed box that
-    # only touches it, so the face over the stem still points down.
+    # The bar's middle third rests flush on the stem -- support, not overhang
+    # (#756) -- so only the 10 mm overhang on each side (200 mm^2) is left.
     area = next(e for e in found.evidence if e.unit == "mm\u00b2")
-    assert area.value == pytest.approx(300.0)
+    assert area.value == pytest.approx(200.0)
     [fix] = found.fixes
     [line] = fix.changes
     assert (line.target, line.setting, line.proposed) == (

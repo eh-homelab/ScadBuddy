@@ -89,9 +89,18 @@ class RenderService:
         self._reconciler: asyncio.Task[None] | None = None
         self._listened_before = False
         metrics.store_info.labels(projection.backend).set(1)
-        metrics.queue_depth_slo.set(config.render_queue_depth_slo)
-        metrics.queue_max.set(config.render_queue_max)
-        metrics.latency_slo.set(config.render_latency_slo)
+        self._publish_limits()
+
+    def reconfigure(self, config: Config) -> None:
+        """A live settings change (#322): the next submit and preview read ``config``,
+        and the exported limits say what is in effect."""
+        self.config = config
+        self._publish_limits()
+
+    def _publish_limits(self) -> None:
+        self.metrics.queue_depth_slo.set(self.config.render_queue_depth_slo)
+        self.metrics.queue_max.set(self.config.render_queue_max)
+        self.metrics.latency_slo.set(self.config.render_latency_slo)
 
     async def start(self) -> None:
         self.store.listener(on_state=self._listener_state)

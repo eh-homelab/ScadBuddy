@@ -8,13 +8,12 @@ import secrets
 import shutil
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
-    contextmanager,
     nullcontext,
     suppress,
 )
@@ -473,13 +472,13 @@ async def plates_thumbnails(
     return rendered, []
 
 
-@contextmanager
-def staged_assets(
+@asynccontextmanager
+async def staged_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
     model_dir: Path,
     store: AssetStore,
-) -> Iterator[dict[str, ParamValue]]:
+) -> AsyncIterator[dict[str, ParamValue]]:
     """``params`` with each uploaded file copied beside the model (#204).
 
     OpenSCAD resolves `import()` and `surface()` relative to the file that calls
@@ -489,11 +488,16 @@ def staged_assets(
     its file parameter against paths still takes it. Each render gets its own
     copies: two renders of one model overlap routinely, and a shared name would be
     deleted from under the one still running.
+
+    The lookup runs in a worker thread, as at every other call site: `use` is a
+    database round trip (#591) that can wait on a row lock, and on the loop that
+    wait would stall every other request and render in the process.
     """
+    found = await asyncio.to_thread(file_assets, schema, params, store, model_dir)
     staged = dict(params)
     created: list[Path] = []
     try:
-        for name, meta in file_assets(schema, params, store, model_dir).items():
+        for name, meta in found.items():
             target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
             shutil.copyfile(store.blob_path(meta), target)
             created.append(target)
@@ -521,6 +525,35 @@ class ModelSource:
         return replace(config, library_path=self.library_path)
 
 
+async def source_directory(
+    slug: str, requested: str | None, *, paths: DataPaths, history: ModelHistory | None
+) -> tuple[Path, str | None]:
+    """The model directory a revision's files are read from, and that revision: the
+    live directory for the current revision (or none requested), otherwise an export.
+    Nothing about the libraries it pins, so a caller that only reads its files (a
+    template's ``ui/``) works while a pinned checkout is missing and cannot be fetched.
+    """
+    current = (
+        await asyncio.to_thread(history.last_commit, model_path(slug))
+        if history is not None and history.available
+        else None
+    )
+    if requested is None or requested == current:
+        return paths.model_dir(slug), current
+    directory = paths.model_revision_dir(slug, requested)
+    if (directory / SOURCE_NAME).is_file():
+        # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
+        # than by export time and cannot take an old revision out from under a
+        # render that is still browsing it.
+        await asyncio.to_thread(_touch, directory)
+    else:
+        # A worker on the bambuddy store has no history: a snapshot it materialized is
+        # a populated export and needs none.
+        assert history is not None  # a requested revision implies a repository
+        await asyncio.to_thread(export_revision, history, slug, requested, directory)
+    return directory, requested
+
+
 async def resolve_source(
     slug: str,
     requested: str | None,
@@ -543,39 +576,24 @@ async def resolve_source(
     With a ``fetcher``, a pinned library checkout missing from the volume is cloned
     back into place rather than failing the resolve (#169).
     """
-    current = (
-        await asyncio.to_thread(history.last_commit, model_path(slug))
-        if history is not None and history.available
-        else None
-    )
-    if requested is None or requested == current:
+    directory, version = await source_directory(slug, requested, paths=paths, history=history)
+    if directory == paths.model_dir(slug):
         return ModelSource(
             scad=paths.model_source(slug),
             schema_cache=paths.model_schema_cache(slug),
-            version=current,
+            version=version,
             # Off the loop: `model.json` and each checkout are reads
             # on the same PVC the history's calls are offloaded for.
             library_path=await resolve_search_path(
                 fetcher, partial(model_search_path, paths, slug)
             ),
         )
-    directory = paths.model_revision_dir(slug, requested)
-    if (directory / SOURCE_NAME).is_file():
-        # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
-        # than by export time and cannot take an old revision out from under a
-        # render that is still browsing it.
-        await asyncio.to_thread(_touch, directory)
-    else:
-        # A worker on the bambuddy store has no history: a snapshot it materialized is
-        # a populated export and needs none.
-        assert history is not None  # a requested revision implies a repository
-        await asyncio.to_thread(export_revision, history, slug, requested, directory)
     # The pins that revision declares, not the live model's: an old revision
     # renders against the library versions it was written with.
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
-        version=requested,
+        version=version,
         library_path=await resolve_search_path(
             fetcher, partial(revision_search_path, paths, directory)
         ),
@@ -768,11 +786,9 @@ async def render_main(
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         work.mkdir(parents=True, exist_ok=True)
-        with (
-            staged_assets(schema, params, prepared.scad.parent, assets) as staged,
-            stage("render"),
-        ):
-            return await _render_main(prepared, schema, staged, params, work, config=config)
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+            with stage("render"):
+                return await _render_main(prepared, schema, staged, params, work, config=config)
 
 
 async def render_solids_stage(
@@ -792,7 +808,7 @@ async def render_solids_stage(
     beside the files it names, which is what :func:`finish_piece_stage` reads."""
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
-        with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
             return await _render_solids(
                 prepared, schema, staged, params, work, output, config=config, stage=stage
             )
@@ -903,7 +919,7 @@ async def render_job(
         work = paths.cache / "render-job" / job.id
         work.mkdir(parents=True, exist_ok=True)
 
-        with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:
+        async with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:
             with stage("render"):
                 output = await _render_main(
                     prepared, schema, params, job.params, work, config=config

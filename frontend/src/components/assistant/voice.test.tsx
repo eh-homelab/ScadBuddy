@@ -127,7 +127,7 @@ describe('voice feature detection', () => {
     await openPanel()
     const note = screen.getByText(/Voice input is transcribed by your browser/)
     expect(note).toBeVisible()
-    expect(note).toHaveTextContent('may send the audio to its maker’s servers (Chrome does)')
+    expect(note).toHaveTextContent('may send the audio to its maker’s servers.')
     expect(screen.getByRole('button', { name: 'Voice input' })).toHaveAccessibleDescription(note.textContent!)
   })
 

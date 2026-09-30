@@ -26,6 +26,7 @@ from scadbuddy.library.assets import (
 )
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from tests.conftest import PgPool
 
 HEART_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
@@ -56,8 +57,8 @@ def png_bytes(
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> AssetStore:
-    return AssetStore(tmp_path / "assets")
+def store(tmp_path: Path, pg_pool: PgPool) -> AssetStore:
+    return AssetStore(tmp_path / "assets", pg_pool)
 
 
 def test_an_svg_is_stored_under_the_hash_of_what_was_kept(store: AssetStore) -> None:
@@ -77,7 +78,10 @@ def test_the_same_content_is_stored_once(store: AssetStore) -> None:
     second = store.put(HEART_SVG, "b.svg")
 
     assert first.id == second.id
-    assert sorted(p.name for p in store.root.iterdir()) == [f"{first.id}.json", f"{first.id}.svg"]
+    # The bytes alone: the metadata is a row (#591), named by the latest upload.
+    assert [p.name for p in store.root.iterdir()] == [f"{first.id}.svg"]
+    assert second.name == "b.svg"
+    assert store.get(first.id) == second
 
 
 def test_the_svg_loses_everything_that_runs_or_fetches() -> None:
@@ -374,11 +378,11 @@ def test_the_catalogue_thumbnail_is_never_a_sample(model_dir: Path) -> None:
     assert sample_files(model_dir) == ["sample-cat.svg"]
 
 
-def test_an_adopted_asset_is_stored_as_it_was_and_listed(tmp_path: Path) -> None:
+def test_an_adopted_asset_is_stored_as_it_was_and_listed(tmp_path: Path, pg_pool: PgPool) -> None:
 
-    source = AssetStore(tmp_path / "api")
+    source = AssetStore(tmp_path / "api", pg_pool)
     meta = source.put(HEART_SVG, "heart.svg")
-    worker = AssetStore(tmp_path / "worker")
+    worker = AssetStore(tmp_path / "worker", pg_pool)
     worker.adopt(meta, source.blob_path(meta).read_bytes())
     assert worker.get(meta.id) == meta
     assert worker.ids() == [meta.id]

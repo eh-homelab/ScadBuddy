@@ -14,18 +14,21 @@ from scadbuddy.store.assets import RemoteAssets, asset_key
 from scadbuddy.store.content import BlobRef
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalContentBackend
+from tests.conftest import PgPool
 from tests.support.store import local_content
 
 pytestmark = pytest.mark.requires_postgres
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>'
 
 
-async def test_an_upload_on_the_api_is_readable_on_a_worker(tmp_path: Path, pool: Pool) -> None:
+async def test_an_upload_on_the_api_is_readable_on_a_worker(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
-    worker = AssetStore(tmp_path / "worker" / "assets")
+    worker = AssetStore(tmp_path / "worker" / "assets", pg_pool)
     params = {"logo": meta.id, "width": 3}
     assert await remote.ensure(worker, asset_ids_in(params)) == [meta.id]
     assert worker.get(meta.id) == meta
@@ -39,9 +42,11 @@ async def test_an_upload_on_the_api_is_readable_on_a_worker(tmp_path: Path, pool
     assert not stored.exists()
 
 
-async def test_backfill_mirrors_uploads_made_before_the_store(tmp_path: Path, pool: Pool) -> None:
+async def test_backfill_mirrors_uploads_made_before_the_store(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "assets")
+    api = AssetStore(tmp_path / "assets", pg_pool)
     meta = api.put(SVG, "old.svg")
     assert await remote.backfill(api) == 1
     assert await remote.backfill(api) == 0
@@ -63,9 +68,11 @@ def _age(pool: Pool, key: str) -> None:
         )
 
 
-async def test_a_re_upload_during_the_sweep_keeps_its_row(tmp_path: Path, pool: Pool) -> None:
+async def test_a_re_upload_during_the_sweep_keeps_its_row(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
     _age(pool, asset_key(meta.id))
@@ -87,16 +94,18 @@ class _FlakyBackend(LocalContentBackend):
         await super().remove(backend_id)
 
 
-async def test_a_failed_drop_is_retried_by_the_next_sweep(tmp_path: Path, pool: Pool) -> None:
+async def test_a_failed_drop_is_retried_by_the_next_sweep(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     content = local_content(tmp_path / "remote", pool)
     content.backend = _FlakyBackend(tmp_path / "remote")
     remote = RemoteAssets(content)
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     first, second = api.put(SVG, "a.svg"), api.put(SVG.replace(b"4", b"5"), "b.svg")
     for meta in (first, second):
         await remote.mirror(api, meta, slug="demo", title="Demo")
         _age(pool, asset_key(meta.id))
-    swept = AssetStore(tmp_path / "swept" / "assets")  # the API after its sweep: neither
+    swept = AssetStore(tmp_path / "swept" / "assets", pg_pool)  # the API after its sweep: neither
     dropped = await remote.drop(sorted([first.id, second.id]), cutoff=await remote.clock())
     assert len(dropped) == 1  # one failed and was kept; the other still went
     kept = next(i for i in (first.id, second.id) if i not in dropped)
@@ -106,26 +115,28 @@ async def test_a_failed_drop_is_retried_by_the_next_sweep(tmp_path: Path, pool: 
 
 
 async def test_ensure_leaves_another_backends_row_and_drops_a_corrupt_copy(
-    tmp_path: Path, pool: Pool
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
 ) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
     (tmp_path / "remote" / f"asset/{meta.id}").write_bytes(b"altered")
     foreign_id = "e" * 64
     foreign = BlobRef(sha256=foreign_id, kind="asset", backend="bambuddy", backend_id="7", size=1)
     remote.content.index.put(asset_key(foreign_id), foreign, slug=None, meta={})
-    worker = AssetStore(tmp_path / "worker" / "assets")
+    worker = AssetStore(tmp_path / "worker" / "assets", pg_pool)
     assert await remote.ensure(worker, [meta.id, foreign_id]) == []
     assert remote.content.index.get(asset_key(foreign_id)) is not None
     assert remote.content.index.get(asset_key(meta.id)) is None  # dropped, object too
     assert not (tmp_path / "remote" / f"asset/{meta.id}").exists()
 
 
-async def test_backfill_re_mirrors_a_row_on_another_backend(tmp_path: Path, pool: Pool) -> None:
+async def test_backfill_re_mirrors_a_row_on_another_backend(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "assets")
+    api = AssetStore(tmp_path / "assets", pg_pool)
     meta = api.put(SVG, "old.svg")
     foreign = BlobRef(sha256=meta.id, kind="asset", backend="bambuddy", backend_id="7", size=1)
     remote.content.index.put(asset_key(meta.id), foreign, slug=None, meta={})
@@ -135,18 +146,20 @@ async def test_backfill_re_mirrors_a_row_on_another_backend(tmp_path: Path, pool
 
 
 async def test_backfill_skips_an_upload_swept_meanwhile(
-    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pool: Pool, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "assets")
+    api = AssetStore(tmp_path / "assets", pg_pool)
     kept = api.put(SVG, "a.svg")
     monkeypatch.setattr(api, "ids", lambda: ["d" * 64, kept.id])  # one swept since
     assert await remote.backfill(api) == 1
 
 
-async def test_drop_swept_assets_drops_the_stores_copies(tmp_path: Path, pool: Pool) -> None:
+async def test_drop_swept_assets_drops_the_stores_copies(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
     state = cast(AppState, SimpleNamespace(store=SimpleNamespace(remote_assets=remote)))
@@ -167,36 +180,38 @@ def _mark_swept(pool: Pool, key: str) -> None:
 
 
 async def test_reconcile_leaves_a_copy_the_sweep_never_decided_to_drop(
-    tmp_path: Path, pool: Pool
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
 ) -> None:
     """A volume restored from a backup lacks recent uploads: their copies are all left."""
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
     _age(pool, asset_key(meta.id))
-    restored = AssetStore(tmp_path / "restored" / "assets")
+    restored = AssetStore(tmp_path / "restored" / "assets", pg_pool)
     assert await remote.reconcile(restored, cutoff=await remote.clock()) == []
     assert remote.content.index.get(asset_key(meta.id)) is not None
 
 
 async def test_reconcile_spares_a_marked_copy_touched_after_the_cutoff(
-    tmp_path: Path, pool: Pool
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
 ) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     cutoff = await remote.clock()
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")  # after the cutoff
     _mark_swept(pool, asset_key(meta.id))
-    elsewhere = AssetStore(tmp_path / "elsewhere" / "assets")  # not (yet) local here
+    elsewhere = AssetStore(tmp_path / "elsewhere" / "assets", pg_pool)  # not (yet) local here
     assert await remote.reconcile(elsewhere, cutoff=cutoff) == []
     assert remote.content.index.get(asset_key(meta.id)) is not None
 
 
-async def test_a_re_upload_clears_the_swept_mark(tmp_path: Path, pool: Pool) -> None:
+async def test_a_re_upload_clears_the_swept_mark(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
     remote = RemoteAssets(local_content(tmp_path / "remote", pool))
-    api = AssetStore(tmp_path / "api" / "assets")
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
     meta = api.put(SVG, "logo.svg")
     await remote.mirror(api, meta, slug="demo", title="Demo")
     _mark_swept(pool, asset_key(meta.id))

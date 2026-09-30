@@ -18,22 +18,30 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    PrintProgressDep,
-    PrintWatcherDep,
     RenderDep,
     SettingsStoreDep,
     SlugPath,
     StateDep,
     UploadsDep,
 )
-from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.download import download_3mf
+from scadbuddy.bambuddy.project_file import (
+    ProjectFile,
+    ProjectFileRequest,
+    file_into_project,
+    project_stem,
+)
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -41,11 +49,10 @@ from scadbuddy.library.outputs import (
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
-    download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
 
@@ -267,16 +274,34 @@ async def delete_output(
 
 @router.get(
     "/outputs/{output_id}/model.3mf",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
+) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+    # For the default printer, on its real presets (#769), with the template's own
+    # print settings (#770).
+    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+
+
+@router.get(
+    "/outputs/{output_id}/preview.glb",
+    response_class=FileResponse,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+    summary="The output's preview mesh",
+)
+def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+    require_output(outputs, output_id)
+    path = outputs.directory(output_id) / PREVIEW_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
+    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
 
 
 @router.get(
@@ -414,7 +439,7 @@ async def put_output_thumbnail(
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
-    summary="Send the 3MF to Bambuddy",
+    summary="Upload the 3MF to the Bambuddy library",
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
@@ -422,22 +447,96 @@ async def send_output_to_bambuddy(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
-    observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
 ) -> SendResult:
-    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-    slice and queue it.
+    """Upload ``model.3mf`` to the configured library folder, laid out for the printer
+    set in Settings, and note the "Edit in ScadBuddy" link on it.
+
+    Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+    ``mode`` accepts only ``"library"``.
 
     The file is read from the PVC and pushed by the server, so the API key never
     reaches the browser. A re-send reuses the copy already in the inbox while it was
     laid out for the same printer, and replaces it otherwise (#316).
     """
+    del body  # validated for its ``mode`` alone
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, uploads, meta, settings, body)
-    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
-    if result.pipeline_run_id is not None or result.queue_item_id is not None:
-        observer.started(meta)
-        await watcher.started(meta.id)
-    return result
+        return await send_output(client, outputs, uploads, meta, settings)
+
+
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
+
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
+        return {}
+    if schema is None:
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
+    """
+    try:
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)
+
+
+@router.post(
+    "/outputs/{output_id}/project-file",
+    response_model=ProjectFile,
+    summary="File this output's 3MF in a project's Bambuddy folder",
+)
+async def post_project_file(
+    output_id: OutputIdPath,
+    body: ProjectFileRequest,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    store: SettingsStoreDep,
+    catalogue: CatalogueDep,
+) -> ProjectFile:
+    """Upload the editable project 3MF into the project's folder (#317), as Generate does
+    when a project is chosen.
+
+    Idempotent per (folder, target): the same project chosen again answers with the file
+    already there (``created: false``), and a later print on the same printer reuses it
+    (#316). The folder is created and linked if the project has none. Every Bambuddy
+    call is made here, so the API key never reaches the browser.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    stem = await output_stem(meta, outputs, catalogue)
+    async with client_for(settings) as client:
+        return await file_into_project(
+            client, outputs, uploads, meta, settings, body.project_id, stem=stem
+        )

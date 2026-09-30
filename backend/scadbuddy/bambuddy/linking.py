@@ -18,16 +18,15 @@ Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1-L3 and L8-L10)
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Collection
 from datetime import timedelta
 
 import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import PipelineRun, QueueItem
+from scadbuddy.bambuddy.models import QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
-from scadbuddy.bambuddy.stages import Stage, stage_of
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
@@ -50,11 +49,6 @@ SCAN_AFTER = timedelta(days=14)
 #: And before its first upload, so a date filter in another time zone cannot cut the
 #: first print off.
 SCAN_BEFORE = timedelta(days=1)
-#: Pipeline job stages whose queue entry can carry an archive: a copy cancelled
-#: mid-print has one too (queue 34 → archive 18 in the spike). Read through the progress
-#: read's vocabulary, since the pipeline route's job states were not measured live and
-#: Bambuddy may say ``complete`` or ``canceled`` (#522 review).
-DISPATCHED_STAGES: frozenset[Stage] = frozenset({"running", "done", "failed", "cancelled"})
 
 
 async def link_item(
@@ -81,17 +75,14 @@ async def owned_queue_items(
     wanted: Collection[int],
 ) -> set[int]:
     """Which of ``wanted`` are queue items ScadBuddy created for this output's prints:
-    its plates' and last item on the slice-and-queue route, and its pipeline run's
-    entries.
+    its plates' and its last item on the slice-and-queue route.
 
     Only these may be linked from outside a progress read. An id a caller names is
     otherwise any queue item in Bambuddy, and linking its archive would open the media
     proxy to a print ScadBuddy never made (#522 review).
 
-    An item already linked to the output is one of these (links are recorded only from
-    them), so the pipeline run is read only for a wanted id that is neither on the
-    output nor linked yet. The UI files a print once its progress read has settled, and
-    that read has linked the dispatched entries, so an attach then costs no extra read.
+    An item already linked to the output is one of these, since links are recorded
+    only from them.
     """
     owned = {plate.queue_item_id for plate in meta.plates}
     if meta.queue_item_id is not None:
@@ -99,52 +90,10 @@ async def owned_queue_items(
     try:
         known = await links.for_output(meta.id)
     except (psycopg.Error, DatabaseRequiredError):
-        # The run is then read for them instead.
         logger.exception("could not read an output's print links", extra={"output_id": meta.id})
     else:
         owned.update(link.queue_item_id for link in known if link.queue_item_id is not None)
-    if meta.pipeline_run_id is not None and not owned.issuperset(wanted):
-        try:
-            run = await client.pipeline_run(meta.pipeline_run_id)
-        except ApiError:
-            # The run's entries then go unlinked here; the progress read links them.
-            logger.exception(
-                "could not read the pipeline run an output's queue entries belong to",
-                extra={"output_id": meta.id, "pipeline_run_id": meta.pipeline_run_id},
-            )
-        else:
-            owned.update(job.queue_entry_id for job in run.jobs if job.queue_entry_id is not None)
     return owned.intersection(wanted)
-
-
-async def link_run(
-    client: BambuddyClient,
-    links: PrintLinkStore,
-    output_id: str,
-    run: PipelineRun,
-    *,
-    gone: Callable[[int], Awaitable[None]] | None = None,
-) -> None:
-    """A pipeline run's copies reach their archives through their queue entries.
-
-    Only entries not yet linked are read, and only for jobs past dispatch, so a
-    settled run costs nothing on later polls. An entry that is gone is handed to
-    ``gone``, which finds its archive by hash as the slice-and-queue route does.
-    """
-    linked = await links.linked_queue_items(output_id)
-    for job in run.jobs:
-        entry = job.queue_entry_id
-        if entry is None or entry in linked or stage_of(job.status) not in DISPATCHED_STAGES:
-            continue
-        try:
-            item = await client.queue_item(entry)
-        except ApiError as error:
-            if error.status != status.HTTP_404_NOT_FOUND:
-                raise
-            if gone is not None:
-                await gone(entry)
-            continue
-        await link_item(links, output_id, item)
 
 
 async def _slice_hashes(

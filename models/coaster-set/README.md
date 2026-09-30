@@ -24,12 +24,16 @@ Coasters are laid out in a grid with `gap` mm between them, as many as fit the
 H2C plate (300 × 320 mm with both nozzles), in the squarest arrangement. If
 `count` coasters do not fit, the model places as many as do and logs
 `NOTE: only N coasters of M fit on the plate`; print the rest as a second
-plate. The holder, when on, takes the last cell of the grid, and every cell is
-then sized for the holder. When even one coaster and the holder do not fit
-side by side that way (a 150 mm coaster with `holder_clearance` 3: two
-161 mm cells are more than the plate either way; at the default 1 mm clearance
-they still fit), the one coaster sits above the holder instead, with the gap cut to fit
-if it has to be (`NOTE: gap reduced`).
+plate. The holder, when on, does not take a grid cell: the coasters keep
+cells of their own size, and the holder (a few mm larger) goes beside the
+grid, below it, or in the empty end of the last row, whichever fits and is
+squarest. Eight 95 mm coasters with a holder fit seven on the plate (six in
+two rows of three, the seventh in a third row beside the holder); twelve
+70 mm coasters all fit, with the holder in a row below. When even one coaster
+and the holder do not fit side by side or one above the other with the gap (a
+150 mm coaster with a `gap` of 20: 150 + 20 + 156.8 mm is deeper than the
+plate, and side by side is wider), the one coaster sits above the holder with
+the gap cut to fit (`NOTE: gap reduced`).
 
 A Text pattern with empty `text`, or a Monogram with blank `letters`, gives
 plain coasters and logs a `NOTE:` saying so.
@@ -152,19 +156,23 @@ one part and one filament. The defaults print in three colours.
 ./verify.sh
 ```
 
-Renders the defaults and 36 variations: every pattern (read from the
+Renders the defaults and 41 variations: every pattern (read from the
 dropdown, so a new one is tested automatically) cycling through the shapes, a
 cork recess on every shape, face-down text, per-coaster monograms with a
 holder and alternating colours, SVG and PNG overlays (including a `.PNG`
 upper-case extension picked up by `auto`, a forced threshold, the pre-#318 `image_threshold`
 value, inverted and face down), a missing overlay file, five refused `overlay_file` values
 (`../`, absolute, a subdirectory, a dotfile, a backslash), a set too large for
-the plate, twelve small coasters with a holder, a recess reduced and a recess dropped because the
+the plate, twelve small coasters with a holder, eight 95 mm and twelve 70 mm
+coasters with a holder (#411), a recess reduced and a recess dropped because the
 coaster is too thin, and the finest pattern on the largest coaster. Each 3MF is
 checked for: no geometry on the `Default` material; exactly the expected
 colour parts, each rendered closed on its own and summing to the whole (no
-overlaps); the layout's coaster count and columns; z = 0; the bounding box
-equal to the layout the parameters imply and inside the plate; every inlay
+overlaps); the plate split into its connected pieces, without re-deriving
+the grid (#422): one piece per coaster of a coaster's size and thickness,
+plus the holder, no two footprints closer than the gap (or the reduced gap
+the log gives), all inside the 300 × 320 plate on z = 0, and how many
+coasters fit for the #411 cases; every inlay
 exactly `inlay_depth` deep and flush with the decorated face; the solid volume
 equal to outline × thickness minus the recess; refused overlay names never
 reaching `import()`/`surface()`; no OpenSCAD warnings or errors; the legacy `overlay_type="image_threshold"`

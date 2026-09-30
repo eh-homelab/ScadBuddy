@@ -10,6 +10,12 @@
  * on `approval.required` and goes nowhere until the panel sends `approval.decision`
  * (spec §8.2). It also lists a session an external MCP agent owns, so the picker's
  * "controlled by …" badge and Take over have something to act on.
+ *
+ * Each chat has a budget (#790, `budgetUsd`, $1.00 by default) that every turn spends
+ * $0.0184 of; once it is spent the agent answers as the real one does. The session
+ * routes the panel calls over HTTP for a spent chat (fork, raise its budget) are msw
+ * handlers in `features/assistantSessions.ts`, which act on the open mock through
+ * `mockAgentSessions()`.
  */
 import type { ChatTransport, TransportHandlers } from '../agent/chat/transport'
 import {
@@ -32,6 +38,25 @@ export const EXTERNAL_SESSION_ID = 'sess-desktop'
 export interface MockAgentOptions {
   /** Delay between scripted steps. 0 in unit tests. */
   stepMs?: number
+  /** What a new chat may spend in all; each turn costs COST_PER_TURN. */
+  budgetUsd?: number
+}
+
+/** What one scripted turn costs. */
+export const COST_PER_TURN = 0.0184
+
+/** The session routes' side of the open mock agent (fork, raise), for the msw handlers. */
+export interface MockAgentSessions {
+  /** The new session's id and title, or an error to answer with. */
+  fork(sessionId: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
+}
+
+let openAgent: MockAgentSessions | null = null
+
+/** The mock agent the panel is connected to now, if any. */
+export function mockAgentSessions(): MockAgentSessions | null {
+  return openAgent
 }
 
 export interface MockAgentTransport extends ChatTransport {
@@ -46,6 +71,8 @@ interface MockSession extends SessionSummary {
   pending?: { id: string; toolCallId: string }
   streaming?: string
   turns: number
+  costUsd: number
+  budgetUsd: number
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -55,7 +82,7 @@ function chunks(text: string, size = 14): string[] {
   return out
 }
 
-export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}): MockAgentTransport {
+export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAgentOptions = {}): MockAgentTransport {
   let handlers: TransportHandlers | null = null
   const sent: ClientMessage[] = []
   const sessions = new Map<string, MockSession>()
@@ -99,10 +126,21 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
     ]
   }
 
+  const money = (usd: number) => `$${usd.toFixed(2)}`
+
   const finish = (s: MockSession) => {
     s.turns += 1
+    s.costUsd += COST_PER_TURN
     setStatus(s, 'idle')
-    emit({ type: 'session.result', sessionId: s.sessionId, costUsd: 0.0184 * s.turns, turns: s.turns })
+    emit({ type: 'session.result', sessionId: s.sessionId, costUsd: s.costUsd, turns: s.turns, budgetUsd: s.budgetUsd })
+    if (s.costUsd >= s.budgetUsd) {
+      emit({
+        type: 'error',
+        sessionId: s.sessionId,
+        code: 'error_max_budget_usd',
+        message: `this chat used its ${money(s.budgetUsd)} budget (${money(s.costUsd)} spent)`,
+      })
+    }
   }
 
   const firstTurn = (s: MockSession): Array<() => void> => {
@@ -201,6 +239,8 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
       log: [],
       timers: [],
       turns: 1,
+      costUsd: COST_PER_TURN,
+      budgetUsd,
     }
     sessions.set(s.sessionId, s)
     const id = s.sessionId
@@ -231,6 +271,20 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
           emit({ type: 'error', sessionId: s.sessionId, code: 'not_owner', message: `${s.owner.label} controls this session. Take over first.` })
           return
         }
+        if (s && s.costUsd >= s.budgetUsd) {
+          // Not logged, as the real agent answers the sender alone.
+          const refusal: EventBody[] = [
+            { type: 'session.budget', sessionId: s.sessionId, costUsd: s.costUsd, budgetUsd: s.budgetUsd },
+            {
+              type: 'error',
+              sessionId: s.sessionId,
+              code: 'budget_exhausted',
+              message: `session ${s.sessionId} has spent its budget (${money(s.costUsd)} of ${money(s.budgetUsd)})`,
+            },
+          ]
+          for (const body of refusal) deliver({ v: PROTOCOL_VERSION, ...body } as ServerEvent)
+          return
+        }
         const isNew = !s
         if (!s) {
           s = {
@@ -242,9 +296,11 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
             log: [],
             timers: [],
             turns: 0,
+            costUsd: 0,
+            budgetUsd,
           }
           sessions.set(s.sessionId, s)
-          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title })
+          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
         }
         emit({ type: 'user.turn', sessionId: s.sessionId, turnId: nextId('turn'), text: msg.text, author: BROWSER_USER })
         setStatus(s, 'running')
@@ -287,10 +343,48 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
     }
   }
 
+  const controls: MockAgentSessions = {
+    fork(sessionId) {
+      const parent = sessions.get(sessionId)
+      if (!parent) return { error: `no session ${sessionId}`, status: 404 }
+      const child: MockSession = {
+        sessionId: nextId('chat'),
+        title: `${parent.title || 'session'} (fork)`,
+        origin: parent.origin,
+        owner: BROWSER_USER,
+        status: 'idle',
+        log: [],
+        timers: [],
+        turns: 0,
+        costUsd: 0,
+        budgetUsd,
+      }
+      sessions.set(child.sessionId, child)
+      const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
+      child.log.push(
+        { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
+        ...parent.log.filter((e) => conversation.has(e.type)).map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
+        { v: PROTOCOL_VERSION, type: 'session.status', sessionId: child.sessionId, status: 'idle' },
+      )
+      return { id: child.sessionId, title: child.title, budgetUsd, parentId: parent.sessionId }
+    },
+    raise(sessionId, addUsd) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `${s.owner.label} controls this session`, status: 403 }
+      s.budgetUsd = Math.round((s.budgetUsd + addUsd) * 100) / 100
+      emit({ type: 'session.budget', sessionId, costUsd: s.costUsd, budgetUsd: s.budgetUsd })
+      return { costUsd: s.costUsd, budgetUsd: s.budgetUsd }
+    },
+  }
+
   return {
     sent,
     connect(h) {
       handlers = h
+      openAgent = controls
+      // In-process, so open at once (the real socket reports it when its handshake is done).
+      h.onOpen?.()
       seedExternal()
       deliver({
         v: PROTOCOL_VERSION,
@@ -307,9 +401,11 @@ export function createMockAgentTransport({ stepMs = 120 }: MockAgentOptions = {}
     send(message) {
       sent.push(message)
       onMessage(message)
+      return 'sent'
     },
     close() {
       handlers = null
+      if (openAgent === controls) openAgent = null
       sessions.forEach((s) => s.timers.forEach(clearTimeout))
     },
   }

@@ -15,6 +15,8 @@ export type FakeTurn =
   | {
       reply: string
       costUsd?: number
+      /** The result's subtype; `success` when omitted. */
+      subtype?: 'success' | 'error_max_budget_usd' | 'error_max_turns'
       /** Keeps the stream open after the result until this settles (the SDK's last appends). */
       holdAfterResult?: Promise<void>
     }
@@ -60,8 +62,9 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
       yield stream({ type: 'content_block_stop', index: 0 })
       yield {
         type: 'result',
-        subtype: 'success',
-        is_error: false,
+        subtype: turn.subtype ?? 'success',
+        is_error: (turn.subtype ?? 'success') !== 'success',
+        ...(turn.subtype && turn.subtype !== 'success' ? { errors: [`Reached maximum budget ($0.025546000000000007)`] } : {}),
         num_turns: 1,
         total_cost_usd: turn.costUsd ?? 0.01,
         session_id,

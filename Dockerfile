@@ -185,6 +185,9 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
+# The authoring guide the agent serves as `scadbuddy://docs/authoring` (#252):
+# `pnpm build` copies it into dist/docs (agent/src/tools/guide.ts).
+COPY plugins/scadbuddy/skills/authoring/SKILL.md /src/plugins/scadbuddy/skills/authoring/SKILL.md
 RUN pnpm build
 
 # Production dependencies only, installed from the same lockfile in a stage of

@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { delay, HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { server } from '../mocks/server'
 import { settings } from '../mocks/fixtures'
@@ -35,6 +35,23 @@ describe('useDisplayUnit', () => {
     const { result } = renderHook(() => useDisplayUnit())
     loadDisplayUnit()
     await waitFor(() => expect(result.current).toBe('in'))
+  })
+
+  it('keeps a unit set while the stored one is still loading (a Settings save wins)', async () => {
+    let answered = false
+    server.use(
+      http.get('/api/v1/settings', async () => {
+        await delay(50)
+        answered = true
+        return HttpResponse.json({ ...settings, display_unit: 'mm' })
+      }),
+    )
+    const { result } = renderHook(() => useDisplayUnit())
+    loadDisplayUnit()
+    act(() => setDisplayUnit('in'))
+    await waitFor(() => expect(answered).toBe(true))
+    await act(() => delay(0))
+    expect(result.current).toBe('in')
   })
 
   it('stays in millimetres when the settings cannot be read', async () => {

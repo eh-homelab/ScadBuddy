@@ -1,0 +1,44 @@
+{
+    "file_id": 67,
+    "filename": "Clara's Wand.3mf",
+    "plates": [
+        {
+            "index": 1,
+            "name": "makerlab",
+            "objects": [
+                "quant_1"
+            ],
+            "object_count": 1,
+            "has_thumbnail": true,
+            "thumbnail_url": "/api/v1/library/files/67/plate-thumbnail/1",
+            "print_time_seconds": null,
+            "filament_used_grams": null,
+            "filaments": []
+        },
+        {
+            "index": 2,
+            "name": "quant_1_A",
+            "objects": [
+                "quant_1_A",
+                "quant_1_B"
+            ],
+            "object_count": 2,
+            "has_thumbnail": true,
+            "thumbnail_url": "/api/v1/library/files/67/plate-thumbnail/2",
+            "print_time_seconds": null,
+            "filament_used_grams": null,
+            "filaments": []
+        }
+    ],
+    "is_multi_plate": true,
+    "embedded_printer": "Bambu Lab A1 0.4 nozzle",
+    "embedded_process": "0.20mm Standard @BBL A1",
+    "design_overrides": [
+        {
+            "key": "enable_support",
+            "value": "1",
+            "printer_coupled": false,
+            "preset_defining": false
+        }
+    ]
+}
