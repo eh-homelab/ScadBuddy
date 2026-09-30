@@ -459,6 +459,8 @@ type LocalTurn = {
    * SDK's last transcript appends, so interrupt() leaves it alone and says so.
    */
   settling: boolean
+  /** The turn's run, final events included; it never rejects. */
+  done?: Promise<unknown>
 }
 
 export class SessionManager {
@@ -753,6 +755,7 @@ export class SessionManager {
       .finally(() => {
         if (this.active.get(id) === local) this.active.delete(id)
       })
+    local.done = done
     return { turnId, done }
   }
 
@@ -1342,5 +1345,14 @@ export class SessionManager {
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
   abortAll(): void {
     for (const { controller } of this.active.values()) controller.abort(new Error(SHUTTING_DOWN))
+  }
+
+  /**
+   * Once every turn running now has finished, its last events appended: what a
+   * shutdown waits for after abortAll(), before it closes the database those appends
+   * use (#802).
+   */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.active.values()].map((turn) => turn.done))
   }
 }
