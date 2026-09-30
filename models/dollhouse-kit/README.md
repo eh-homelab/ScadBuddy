@@ -17,8 +17,9 @@ The second picture is the hidden `preview = "room"` mode: one back corner of a
 You enter a box house: modules wide and deep (150 mm each), storeys, and windows
 per storey. It lists every piece that house needs, with counts. **Show** puts
 one piece in the preview on the one-module grid, and Generate keeps the piece
-shown, so a house is generated one piece at a time. The style parameters
-(exterior, wallpaper, colours) apply to every piece. Generating the whole house
+shown, so a house is generated one piece at a time. The Grid sizes (module,
+course height, wall and floor thickness) and the style parameters (exterior,
+wallpaper, colours) stay editable and apply to every piece. Generating the whole house
 in one go is still to come (it needs template pipelines).
 
 **Safety:** the keys, pegs and hinge pins are small parts and a choking hazard

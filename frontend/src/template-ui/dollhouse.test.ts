@@ -81,6 +81,8 @@ describe('the designer', () => {
     parameters: [
       { name: 'piece', type: 'select', group: 'Piece', initial: 'wall_window', caption: '' },
       { name: 'course', type: 'select', group: 'Piece', initial: 'upper', caption: '' },
+      { name: 'module_size', type: 'number', group: 'Grid', initial: 150, caption: '' },
+      { name: 'width_units', type: 'number', group: 'Grid', initial: 1, caption: '' },
       { name: 'exterior', type: 'select', group: 'Exterior', initial: 'plain', caption: '' },
     ],
   } as unknown as CustomizerSchema
@@ -134,6 +136,9 @@ describe('the designer', () => {
     expect(root.querySelector('sb-generate')).not.toBeNull()
     expect(root.querySelector('sb-param[name="exterior"]')).not.toBeNull()
     expect(root.querySelector('sb-param[name="piece"]')).toBeNull()
+    // The Grid sizes are the user's; a piece's size in modules is the designer's.
+    expect(root.querySelector('sb-param[name="module_size"]')).not.toBeNull()
+    expect(root.querySelector('sb-param[name="width_units"]')).toBeNull()
     button('floor_tile').click()
     expect(set).toHaveBeenLastCalledWith({
       params: { piece: 'floor_tile', course: 'upper', width_units: 1, depth_units: 1 },

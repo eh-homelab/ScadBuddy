@@ -5,7 +5,6 @@
 import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceParams } from './pieces.js'
 
 const DRIVEN = new Set(['piece', 'course', 'width_units', 'depth_units'])
-const HIDDEN_GROUPS = new Set(['Piece', 'Grid'])
 const HOUSE_LABELS = {
   cols: 'Modules wide',
   rows: 'Modules deep',
@@ -53,11 +52,12 @@ export async function mount(root, host) {
     form.append(element('label', {}, HOUSE_LABELS[key], input))
   }
 
-  // Every style parameter is the host's own widget; the piece and its grid are the
+  // Every other parameter is the host's own widget, the Grid sizes included (one value
+  // for every piece of a house); the piece, its course and its size in modules are the
   // designer's to set.
   const style = element('div')
   for (const param of schema.parameters ?? []) {
-    if (DRIVEN.has(param.name) || HIDDEN_GROUPS.has(param.group)) continue
+    if (DRIVEN.has(param.name) || param.group === 'Piece') continue
     const field = element('sb-param')
     field.setAttribute('name', param.name)
     style.append(field)
@@ -125,7 +125,7 @@ export async function mount(root, host) {
 
   draw(host.inputs.get())
   const unsubscribe = host.inputs.subscribe(draw)
-  host.describe?.(() => {
+  host.describe(() => {
     const inputs = host.inputs.get()
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
     const count = housePieces(house).reduce((sum, entry) => sum + entry.count, 0)
