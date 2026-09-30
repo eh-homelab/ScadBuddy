@@ -313,6 +313,17 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     await waitIdle(session.id)
   })
 
+  it('settles once the aborted turns have appended their last events (#802)', async () => {
+    next = { hang: true }
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'wait' })
+    m.abortAll()
+    await m.settled()
+    // Nothing left to append: a shutdown may close the database now.
+    const events = await m.events.read(session.id, 0)
+    expect(events.at(-1)?.event).toMatchObject({ type: 'session.status', status: 'idle' })
+    await expect(m.settled()).resolves.toBeUndefined()
+  })
+
   it('takes over a session another principal controls', async () => {
     const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })
     const res = await app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'POST', headers: UI })

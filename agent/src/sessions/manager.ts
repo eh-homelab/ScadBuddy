@@ -21,6 +21,7 @@ import {
 } from '../harness/run.js'
 import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
+import { loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -312,11 +313,17 @@ export type SessionManagerDeps = {
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
-   * is the one origin the browser may open.
+   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA;
+   * `publicUrl` and `uiOrigins` (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)
+   * are rewritten onto it; `browserAllowedOrigins`
+   * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
+   * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
    */
   headlessBrowser?: {
     backendUrl: string
+    publicUrl?: string
+    uiOrigins?: string
+    browserAllowedOrigins?: string
     /** Tests only: a Chromium other than the pinned one. */
     executablePath?: string
     /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
@@ -480,6 +487,8 @@ type LocalTurn = {
    * SDK's last transcript appends, so interrupt() leaves it alone and says so.
    */
   settling: boolean
+  /** The turn's run, final events included; it never rejects. */
+  done?: Promise<unknown>
 }
 
 export class SessionManager {
@@ -781,6 +790,7 @@ export class SessionManager {
       .finally(() => {
         if (this.active.get(id) === local) this.active.delete(id)
       })
+    local.done = done
     return { turnId, done }
   }
 
@@ -922,6 +932,7 @@ export class SessionManager {
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const hb = this.deps.headlessBrowser
       const gate = this.approvals.gate({
         sessionId: id,
         turnId,
@@ -935,16 +946,26 @@ export class SessionManager {
           ? await this.deps.headlessBrowser.sandbox()
           : false
       const browser =
-        this.deps.headlessBrowser && browserSetting === true
+        hb && browserSetting === true
           ? {
               ...(sandbox ? { sandbox: true } : {}),
               sessionId: id,
-              backendUrl: this.deps.headlessBrowser.backendUrl,
+              backendUrl: hb.backendUrl,
+              ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
+              ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
+              ...(hb.browserAllowedOrigins
+                ? {
+                    browserAllowedOrigins: hb.browserAllowedOrigins,
+                    // Approved once per origin per session, in Postgres, so a
+                    // later turn (on any replica) does not ask again.
+                    approvedOrigins: await loadApprovedOrigins(sql, id),
+                    rememberOrigin: (origin: string, approvalId: string | undefined) =>
+                      rememberApprovedOrigin(sql, id, origin, approvalId),
+                  }
+                : {}),
               dir: sessionBrowserDir(this.deps.paths, id),
               tmpDir: sessionBrowserTmpDir(id),
-              ...(this.deps.headlessBrowser.executablePath
-                ? { executablePath: this.deps.headlessBrowser.executablePath }
-                : {}),
+              ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
             }
           : undefined
       browserDirs = browser !== undefined
@@ -1519,5 +1540,14 @@ export class SessionManager {
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
   abortAll(): void {
     for (const { controller } of this.active.values()) controller.abort(new Error(SHUTTING_DOWN))
+  }
+
+  /**
+   * Once every turn running now has finished, its last events appended: what a
+   * shutdown waits for after abortAll(), before it closes the database those appends
+   * use (#802).
+   */
+  async settled(): Promise<void> {
+    await Promise.allSettled([...this.active.values()].map((turn) => turn.done))
   }
 }
