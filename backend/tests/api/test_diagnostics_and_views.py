@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
+import pytest
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -212,3 +213,29 @@ def test_a_breakdown_tile_past_its_cap_is_a_422(client: TestClient, model: str) 
     assert (
         client.get(f"/api/v1/jobs/{job_id}/colours.png", params={"size": 1024}).status_code == 422
     )
+
+
+def test_a_breakdown_of_a_result_only_in_the_store_fetches_it_first(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As `/preview.glb` and `/views/…`: on the Bambuddy store a finished piece may be
+    only in the store, so the route pulls it into the cache before reading the glb."""
+    job_id = _render(client, model)
+    _three_colours(client, job_id)
+    glb = job_file(client, job_id, "preview.glb")
+    kept = glb.read_bytes()
+    glb.unlink()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    rel = state.render.store.read(job_id).result.preview_glb
+    assert rel.split("/")[0] == "blobs", rel
+    fetched: list[str] = []
+
+    async def fetch(key: str) -> bool:
+        fetched.append(key)
+        glb.write_bytes(kept)
+        return True
+
+    monkeypatch.setattr(state.store.blobs, "fetch", fetch)
+    response = client.get(f"/api/v1/jobs/{job_id}/colours.png", params={"view": "top", "size": 64})
+    assert response.status_code == 200, response.text
+    assert set(fetched) == {rel.split("/")[1]}
