@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import socket
 import threading
+import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
@@ -35,11 +37,14 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
 from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store import BlobRefs
+from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
@@ -56,7 +61,12 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
+from tests.conftest import (
+    UNUSED_DATABASE_URL,
+    UNUSED_TEMPORAL_ADDRESS,
+    PgPool,
+    fake_3mf_openscad,
+)
 from tests.support.temporal import current_address, temporal_client
 
 
@@ -527,51 +537,132 @@ async def test_stopping_the_worker_cancels_the_retry(
     assert attempts == 1
 
 
-class _Cache:
-    def __init__(self) -> None:
-        self.calls = 0
+async def test_the_workers_housekeeping_runs_each_interval_and_survives_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
 
-    def evict(self) -> list[str]:
-        self.calls += 1
-        if self.calls == 1:
+    def housekeep(deps: WorkerDeps) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
             raise OSError("a transient disk error")
-        return ["k"]
 
-
-async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_failure() -> None:
-    cache = _Cache()
-    evicting = asyncio.create_task(
-        worker_module._evict_periodically(cache, 0.01)  # type: ignore[arg-type]
+    monkeypatch.setattr(worker_module, "_housekeep", housekeep)
+    running = asyncio.create_task(
+        worker_module._housekeep_periodically(cast(WorkerDeps, None), 0.01)
     )
     try:
         async with asyncio.timeout(5):
-            while cache.calls < 3:
+            while calls < 3:
                 await asyncio.sleep(0.01)
     finally:
-        evicting.cancel()
+        running.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await evicting
-    assert cache.calls >= 3
+            await running
+    assert calls >= 3
+
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>'
+
+
+def _own_volume_deps(tmp_path: Path, pg_pool: PgPool) -> WorkerDeps:
+    paths = DataPaths(tmp_path / "worker")
+    paths.ensure()
+    return WorkerDeps(
+        config=Config(data_dir=paths.root),
+        paths=paths,
+        assets=AssetStore(paths.assets, pg_pool),
+        blobs=LocalBlobStore(paths.blobs),
+        refs=cast(BlobRefs, None),
+        projection=cast(JobProjection, None),
+        remote_assets=cast(RemoteAssets, object()),
+    )
+
+
+def _aged(*paths: Path, days: float = 7) -> None:
+    old = time.time() - days * 86400
+    for path in paths:
+        os.utime(path, (old, old))
+
+
+def _last_used_long_ago(pg_pool: PgPool, asset_id: str, days: float = 7) -> None:
+    """The shared row's last use (#591): what a worker's prune goes by."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = %s WHERE id = %s",
+            (datetime.now(UTC) - timedelta(days=days), asset_id),
+        )
+
+
+def _rows(pg_pool: PgPool) -> list[str]:
+    with pg_pool.connection() as conn:
+        return sorted(row["id"] for row in conn.execute("SELECT id FROM assets"))
+
+
+def test_one_housekeeping_pass_prunes_old_exports_and_uploads_and_keeps_fresh_ones(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    """Final review I2: what a worker fetched is pruned on its own volume, by last use.
+    Its files only: the rows are the API's (#591), shared, and the API's sweep decides."""
+    deps = _own_volume_deps(tmp_path, pg_pool)
+    old_export = deps.paths.model_revision_dir("demo", "a" * 40)
+    fresh_export = deps.paths.model_revision_dir("demo", "b" * 40)
+    for export in (old_export, fresh_export):
+        export.mkdir(parents=True)
+        (export / "model.scad").write_text("cube(1);")
+    _aged(old_export)
+    old = deps.assets.put(SVG, "old.svg")
+    fresh = deps.assets.put(SVG.replace(b'"4"', b'"5"'), "fresh.svg")
+    _aged(deps.assets.blob_path(old))
+    _last_used_long_ago(pg_pool, old.id)
+
+    worker_module._housekeep(deps)
+
+    assert not old_export.exists() and fresh_export.is_dir()
+    assert deps.assets.ids() == [fresh.id]
+    assert _rows(pg_pool) == sorted([old.id, fresh.id])
+
+
+def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    """A worker that still mounts the API's /data holds none of the references: its
+    uploads and exports are the API's to sweep."""
+    deps = _own_volume_deps(tmp_path, pg_pool)
+    deps.paths.model_dir("demo").mkdir(parents=True)  # the API's templates are here
+    export = deps.paths.model_revision_dir("demo", "a" * 40)
+    export.mkdir(parents=True)
+    _aged(export)
+    upload = deps.assets.put(SVG, "old.svg")
+    _aged(deps.assets.blob_path(upload))
+    _last_used_long_ago(pg_pool, upload.id)
+
+    worker_module._housekeep(deps)
+
+    assert export.is_dir()
+    assert deps.assets.ids() == [upload.id]
 
 
 @pytest.mark.parametrize(("sweep", "interval"), [(0.0, 300.0), (60.0, 60.0)])
 async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sweep: float, interval: float
 ) -> None:
-    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's cache
-    eviction, which then runs every WORKER_CACHE_EVICT_INTERVAL."""
+    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's
+    housekeeping (its cache eviction), which then runs every WORKER_CACHE_EVICT_INTERVAL."""
     intervals: list[float] = []
 
-    async def evict(_blobs: object, every: float) -> None:
+    async def housekeep(_deps: object, every: float) -> None:
         intervals.append(every)
 
-    monkeypatch.setattr(worker_module, "_evict_periodically", evict)
+    monkeypatch.setattr(worker_module, "_housekeep_periodically", housekeep)
     cache = CachedBlobStore.__new__(CachedBlobStore)
-    task = worker_module._start_eviction(cache, sweep)
+    task = worker_module._start_housekeeping(cast(WorkerDeps, SimpleNamespace(blobs=cache)), sweep)
     assert task is not None
     await task
     assert intervals == [interval]
-    assert worker_module._start_eviction(LocalBlobStore(tmp_path), sweep) is None
+    local = cast(WorkerDeps, SimpleNamespace(blobs=LocalBlobStore(tmp_path)))
+    assert worker_module._start_housekeeping(local, sweep) is None
     assert intervals == [interval]
 
 
@@ -636,3 +727,41 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     with pytest.raises(StoreNotReadyError):
         worker_module.build_worker_deps(settings)
     assert len(opened) == 1 and opened[0].pool.closed
+
+
+async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
+    loops: list[asyncio.AbstractEventLoop | None] = []
+
+    def build(_settings: Settings) -> NoReturn:
+        try:
+            loops.append(asyncio.get_running_loop())
+        except RuntimeError:
+            loops.append(None)  # no loop in this thread: off the loop, as it should be
+        raise StoreNotReadyError("stop here")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    with pytest.raises(StoreNotReadyError):
+        await worker_module.run_worker(settings, health_port=None)
+    assert loops == [None]
+
+
+async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Final review I1: as the API's boot does, so a BOSL2 render needs no network."""
+    commit = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"
+    seed = tmp_path / "image-libraries"
+    (seed / "BOSL2" / commit / "BOSL2").mkdir(parents=True)
+    (seed / "BOSL2" / commit / "BOSL2" / "std.scad").write_text("// std\n")
+    data = tmp_path / "worker-data"
+    cfg = settings.model_copy(update={"data_dir": data, "seed_libraries_dir": seed})
+    deps, store = worker_module.build_worker_deps(cfg)
+    try:
+        checkout = deps.paths.libraries / "BOSL2" / commit / "BOSL2" / "std.scad"
+        assert checkout.read_text() == "// std\n"
+    finally:
+        await store.aclose()
+        deps.projection.close()

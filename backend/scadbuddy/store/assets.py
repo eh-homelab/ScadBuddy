@@ -56,7 +56,9 @@ class RemoteAssets:
         fetched: list[str] = []
         for asset_id in sorted(set(ids)):
             try:
-                await asyncio.to_thread(store.get, asset_id)
+                # `use`, not `get`: a hit is a use, so the worker's own sweep (by last
+                # use) never takes an upload a render in flight is about to read.
+                await asyncio.to_thread(store.use, asset_id)
                 continue
             except AssetNotFoundError:
                 pass

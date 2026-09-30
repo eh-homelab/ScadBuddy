@@ -54,6 +54,14 @@ HEARTBEAT = timedelta(seconds=30)
 #: worker without the API's volume (phase 3): a transfer, heartbeated, so a stalled
 #: download is noticed within `HEARTBEAT` rather than at the budget's end.
 PREPARE_TIMEOUT = timedelta(minutes=10)
+#: A preview on a worker without the API's volume first brings in what `prepare` does
+#: for a piece: the revision's snapshot and the font families it names, one transfer
+#: each. (Its default parameters name no upload: `file_assets` skips a file
+#: parameter's own default, so there is no assets transfer.)
+#: Not in it: the first clone of a library pinned outside the image (a piece has
+#: `PREPARE_TIMEOUT` for that). Such a template's first preview on a fresh worker may
+#: time out; the clone lands anyway, and the next pass renders the preview.
+PREVIEW_TRANSFER = 2 * TRANSFER
 
 
 def _openscad_timeout() -> timedelta:
@@ -75,13 +83,15 @@ def _retried(start_to_close: timedelta) -> timedelta:
 
 
 def _main_timeout() -> timedelta:
-    """`render_main`: the openscad run, then its piece published."""
-    return _openscad_timeout() + TRANSFER
+    """`render_main`: the render's uploads brought in (one transfer), the openscad run,
+    then its piece published (one transfer)."""
+    return _openscad_timeout() + 2 * TRANSFER
 
 
 def _solids_timeout() -> timedelta:
-    """`render_solids`: the piece fetched, the openscad runs, the piece published."""
-    return _openscad_timeout() + 2 * TRANSFER
+    """`render_solids`: the piece fetched (one transfer), the render's uploads brought
+    in (one transfer), the openscad runs, the piece published (one transfer)."""
+    return _openscad_timeout() + 3 * TRANSFER
 
 
 #: `cached_piece`: an index read and, on a miss, one download.
@@ -209,16 +219,17 @@ class RenderPreview:
     the openscad budget. Id ``preview-<slug>``: a second request joins the first."""
 
     @workflow.run
-    async def run(self, slug: str) -> bytes:
+    async def run(self, slug: str, revision: str | None = None) -> bytes:
         # Schema, render and plate image, each bounded by `render_timeout`, plus the
-        # margin: `RenderService.render_preview` sets it.
+        # margin: `RenderService.render_preview` sets it. Then the snapshot and fonts
+        # it brings in first, on a worker without the volume.
         timeout = workflow.memo_value("preview_timeout", default=3 * 120.0 + 60.0, type_hint=float)
         png: bytes = await workflow.execute_activity(
             "render_preview_png",
-            slug,
+            args=[slug, revision],
             result_type=bytes,
-            start_to_close_timeout=timedelta(seconds=timeout),
-            heartbeat_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(seconds=timeout) + PREVIEW_TRANSFER,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
         return png

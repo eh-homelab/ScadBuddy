@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -218,3 +220,22 @@ async def test_a_re_upload_clears_the_swept_mark(
     await remote.mirror(api, api.put(SVG, "logo.svg"), slug="demo", title="Demo")
     row = remote.content.index.get(asset_key(meta.id))
     assert row is not None and "swept" not in row.meta
+
+
+async def test_ensure_marks_a_local_upload_used_so_the_workers_sweep_keeps_it(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
+    """Final review I2: a worker prunes its uploads by last use, so a hit is a use."""
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    worker = AssetStore(tmp_path / "worker" / "assets", pg_pool)
+    meta = worker.put(SVG, "logo.svg")
+    old = time.time() - 7 * 86400
+    os.utime(worker.blob_path(meta), (old, old))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = %s WHERE id = %s",
+            (datetime.now(UTC) - timedelta(days=7), meta.id),
+        )
+    assert await remote.ensure(worker, [meta.id]) == []  # a hit: nothing fetched
+    assert worker.prune_local(grace=3600) == []
+    assert worker.get(meta.id) == meta

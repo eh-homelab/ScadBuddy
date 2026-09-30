@@ -21,7 +21,7 @@ from starlette.routing import Route
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY
+from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
@@ -32,7 +32,9 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.library_seed import seed_libraries
 from scadbuddy.library.settings_store import load_render_store_settings
+from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
@@ -41,6 +43,7 @@ from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, make_current, render_worker
+from scadbuddy.workflows.pipelines import TRANSFER
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -62,6 +65,14 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
+    # The image's libraries (#169), as the API's boot seeds them: a worker on an
+    # emptyDir would otherwise clone BOSL2 from the network for its first render.
+    seed_libraries_dir = settings.resolve_seed_libraries_dir()
+    if seed_libraries_dir is not None:
+        try:
+            seed_libraries(paths, seed_libraries_dir)
+        except OSError:
+            logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
@@ -307,33 +318,80 @@ def _health_server(
     )
 
 
-#: How often a worker evicts its piece cache when the upload sweep is off (seconds).
+def _upload_grace(config: Config) -> float:
+    """How long an upload a worker fetched stays unused before its sweep removes it.
+    The API's grace (at least `MIN_ASSET_SWEEP_GRACE`, an hour), and never less than
+    one activity's whole budget: an activity marks the uploads it needs used when it
+    brings them in (`RemoteAssets.ensure`), then reads them within its openscad
+    timeout and its transfers, so none is swept under a render in flight. A worker
+    holds no references; what it needs again comes back from the store."""
+    return max(config.asset_sweep_grace, config.activity_timeout + 3 * TRANSFER.total_seconds())
+
+
+def _own_volume(paths: DataPaths) -> bool:
+    """Whether the volume is the worker's own. The API's /data holds the templates in
+    `models/`; a worker never writes there, so one still mounting the shared volume
+    leaves its uploads and exports to the API's sweeps, which know the references."""
+    return not (paths.models.is_dir() and any(paths.models.iterdir()))
+
+
+def _housekeep(deps: WorkerDeps) -> None:
+    """One pass of the worker's sweep (final review I2): its piece cache down to
+    SCADBUDDY_WORKER_CACHE_MAX_BYTES, then, on its own volume, the revision exports
+    it materialized (by last use, on the API's `SCADBUDDY_JOB_TTL`) and the uploads it
+    fetched (by last use, `_upload_grace`). Library checkouts stay: a checkout is a
+    pinned library, and nothing prunes those. Each step is best effort; the next
+    pass retries."""
+    if isinstance(deps.blobs, CachedBlobStore):
+        try:
+            evicted = deps.blobs.evict()
+            if evicted:
+                logger.info("evicted cached pieces", extra={"count": len(evicted)})
+        except Exception:
+            logger.exception("could not evict the piece cache")
+    if not _own_volume(deps.paths):
+        return
+    try:
+        pruned = prune_revision_exports(deps.paths, deps.config.job_ttl)
+        if pruned:
+            logger.info("pruned revision exports", extra={"count": len(pruned)})
+    except Exception:
+        logger.exception("could not prune revision exports")
+    if deps.remote_assets is not None:
+        try:
+            # Its copies only: the rows are the API's (#591), and its sweep decides.
+            pruned_uploads = deps.assets.prune_local(grace=_upload_grace(deps.config))
+            if pruned_uploads:
+                logger.info("pruned fetched uploads", extra={"count": len(pruned_uploads)})
+        except Exception:
+            logger.exception("could not prune fetched uploads")
+
+
+#: How often a worker housekeeps when the upload sweep is off (seconds): the piece
+#: cache must still be evicted.
 WORKER_CACHE_EVICT_INTERVAL = 300.0
 
 
-async def _evict_periodically(blobs: CachedBlobStore, interval: float) -> None:
-    """The worker's sweep: its piece cache, least recently used first, down to
-    SCADBUDDY_WORKER_CACHE_MAX_BYTES. Best effort; the next pass retries."""
+async def _housekeep_periodically(deps: WorkerDeps, interval: float) -> None:
+    """`_housekeep` every ``interval`` (see `_start_housekeeping`)."""
     while True:
         await asyncio.sleep(interval)
         try:
-            evicted = await asyncio.to_thread(blobs.evict)
+            await asyncio.to_thread(_housekeep, deps)
         except Exception:
-            logger.exception("could not evict the piece cache")
-            continue
-        if evicted:
-            logger.info("evicted cached pieces", extra={"count": len(evicted)})
+            logger.exception("the worker's sweep failed; the next one retries")
 
 
-def _start_eviction(blobs: object, sweep_interval: float) -> asyncio.Task[None] | None:
-    """Evict the piece cache on a timer whenever the worker's blobs are one: every
-    SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
-    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops it."""
-    if not isinstance(blobs, CachedBlobStore):
+def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task[None] | None:
+    """Housekeep on a timer whenever the worker's blobs are a piece cache (the bambuddy
+    store; a local-store worker shares the API's volume, whose sweeps are the API's):
+    every SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
+    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops eviction."""
+    if not isinstance(deps.blobs, CachedBlobStore):
         return None
     interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
-    logger.info("evicting the piece cache every %.0f s", interval)
-    return asyncio.create_task(_evict_periodically(blobs, interval))
+    logger.info("housekeeping the worker's cache and volume every %.0f s", interval)
+    return asyncio.create_task(_housekeep_periodically(deps, interval))
 
 
 async def run_worker(
@@ -344,9 +402,11 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps, store = build_worker_deps(settings)
+    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
+    # the rest opens the projection's pool and reads the store settings.
+    deps, store = await asyncio.to_thread(build_worker_deps, settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
-    evicting = _start_eviction(store.blobs, deps.config.asset_sweep_interval)
+    evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)

@@ -548,8 +548,14 @@ async def source_directory(
         await asyncio.to_thread(_touch, directory)
     else:
         # A worker on the bambuddy store has no history: a snapshot it materialized is
-        # a populated export and needs none.
-        assert history is not None  # a requested revision implies a repository
+        # a populated export and needs none. Without one here (the prune took it after
+        # `materialize`), there is nothing to export it from: say so; a retry brings the
+        # snapshot in again.
+        if history is None or not history.available:
+            raise SnapshotUnavailableError(
+                f"the export of {slug}@{requested} is gone and there is no history to"
+                " export it from"
+            )
         await asyncio.to_thread(export_revision, history, slug, requested, directory)
     return directory, requested
 
@@ -603,6 +609,14 @@ async def resolve_source(
 def _touch(directory: Path) -> None:
     with suppress(OSError):
         os.utime(directory)
+
+
+#: Marks a revision export used, so `prune_revision_exports` evicts by last use.
+touch_export = _touch
+
+
+class SnapshotUnavailableError(RuntimeError):
+    """No snapshot is stored and this process has no git history to make one."""
 
 
 def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:

@@ -614,6 +614,43 @@ class AssetStore:
                 logger.exception("could not remove an unused asset", extra={"asset": asset_id})
         return removed
 
+    def prune_local(self, *, grace: float, now: float | None = None) -> list[str]:
+        """Remove this root's copies of assets last used more than ``grace`` seconds
+        before ``now``, and answer their ids; every row stays.
+
+        For a root that is a copy (a render worker on its own volume, #426): the rows
+        are the API's, shared through Postgres (#591), and only the API's `sweep`, which
+        knows the references, removes one. A copy with a row goes by the row's last use;
+        one without a row by its mtime. Each copy is removed with its row locked, so a
+        `use` either lands first and keeps it, or finds it gone and the store brings it
+        back.
+        """
+        pool = self._require()
+        cutoff = (time.time() if now is None else now) - grace
+        cutoff_at = datetime.fromtimestamp(cutoff, UTC)
+        removed: list[str] = []
+        for asset_id in sorted(self._blobs()):
+            try:
+                with pool.connection() as conn, conn.transaction():
+                    row = conn.execute(
+                        "SELECT last_used_at FROM assets WHERE id = %s FOR UPDATE", (asset_id,)
+                    ).fetchone()
+                    if row is not None:
+                        stale = row["last_used_at"] < cutoff_at
+                    else:
+                        last_used = self._orphan_last_used(asset_id)
+                        stale = last_used is not None and last_used < cutoff
+                    if not stale:
+                        continue
+                    for kind in MEDIA_TYPES:
+                        (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
+                removed.append(asset_id)
+            except (OSError, psycopg.Error):
+                logger.exception(
+                    "could not remove a local copy of an asset", extra={"asset": asset_id}
+                )
+        return removed
+
     def _remove(
         self, conn: Connection[DictRow], asset_id: str, cutoff: float, cutoff_at: datetime
     ) -> bool:

@@ -45,6 +45,7 @@ from scadbuddy.render.job_models import (
     PlateInfo,
     QueueFullError,
 )
+from scadbuddy.render.jobs import SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -254,6 +255,9 @@ async def render_model(
             status.HTTP_507_INSUFFICIENT_STORAGE,
             f"the blob store has no room for this template's source: {error}",
         ) from None
+    except SnapshotUnavailableError as error:
+        # The bambuddy store renders from a snapshot of a commit, and there is none.
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 
