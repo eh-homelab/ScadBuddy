@@ -963,6 +963,20 @@ function paramsClash(
   return names.length !== Object.keys(other).length || names.some((name) => other[name] !== params[name])
 }
 
+/** `api/template_ui.py` `UI_MEDIA_TYPES`: the only files under ui/ that are served. */
+const UI_MEDIA_TYPES: Record<string, string> = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.woff2': 'font/woff2',
+}
+
 /** Inputs as the backend records them: a given `v` is kept, a missing one is 0. */
 function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
   return { ...inputs, v: inputs['v'] ?? 0 }
@@ -1732,7 +1746,7 @@ export const handlers = [
     return HttpResponse.json(updated)
   }),
 
-  // #425 — a template's own UI files, live or pinned; the module graph is plain JS.
+  // #425 — a template's own UI files, live or pinned, served as `api/template_ui.py` serves them.
   // A pinned revision serves `UI_MODULES['<slug>@<commit>']` when a test gives one, else
   // the live files: the mock keeps no history of ui/, so a test of a pinned UI that must
   // differ from the live one adds its own entry.
@@ -1746,10 +1760,12 @@ export const handlers = [
       )
       const path = decodeURIComponent(match?.[1] ?? '')
       const files = (commit !== undefined ? UI_MODULES[`${slug}@${commit}`] : undefined) ?? UI_MODULES[slug]
-      const body = files?.[path]
-      return body === undefined
+      // `_ui_file`'s rules: no empty or dot segment, and only a UI_MEDIA_TYPES extension.
+      const type = UI_MEDIA_TYPES[/\.[^./]+$/.exec(path)?.[0].toLowerCase() ?? '']
+      const body = path.split('/').some((part) => !part || part.startsWith('.')) ? undefined : files?.[path]
+      return body === undefined || type === undefined
         ? problem(404, 'Not Found', `no ui file '${path}'`)
-        : new HttpResponse(body, { headers: { 'Content-Type': 'text/javascript; charset=utf-8' } })
+        : new HttpResponse(body, { headers: { 'Content-Type': type } })
     }),
   ),
 
@@ -2093,6 +2109,16 @@ export const handlers = [
     const job = state.jobs.get(body.job_id)
     if (!job || job.status !== 'done' || !job.bbox_mm) {
       return problem(409, 'Job not finished', 'Wait for the render to finish before generating.')
+    }
+    // The backend's rule: the inputs saved must be the ones the job rendered.
+    const given = (body.inputs?.['params'] ?? {}) as Record<string, ParamValue>
+    const rendered = job.params ?? {}
+    if (
+      body.inputs &&
+      (Object.keys(given).length !== Object.keys(rendered).length ||
+        Object.entries(given).some(([name, value]) => rendered[name] !== value))
+    ) {
+      return problem(422, 'Unprocessable Content', `inputs.params are not the parameters job ${job.id} rendered`)
     }
     const output: Output = {
       id: nextHexId(),

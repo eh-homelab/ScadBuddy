@@ -363,6 +363,7 @@ export const models: ModelSummary[] = [
     upstream: null,
     has_readme: false,
     origin: 'builtin',
+    version: commit('9a8b7c6d5e4f'),
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
 ]
