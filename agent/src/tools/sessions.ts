@@ -100,6 +100,18 @@ async function refusals<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Who a result is rendered for. In a session's own turn nobody is shown by id, the
+ * caller's own included: the result is kept in that session's transcript, which
+ * whoever it is offered or handed to later reads as it was written (PR #715 review).
+ * No principal has this kind and id.
+ */
+const IN_A_TURN: Pick<Owner, 'kind' | 'id'> = { kind: 'anonymous', id: '' }
+
+function viewerOf(ctx: ToolContext): Pick<Owner, 'kind' | 'id'> {
+  return ctx.gate === 'harness' ? IN_A_TURN : ownerOf(ctx.principal)
+}
+
 function notInHarness(ctx: ToolContext, what: string): void {
   if (ctx.gate === 'harness') {
     throw new ToolError(
@@ -266,7 +278,7 @@ function decideTool(approve: boolean): Tool {
           surface: 'mcp',
         }),
       )
-      return json(approvalSeenBy(ownerOf(ctx.principal), decided))
+      return json(approvalSeenBy(viewerOf(ctx), decided))
     },
   })
 }
@@ -293,7 +305,7 @@ export const sessionTools: Tool[] = [
           limit,
         }),
       )
-      return json(sessions.map((one) => sessionView(one, ownerOf(ctx.principal))))
+      return json(sessions.map((one) => sessionView(one, viewerOf(ctx))))
     },
   }),
 
@@ -333,10 +345,10 @@ export const sessionTools: Tool[] = [
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
         }),
       )
-      if (!turn) return json({ session: sessionView(session, ownerOf(ctx.principal)) })
+      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)) })
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session.id, ownerOf(ctx.principal)))
-      return json({ session: sessionView(now, ownerOf(ctx.principal)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: 0 })
+      return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: 0 })
     },
   }),
 
@@ -367,7 +379,7 @@ export const sessionTools: Tool[] = [
       const turn = await refusals(() => sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers }))
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session_id, owner))
-      return json({ session: sessionView(now, ownerOf(ctx.principal)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })
+      return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: before })
     },
   }),
 
@@ -394,9 +406,9 @@ export const sessionTools: Tool[] = [
         refusals(() => sessions.approvals.list(owner, { sessionId: session.id, pending: true })),
       ])
       return json({
-        session: sessionView(session, owner),
-        pending_approvals: pending.map((a) => approvalSeenBy(owner, a)),
-        transcript: condense(rows, owner),
+        session: sessionView(session, viewerOf(ctx)),
+        pending_approvals: pending.map((a) => approvalSeenBy(viewerOf(ctx), a)),
+        transcript: condense(rows, viewerOf(ctx)),
         next_seq: rows.at(-1)?.seq ?? after_seq,
         more: rows.length === limit,
       })
@@ -443,7 +455,7 @@ export const sessionTools: Tool[] = [
         ctx.signal.removeEventListener('abort', onAbort)
       }
       const session = await refusals(() => sessions.get(session_id, owner))
-      return json({ session: sessionView(session, owner), events: condense(rows, owner), next_seq: rows.at(-1)?.seq ?? from })
+      return json({ session: sessionView(session, viewerOf(ctx)), events: condense(rows, viewerOf(ctx)), next_seq: rows.at(-1)?.seq ?? from })
     },
   }),
 
@@ -460,7 +472,7 @@ export const sessionTools: Tool[] = [
       const child = await refusals(() =>
         manager(ctx).fork(session_id, ownerOf(ctx.principal), title === undefined ? {} : { title }),
       )
-      return json(sessionView(child, ownerOf(ctx.principal)))
+      return json(sessionView(child, viewerOf(ctx)))
     },
   }),
 
@@ -557,7 +569,7 @@ export const sessionTools: Tool[] = [
           pending: true,
         }),
       )
-      return json(approvals.map((a) => approvalSeenBy(ownerOf(ctx.principal), a)))
+      return json(approvals.map((a) => approvalSeenBy(viewerOf(ctx), a)))
     },
   }),
 

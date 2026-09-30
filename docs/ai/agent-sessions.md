@@ -23,7 +23,7 @@ so the dot is an underscore.
 | `sessions_send` | `write` | A user turn in a session the caller owns; refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
-| `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far |
+| `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does |
 | `sessions_interrupt` | `write` | Stops the running turn on whichever replica runs it |
 | `sessions_handoff` | `write` | Gives a session the caller owns to `"browser"` (the user in the UI) at once, or **offers** it to `"token:<id>"` or `"oidc:<issuer>#<sub>"` (§2.1); with `to` the caller's own id, accepts an offer made to it |
 | `sessions_accept_handoff` | `write` | Accepts a session offered to the caller: it becomes the owner |
@@ -116,6 +116,10 @@ transcript event's `owner`, `author` or `by`, an approval's `requested_by` and
 token`, `another MCP OIDC principal` or `an anonymous MCP client`, since the stored
 labels carry the id (`MCP token:<id>`) or the OIDC subject (`ownerSeenBy()` and
 `publicLabel()` in [`agent/src/sessions/protocol.ts`](../../agent/src/sessions/protocol.ts)).
+Inside a session's own turn no id is shown, the caller's own included (`viewerOf()` in
+`sessions.ts`): what the model reads there is kept in that session's transcript, which
+whoever the session is later offered or handed to reads as it was written (PR #715
+review).
 The same applies to the resources, which are these tools. The browser user sees every id:
 the panel's badges and Take over read them over the chat socket, and
 `/api/v1/ai/sessions` is the browser user's. Free text another principal may read (a

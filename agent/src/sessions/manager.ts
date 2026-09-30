@@ -562,20 +562,10 @@ export class SessionManager {
                 ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
     }
     if (options.rateLimited) {
-      const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
       await this.deps.sql.begin(async (tx) => {
         // Per owner, held until commit, so concurrent starts count each other.
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
-        const [recent] = await tx<{ n: number }[]>`
-          SELECT count(*)::int AS n FROM ai_sessions
-          WHERE owner_kind = ${principal.kind} AND owner_id = ${principal.id}
-            AND created_at > now() - (${windowMs} * interval '1 millisecond')`
-        if ((recent?.n ?? 0) >= max) {
-          throw new SessionError(
-            'rate_limited',
-            `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`,
-          )
-        }
+        await this.withinNewSessionLimit(principal, tx as unknown as Sql)
         await insert(tx as unknown as Sql)
       })
     } else {
@@ -584,6 +574,21 @@ export class SessionManager {
     const session = await this.row(id)
     if (!session) throw new Error(`session ${id} vanished after insert`)
     return session
+  }
+
+  /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
+  private async withinNewSessionLimit(principal: Owner, sql: Sql): Promise<void> {
+    const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
+    const [recent] = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ai_sessions
+      WHERE owner_kind = ${principal.kind} AND owner_id = ${principal.id}
+        AND created_at > now() - (${windowMs} * interval '1 millisecond')`
+    if ((recent?.n ?? 0) >= max) {
+      throw new SessionError(
+        'rate_limited',
+        `too many new sessions: at most ${max} per ${Math.round(windowMs / 1000)} s; wait and try again`,
+      )
+    }
   }
 
   async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
@@ -1243,6 +1248,10 @@ export class SessionManager {
       throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
     }
     const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
+    // A fork is a new session and counts against the same limit as a start (PR #715
+    // review). Checked first too, so a refused fork leaves no SDK copy behind; the
+    // insert's check under the lock is the one that holds.
+    await this.withinNewSessionLimit(principal, this.deps.sql)
     const { sessionId: childId } = await sdkForkSession(id, {
       sessionStore: this.store,
       dir: sessionWorkDir(this.deps.paths, id),
@@ -1254,7 +1263,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
-    })
+    }, { rateLimited: true })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []

@@ -104,7 +104,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         closers.push(() => client.close())
         const call = (name: string, args: Record<string, unknown> = {}) =>
           client.callTool({ name, arguments: args }) as Promise<Result>
-        return { client, call, token, owner: ownerOf(principalFor(record.id, tier)) }
+        const principal = principalFor(record.id, tier)
+        return { client, call, token, principal, owner: ownerOf(principal) }
       }
       return { ...t, sessions, runs, principals, publisher, bus, hub, agent }
     }
@@ -499,6 +500,33 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // Reads still work there, as the session's owner.
       const listed = (await runTool(byName.get('sessions_list')!, {}, ctx)) as Result
       expect(ok<unknown[]>(listed)).toHaveLength(1)
+    })
+
+    it("in the harness, shows no principal's id, not even the caller's own", async () => {
+      // What a session's model reads is kept in that session's transcript, which whoever
+      // it is later handed to reads too (PR #715 review).
+      const { agent, sessions } = await setup()
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'mine' }))
+      const byName = new Map(ALL_TOOLS.map((t) => [t.name, t]))
+      const ctx = {
+        ...services({ sessions }),
+        principal: a.principal,
+        progress: async () => {},
+        signal: new AbortController().signal,
+        gate: 'harness' as const,
+      }
+      const id = a.owner.id.slice('token:'.length)
+      for (const [name, args] of [
+        ['sessions_list', {}],
+        ['sessions_get', { session_id: session.id }],
+        ['sessions_attach', { session_id: session.id, after_seq: 0, wait_seconds: 1 }],
+      ] as const) {
+        const result = (await runTool(byName.get(name)!, args, ctx)) as Result
+        expect(JSON.stringify(ok(result)), name).not.toContain(id)
+      }
+      // Over /mcp the caller still sees its own id.
+      expect(JSON.stringify(await a.call('sessions_get', { session_id: session.id }))).toContain(id)
     })
   },
 )
