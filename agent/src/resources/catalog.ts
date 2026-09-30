@@ -27,8 +27,9 @@ import type { Tool } from '../tools/registry.js'
 //
 // Not here yet (each needs a backend route or event source that is not on
 // main): the Bambuddy printers, queue, inventory, history and stats resources
-// (the print watcher, #268), `scadbuddy://browser/{tab}/snapshot` (#254), and
-// `scadbuddy://docs/authoring` (#252).
+// (the print watcher, #268) and `scadbuddy://browser/{tab}/snapshot` (#254).
+// `scadbuddy://docs/authoring` (#252) needs no backend route: its tool reads
+// the authoring skill the agent ships with (tools/guide.ts).
 
 export type ResourceDef = {
   /** RFC 6570 template, or a fixed URI when it has no `{var}`. */
@@ -276,6 +277,17 @@ export const RESOURCES: readonly ResourceDef[] = [
     mimeType: JSON_TYPE,
     tool: 'sessions_get',
     readToSubscribe: true,
+  },
+  // ── docs (#252) ─────────────────────────────────────────────────────────
+  {
+    template: 'scadbuddy://docs/authoring',
+    name: 'docs-authoring',
+    title: 'Authoring guide',
+    description:
+      "ScadBuddy's template conventions: customizer comments, colours per extruder, installed fonts, " +
+      'open preview parts, verify.sh, and the edit loop. Read it before writing a template.',
+    mimeType: 'text/markdown',
+    tool: 'get_authoring_guide',
   },
 ]
 

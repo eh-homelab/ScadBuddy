@@ -2,7 +2,9 @@ import { approvalTools } from './approvals.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
+import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
@@ -23,6 +25,8 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...customizerTools,
   ...outputTools,
   ...historyTools,
+  ...inspectTools,
+  ...guideTools,
   ...libraryTools,
   ...settingsTools,
   ...printTools,

@@ -23,7 +23,7 @@ import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
 import { NozzleStep } from './print/NozzleStep'
-import { NozzleVerdict } from './print/NozzleVerdict'
+import { PrintVerdict } from './print/PrintVerdict'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
@@ -35,6 +35,7 @@ import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**
  * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
@@ -128,8 +129,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     async () => (open && unanswered !== null ? await api.getSettings() : null),
     [open, unanswered !== null],
   )
-  // As typed in Settings: a trailing slash would make `…//queue` below.
-  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
+  const bambuddyUrl = bambuddyBase(webUrls(settings.data))
 
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
@@ -214,8 +214,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : null
 
   /**
-   * #755 — the run's nozzle verdict for these choices, before Print: the same
-   * `plan_extruders` the run refuses with. An error holds Print, since the run would 422;
+   * #755, #760 — what the run would refuse for these choices, before Print: the same
+   * refusals the run makes before upload. An error holds Print, since the run would 422;
    * one for choices since changed does not.
    */
   const checkRequest: PrintRunRequest | null =
@@ -229,9 +229,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         }
       : null
   const check = usePrintCheck(source, checkRequest)
-  const nozzlesRefuse = check.current && (check.verdict?.errors ?? []).length > 0
+  const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   const verdict = (
-    <NozzleVerdict verdict={check.verdict} error={check.error} onRetry={check.reload} />
+    <PrintVerdict verdict={check.verdict} error={check.error} onRetry={check.reload} />
   )
   const verdictShown =
     check.error !== undefined ||
@@ -263,7 +263,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
+            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
               Open in queue
             </Button>
           </>
@@ -288,7 +288,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || loading || !choices || refused || nozzlesRefuse}
+              disabled={running || loading || !choices || refused || runRefuses}
               data-testid="run-print"
               {...USER_ONLY}
             >

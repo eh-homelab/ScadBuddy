@@ -82,6 +82,22 @@ KILL_WAIT = 5.0
 _unreaped: dict[asyncio.subprocess.Process, asyncio.Task[int]] = {}
 
 
+def reap_later(process: asyncio.subprocess.Process) -> None:
+    """A killed server that outlived ``KILL_WAIT``: waited on in the background,
+    counted in ``_unreaped`` and logged, rather than forgotten (also
+    ``lsp_diagnostics``, #750 review)."""
+    reaper = asyncio.ensure_future(process.wait())
+    reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
+    _unreaped[process] = reaper
+    logger.warning(
+        "killed openscad-lsp (pid %d) was not reaped within %gs; "
+        "%d killed server(s) not yet reaped",
+        process.pid,
+        KILL_WAIT,
+        len(_unreaped),
+    )
+
+
 def frame(body: bytes) -> bytes:
     """One LSP message on the wire. The length is in bytes, not characters."""
     return b"Content-Length: %d\r\n\r\n" % len(body) + body
@@ -287,16 +303,7 @@ async def serve(
             if waiting.cancelled_caught:
                 # Stuck in the kernel: holding the permit for it would be the wedge
                 # all over again, so it is let go and counted instead.
-                reaper = asyncio.ensure_future(process.wait())
-                reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
-                _unreaped[process] = reaper
-                logger.warning(
-                    "killed openscad-lsp (pid %d) was not reaped within %gs; "
-                    "%d killed server(s) not yet reaped",
-                    process.pid,
-                    KILL_WAIT,
-                    len(_unreaped),
-                )
+                reap_later(process)
             # Anything but our own kill means it went on its own: say so, or a server
             # that crashes on every session is invisible.
             if process.returncode not in (None, 0, -signal.SIGKILL):

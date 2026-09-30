@@ -432,6 +432,22 @@ choice the way the print dialog opens, then slices and queues behind a single ap
 (It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
 pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
+As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
+`POST /api/v1/models/{slug}/dependencies`, which reports each `include <…>`/`use <…>`
+as resolved (file and library) or unresolved (reason, and a catalogue or installed
+library to pin), resolved as OpenSCAD's lexer and `find_valid_path` resolve them
+against the model's own pins, and lists `font = "…"` literals with their missing
+families (`backend/scadbuddy/library/includes.py`). A target outside the model's
+directory and its checkouts (absolute, `../`, or through a symbolic link) is unresolved
+without its existence being checked, and a report is capped in statements and library
+lookups, with `truncated` past the caps (review of #740). A missing font family is
+enforced by the backend, not the tool: the render and preset routes answer 422 for a `// font`
+value whose family fontconfig does not resolve, and `POST /api/v1/fonts/install`
+answers 500 when the family still does not resolve after the install; "already
+installed" uses the same outline, scalable filter (review of #740)
+(`backend/scadbuddy/api/params.py` `require_installed_fonts`,
+`backend/scadbuddy/library/fonts.py`). Details and sources: `docs/ai/dependencies.md`.
+
 ### 5.2 Browser tools
 
 The SDK runs tools in the service process ([custom tools][sdk-tools]), so a browser tool
@@ -558,11 +574,20 @@ implements it):
   for a slug given in `context.arguments`.
 - **Not built in #264**, for want of a backend route or event source on `main`: the
   Bambuddy printers, queue, inventory, history and stats resources (print watcher,
-  #268), the browser snapshot (#254), and `scadbuddy://docs/authoring` (#252).
+  #268) and the browser snapshot (#254).
 - **Sessions, as built in #300:** `scadbuddy://sessions` (backed by `sessions_list`)
   and `scadbuddy://sessions/{session_id}` (`sessions_get`). A session resource also
   checks who may see it (§6), so subscribing reads it first and refuses one the caller
   may not see with `-32002` (`readToSubscribe` in `agent/src/resources/catalog.ts`).
+- **As built for #252:** `scadbuddy://docs/authoring` is backed by the `read` tool
+  `get_authoring_guide`, which serves the plugin's `authoring` skill without its
+  frontmatter; the agent image carries a copy (`dist/docs/authoring.md`, copied by
+  `pnpm build`), so it needs no backend route (`agent/src/tools/guide.ts`). LSP
+  diagnostics are a tool, `get_lsp_diagnostics` (`POST /api/v1/lsp/diagnostics`), not a
+  resource: openscad-lsp 2.0.1 publishes them only on `didChange` (measured, and
+  `src/server/handler/notification.rs` upstream), and only tree-sitter parse errors plus
+  a missing leading `include`. A per-colour breakdown image is `get_render_colours`
+  (`GET /api/v1/jobs/{job_id}/colours.png`).
 
 ## 6. Sessions (#300)
 
