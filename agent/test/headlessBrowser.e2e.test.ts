@@ -22,6 +22,8 @@ import { type PageServer, startOtherOrigin, startUi, testChromium } from './supp
 // (test/support/browserPages.ts `testChromium`) or without the bundled binary.
 
 const TOKEN = 'gw-headless-browser-token-777788889999'
+/** SCADBUDDY_PUBLIC_URL for the run; never resolves (RFC 2606), so only the rewrite can land. */
+const ALIAS = 'http://scadbuddy.invalid'
 const chromium = testChromium()
 let cliMissing: string | undefined
 try {
@@ -123,6 +125,8 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_take_screenshot`, input: { filename: '../../escape.png' } } }),
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_evaluate`, input: { function: '() => document.cookie' } } }),
       () => ({ toolUse: { name: `${TOOL_PREFIX}browser_run_code_unsafe`, input: { code: 'process.exit(1)' } } }),
+      // ScadBuddy's public URL, rewritten onto the backend by canUseTool.
+      () => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ALIAS}/m/box?via=alias` } } }),
       () => ({ text: 'Done.' }),
     ]
     fake = await startFakeAnthropic((r) => {
@@ -145,7 +149,7 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
         cwd,
         sessionId,
         maxTurns: 20,
-        headlessBrowser: { sessionId, backendUrl: ui.origin, dir: browserDir, ...chromium },
+        headlessBrowser: { sessionId, backendUrl: ui.origin, publicUrl: ALIAS, dir: browserDir, ...chromium },
         onDecision: (name, d) => decisions.push([name, d.decision, d.tier]),
         stderr: (l) => stderr.push(l),
       })) {
@@ -226,6 +230,14 @@ describe.skipIf(skip)(`the headless browser in the harness${skip ? ` (skipped: $
   it('cannot call a disallowed tool even when the model names it', () => {
     expect(results()[8]).toMatch(/No such tool available|not available/i)
     expect(results()[9]).toMatch(/No such tool available|not available/i)
+  })
+
+  it('runs a navigation to the public URL with the URL rewritten onto the backend', () => {
+    // The tool ran with canUseTool's `updatedInput`, not the model's input:
+    // the server's own record of the call names the backend URL.
+    expect(results()[10]).toContain(`await page.goto('${ui.origin}/m/box?via=alias')`)
+    expect(results()[10]).not.toContain(ALIAS)
+    expect(decisions).toContainEqual([`${TOOL_PREFIX}browser_navigate`, 'allow', 'read'])
   })
 
   it('marks every request the page made with the session', () => {

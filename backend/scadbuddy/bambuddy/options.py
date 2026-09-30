@@ -23,10 +23,6 @@ from scadbuddy.bambuddy.models import CalibrationMode, PreheatOverride
 #: not one of them — it is not remembered.
 OptionScope = Literal["global", "printer", "model"]
 
-#: The one option ``POST /slicer-pipelines/{id}/run`` can express, as its ``copies``.
-#: Everything else has to go out on the queue route; see :mod:`scadbuddy.bambuddy.send`.
-PIPELINE_CARRIED = frozenset({"quantity"})
-
 
 class PrintOptions(BaseModel):
     """A sparse overlay on ``PrintQueueItemCreate``'s option fields.
@@ -44,7 +40,7 @@ class PrintOptions(BaseModel):
     layer_inspect: bool | None = None
     timelapse: bool | None = None
     use_ams: bool | None = None
-    #: 1-1000 is **ScadBuddy's** bound, mirroring ``SendRequest.copies``, which is the
+    #: 1-1000 is **ScadBuddy's** bound, mirroring ``PrintRunRequest.copies``, which is the
     #: other control for this same value. Bambuddy declares ``quantity`` as a plain
     #: integer with no bound at all.
     quantity: int | None = Field(default=None, ge=1, le=1000)
@@ -69,15 +65,6 @@ class PrintOptions(BaseModel):
 
     def is_empty(self) -> bool:
         return not self.queue_fields()
-
-    def beyond_pipeline(self) -> tuple[str, ...]:
-        """The set options a pipeline run cannot carry, sorted.
-
-        Non-empty means the send has to slice and queue rather than run the pipeline —
-        ``POST /slicer-pipelines/{id}/run`` takes no option fields at all and creates
-        its queue entries later, in a background task, from Bambuddy's own defaults.
-        """
-        return tuple(sorted(set(self.queue_fields()) - PIPELINE_CARRIED))
 
 
 #: Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults, recorded from its

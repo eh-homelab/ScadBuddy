@@ -1,5 +1,7 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { AuditContext } from '../src/audit/log.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { type McpAuthSettings, quoted } from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfig, type OidcConfigRepo, OidcProvider } from '../src/auth/oidc.js'
 import { appFetch, connect, firstText, INGRESS, MCP_URL, testApp } from './helpers/mcp.js'
@@ -75,7 +77,7 @@ describe('/mcp: oidc mode, tokens', () => {
     const { app } = oidcApp()
     const client = await open(app, { headers: { authorization: `Bearer ${await idp.sign({ scope: 'scadbuddy:read' })}` } })
     expect((await client.listTools()).tools.length).toBeGreaterThan(0)
-    expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual([])
+    expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual({ items: [], next_cursor: null, total: 0 })
     const write = await client.callTool({ name: 'install_font', arguments: { family: 'Lobster Two' } })
     expect(write.isError).toBe(true)
     expect(firstText(write)).toContain('needs the "write" tier')
@@ -168,14 +170,21 @@ describe('/api/v1/ai/mcp/oidc (Settings)', () => {
 
   function settingsApp(publicUrl: string | null = PUBLIC_URL) {
     let stored: OidcConfig | undefined
-    const repo: OidcConfigRepo = { get: async () => stored, put: async (c) => void (stored = c) }
+    const contexts: AuditContext[] = []
+    const repo: OidcConfigRepo = {
+      get: async () => stored,
+      put: async (c, context) => {
+        stored = c
+        contexts.push(context)
+      },
+    }
     const { app } = testApp({ deps: { mcpOidc: { repo, provider: new OidcProvider(), publicUrl: publicUrl ?? undefined } } })
     const call = (method: string, path = '', body?: unknown, headers: Record<string, string> = UI) =>
       appFetch(app, { address: INGRESS, headers })(`http://scadbuddy.test/api/v1/ai/mcp/oidc${path}`, {
         method,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
-    return { call, stored: () => stored }
+    return { call, stored: () => stored, contexts }
   }
 
   it('shows the defaults, the resource and the metadata URL before anything is saved', async () => {
@@ -210,6 +219,12 @@ describe('/api/v1/ai/mcp/oidc (Settings)', () => {
     expect(res.status).toBe(200)
     expect(stored()?.issuer).toBe('https://idp.invalid/')
     expect(idp.hits.metadata).toBe(0)
+  })
+
+  it('audits the save as the browser user over HTTP, not as ScadBuddy (#831)', async () => {
+    const { call, contexts } = settingsApp()
+    expect((await call('PUT', '', { ...config, enabled: false })).status).toBe(200)
+    expect(contexts).toEqual([{ actor: UI_ACTOR, surface: 'http', clientIp: INGRESS }])
   })
 
   it('refuses to enable without SCADBUDDY_PUBLIC_URL, and refuses a bad body', async () => {

@@ -13,6 +13,7 @@ import { assertGatewayHostAllowed, EgressError, type Resolver, systemResolver } 
 import type { OriginPolicy } from '../http/origins.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/credentials (issue #255). The ingress routes /api/v1/ai/* to this
 // service (spec §4.2). No route ever returns the secret: reads give `kind`,
@@ -191,4 +192,31 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       testing = false
     }
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    testConnection: (credential: Credential) => Promise<ConnectionTest>
+    /** Connection-test cooldown; this file's default when omitted. */
+    testCooldownMs?: number
+    /** Clock for the connection-test cooldown; Date.now when omitted. */
+    now?: () => number
+  }
+}
+
+/** The Claude credential routes (#255). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerCredentialRoutes(app, {
+      credentials: deps.credentials,
+      ready: ready(deps),
+      kek: deps.kek,
+      testConnection: deps.testConnection,
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+      ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
+      ...(deps.now === undefined ? {} : { now: deps.now }),
+    })
+  },
 }
