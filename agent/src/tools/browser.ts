@@ -231,7 +231,8 @@ export const browserTools: Tool[] = [
     description:
       PREFIX +
       'fallback for UI no other browser_* tool covers: type a value into the visible field with this label (a ' +
-      'text box, number box, select or slider). Never fills a password or API key.',
+      "text box, number box, select or slider). A select takes an option's value or its visible label. Never " +
+      'fills a password or API key.',
     input: z.object({
       label: z.string().min(1).describe("The field's accessible name"),
       value: z.string(),

@@ -11,6 +11,7 @@ import {
   BROWSER_TOOL_TIERS,
   browserInputGuard,
   browserTierOf,
+  browserToolsGuide,
   DISALLOWED_BROWSER_TOOLS,
   disallowedBrowserTools,
   materializeHeadlessBrowser,
@@ -30,6 +31,7 @@ import {
 import { probeChromiumSandbox } from '../src/harness/headlessSandbox.js'
 import { decide } from '../src/harness/permissions.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
+import { browserTools } from '../src/tools/browser.js'
 
 // The headless browser's configuration and guards (#349, spec §5.3), without a
 // browser. The real server and Chromium are headlessBrowser.server.test.ts and
@@ -595,5 +597,21 @@ describe('the sandbox probe', () => {
         Promise.reject(new Error('browserType.launch: closed\nBrowser logs:\nChromium sandboxing failed!\nmore')),
     }
     expect(await probeChromiumSandbox({ launcher })).toEqual({ available: false, detail: 'Chromium sandboxing failed!' })
+  })
+})
+
+describe('browserToolsGuide', () => {
+  it("names only tools the scadbuddy server has, and the ones it lacks are the headless set's", () => {
+    const ours = new Set(browserTools.map((t) => t.name))
+    for (const guide of [browserToolsGuide(false), browserToolsGuide(true)]) {
+      for (const [, name] of guide.matchAll(/mcp__scadbuddy__(browser_\w+)/g)) expect(ours).toContain(name)
+      for (const missing of ['browser_find', 'browser_type', 'browser_select_option']) {
+        expect(guide).toContain(missing)
+        expect(ours).not.toContain(missing)
+        expect(BROWSER_TOOL_TIERS).toHaveProperty(missing)
+      }
+    }
+    expect(browserToolsGuide(true)).toContain(`${TOOL_PREFIX}browser_*`)
+    expect(browserToolsGuide(false)).not.toContain(TOOL_PREFIX)
   })
 })

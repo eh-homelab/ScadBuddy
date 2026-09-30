@@ -19,7 +19,7 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { browserTierOf, browserToolsGuide, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import { loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -992,8 +992,9 @@ export class SessionManager {
         tierOf,
         approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
-        // user's messages are instructions; tool results are data.
-        systemPromptAppend: UNTRUSTED_CONTENT_POLICY,
+        // user's messages are instructions; tool results are data. Then which
+        // browser each browser_* tool drives.
+        systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
         ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
