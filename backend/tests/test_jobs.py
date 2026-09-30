@@ -1186,3 +1186,36 @@ async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths
 
     assert leased == [["s"]]
     assert unreadable_colour_warnings(schema, {"base_color": "not-a-colour"})[0] in result.warnings
+
+
+# ── the pins a render read (#169) ─────────────────────────────────────────────
+
+
+async def test_a_render_records_the_library_pins_it_was_built_from(paths: DataPaths) -> None:
+    """The result names the exact library commits, not only the model revision."""
+    _model_pinning_a_library(paths)
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+
+    assert [(pin.name, pin.ref, pin.commit) for pin in result.libraries] == [
+        ("BOSL2", "v1", LIBRARY_COMMIT)
+    ]
+
+
+async def test_a_render_of_a_model_with_no_libraries_records_none(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        result, _ = await jobs.render_job(
+            _job("n"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+
+    assert result.libraries == []
+
+
+def test_a_result_stored_before_the_pins_were_recorded_still_loads() -> None:
+    stored = _result().model_dump(mode="json")
+    del stored["libraries"]
+    assert JobResult.model_validate(stored).libraries == []
