@@ -431,11 +431,22 @@ class SettingsStore:
                 changes[secret] = None
         # The merged result, not the patch: clearing the URL or the inbox while on the
         # Bambuddy store would leave a store the next start refuses (`build_store`).
-        if changes.keys() & {"store_backend", "bambuddy_url", "library_folder_id"}:
+        # A reset name is part of it: its row goes, and the value is the deployment's.
+        needed = {"store_backend", "bambuddy_url", "library_folder_id"}
+        if (changes.keys() | set(reset)) & needed:
             current = self.load()
-            backend = changes.get("store_backend", current.store_backend) or "local"
-            url = changes.get("bambuddy_url", current.bambuddy_url)
-            inbox = changes.get("library_folder_id", current.library_folder_id)
+
+            def merged(name: str) -> Any:
+                if name in changes:
+                    return changes[name]
+                if name in reset:
+                    # The deployment's own value: the environment's, else the default.
+                    return getattr(self.defaults, name)
+                return getattr(current, name)
+
+            backend = merged("store_backend") or "local"
+            url = merged("bambuddy_url")
+            inbox = merged("library_folder_id")
             if backend == "bambuddy" and (not url or inbox is None):
                 raise StoreNotReadyError(
                     "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
