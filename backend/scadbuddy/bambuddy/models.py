@@ -486,6 +486,9 @@ class SliceRequest(BambuddyModel):
     bed_type: str | None = None
     plate: int = 1
     use_embedded_settings: bool = False
+    #: Process settings written over the process preset for this slice, as Bambuddy's
+    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is.
+    process_overrides: dict[str, str] | None = None
 
     @property
     def preset_key(self) -> str:
@@ -493,15 +496,19 @@ class SliceRequest(BambuddyModel):
 
         The printer, process and filament presets — the preset triple — plus the plate
         and the plate type: a slice of plate 2, or for another plate type, is a
-        different file even with the same presets. Recorded as
+        different file even with the same presets. Process overrides (#770) are
+        appended, so a slice without any keeps the key it always had. Recorded as
         :attr:`~scadbuddy.library.outputs.SlicedCopy.preset_key`.
         """
         filaments = ",".join(f"{ref.source}:{ref.id}" for ref in self.filament_presets)
-        return (
+        key = (
             f"{self.printer_preset.source}:{self.printer_preset.id}"
             f"/{self.process_preset.source}:{self.process_preset.id}"
             f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
         )
+        if self.process_overrides:
+            key += "/" + ",".join(f"{k}={v}" for k, v in sorted(self.process_overrides.items()))
+        return key
 
 
 class SliceJobAccepted(BambuddyModel):

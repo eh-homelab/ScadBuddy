@@ -377,15 +377,25 @@ describe('memory hooks against a fake Hindsight', () => {
       return { h, seen }
     }
 
-    it('reports a recall: the bank and how many memories were injected, never the query or a memory', async () => {
+    it('reports a recall: the bank, the redacted query and the memories injected', async () => {
       fake.memories = ['The user prints in PETG.', 'x2', 'x3', 'x4', 'x5', 'x6']
       const { h, seen } = reporting()
       await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt(`secret plans ${CREDENTIAL}`))
       await h.settled()
       expect(seen).toEqual([
-        { action: 'recall', bank: BANK, outcome: 'ok', count: 5, startedAt: expect.any(Date), finishedAt: expect.any(Date) },
+        {
+          action: 'recall',
+          bank: BANK,
+          outcome: 'ok',
+          count: 5,
+          input: expect.stringContaining('secret plans'),
+          memories: ['1. The user prints in PETG.', '2. x2', '3. x3', '4. x4', '5. x5'],
+          startedAt: expect.any(Date),
+          finishedAt: expect.any(Date),
+        },
       ])
-      expect(JSON.stringify(seen)).not.toMatch(/PETG|secret plans/)
+      // The query as it was sent: redacted of the turn's secrets.
+      expect(JSON.stringify(seen)).not.toContain(CREDENTIAL)
       expect(seen[0]!.finishedAt.getTime()).toBeGreaterThanOrEqual(seen[0]!.startedAt.getTime())
     })
 
@@ -426,11 +436,11 @@ describe('memory hooks against a fake Hindsight', () => {
           bank: BANK,
           outcome: 'ok',
           documentId: `conversation:${SESSION}`,
+          input: expect.stringContaining('40 mm'),
           startedAt: expect.any(Date),
           finishedAt: expect.any(Date),
         },
       ])
-      expect(JSON.stringify(seen)).not.toContain('40 mm')
     })
 
     it('reports a failed retain, and a PostToolUse retain names its tool and call', async () => {

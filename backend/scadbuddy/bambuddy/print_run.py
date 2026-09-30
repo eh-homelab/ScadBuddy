@@ -466,6 +466,7 @@ async def execute_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
+            process_overrides=source.print_settings,
         )
         planned.append((plate_id, options, resolved, plan))
     if errors:

@@ -173,6 +173,65 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
+def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+    """Give ``model``'s model.json the ``print_settings`` (#770)."""
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["print_settings"] = settings
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+
+
+@respx.mock
+def test_a_templates_print_settings_reach_the_slice(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#770: the template's defaults are the slice's process overrides."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_support": "0", "enable_prime_tower": "1"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body())
+
+    assert response.status_code == 200, response.text
+    slice_body = json.loads(sliced.calls.last.request.content)
+    assert slice_body["process_overrides"] == {"enable_prime_tower": "1", "enable_support": "0"}
+    # The same presets as a template without them: only the overrides differ.
+    assert slice_body["process_preset"] == {"source": "cloud", "id": "GP243"}
+
+
+@respx.mock
+def test_a_template_without_print_settings_sends_no_overrides(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    assert run_print(client, output_id, json=body()).status_code == 200
+    assert "process_overrides" not in json.loads(sliced.calls.last.request.content)
+
+
+@respx.mock
+def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"infill": "15%"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = run_print(client, output_id, json=body())
+
+    assert response.status_code == 409
+    assert "'infill' is not a print setting" in response.json()["detail"]
+    assert not sliced.called
+
+
 @respx.mock
 def test_a_resolver_error_is_a_422_before_anything_is_sliced(
     client: TestClient, model: str

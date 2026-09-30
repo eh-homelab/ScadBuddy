@@ -201,6 +201,19 @@ export const MAX_NEW_SESSIONS = 10
 export const NEW_SESSION_WINDOW_MS = 60_000
 
 /** A refused session operation; `status` is the HTTP status a route would answer with. */
+
+/** The most of one memory, or of a memory event's input, a panel event carries. */
+export const MEMORY_TEXT_MAX = 4000
+/**
+ * A memory event's query or memory text, redacted and then capped. Redaction
+ * must come first: a secret the cut splits would no longer match, and its
+ * fragment would reach the log.
+ */
+export function memoryText(text: string, secrets: readonly (string | undefined)[]): string {
+  const clean = redact(text, secrets)
+  return clean.length > MEMORY_TEXT_MAX ? `${clean.slice(0, MEMORY_TEXT_MAX)}… (${clean.length} characters)` : clean
+}
+
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
@@ -1186,6 +1199,8 @@ export class SessionManager {
             outcome: a.outcome,
             ...(a.count === undefined ? {} : { count: a.count }),
             ...detail,
+            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
           }),
           secrets,
         ),
