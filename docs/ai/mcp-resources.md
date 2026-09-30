@@ -54,9 +54,23 @@ that tool returns, in the MIME type below.
 | `scadbuddy://libraries` | `application/json` | `list_libraries` |
 | `scadbuddy://fonts` | `application/json` | `list_fonts` |
 | `scadbuddy://settings` | `application/json` | `get_settings` (secrets redacted) |
+| `scadbuddy://sessions` | `application/json` | `sessions_list` (#300) |
+| `scadbuddy://sessions/{session_id}` | `application/json` | `sessions_get` (#300) |
+| `scadbuddy://docs/authoring` | `text/markdown` | `get_authoring_guide` |
 
-- `resources/list` returns the five fixed resources and one `scadbuddy://models/{slug}`
+`scadbuddy://docs/authoring` (#252) is ScadBuddy's authoring conventions: the plugin's
+`authoring` skill ([`plugins/scadbuddy/skills/authoring/SKILL.md`](../../plugins/scadbuddy/skills/authoring/SKILL.md))
+without its frontmatter. It has no backend route: `pnpm build` copies the skill to
+`agent/dist/docs/authoring.md` (the Dockerfile's `agent-build` stage copies it in for
+that), and [`agent/src/tools/guide.ts`](../../agent/src/tools/guide.ts) reads it there,
+or from the source tree when run from it.
+
+- `resources/list` returns the six fixed resources and one `scadbuddy://models/{slug}`
   per model; everything else is reached through `resources/templates/list`.
+- **Sessions** ([agent-sessions.md](agent-sessions.md)) answer only for sessions the
+  caller may see, as the tools do. Subscribing to `scadbuddy://sessions/{session_id}`
+  reads it first (`readToSubscribe` in `catalog.ts`), so a session the caller may not
+  see answers `-32002`, the same as one that does not exist.
 - **URIs.** Templates are RFC 6570 level 1
   ([§3.2.2](https://datatracker.ietf.org/doc/html/rfc6570#section-3.2.2)), one path
   segment per variable, percent-encoded. A bundled template's slug `builtin:x` is
@@ -94,6 +108,8 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
 | `library.removed` | `libraries` |
 | `font.installed` | `fonts` |
 | `settings.changed` | `settings` |
+| `session.message` (agent, #300) | `sessions/{session_id}` |
+| `session.started`, `session.owner`, `session.waiting`, `session.done` (agent, #300) | `sessions/{session_id}`, `sessions` |
 
 - **Coalescing.** Per session and per URI, at most one notification per 250 ms
   (`DEFAULT_MIN_INTERVAL_MS`, [`hub.ts`](../../agent/src/resources/hub.ts)): the first
@@ -170,7 +186,26 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
 
 Issue #264 also lists resources that need a backend route or event source not on
 `main`: Bambuddy printers, queue, inventory, print history and stats (print watcher,
-#268), `scadbuddy://browser/{tab}/snapshot` (#254), `scadbuddy://docs/authoring` and
-LSP diagnostics (#252), and sessions (#300). The agent does not yet publish
-`session.*` on the bus, so the session event log still polls
-([`agent/src/sessions/eventLog.ts`](../../agent/src/sessions/eventLog.ts) `wake()`).
+#268) and `scadbuddy://browser/{tab}/snapshot` (#254). LSP
+diagnostics (#252) are the `get_lsp_diagnostics` tool rather than a resource: they are
+worked out from a source the caller passes, not state to read or subscribe to.
+
+### The agent's own `session.*` events (#300)
+
+The agent publishes one `session.*` event on `scadbuddy_events` per batch a session
+appends to its event log
+([`agent/src/sessions/busEvents.ts`](../../agent/src/sessions/busEvents.ts)): ids only,
+`{ id, at, kind, session_id, seq, status?, replica }`, sent after the batch has
+committed. Streamed text is throttled to one `session.message` per 100 ms per session;
+the lifecycle kinds go at once. Every agent replica's listener wakes its own event-log
+followers for them (`followSessionEvents`, which calls `EventLog.wake()` in
+[`agent/src/sessions/eventLog.ts`](../../agent/src/sessions/eventLog.ts)), and the
+resource hub maps them as in the table above. The backend decodes them
+(`SessionBusEvent` in `backend/scadbuddy/core/events.py`) and sends them to no
+WebSocket topic.
+
+They are NOTIFY only, never rows in the backend's `events` log, so the replay after a
+reconnect cannot bring them back. Instead the listener reports the reconnect
+(`onReconnect` in [`agent/src/events/bus.ts`](../../agent/src/events/bus.ts)): every
+subscribed `scadbuddy://sessions…` URI gets `resources/updated`, and every event-log
+follower re-reads. The event log itself still polls every second as the fallback.

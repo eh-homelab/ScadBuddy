@@ -336,6 +336,18 @@ PRESET_PLACEHOLDER = "ScadBuddy"
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
 
 
+def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
+    """Every filament on extruder 1, as Bambu Studio 02.08.02.61 saved the maintainer's
+    two-colour H2C keychain at 0.2 mm, which printed through the one 0.2 mm nozzle
+    (2026-09-29, #768): ``filament_map`` ``["1", "1"]`` under ``"Auto For Flush"``.
+
+    Not measured to steer Bambuddy's headless slicer: on 2026-09-28 it kept a
+    full-length ``["1", "1"]`` map, Auto or Manual, and still spread two filaments onto
+    two nozzles (#745). Only the project-level map is written; one at plate level in
+    ``model_settings.config`` crashed that slicer the same day."""
+    return {"filament_map": ["1"] * filaments, "filament_map_mode": "Auto For Flush"}
+
+
 def project_settings(
     colours: Sequence[str], placements: Sequence[Placement], plate: PlateGeometry
 ) -> str:
@@ -489,23 +501,6 @@ def plates_of(path: Path) -> list[PlateEntry]:
         cover = plate.metadata.get("thumbnail_file")
         plates.append(PlateEntry(plate.index, cover if cover in names else None))
     return sorted(plates, key=lambda plate: plate.index)
-
-
-def plate_filaments(path: Path) -> dict[int, set[int]]:
-    """The filaments (1-based extruder numbers) each plate's parts are assigned in
-    ``model_settings.config``, by plate index (#469). A plate whose object names no
-    part extruder is left out: the caller can't tell what it uses."""
-    with zipfile.ZipFile(path) as archive:
-        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
-    used: dict[str, set[int]] = {}
-    for obj in config.iter("object"):
-        numbers = {_metadata(part).get("extruder", "") for part in obj.findall("part")}
-        used[obj.get("id", "")] = {int(number) for number in numbers if number.isdigit()}
-    return {
-        plate.index: used[plate.object_id]
-        for plate in plate_settings(config)
-        if plate.object_id is not None and used.get(plate.object_id)
-    }
 
 
 def write_bambu_3mf(
@@ -712,7 +707,8 @@ def replate_3mf(
     minute finding out.
 
     ``nozzle_diameter``, when the target names one, replaces the placeholder in
-    ``project_settings.config`` (#126); ``None`` leaves whatever the file states.
+    ``project_settings.config`` (#126), and every filament is mapped to one extruder
+    (:func:`one_extruder_map`, #768); ``None`` leaves whatever the file states.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -764,6 +760,7 @@ def replate_3mf(
             settings["printable_height"] = _number(plate.height)
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
+                settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))

@@ -283,7 +283,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
   where it is refused (`document.fullscreenEnabled` is false, or the request is
   rejected) the full-screen view covers the frame instead.
-- The assistant (the agent's `/api/v1/ai/*`, including its WebSocket `/api/v1/ai/chat`)
+- The assistant (the agent's `/api/v1/ai/*`, including its WebSockets `/api/v1/ai/chat` and,
+  for the browser bridge, `/api/v1/ai/bridge`)
   is reached on ScadBuddy's own origin: the ingress routes those paths to the agent
   sidecar (AI spec §4.2, `docs/ai/operating.md` §1.1). The sandbox's
   `allow-same-origin` is what keeps the frame's `Origin` ScadBuddy's own, and the agent's
@@ -308,6 +309,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
+- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
+  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
+  arm64 under QEMU and runs `openscad-lsp --version`, caching under
+  `scope=openscad-lsp-arm64`. It is not a required check. Making it one needs its
+  `pull_request.paths` filter dropped first: a required check that never runs on a PR
+  outside those paths leaves that PR waiting for it forever.
 
 ## PR conventions
 

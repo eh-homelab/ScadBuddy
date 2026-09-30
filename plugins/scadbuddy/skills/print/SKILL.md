@@ -30,6 +30,8 @@ The ScadBuddy MCP tools arrive with issue #251. A print tool wraps the run
 behind a single approval (AI spec §5.1): read the choices, then run with them.
 The routes below are what it calls. Use the tool when you have it. There is no
 pipeline or eligibility step in the print dialog any more (spool-first spec §0).
+The `/api/v1/print/library` routes (#313, printing a file already in Bambuddy's
+library) have no agent tool yet — that's a #313 follow-up.
 
 ## Approvals come first
 
@@ -113,16 +115,40 @@ chosen spools (spool-first spec §4), slices through Bambuddy, waits for the sli
 job, then `POST /queue/` on the one printer the dialog is scoped to. No pipeline
 runs on this path.
 
+The route answers **202** with a `PrintRun` (`status: "running"`) and slices and
+queues in the background, because the slices outlast the proxies in front.
+Follow `GET /api/v1/print/runs/{run_id}` until `status` is `succeeded` (its
+`result` is the `PrintRunResult` below) or `failed` (its `error` carries the
+`type`, `status` and `detail` of the refusal). The body's optional `request_id`
+names one deliberate print: send a new one per print and the same one on a
+retry of it. The same request (same `request_id`) for the same output again
+answers **200** with that run (`repeated: true`) while it is in flight, or for
+ten minutes after it succeeded or failed with `may_have_queued: true`, and queues
+nothing more; a failed run that never tried to queue holds nothing, so repeating
+it tries again. A new `request_id` with
+the same choices is a new print (`backend/openapi.json`; #470). `print_output`
+makes a new one per call, and re-sends that call's POST with the same id when no
+answer from ScadBuddy arrived. If it still reports no answer, or names a run it
+started but could not read, follow that run or check Bambuddy's queue rather
+than calling `print_output` again. A `failed` run with `may_have_queued: true` had already
+tried to queue (a queue call that timed out, or a later plate failing after an
+earlier one was queued): tell the user to check Bambuddy's queue, and do not
+print again until they have, since another print would be a second one.
+
 - **Errors** are a 422 before anything is sliced, and name the slot or setting:
   mixed nozzle sizes, or a slot with no filament preset for the nozzle
-  (spool-first spec §4.5).
+  (spool-first spec §4.5). A slot error needs the uploaded file, so it arrives
+  as the run's `failed` `error` with that 422, not as the POST's answer.
 - **Warnings** come back in the result and never block: spool not loaded, nozzle
   not installed, High Flow slicing as Standard, a Generic filament preset
   fallback, or a plate that differs from the last print (spool-first spec §4.5).
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,
-stay Bambuddy's and the printer's decisions (spool-first spec §6).
+stay Bambuddy's and the printer's decisions (spool-first spec §6). The run does
+not check the chosen size against the mounted nozzles, so do not warn that a
+multi-colour print needs the size on both sides: a two-colour print sliced for
+0.2 mm printed through the one 0.2 mm nozzle (spool-first spec §4.3, #768).
 
 The simpler **send** path, `POST /api/v1/outputs/{output_id}/send` with
 `{mode: "library"}`, only uploads the 3MF to the library folder and attaches the
@@ -132,7 +158,7 @@ print, use the run above. Sending is outward too.
 
 ## 4. After the run: the result
 
-`PrintRunResult` reports `route` (always `slice_queue`), `slice_job_id`,
+A `succeeded` run's `result`, a `PrintRunResult`, reports `route` (always `slice_queue`), `slice_job_id`,
 `queue_item_ids`, `library_file_id`, `copies`, `bambuddy_url` and `warnings`
 (`backend/openapi.json`). Give the user the `bambuddy_url` and every warning.
 

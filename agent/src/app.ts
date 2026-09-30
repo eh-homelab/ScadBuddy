@@ -7,8 +7,29 @@ import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
-import type { RemoteAddress } from './routes/guard.js'
+import type { RemoteAddress, uiReadProblem } from './routes/guard.js'
 import { ROUTES } from './routes/index.js'
+import type { PluginForwarder } from './plugins/forwarder.js'
+import type { PackageInstaller } from './plugins/packages/install.js'
+import type { PackageRepo } from './plugins/packages/store.js'
+import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
+import { type PluginTest, testPlugin } from './plugins/testConnection.js'
+import type { AuditRepo } from './audit/log.js'
+import type { TabHub } from './bridge/hub.js'
+import { auditWrites, RefusalCoalescer } from './audit/writes.js'
+import { registerApprovalRoutes } from './routes/approvals.js'
+import { registerAuditRoutes } from './routes/audit.js'
+import { registerBridgeRoute } from './routes/bridge.js'
+import { registerChatRoute } from './routes/chat.js'
+import { registerCredentialRoutes } from './routes/credentials.js'
+import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
+import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
+import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
+import { registerPluginRoutes } from './routes/plugins.js'
+import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
+import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
+import { registerSessionLimitsRoutes } from './routes/sessionLimits.js'
+import { registerSessionRoutes } from './routes/sessions.js'
 import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
 
@@ -45,6 +66,15 @@ export interface AppDeps {
   resolveHost?: Resolver
   /** Upper bound on each database step of /healthz (migrations, credential read). */
   healthTimeoutMs?: number
+  /** Clock for the connection-test cooldown; Date.now when omitted. */
+  now?: () => number
+  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+  approvals?: ApprovalService
+  /**
+   * `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) and the session
+   * limits (#790) answer 503 without it.
+   */
+  settings?: SettingsRepo | undefined
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
@@ -68,6 +98,12 @@ export interface AppDeps {
    * route groups use it.
    */
   audit?: AuditRepo | undefined
+  /**
+   * The tabs of the browser bridge (#254, bridge/hub.ts): their socket
+   * (routes/bridge.ts), and the chat socket's `tab.bind`. Left out, there is
+   * no bridge socket, and the browser_* tools answer "no browser attached".
+   */
+  tabs?: TabHub | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -81,6 +117,11 @@ function tokenVerb(method: string, path: string): string | undefined {
   if (method === 'POST' && path === '/api/v1/ai/mcp-tokens') return 'mint'
   if (method === 'DELETE' && path.startsWith('/api/v1/ai/mcp-tokens/')) return 'revoke'
   return undefined
+}
+
+/** A raise of one session's budget (routes/sessions.ts); no other session route is recorded here. */
+function budgetVerb(method: string, path: string): string | undefined {
+  return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
 }
 
 /** Which plugin requests are writes; connection tests are not. */
@@ -158,6 +199,9 @@ export function createApp(deps: AppDeps): AgentApp {
     app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
     // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
     app.use('/api/v1/ai/plugins/*', auditWrites({ ...writes, kind: 'plugin', verb: pluginVerb }))
+    // Refused or failed raises of a session's budget (#790); a raise that
+    // lands is recorded by the manager (sessions/manager.ts raiseBudget).
+    app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))
   }
 
   const shutdown = new AbortController()

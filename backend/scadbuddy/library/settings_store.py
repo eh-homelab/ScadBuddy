@@ -13,6 +13,10 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 - ``model_print_choices``: what the print dialog last chose, one row per model.
 - ``printer_bed_types``: the plate last printed on, one row per printer.
 
+A fourth, ``library_print_choices`` (``migrations/20260928T1522Z_library_print_choices.sql``,
+#313), is the same shape as ``model_print_choices`` but keyed by Bambuddy's own library
+file id, for a library file that has no ScadBuddy slug.
+
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
 statement on its own row, so neither can drop the other's change.
@@ -33,6 +37,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -132,6 +137,7 @@ class StoredSettings(BambuddyIds):
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     public_url: str | None = None
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
@@ -180,6 +186,7 @@ class SettingsPatch(BaseModel):
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -431,6 +438,38 @@ class SettingsStore:
                 )
         return self._written("printer_bed_type")
 
+    def library_choices(self, file_id: int) -> ModelPrintChoices:
+        """What the dialog last chose for one Bambuddy library file (#313); nothing
+        remembered is the empty choice. A row this version cannot read is nothing
+        remembered too, rather than a dialog that will not open."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT choices FROM library_print_choices WHERE file_id = %s", (file_id,)
+            ).fetchone()
+        if row is None:
+            return ModelPrintChoices()
+        try:
+            return ModelPrintChoices.model_validate(row["choices"])
+        except ValidationError:
+            logger.warning("unreadable library print choices", extra={"file_id": file_id})
+            return ModelPrintChoices()
+
+    def set_library_choices(self, file_id: int, choices: ModelPrintChoices) -> ModelPrintChoices:
+        """Remember one library file's choices; an empty ``choices`` forgets them."""
+        with self._pool.connection() as conn:
+            if choices == ModelPrintChoices():
+                conn.execute("DELETE FROM library_print_choices WHERE file_id = %s", (file_id,))
+            else:
+                conn.execute(
+                    "INSERT INTO library_print_choices (file_id, choices) VALUES (%s, %s)"
+                    " ON CONFLICT (file_id) DO UPDATE"
+                    " SET choices = EXCLUDED.choices, updated_at = now()",
+                    (file_id, Jsonb(choices.model_dump(mode="json"))),
+                )
+        # The dialog's remembered choices, as for a model: no new section is needed.
+        emit(self.events, SettingsChanged(section="model_choices"))
+        return self.library_choices(file_id)
+
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
         with self._pool.connection() as conn:
@@ -467,11 +506,12 @@ class SettingsStore:
         return self._written("print_options")
 
     def forget_remembered(self) -> StoredSettings:
-        """Forget every remembered choice (#322): the per-model print-dialog choices, the
-        per-printer plates, and the print options at every scope. The
-        settings themselves are left alone."""
+        """Forget every remembered choice (#322): the per-model and per-library-file
+        (#313) print-dialog choices, the per-printer plates, and the print options at
+        every scope. The settings themselves are left alone."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM model_print_choices")
+            conn.execute("DELETE FROM library_print_choices")
             conn.execute("DELETE FROM printer_bed_types")
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(REMEMBERED_ROWS),))
         return self._written("remembered")

@@ -283,14 +283,14 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     script = printing(() => 'box.3mf')
     const m = await replica()
     const { session, turn, approvalId } = await parked(m)
-    await m.handoff(session.id, agentA, agentB)
+    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(printed).toEqual([])
     expect(await m.approvals.get(approvalId, browser)).toMatchObject({
       decision: 'cancelled',
-      reason: 'the session was handed off to Agent B',
+      reason: 'the session was handed off to another MCP token',
     })
-    expect(lastContent(fake.messageCalls().at(-1)!)).toContain('was cancelled (the session was handed off to Agent B)')
+    expect(lastContent(fake.messageCalls().at(-1)!)).toContain('was cancelled (the session was handed off to another MCP token)')
   }, 60_000)
 
   it('expires a parked approval at its time, and the model is told', async () => {
@@ -348,7 +348,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
     await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
     expect((await b.approvals.get(approvalId, browser)).revokedAt).not.toBeNull()
 
-    await b.handoff(session.id, agentA, agentB)
+    await b.handoff(session.id, agentA, agentB).then(() => b.acceptHandoff(session.id, agentB))
     await b.send(session.id, agentB, 'print the box')
     const events = await b.attach(session.id, agentB, { signal: stop.signal })
     const seen = await collectUntil(events, (e) => e.event.type === 'approval.required' && e.event.id !== approvalId)

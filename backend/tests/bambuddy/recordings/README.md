@@ -211,3 +211,32 @@ every request a `GET`):
 `GET /archives/35/timelapse` and `/photos/{name}` with `Range: bytes=100-199` answered
 `206` with `Content-Range: bytes 100-199/<size>` and `Accept-Ranges: bytes`: Bambuddy's
 `FileResponse` serves ranges itself, so the proxy passes the header through.
+
+Added for #313 on 2026-09-28, from Bambuddy 1.2.5.6 over the ingress (every request a
+`GET` except the one probe slice below; `created_by_username` nulled):
+
+| File | Source |
+|---|---|
+| `library-files-root.json` | `GET /api/v1/library/files/` (the root: `include_root` defaults to true) |
+| `library-files-folder.json` | `GET /api/v1/library/files/?folder_id=4` (3MF, sliced 3MF and STL) |
+| `library-plates-single.json` | `GET /api/v1/library/files/89/plates` |
+| `library-plates-multi.json` | `GET /api/v1/library/files/67/plates` |
+| `library-plates-stl.json` | `GET /api/v1/library/files/46/plates` |
+| `filament-requirements-stl.json` | `GET /api/v1/library/files/46/filament-requirements` |
+| `filament-requirements-rgba.json` | `GET /api/v1/library/files/67/filament-requirements` (colors as `#RRGGBBAA`) |
+| `filament-requirements-plate-unsliced.json` | `GET /api/v1/library/files/89/filament-requirements?plate_id=1` |
+
+- **`GET /library/files/` answers a bare list of `FileListResponse`** and is filtered by
+  `folder_id`; without one it lists the root only. There is no pagination.
+- **`/library/files/{id}/plates` declares no schema** (its 200 is `{}`). The body is
+  `{file_id, filename, plates: [{index, name, objects, object_count, has_thumbnail,
+  thumbnail_url, print_time_seconds, filament_used_grams, filaments}], is_multi_plate,
+  ...}`. An STL answers `plates: []`.
+- **An STL's `filament-requirements` is `filaments: []`.**
+- **A plate-scoped read of an unsliced 3MF marks every slot `used_in_plate: true`**
+  (file 89), so it cannot narrow the slots a plate uses. **Over the ingress, the first
+  plate-scoped read of a large file can 504 after 15 s** (Envoy's route timeout) while
+  Bambuddy parses it (file 67, 2026-09-28); it answers in under a second after that.
+  ScadBuddy reaches Bambuddy by its Service URL, which has no such limit.
+- **Slicing a raw STL (#313 probe, the only write):** PASS: job 24 completed, sliced file
+  177 left in the library. STL_PRINTABLE = yes.

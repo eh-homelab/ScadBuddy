@@ -12,8 +12,9 @@ import { createBackendClient } from '../src/api/backend.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // Spec §5.1: "A test asserts both lists are identical, apart from browser-only
-// tools." There are no browser-only tools yet (#254), so the lists must be
-// equal outright: names, descriptions, input schemas and annotations.
+// tools." The browser_* tools (#254, src/tools/browser.ts) are in both lists,
+// so the lists must be equal outright: names, descriptions, input schemas and
+// annotations.
 //
 // One normalisation: the two servers turn the same zod union of primitives
 // into JSON Schema differently. The Agent SDK's bundled server writes
@@ -123,16 +124,18 @@ describe('registry projections', () => {
     for (const tool of ALL_TOOLS) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.risk === 'read')
       expect(tool.annotations.destructiveHint, tool.name).toBe(tool.risk === 'outward')
-      // Every outward tool is gated, except the gate's own confirm.
-      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && tool.name !== 'confirm_action')
+      // Every outward tool is gated, except the approval path itself: the
+      // gate's own confirm, and deciding another agent's approval (#300).
+      const approvalPath = ['confirm_action', 'sessions_approve', 'sessions_deny'].includes(tool.name)
+      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && !approvalPath)
     }
   })
 
   it('declare a Bambuddy scope on every tool that reaches Bambuddy', () => {
     // The backend routes that call Bambuddy (backend/scadbuddy/api/printing.py,
     // outputs.py `send`, settings.py `test`/`targets`); `remember_*` only write
-    // ScadBuddy's own settings.json.
-    const bambuddyRoutes = /\/print\/|\/send$|\/settings\/(test|targets)$/
+    // ScadBuddy's own settings.json, and `/print/runs/` only reads its database.
+    const bambuddyRoutes = /\/print\/(?!runs\/)|\/send$|\/settings\/(test|targets)$/
     for (const tool of ALL_TOOLS) {
       if (tool.routes.some((r) => bambuddyRoutes.test(r.split(' ')[1]!)) && !tool.name.startsWith('remember_')) {
         expect(tool.bambuddyScope.length, tool.name).toBeGreaterThan(0)

@@ -432,6 +432,22 @@ choice the way the print dialog opens, then slices and queues behind a single ap
 (It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
 pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
+As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
+`POST /api/v1/models/{slug}/dependencies`, which reports each `include <…>`/`use <…>`
+as resolved (file and library) or unresolved (reason, and a catalogue or installed
+library to pin), resolved as OpenSCAD's lexer and `find_valid_path` resolve them
+against the model's own pins, and lists `font = "…"` literals with their missing
+families (`backend/scadbuddy/library/includes.py`). A target outside the model's
+directory and its checkouts (absolute, `../`, or through a symbolic link) is unresolved
+without its existence being checked, and a report is capped in statements and library
+lookups, with `truncated` past the caps (review of #740). A missing font family is
+enforced by the backend, not the tool: the render and preset routes answer 422 for a `// font`
+value whose family fontconfig does not resolve, and `POST /api/v1/fonts/install`
+answers 500 when the family still does not resolve after the install; "already
+installed" uses the same outline, scalable filter (review of #740)
+(`backend/scadbuddy/api/params.py` `require_installed_fonts`,
+`backend/scadbuddy/library/fonts.py`). Details and sources: `docs/ai/dependencies.md`.
+
 ### 5.2 Browser tools
 
 The SDK runs tools in the service process ([custom tools][sdk-tools]), so a browser tool
@@ -440,6 +456,24 @@ WebSocket and awaits the result, with a timeout. If no tab is paired it returns 
 ("no browser attached"). The tab reports which handlers are live on each route change.
 Unavailable handlers return an error instead of disappearing, so the session's tool list
 stays stable. Details are in #254.
+
+As built (#254; tab side PR #339, agent side its follow-up; `docs/ai/browser-bridge.md`):
+every tool of the tab's catalogue (`frontend/src/agent/catalog.ts`) is a registry tool
+`browser_<name>` (`agent/src/tools/browser.ts`), plus `browser_status` and
+`browser_pair`. They are in `ALL_TOOLS`, so both projections serve them and the two lists
+stay equal: the harness gets them bound to the turn's session, `/mcp` callers reach the
+tab they paired. A tool is never below the tab's tier, and anything that moves or changes
+the tab is at least `write` (`navigate` and `open_model` are raised from the tab's
+`read`); `browser_open_print_dialog` is `outward`, so it is gated like any outward tool,
+and the dialog's confirmation stays user-only in the tab. The tab opens
+`GET /api/v1/ai/bridge` (`agent/src/routes/bridge.ts`, same gate as the chat socket) while
+the assistant is available, says `hello` with its tab id (128 random bits per page load,
+in memory only), route and live tools, and `state` on every change; the agent sends
+`call`, the tab answers `result` from `AgentBridge.call()`. A call waits 30 s, or a
+tool's own `timeout_ms` plus 10 s; with no tab it answers "no browser attached: …" with
+the reason. Tabs are held per process: a call reaches a tab whose socket is on the same
+replica, and otherwise says it is not connected (follow-up). `screenshot()` stays out,
+as PR #339 decided.
 
 ### 5.3 Headless browser (#349)
 
@@ -540,8 +574,20 @@ implements it):
   for a slug given in `context.arguments`.
 - **Not built in #264**, for want of a backend route or event source on `main`: the
   Bambuddy printers, queue, inventory, history and stats resources (print watcher,
-  #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
-  sessions (#300).
+  #268) and the browser snapshot (#254).
+- **Sessions, as built in #300:** `scadbuddy://sessions` (backed by `sessions_list`)
+  and `scadbuddy://sessions/{session_id}` (`sessions_get`). A session resource also
+  checks who may see it (§6), so subscribing reads it first and refuses one the caller
+  may not see with `-32002` (`readToSubscribe` in `agent/src/resources/catalog.ts`).
+- **As built for #252:** `scadbuddy://docs/authoring` is backed by the `read` tool
+  `get_authoring_guide`, which serves the plugin's `authoring` skill without its
+  frontmatter; the agent image carries a copy (`dist/docs/authoring.md`, copied by
+  `pnpm build`), so it needs no backend route (`agent/src/tools/guide.ts`). LSP
+  diagnostics are a tool, `get_lsp_diagnostics` (`POST /api/v1/lsp/diagnostics`), not a
+  resource: openscad-lsp 2.0.1 publishes them only on `didChange` (measured, and
+  `src/server/handler/notification.rs` upstream), and only tree-sitter parse errors plus
+  a missing leading `include`. A per-colour breakdown image is `get_render_colours`
+  (`GET /api/v1/jobs/{job_id}/colours.png`).
 
 ## 6. Sessions (#300)
 
@@ -568,6 +614,65 @@ implements it):
 - **A2A: deferred.** Once the MCP path works, the same model can be exposed through the
   [A2A protocol][a2a] if an agent needs it. That is not planned for now.
 
+As built (#300; `agent/src/tools/sessions.ts`, `docs/ai/agent-sessions.md`):
+
+- **Names.** The tools are `sessions_list`, `sessions_start`, `sessions_send`,
+  `sessions_get`, `sessions_attach`, `sessions_fork`, `sessions_interrupt`,
+  `sessions_handoff`, `sessions_accept_handoff`, `sessions_cancel_handoff`,
+  `sessions_list_approvals`, `sessions_approve` and `sessions_deny`: an underscore, not a dot, because the registry's names are also the
+  harness's and the Messages API allows only `^[a-zA-Z0-9_-]{1,64}$` in a tool name
+  ([tool use](https://docs.claude.com/en/docs/agents-and-tools/tool-use/implement-tool-use)).
+  They are registry tools, on both projections (§5.1).
+- **Tiers (§8.1).** Reads are `read`. Start, send, fork, interrupt and handoff (offer,
+  accept, withdraw, decline) change only ScadBuddy's own session state and are `write`. Approve and deny are `outward`
+  and, like `confirm_action`, are the approval path and not gated again.
+- **Principal.** Every call acts as its caller (`ownerOf`), under the manager's rules
+  above. A turn a token sends runs its in-process tools with that token's tiers
+  (`SendOptions.tiers`, `tools/harness.ts` `turnPrincipal`); without them a
+  non-browser owner's turns are `read` only. An approval a turn asks for records
+  those tiers (`ai_approvals.requested_tiers`,
+  `agent/src/db/migrations/20260929T2258Z_approval_requested_tiers.sql`), so the turn
+  that resumes an orphan approved after a restart (§8.2) is offered the approved tool
+  again. It gets them only while the requester still owns the session, and no more
+  than a bearer token holds at resume time (`auth/tokens.ts` `liveTokenTiers`: a
+  revoked or expired token leaves `read`). An OIDC subject's tiers come with each
+  access token and are not stored, so its resumed turn gets the recorded ones (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715)).
+- **Watching.** `sessions_get` returns status, owner, pending approvals and the
+  transcript after a seq, with streamed text joined per message; `sessions_attach`
+  long-polls the event log (at most 300 s) and returns once events pause. Start and
+  send can wait for their turn (at most 600 s), reporting MCP progress.
+- **Inside a session** the tools run as the session's owner, but deciding an approval
+  and handing off, accepting or declining a handoff are refused there: they are the
+  owner's decisions, and a model running as the browser user would otherwise approve
+  its own calls.
+- **Handoff to another agent is an offer** (PR #715
+  [review](https://github.com/eh-homelab/ScadBuddy/pull/715#issuecomment-5896053771)).
+  "Explicitly" above now means the receiving principal agrees too: a handoff to the
+  browser user moves at once (it may take any session over and sees every one), but to
+  an MCP principal it records a pending offer (`ai_sessions.pending_owner_*`,
+  `agent/src/db/migrations/20260929T1825Z_session_handoff_offers.sql`) that only that
+  principal accepts, as `confirm_action` completes only for the principal that
+  prepared the call (§8.2). The owner withdraws it and the target declines it
+  (`sessions_cancel_handoff`); it expires after an hour and ends on any change of
+  owner. The target sees offered sessions in `sessions_list` (`offered_to_you`).
+  Otherwise one `write` token could make another agent the sole sender of content it
+  never asked for. The MCP tools spec asks servers to "implement proper access
+  controls" on tool calls
+  ([Security Considerations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#security-considerations)).
+- **Principal ids.** Over `/mcp` a caller is shown only its own principal id: every
+  other principal in a session, its transcript or its approvals is shown by kind and a
+  label that does not name it (`agent/src/sessions/protocol.ts` `ownerSeenBy`), since
+  an id is what a handoff addresses. The browser user sees every id.
+- **The per-token grant** is `ai_mcp_tokens.approval_grant`
+  (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off by
+  default and allowed only on an `outward` token, set when the token is minted
+  (`POST /api/v1/ai/mcp-tokens` `approval_grant`). `auth/tokens.ts`
+  `approvalGrantCheck` reads it on every decision, for bearer tokens only; §8.2's
+  rules (`approvals/service.ts` `authorize`) do the rest.
+- **Not built:** a skill on `sessions_start` (session queries have no Skill tool,
+  `tools: []`); the grant's checkbox in Settings.
+
 ## 7. Events
 
 The Python backend gets a small typed event bus. Every state change publishes
@@ -588,6 +693,20 @@ Two independent consumers `LISTEN` on the channel, each on its own connection
 - **The agent service** fans them out to MCP resource subscriptions
   (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
   sockets under `/api/v1/ai/*`.
+
+As built for `session.*` (#300, `agent/src/sessions/busEvents.ts`): every batch a
+session appends to its event log is one NOTIFY on `scadbuddy_events`, after it
+commits: `{ id, at, kind, session_id, seq, status?, replica }` with the kinds
+`session.started`, `session.owner`, `session.waiting`, `session.done` and
+`session.message` (streamed text, throttled to one per 100 ms per session). They are
+not rows in the backend's `events` log (its lock and row-count pruning are the
+backend's, and a streaming turn would flood it), so they are not replayed; a
+reconnecting agent listener reports the reconnect instead (`onReconnect`,
+`agent/src/events/bus.ts`), and session followers and subscriptions re-read. Each agent
+replica's consumer calls `EventLog.wake()` for other replicas' sessions; the event
+log's poll stays as the fallback. The backend decodes them (`SessionBusEvent`,
+`backend/scadbuddy/core/events.py`) and routes them to no WebSocket topic: the UI
+follows sessions over the agent's chat socket, which checks who may see them.
 
 The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). As
 built (`agent/src/events/pgListener.ts`), the agent LISTENs on a dedicated connection
@@ -651,7 +770,8 @@ including `disabled`. Where it is enforced:
   approvals of a session cancels the others. A decision binds to the input hash (an
   HMAC under a key derived from the key-encryption key); a changed input needs a new
   approval. Only the browser user decides, or another principal with a per-token grant
-  (§6), and never for its own calls or sessions. Interrupt, handoff and a new turn
+  (§6; as built in #300, `ai_mcp_tokens.approval_grant` and the `sessions_approve` /
+  `sessions_deny` tools), and never for its own calls or sessions. Interrupt, handoff and a new turn
   cancel a pending approval and void an approved one that was not used yet, as does
   the end of the turn it belongs to; one that nobody decides expires
   (`approval_expiry_seconds` in `ai_settings`). The code is
@@ -764,6 +884,27 @@ The browser user's own chat sessions pair with their tab automatically. An exter
 agent needs a pairing token that the user accepts **in the tab**, in every auth mode:
 driving someone's open tab is more invasive than calling tools, so `disabled` mode does
 not skip pairing.
+
+As built (#254; `agent/src/bridge/`, `docs/ai/browser-bridge.md`):
+
+- **Chat sessions.** The panel names its tab on every chat-socket connection
+  (`tab.bind`), and each session it starts or sends to (or attaches to while it has no
+  connected tab) is paired with that tab, in memory (`TabHub.pairSession`). The last tab
+  the user sent from wins.
+- **External agents.** The token is a short code in the style of the device
+  authorization grant ([RFC 8628 §3.3][rfc8628]): `browser_pair` stores a pending row in
+  `ai_browser_pairings` (migration `20260929T1330Z_browser_pairings.sql`) and returns
+  the code once; only its SHA-256 is kept. Every connected tab shows the request, naming
+  the MCP token that asked, and the user types the code into the tab the agent should
+  drive. Typing it, rather than only clicking Allow, ties the acceptance to the agent
+  the user is talking to. The code is single-use, lives 5 minutes, and allows 5 tries;
+  requests are capped per principal (3) and overall (20). The accepted pairing binds the
+  principal to that tab, one tab per principal (a partial unique index), until the user
+  disconnects it in the tab, 8 hours pass, or the tab reloads (a new tab id). The prompt
+  is user-only, so a paired agent's own `click`/`fill` cannot accept another.
+- **Replicas.** Pairing rows are shared through Postgres, and every replica re-reads the
+  pending requests for its tabs every 3 s, so the prompt appears wherever the tab is
+  connected; a call itself reaches only a tab on the caller's replica (§5.2).
 
 ### 8.6 Threat model (summary)
 
@@ -926,6 +1067,7 @@ Each of these is in §3.2 until verified.
 [rfc8707]: https://www.rfc-editor.org/rfc/rfc8707
 [rfc6750]: https://www.rfc-editor.org/rfc/rfc6750
 [rfc9068]: https://www.rfc-editor.org/rfc/rfc9068
+[rfc8628]: https://www.rfc-editor.org/rfc/rfc8628#section-3.3
 [mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
 [mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject

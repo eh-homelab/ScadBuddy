@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError, mayHaveRun } from '../api/client'
+import { api, ApiError, mayHaveRun, newRequestId } from '../api/client'
 import type {
   ChoicesView,
   PrintOptions,
@@ -8,11 +8,12 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { printChoicesOf } from './printChoices'
+import { sourceApi, type PrintSource } from './printSource'
 import type { PrintSelection } from './usePrintChoices'
 
 interface RunInput {
-  outputId: string | undefined
-  slug: string
+  /** #313 — an output or a library file. */
+  source: PrintSource | undefined
   choices: ChoicesView | null
   printerId: number | null
   selection: PrintSelection
@@ -29,14 +30,14 @@ interface RunInput {
 }
 
 /**
- * The print dialog's one write, `POST /print/outputs/{id}/run`. A 422 is the resolver
+ * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
+ * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
  * refusing a combination; its `detail` is `runError`, and `refused` keeps Print disabled
  * until one of the choices changes. A run whose answer never arrived is `unanswered`
  * instead (#470). `reset` clears the run for the dialog's next open.
  */
 export function useRunPrint({
-  outputId,
-  slug,
+  source,
   choices,
   printerId,
   selection,
@@ -55,13 +56,18 @@ export function useRunPrint({
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
   /**
-   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection):
-   * the backend may have queued it anyway, so the dialog says so instead of offering
-   * Print again. Closing the dialog is the way back to it.
+   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection),
+   * or one that failed after it had tried to queue (`may_have_queued`): Bambuddy may
+   * have queued it anyway, so the dialog says so instead of offering Print again.
+   * Closing the dialog is the way back to it.
    */
   const [unanswered, setUnanswered] = useState<string | null>(null)
   /** Which `run()` may still update the dialog: bumped by each run. */
   const runAttempt = useRef(0)
+  /** Stops following the current run: the dialog unmounted, or was reset. */
+  const following = useRef<AbortController | null>(null)
+
+  useEffect(() => () => following.current?.abort(), [])
 
   // A refused run was refused for *these* choices; any change is worth another try.
   useEffect(() => {
@@ -91,7 +97,7 @@ export function useRunPrint({
       process_name: last?.process_name ?? null,
     }
     if (JSON.stringify(next) === JSON.stringify(before)) return
-    void api.putModelChoices(slug, next).catch(() => undefined)
+    if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
   /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
@@ -102,8 +108,11 @@ export function useRunPrint({
 
   async function run() {
     const printChoices = printChoicesOf(selection)
-    if (!outputId || !choices || !printChoices) return
+    if (!source || !choices || !printChoices) return
     const attempt = ++runAttempt.current
+    following.current?.abort()
+    const controller = new AbortController()
+    following.current = controller
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -117,15 +126,18 @@ export function useRunPrint({
         all_plates: plate === 'all',
         project_id: projectId,
         options,
+        // One per press: the same choices printed again are a new print, while
+        // runPrint's own retries of this press re-attach to its run (#470).
+        request_id: newRequestId(),
       }
-      const ran = await api.runPrint(outputId, body)
+      const ran = await sourceApi(source).run(body, controller.signal)
       if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
-      if (attempt !== runAttempt.current) return
+      if (attempt !== runAttempt.current || controller.signal.aborted) return
       if (mayHaveRun(cause)) {
         setUnanswered((cause as ApiError).detail)
         return
@@ -139,6 +151,7 @@ export function useRunPrint({
   }
 
   function reset() {
+    following.current?.abort()
     setRunError(null)
     setRefused(false)
     setResult(null)

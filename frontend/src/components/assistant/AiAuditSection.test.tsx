@@ -27,6 +27,46 @@ describe('AiAuditSection', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
+  it('shows memory rows in words, not their JSON summary', async () => {
+    const memory = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'memory' as const,
+      tier: null,
+      duration_ms: 120,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            memory('3', { action: 'retain', outcome: 'ok', input_summary: '{"bank":"scadbuddy","document_id":"conversation:abc"}' }),
+            memory('2', { action: 'recall', outcome: 'ok', input_summary: '{"bank":"scadbuddy","results":3}' }),
+            memory('1', {
+              action: 'recall',
+              outcome: 'error',
+              input_summary: '{"bank":"scadbuddy"}',
+              detail: 'timed out after 3000 ms',
+            }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(3))
+    const [retain, recall, failed] = rows()
+    expect(retain).toHaveTextContent('Memory save')
+    expect(retain).toHaveTextContent('bank scadbuddy · conversation:abc')
+    expect(recall).toHaveTextContent('Memory recall')
+    expect(recall).toHaveTextContent('bank scadbuddy · 3 memories')
+    expect(recall).not.toHaveTextContent('{')
+    expect(failed).toHaveTextContent('Error')
+    expect(failed).toHaveTextContent('bank scadbuddy · timed out after 3000 ms')
+    expect(screen.getByRole('option', { name: 'Memory' })).toBeInTheDocument()
+  })
+
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))
