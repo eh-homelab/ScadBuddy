@@ -2308,6 +2308,18 @@ export const handlers = [
     } satisfies AssetUsage)
   }),
 
+  // #426 — the blob store's usage, over every kind.
+  http.get(`${base}/store/usage`, () =>
+    HttpResponse.json({
+      backend: 'local',
+      count: 3,
+      bytes: 4096,
+      max_count: 200000,
+      max_total_bytes: 53687091200,
+      by_kind: { piece: 4096 },
+    }),
+  ),
+
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
     return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')

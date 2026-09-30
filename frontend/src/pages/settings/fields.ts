@@ -227,7 +227,7 @@ export function envVar(name: string): string {
 
 /** The value a field has on the server, as the form holds it. Secrets are never shown. */
 export function serverValue(settings: Settings, name: FieldName): string {
-  if (name === 'bambuddy_api_key' || name === 'google_fonts_api_key') return ''
+  if (name === 'bambuddy_api_key' || name === 'bambuddy_render_api_key' || name === 'google_fonts_api_key') return ''
   const value = (settings as Record<string, unknown>)[name]
   if (value === null || value === undefined) return ''
   return String(value)

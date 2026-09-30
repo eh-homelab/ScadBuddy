@@ -46,7 +46,7 @@ function ofLimit(used: string, limit: number, format: (n: number) => string): st
   return limit > 0 ? `${used} of ${format(limit)}` : `${used} (no limit)`
 }
 
-const SECRETS = ['bambuddy_api_key', 'google_fonts_api_key'] as const
+const SECRETS = ['bambuddy_api_key', 'bambuddy_render_api_key', 'google_fonts_api_key'] as const
 type Secret = (typeof SECRETS)[number]
 
 function isSecret(name: FieldName): name is Secret {
@@ -57,9 +57,10 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
-  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'public_url'],
+  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'bambuddy_render_api_key', 'public_url'],
   printing: ['printer_id'],
-  projects: ['library_folder_id', 'last_project_id'],
+  // #426 — the blob store beside the inbox folder it needs.
+  projects: ['library_folder_id', 'last_project_id', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
 }
 
@@ -150,6 +151,7 @@ export function SettingsPage() {
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
   const usage = useAsync(() => api.getAssetUsage(), []).data
+  const storeUsage = useAsync(() => api.getStoreUsage(), []).data
   const plateNames = (platesState.data?.plates ?? []).map((plate) => plate.name)
 
   // The pickers need a live Bambuddy, so they are only fetched once one is configured.
@@ -189,8 +191,17 @@ export function SettingsPage() {
     if (isSecret(name) && next !== '') setClearing((current) => current.filter((secret) => secret !== name))
   }
 
+  // #426 — the Bambuddy store needs a SAVED Bambuddy URL and an inbox folder in the form:
+  // until then the Blob store choice shows, sends and compares the local store. The URL is
+  // the saved one, never Connection's unsaved draft: a Projects & files save cannot commit
+  // it, so what the choice shows and what that save sends always agree.
+  const savedBambuddyUrl = settings ? baseline(settings, 'bambuddy_url') !== '' : false
+  const bambuddyStoreReady = savedBambuddyUrl && value('library_folder_id') !== ''
+  const chosenBackend = bambuddyStoreReady ? value('store_backend') : 'local'
+
   const changed = (name: FieldName): boolean => {
     if (!settings) return false
+    if (name === 'store_backend') return chosenBackend !== baseline(settings, name)
     if (isSecret(name)) return value(name) !== '' || clearing.includes(name)
     return value(name) !== baseline(settings, name)
   }
@@ -234,6 +245,10 @@ export function SettingsPage() {
     const problems: Partial<Record<FieldName, string>> = {}
     for (const name of fieldsOf(id, settings)) {
       if (!changed(name)) continue
+      if (name === 'store_backend') {
+        body[name] = chosenBackend
+        continue
+      }
       if (isSecret(name)) {
         // Omitted when untouched, so the stored key is left alone; "" clears it.
         body[name] = value(name)
@@ -247,6 +262,17 @@ export function SettingsPage() {
       setErrors((current) => ({ ...current, ...problems }))
       return null
     }
+    // A Connection save that loses the Bambuddy URL takes the store back to local with it,
+    // or the server would refuse the save (it never keeps an unready Bambuddy store).
+    // Only this save's own change counts: another section's unsaved draft does not.
+    if (
+      id === 'connection' &&
+      changed('bambuddy_url') &&
+      value('bambuddy_url') === '' &&
+      settings.store_backend === 'bambuddy'
+    ) {
+      body.store_backend = 'local'
+    }
     return body as SettingsUpdate
   }
 
@@ -259,7 +285,7 @@ export function SettingsPage() {
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
       const next = await api.putSettings(body)
-      reseed.current = fieldsOf(id, next)
+      reseed.current = [...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])]
       settingsState.setData(next)
       if (id === 'preview') setDisplayUnit(next.display_unit)
       if (id === 'connection') setBambuddyLinks(next)
@@ -306,8 +332,12 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
-      const next = await api.putSettings({ reset: [name] })
-      reseed.current = [name]
+      // Resetting what the Bambuddy store needs takes the store back to local with it, as a
+      // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
+      const fallBack =
+        (name === 'bambuddy_url' || name === 'library_folder_id') && settings?.store_backend === 'bambuddy'
+      const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
+      reseed.current = fallBack ? [name, 'store_backend'] : [name]
       settingsState.setData(next)
       setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
@@ -643,6 +673,53 @@ export function SettingsPage() {
               </FieldRow>
 
               <FieldRow
+                id="bambuddy-render-key"
+                label="Render key"
+                badge={badge('bambuddy_render_api_key')}
+                error={errors.bambuddy_render_api_key}
+                help="A second key with Manage Library only. Render workers run template code and hold this key alone."
+              >
+                <div className="flex gap-2">
+                  <input
+                    id="bambuddy-render-key"
+                    type="password"
+                    value={value('bambuddy_render_api_key')}
+                    autoComplete="off"
+                    onChange={(event) => setField('bambuddy_render_api_key', event.target.value)}
+                    placeholder={
+                      clearing.includes('bambuddy_render_api_key')
+                        ? 'Cleared when you save.'
+                        : settings.has_render_api_key
+                          ? 'A key is stored. Paste a new one to replace it.'
+                          : 'Paste the key'
+                    }
+                    className="sb-field sb-num"
+                  />
+                  {settings.has_render_api_key && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={clearing.includes('bambuddy_render_api_key')}
+                      onClick={() => clearSecret('bambuddy_render_api_key')}
+                      {...USER_ONLY}
+                    >
+                      Remove key
+                    </Button>
+                  )}
+                </div>
+                {settings.render_key_fallback && (
+                  <p
+                    role="status"
+                    data-testid="render-key-fallback"
+                    className="mt-1.5 rounded-[6px] border border-warn px-2 py-1.5 text-[12px]"
+                  >
+                    Render workers hold the full Bambuddy key; template code can print. Create a key with only
+                    Manage Library in Bambuddy and paste it above as the render key.
+                  </p>
+                )}
+              </FieldRow>
+
+              <FieldRow
                 id="public-url"
                 label="ScadBuddy’s own URL"
                 badge={badge('public_url')}
@@ -853,6 +930,58 @@ export function SettingsPage() {
                   ))}
                 </select>
               </FieldRow>
+
+              <FieldRow
+                id="store-backend"
+                label="Blob store"
+                badge={badge('store_backend')}
+                error={errors.store_backend}
+                help="Takes effect when ScadBuddy and its render workers restart."
+              >
+                <select
+                  id="store-backend"
+                  value={chosenBackend}
+                  onChange={(event) => setField('store_backend', event.target.value)}
+                  className="sb-field cursor-pointer"
+                >
+                  <option value="local">This server&rsquo;s volume (one render worker)</option>
+                  <option value="bambuddy" disabled={!bambuddyStoreReady}>
+                    Bambuddy library (any number of render workers)
+                  </option>
+                </select>
+                {!bambuddyStoreReady && (
+                  <p className="mt-1.5 text-[12px] text-muted" data-testid="store-backend-hint">
+                    {!savedBambuddyUrl && value('bambuddy_url') !== ''
+                      ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
+                      : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
+                  </p>
+                )}
+              </FieldRow>
+
+              {storeUsage && (
+                <div>
+                  <p className="text-[13px]">Blob store usage</p>
+                  <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="store-usage">
+                    <dt className="text-muted">Where</dt>
+                    <dd>{storeUsage.backend === 'bambuddy' ? 'Bambuddy library' : 'This server’s volume'}</dd>
+                    <dt className="text-muted">Files</dt>
+                    <dd className="sb-num">{ofLimit(String(storeUsage.count), storeUsage.max_count, String)}</dd>
+                    <dt className="text-muted">Size</dt>
+                    <dd className="sb-num">
+                      {ofLimit(formatBytes(storeUsage.bytes), storeUsage.max_total_bytes, formatBytes)}
+                    </dd>
+                  </dl>
+                  <p className="mt-1.5 text-[12px] text-muted">
+                    The Where row is the store this process uses; it moves to the Blob store choice above at its
+                    next restart, so the two can differ until then.
+                  </p>
+                  <p className="mt-1.5 text-[12px] text-muted">
+                    Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded fonts. What no job,
+                    output or preset uses is removed once unused for the sweep&rsquo;s grace period (a week by
+                    default). Past either limit, new files are refused.
+                  </p>
+                </div>
+              )}
             </>,
           )}
 

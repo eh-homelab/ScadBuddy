@@ -24,6 +24,7 @@ export type CustomizerSchema = Schemas['CustomizerSchema']
 export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']
+export type StoreUsage = Schemas['StoreUsage']
 
 export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */

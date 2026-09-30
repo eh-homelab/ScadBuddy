@@ -73,6 +73,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -620,6 +621,7 @@ export const api = {
 
   /** #296 — the upload store's size against its caps, for Settings. */
   getAssetUsage: () => request<AssetUsage>('/assets/usage'),
+  getStoreUsage: () => request<StoreUsage>('/store/usage'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

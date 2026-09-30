@@ -161,8 +161,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   worker's bounded local copy), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
-  (`RemoteAssets`, uploads reaching workers). The API's `StoreBundle` that wires them
-  arrives with phase 3's #672; until then `getattr(state, "store", None)` is `None`.
+  (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that
+  wires them, reading `store_backend` (a stored setting) at start.
+
+  `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
+  run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's
