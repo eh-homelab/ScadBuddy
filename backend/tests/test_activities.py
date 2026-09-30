@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import threading
 import uuid
 from collections.abc import Iterator
 from dataclasses import replace
@@ -40,6 +41,7 @@ from scadbuddy.workflows.activities import (
     _heartbeating,
     _main_result,
     _process_output,
+    _scope,
     _write_piece,
 )
 from scadbuddy.workflows.client import make_current, render_worker
@@ -106,6 +108,24 @@ def _request(revision: str | None = REVISION) -> PieceRequest:
         params=dict(params),
         piece_key=piece_key("demo", revision, "model.scad", params),
     )
+
+
+async def test_a_pieces_scope_reads_model_json_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`template_title` reads the template's `model.json`: a file read, so not on the loop."""
+    loop_thread = threading.get_ident()
+    readers: list[int] = []
+
+    def title(model_dir: Path, slug: str) -> str:
+        readers.append(threading.get_ident())
+        return "Demo"
+
+    monkeypatch.setattr(activities, "template_title", title)
+    prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
+    scope = await _scope(_request(), prepared)
+    assert (scope.slug, scope.title) == ("demo", "Demo")
+    assert readers and loop_thread not in readers
 
 
 # ── the library lease, per activity ────────────────────────────────────────────
