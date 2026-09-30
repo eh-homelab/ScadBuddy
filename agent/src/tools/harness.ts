@@ -43,7 +43,8 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
         services.browser && session.id !== undefined
           ? { ...services, browser: services.browser.forSession(session.id) }
           : services
-      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal) }
+      // The session id too, so its commits name it (authorship.ts, #252).
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id) }
     },
   }
 }

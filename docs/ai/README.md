@@ -19,6 +19,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 | [browser-bridge.md](browser-bridge.md) | Contributors | The browser tools (#254): the tab side, `data-agent-user-only`, the WebMCP opt-in, the agent's `browser_*` tools, the tab's socket, and pairing an agent with a tab (spec §8.5) |
 | [agent-sessions.md](agent-sessions.md) | MCP client authors, operators | Agent-to-agent control (#300): the `sessions_*` tools, the session resources, `session.*` events, and approvals under a per-token grant |
 | [headless-browser.md](headless-browser.md) | Contributors, reviewers | The headless Chromium for sessions with no tab (#349): the pinned Playwright plugin, its tiers and guards, the backend's agent-actor gate, and what was measured |
+| [authoring.md](authoring.md) | Contributors, MCP client authors | The agent's model-authoring loop (#252): `apply_patch` and its conflict rule, `checkpoint`, and commits authored as the agent |
 | [dependencies.md](dependencies.md) | Contributors, MCP client authors | The library and font tools, include/use resolution, and the missing-font refusals (#253) |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |
 | [evals.md](evals.md) | Contributors | The eval harness (`agent/evals/`, scripted in CI, live with `pnpm evals`), the AI test and e2e coverage, and what is still planned (#259) |

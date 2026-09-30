@@ -27,6 +27,7 @@ import type { CheckedPlugin } from '../plugins/registry.js'
 import {
   createMemoryHooks,
   HindsightClient,
+  type MemoryActivity,
   type MemoryHooks,
   type MemoryHooksOptions,
   hindsightTarget,
@@ -41,7 +42,7 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
-import type { AuditContext, AuditLog } from '../audit/log.js'
+import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
@@ -308,7 +309,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore'> | false
+  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
@@ -884,7 +885,7 @@ export class SessionManager {
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText) : undefined
+      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
       const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
       eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
       // A plugin left out of this turn is said so in the session, not only in the log.
@@ -1055,8 +1056,18 @@ export class SessionManager {
    * Recall is against the user's words (`recallQuery`), not the page context
    * appended after them, unless a fixed query is configured. Undefined when
    * memory is off or the plugin's URL is not a bank endpoint (logged).
+   *
+   * Each recall and retain becomes an audit row and a `memory` panel event
+   * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
+   * retain reports after the turn ended; both writes work then too, since
+   * they need only the session row. A failure is logged by the hooks.
    */
-  private memoryHooks(plugin: CheckedPlugin, secrets: readonly string[], userText: string): MemoryHooks | undefined {
+  private memoryHooks(
+    plugin: CheckedPlugin,
+    secrets: readonly string[],
+    userText: string,
+    turn: { session: SessionRecord; turnId: string },
+  ): MemoryHooks | undefined {
     const config = this.deps.memory
     if (config === false) return undefined
     const log = (line: string) => this.deps.stderr?.(line)
@@ -1075,7 +1086,56 @@ export class SessionManager {
       secrets,
       log,
       sessionStore: this.store,
+      onActivity: (activity) => this.recordMemory(turn.session, turn.turnId, activity, secrets),
     })
+  }
+
+  /** One recall or retain: its audit row (never fails, audit/log.ts) and its panel event. */
+  private async recordMemory(
+    session: SessionRecord,
+    turnId: string,
+    a: MemoryActivity,
+    secrets: readonly string[],
+  ): Promise<void> {
+    const id = session.id
+    const summary = {
+      bank: a.bank,
+      ...(a.documentId ? { document_id: a.documentId } : {}),
+      ...(a.count === undefined ? {} : { results: a.count }),
+      ...(a.tool ? { tool: a.tool } : {}),
+    }
+    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+    await Promise.all([
+      this.deps.audit?.record({
+        kind: 'memory',
+        action: a.action,
+        surface: 'harness',
+        actor: session.owner,
+        sessionId: id,
+        turnId,
+        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+        inputSummary: JSON.stringify(summary),
+        outcome: a.outcome === 'ok' ? 'ok' : 'error',
+        ...detail,
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+      }),
+      this.events.append(id, [
+        scrubForLog(
+          event({
+            type: 'memory',
+            sessionId: id,
+            turnId,
+            action: a.action,
+            bank: a.bank,
+            outcome: a.outcome,
+            ...(a.count === undefined ? {} : { count: a.count }),
+            ...detail,
+          }),
+          secrets,
+        ),
+      ]),
+    ])
   }
 
   /**
