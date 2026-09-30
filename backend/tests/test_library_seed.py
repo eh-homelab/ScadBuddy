@@ -30,7 +30,7 @@ from scadbuddy.library.library_seed import (
     verify_seed,
 )
 from scadbuddy.main import create_app
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.test_library_processes import _age
 
 COMMIT = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"
@@ -309,6 +309,7 @@ def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path, pg_con
         seed_libraries_dir=seed,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
     with TestClient(create_app(settings)):
         pass
@@ -330,6 +331,7 @@ def test_the_boot_checkout_sweep_keeps_the_seed_nothing_pins(
         seed_libraries_dir=seed,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
     )
     libraries = tmp_path / "data" / "libraries"
     with TestClient(create_app(settings)):
@@ -352,12 +354,24 @@ def test_the_container_seed_is_used_when_it_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path)
-    assert Settings(database_url=UNUSED_DATABASE_URL).resolve_seed_libraries_dir() == tmp_path
-    monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path / "gone")
-    assert Settings(database_url=UNUSED_DATABASE_URL).resolve_seed_libraries_dir() is None
     assert (
         Settings(
-            seed_libraries_dir=tmp_path, database_url=UNUSED_DATABASE_URL
+            database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ).resolve_seed_libraries_dir()
+        == tmp_path
+    )
+    monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path / "gone")
+    assert (
+        Settings(
+            database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ).resolve_seed_libraries_dir()
+        is None
+    )
+    assert (
+        Settings(
+            seed_libraries_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
         ).resolve_seed_libraries_dir()
         == tmp_path
     )

@@ -84,7 +84,7 @@ class ProjectTarget(BaseModel):
 class BambuddyUploadStore:
     """``output_bambuddy_uploads`` and ``output_bambuddy_slices``, on the process's pool.
 
-    The pool is the render queue's (`PostgresJobStore.pool`), opened and migrated at
+    The pool is the projection's (`JobProjection.pool`), opened and migrated at
     startup; this store opens nothing of its own.
 
     Every public method is a coroutine that runs its query in a worker thread, as the

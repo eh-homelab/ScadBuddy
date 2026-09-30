@@ -11,13 +11,14 @@ from scadbuddy.core.config import (
     load_config,
 )
 from scadbuddy.core.settings import Settings
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 @pytest.fixture(autouse=True)
 def _database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every `Settings` needs one (#401); these tests are about the other fields."""
     monkeypatch.setenv("SCADBUDDY_DATABASE_URL", UNUSED_DATABASE_URL)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", UNUSED_TEMPORAL_ADDRESS)
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])
@@ -60,13 +61,6 @@ def test_an_empty_temporal_namespace_or_queue_is_refused_by_name(
     monkeypatch.setenv(variable, "")
     with pytest.raises(ValueError, match=variable):
         Settings()
-
-
-def test_an_empty_temporal_address_keeps_the_legacy_queue(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "")
-    assert Settings().temporal_address == ""
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
@@ -266,21 +260,47 @@ def test_temporal_settings_reach_the_config() -> None:
     assert config.activity_timeout == 45.0 + ACTIVITY_TIMEOUT_MARGIN
 
 
-def test_load_config_reads_the_temporal_settings() -> None:
-    config = load_config(
-        {
-            "SCADBUDDY_TEMPORAL_ADDRESS": "temporal:7233",
-            "SCADBUDDY_TEMPORAL_NAMESPACE": "elsewhere",
-            "SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER": "render-2",
-        }
-    )
-    assert config.temporal_address == "temporal:7233"
-    assert config.temporal_namespace == "elsewhere"
-    assert config.temporal_task_queue_render == "render-2"
+@pytest.mark.parametrize("value", ['abc"def', "abc def", "abc\tdef", " abc"])
+def test_a_revision_with_a_quote_or_whitespace_is_refused(value: str) -> None:
+    """The worker's drain puts it inside a quoted visibility query (#424)."""
+    with pytest.raises(ValueError, match="SCADBUDDY_REVISION must not contain"):
+        Settings(revision=value)
 
 
-def test_load_config_defaults_the_temporal_settings() -> None:
-    config = load_config({})
-    assert config.temporal_address == ""
-    assert config.temporal_namespace == "scadbuddy"
-    assert config.temporal_task_queue_render == "render"
+def test_a_commit_or_tag_revision_loads() -> None:
+    assert Settings(revision="d5028c3b").revision == "d5028c3b"
+    assert Settings(revision="v1.2.3-rc.1+build.7").revision == "v1.2.3-rc.1+build.7"
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_settings_refuse_to_start_without_a_temporal_address(
+    value: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every render runs on Temporal (#546)."""
+    if value is None:
+        monkeypatch.delenv("SCADBUDDY_TEMPORAL_ADDRESS")
+    else:
+        monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_TEMPORAL_ADDRESS is required"):
+        Settings()
+
+
+def test_the_store_caps_reach_the_config_from_either_source(tmp_path: Path) -> None:
+    env = {
+        "SCADBUDDY_STORE_MAX_TOTAL_BYTES": "0",
+        "SCADBUDDY_STORE_MAX_COUNT": "5",
+        "SCADBUDDY_WORKER_CACHE_MAX_BYTES": "1024",
+    }
+    loaded = load_config(env)
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_max_total_bytes=0,
+        store_max_count=5,
+        worker_cache_max_bytes=1024,
+    ).to_config()
+    for config in (loaded, settings):
+        assert (config.store_max_total_bytes, config.store_max_count) == (0, 5)
+        assert config.worker_cache_max_bytes == 1024

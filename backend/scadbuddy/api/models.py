@@ -43,7 +43,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     PresetsDep,
     PrintLinksDep,
-    QueueDep,
+    RenderDep,
     SlugPath,
     UploadsDep,
 )
@@ -120,9 +120,10 @@ from scadbuddy.library.url_import import (
     ResolverBusyError,
     fetch_model,
 )
-from scadbuddy.render.jobs import RenderQueue, resolve_source
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
+from scadbuddy.render.submit import RenderService
 
 logger = logging.getLogger(__name__)
 
@@ -1041,7 +1042,7 @@ def duplicate_model(
 async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
-    queue: QueueDep,
+    render: RenderDep,
     outputs: OutputsDep,
     uploads: UploadsDep,
     links: PrintLinksDep,
@@ -1050,7 +1051,7 @@ async def delete_model(
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
-    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, render, outputs, force)
     # Its outputs went with it; so do their Bambuddy upload records (#455) and print
     # links (#306). Bambuddy's own files and archives are left alone, as a single
     # output's delete leaves them unless asked. Best effort, like the rest of the
@@ -1072,7 +1073,7 @@ async def delete_model(
 
 
 def _delete_model(
-    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+    slug: str, catalogue: Catalogue, render: RenderService, outputs: OutputStore, force: bool
 ) -> list[str]:
     """The blocking part of :func:`delete_model`; returns the ids of the outputs it
     removed, read before their directories go."""
@@ -1090,7 +1091,7 @@ def _delete_model(
             )
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
-    if queue.store.has_unfinished(slug):
+    if render.store.has_unfinished(slug):
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )

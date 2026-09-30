@@ -29,12 +29,12 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import libraries as libraries_api
 from scadbuddy.api.deps import (
     DEPENDENCY_CHECK_CONCURRENCY,
-    INSTALL_CONCURRENCY,
     STATE_ATTR,
     AppState,
     get_fonts,
     get_libraries,
 )
+from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env

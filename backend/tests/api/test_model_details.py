@@ -20,8 +20,7 @@ from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES, _mib
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
-from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
+from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 SLUG = "widget"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -57,19 +56,15 @@ def _put_readme(client: TestClient, content: str, slug: str = SLUG) -> httpx.Res
 
 
 def _generate(client: TestClient, paths: DataPaths, slug: str, cover: bytes | None) -> str:
-    """Render and save an output; `cover` goes into its 3MF as the plate image.
-
-    The test render writes no cover images, as a real one does when the cover step
-    times out, so the plate image is added to the job's 3MF -- before the output is
-    saved, the way a real render carries it, so nothing changes behind the store.
+    """Render and save an output whose 3MF carries `cover` as its plate image, or none
+    (as a real render's does when the cover step times out). It is set before the
+    output is saved, the way a render carries it, so nothing changes behind the store.
     """
     job_id = client.post(
         f"/api/v1/models/{slug}/render", json={"params": {"width": next(_WIDTHS)}}
     ).json()["job_id"]
     wait_for_job(client, job_id)
-    if cover is not None:
-        with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
-            archive.writestr(PLATE_THUMBNAIL, cover)
+    set_plate_image(client, job_id, cover)
     response = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]

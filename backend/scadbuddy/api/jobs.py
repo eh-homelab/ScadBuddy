@@ -20,7 +20,7 @@ from scadbuddy.api.deps import (
     HistoryDep,
     JobIdPath,
     PathsDep,
-    QueueDep,
+    RenderDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
@@ -36,16 +36,16 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
-from scadbuddy.render.jobs import (
+from scadbuddy.render.job_models import (
     Job,
     JobNotFoundError,
     JobState,
     PartInfo,
     PlateInfo,
     QueueFullError,
-    RenderQueue,
 )
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
     BREAKDOWN_TILE_SIZE,
     MAX_BREAKDOWN_TILE_SIZE,
@@ -57,6 +57,7 @@ from scadbuddy.render.thumbnail import (
     render_colour_breakdown,
     render_view,
 )
+from scadbuddy.store.content import StoreFullError
 
 router = APIRouter(tags=["jobs"])
 
@@ -176,9 +177,9 @@ async def _resolve_version(history: HistoryDep, slug: str, version: str | None) 
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
-def require_job(queue: RenderQueue, job_id: str) -> Job:
+def require_job(render: RenderService, job_id: str) -> Job:
     try:
-        return queue.store.read(job_id)
+        return render.store.read(job_id)
     except JobNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
 
@@ -205,7 +206,7 @@ async def render_model(
     history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
-    queue: QueueDep,
+    render: RenderDep,
     assets: AssetsDep,
     fetcher: FetcherDep,
     fonts: FontsDep,
@@ -235,7 +236,7 @@ async def render_model(
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
     try:
-        job = await queue.submit(
+        job = await render.submit(
             slug, body.params, model_version=source.version, supersedes=body.supersedes
         )
     except QueueFullError as error:
@@ -245,12 +246,18 @@ async def render_model(
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
         ) from None
+    except StoreFullError as error:
+        # `submit` pins the template's snapshot in the blob store before the job exists.
+        raise ApiError(
+            status.HTTP_507_INSUFFICIENT_STORAGE,
+            f"the blob store has no room for this template's source: {error}",
+        ) from None
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatus, summary="Render job state")
-def get_job(job_id: JobIdPath, request: Request, queue: QueueDep) -> JobStatus:
-    job = require_job(queue, job_id)
+def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus:
+    job = require_job(render, job_id)
     return _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
 
 
@@ -260,8 +267,8 @@ def get_job(job_id: JobIdPath, request: Request, queue: QueueDep) -> JobStatus:
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
 )
-def get_job_preview(job_id: JobIdPath, queue: QueueDep, paths: PathsDep) -> FileResponse:
-    job = require_job(queue, job_id)
+def get_job_preview(job_id: JobIdPath, render: RenderDep, paths: PathsDep) -> FileResponse:
+    job = require_job(render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
@@ -283,11 +290,11 @@ def get_job_preview(job_id: JobIdPath, queue: QueueDep, paths: PathsDep) -> File
     ),
 )
 async def get_model_diagnostics(
-    slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep
+    slug: SlugPath, catalogue: CatalogueDep, render: RenderDep
 ) -> ModelDiagnostics:
     require_model_exists(catalogue, slug)
     # Reads every job file on the PVC; off the loop.
-    job = await asyncio.to_thread(queue.store.latest_finished, slug)
+    job = await asyncio.to_thread(render.store.latest_finished, slug)
     if job is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no finished render of {slug!r} is on record")
     return ModelDiagnostics(
@@ -343,12 +350,12 @@ async def preview_view(
 async def get_job_view(
     job_id: JobIdPath,
     view: ViewName,
-    queue: QueueDep,
+    render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    job = require_job(queue, job_id)
+    job = require_job(render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
@@ -402,7 +409,7 @@ def _draw_breakdown(
 )
 async def get_job_colours(
     job_id: JobIdPath,
-    queue: QueueDep,
+    render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
     view: ViewName = "iso",
@@ -411,7 +418,7 @@ async def get_job_colours(
         Query(ge=MIN_VIEW_SIZE, le=MAX_BREAKDOWN_TILE_SIZE, description="Edge of each tile"),
     ] = BREAKDOWN_TILE_SIZE,
 ) -> Response:
-    job = require_job(queue, job_id)
+    job = require_job(render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
