@@ -576,6 +576,15 @@ implements it):
   Bambuddy printers, queue, inventory, history and stats resources (print watcher,
   #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
   sessions (#300).
+- **As built for #252:** `scadbuddy://docs/authoring` is backed by the `read` tool
+  `get_authoring_guide`, which serves the plugin's `authoring` skill without its
+  frontmatter; the agent image carries a copy (`dist/docs/authoring.md`, copied by
+  `pnpm build`), so it needs no backend route (`agent/src/tools/guide.ts`). LSP
+  diagnostics are a tool, `get_lsp_diagnostics` (`POST /api/v1/lsp/diagnostics`), not a
+  resource: openscad-lsp 2.0.1 publishes them only on `didChange` (measured, and
+  `src/server/handler/notification.rs` upstream), and only tree-sitter parse errors plus
+  a missing leading `include`. A per-colour breakdown image is `get_render_colours`
+  (`GET /api/v1/jobs/{job_id}/colours.png`).
 
 ## 6. Sessions (#300)
 

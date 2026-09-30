@@ -54,8 +54,16 @@ that tool returns, in the MIME type below.
 | `scadbuddy://libraries` | `application/json` | `list_libraries` |
 | `scadbuddy://fonts` | `application/json` | `list_fonts` |
 | `scadbuddy://settings` | `application/json` | `get_settings` (secrets redacted) |
+| `scadbuddy://docs/authoring` | `text/markdown` | `get_authoring_guide` |
 
-- `resources/list` returns the five fixed resources and one `scadbuddy://models/{slug}`
+`scadbuddy://docs/authoring` (#252) is ScadBuddy's authoring conventions: the plugin's
+`authoring` skill ([`plugins/scadbuddy/skills/authoring/SKILL.md`](../../plugins/scadbuddy/skills/authoring/SKILL.md))
+without its frontmatter. It has no backend route: `pnpm build` copies the skill to
+`agent/dist/docs/authoring.md` (the Dockerfile's `agent-build` stage copies it in for
+that), and [`agent/src/tools/guide.ts`](../../agent/src/tools/guide.ts) reads it there,
+or from the source tree when run from it.
+
+- `resources/list` returns the six fixed resources and one `scadbuddy://models/{slug}`
   per model; everything else is reached through `resources/templates/list`.
 - **URIs.** Templates are RFC 6570 level 1
   ([§3.2.2](https://datatracker.ietf.org/doc/html/rfc6570#section-3.2.2)), one path
@@ -170,7 +178,9 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
 
 Issue #264 also lists resources that need a backend route or event source not on
 `main`: Bambuddy printers, queue, inventory, print history and stats (print watcher,
-#268), `scadbuddy://browser/{tab}/snapshot` (#254), `scadbuddy://docs/authoring` and
-LSP diagnostics (#252), and sessions (#300). The agent does not yet publish
+#268), `scadbuddy://browser/{tab}/snapshot` (#254), and sessions (#300). LSP
+diagnostics (#252) are the `get_lsp_diagnostics` tool rather than a resource: they are
+worked out from a source the caller passes, not state to read or subscribe to. The
+agent does not yet publish
 `session.*` on the bus, so the session event log still polls
 ([`agent/src/sessions/eventLog.ts`](../../agent/src/sessions/eventLog.ts) `wake()`).
