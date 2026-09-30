@@ -513,6 +513,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`

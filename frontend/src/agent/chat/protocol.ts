@@ -134,6 +134,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     origin: OriginSchema,
     owner: OwnerSchema,
     title: z.string().optional(),
+    /** What the session may spend in all (#790); absent on sessions started before it. */
+    budgetUsd: z.number().positive().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -202,6 +204,18 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     costUsd: z.number().nonnegative().optional(),
     turns: z.number().int().nonnegative(),
+    budgetUsd: z.number().positive().optional(),
+  }),
+  /**
+   * #790 — the session's budget changed (the user raised it), or a send was refused
+   * because it is spent: what it has spent and may spend, for the header's meter.
+   */
+  z.object({
+    v,
+    type: z.literal('session.budget'),
+    sessionId,
+    costUsd: z.number().nonnegative(),
+    budgetUsd: z.number().positive(),
   }),
   z.object({
     v,

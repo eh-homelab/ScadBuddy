@@ -42,7 +42,8 @@ type V = { v: typeof PROTOCOL_VERSION }
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string }
+    /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
+    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
@@ -54,7 +55,9 @@ export type ServerEvent = V &
     /** Expired and cancelled approvals resolve as not approved, without `by`. */
     | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
-    | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number }
+    | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
+    /** The budget changed (a raise, #790), or a send was refused because it is spent. */
+    | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
     | { type: 'error'; sessionId?: string; code?: string; message: string }
     /**
      * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A

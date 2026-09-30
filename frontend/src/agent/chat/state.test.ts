@@ -1,5 +1,5 @@
 import type { ServerEvent } from './protocol'
-import { chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
+import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
 const desktop = { kind: 'bearer', id: 'tok', label: 'Claude Desktop' } as const
@@ -231,5 +231,57 @@ describe('chatReducer', () => {
     expect(busy).toMatchObject({ kind: 'error', message: expect.stringMatching(/still working.*send it again/) })
     expect(state.notice).toMatch(/Too many new chats.*Wait a minute/)
     expect(state.awaitingStart).toBe(false)
+  })
+
+  describe('the session budget (#790)', () => {
+    const budgeted = run([
+      { type: 'started-new' },
+      server({ type: 'session.started', sessionId: 's1', origin: 'chat', owner: you, budgetUsd: 1 }),
+    ])
+
+    it('starts at nothing spent, and follows each turn’s result', () => {
+      expect(budgeted.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
+      const state = run([server({ type: 'session.result', sessionId: 's1', costUsd: 0.74, turns: 2, budgetUsd: 1 })], budgeted)
+      expect(state.sessions.s1?.budget).toEqual({ costUsd: 0.74, budgetUsd: 1 })
+      expect(budgetUsed(state.sessions.s1)).toBeCloseTo(0.74)
+      expect(state.sessions.s1?.budgetSpent).toBe(false)
+    })
+
+    it('has no budget for a session whose log never said one', () => {
+      expect(started.sessions.s1?.budget).toBeUndefined()
+      expect(budgetUsed(started.sessions.s1)).toBeUndefined()
+    })
+
+    it.each(['error_max_budget_usd', 'budget_exhausted'])('marks it spent on %s, instead of adding the error', (code) => {
+      const state = run(
+        [
+          server({ type: 'session.result', sessionId: 's1', costUsd: 1.016, turns: 3, budgetUsd: 1 }),
+          server({ type: 'error', sessionId: 's1', code, message: 'raw text' }),
+        ],
+        budgeted,
+      )
+      expect(state.sessions.s1?.budgetSpent).toBe(true)
+      expect(state.sessions.s1?.items.filter((i) => i.kind === 'error')).toEqual([])
+    })
+
+    it('is no longer spent once the budget is raised', () => {
+      const state = run(
+        [
+          server({ type: 'session.budget', sessionId: 's1', costUsd: 1.016, budgetUsd: 1 }),
+          server({ type: 'error', sessionId: 's1', code: 'budget_exhausted', message: 'spent' }),
+          server({ type: 'session.budget', sessionId: 's1', costUsd: 1.016, budgetUsd: 2 }),
+        ],
+        budgeted,
+      )
+      expect(state.sessions.s1?.budget).toEqual({ costUsd: 1.016, budgetUsd: 2 })
+      expect(state.sessions.s1?.budgetSpent).toBe(false)
+    })
+
+    it('recomputes "spent" from the replay on attach, keeping the numbers', () => {
+      const spent = run([server({ type: 'error', sessionId: 's1', code: 'budget_exhausted', message: 'spent' })], budgeted)
+      const reattached = run([{ type: 'select', sessionId: 's1' }], spent)
+      expect(reattached.sessions.s1?.budgetSpent).toBe(false)
+      expect(reattached.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
+    })
   })
 })
