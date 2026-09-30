@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
-import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
@@ -488,9 +488,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
       await turn!.done
       expect(runs[0]!.headlessBrowser).toBeUndefined()
+      // The prompt says which browser each browser_* set drives (a model called
+      // mcp__scadbuddy__browser_find in production, a name only the headless set has).
+      expect(runs[0]!.systemPromptAppend).toContain(browserToolsGuide(false))
 
       await settings.set(SETTING_HEADLESS_BROWSER, true)
       await (await m.send(session.id, agentA, 'look again')).done
+      expect(runs[1]!.systemPromptAppend).toContain(browserToolsGuide(true))
       expect(runs[1]!.headlessBrowser).toEqual({
         sessionId: session.id,
         backendUrl,

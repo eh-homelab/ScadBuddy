@@ -71,12 +71,24 @@ describe('global tools', () => {
     expect(screen.getByTestId('unit')).toHaveTextContent('in')
   })
 
+  it("fills a select by an option's visible label, since that is what the agent sees", async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
+
+    expect(await bridge.call('fill', { label: 'Unit', value: 'Inches' })).toEqual({
+      ok: true,
+      result: { filled: 'Unit', value: 'in' },
+    })
+    expect(screen.getByTestId('unit')).toHaveTextContent('in')
+  })
+
   it('refuses a value a select does not offer, and never fills a password', async () => {
     renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
 
     const bad = await bridge.call('fill', { label: 'Unit', value: 'cubits' })
     expect(!bad.ok && bad.error.code).toBe('invalid_args')
+    expect(!bad.ok && bad.error.message).toContain('"Millimetres" ("mm"), "Inches" ("in")')
 
     const key = await bridge.call('fill', { label: 'API key', value: 'secret' })
     expect(!key.ok && key.error.code).toBe('refused')
@@ -129,7 +141,15 @@ describe('global tools', () => {
     expect(snapshot.fields).toEqual(
       expect.arrayContaining([
         { label: 'Name on the tag', role: 'textbox', value: 'Nova' },
-        { label: 'Unit', role: 'combobox', value: 'mm' },
+        {
+          label: 'Unit',
+          role: 'combobox',
+          value: 'mm',
+          options: [
+            { label: 'Millimetres', value: 'mm' },
+            { label: 'Inches', value: 'in' },
+          ],
+        },
         // A password is never read back.
         { label: 'API key', role: 'textbox', value: '' },
       ]),
