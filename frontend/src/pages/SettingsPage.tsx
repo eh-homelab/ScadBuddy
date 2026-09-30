@@ -323,8 +323,13 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
-      const next = await api.putSettings({ reset: [name] })
-      reseed.current = [name]
+      // Resetting what the Bambuddy store needs takes the store back to local with it, as a
+      // save that loses them does (patchFor): the server refuses an unready Bambuddy store.
+      const fallBack =
+        (name === 'bambuddy_url' || name === 'library_folder_id') &&
+        (chosenBackend === 'bambuddy' || settings?.store_backend === 'bambuddy')
+      const next = await api.putSettings(fallBack ? { reset: [name], store_backend: 'local' } : { reset: [name] })
+      reseed.current = fallBack ? [name, 'store_backend'] : [name]
       settingsState.setData(next)
       setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {

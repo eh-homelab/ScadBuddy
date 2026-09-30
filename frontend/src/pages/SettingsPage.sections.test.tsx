@@ -507,6 +507,25 @@ describe('SettingsPage blob store (#426)', () => {
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
   })
 
+  it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
+    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
+  })
+
+  it('resets only the Bambuddy URL while on the local store', async () => {
+    const bodies = serve(stored)
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
+  })
+
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
     serve({ ...stored, library_folder_id: null })
     renderPage(<SettingsPage />)
