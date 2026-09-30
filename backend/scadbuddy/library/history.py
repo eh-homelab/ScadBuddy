@@ -395,17 +395,28 @@ class ModelHistory:
     # ── writing ───────────────────────────────────────────────────────────────
 
     def commit(
-        self, message: str, *paths: str, prepare: Callable[[], None] | None = None
+        self,
+        message: str,
+        *paths: str,
+        prepare: Callable[[], None] | None = None,
+        rollback: Callable[[], None] | None = None,
     ) -> str | None:
         """Stage ``paths`` and commit them. ``None`` when nothing actually changed.
 
         ``prepare`` runs under the write lock first, which makes a read-modify-write
-        -- of a ``model.json``, say -- atomic with its commit.
+        -- of a ``model.json``, say -- atomic with its commit. ``rollback`` runs under
+        the same lock if the commit then fails, before the error is raised, so what
+        ``prepare`` wrote can be undone before another write sees it.
         """
         with self._exclusive():
             if prepare is not None:
                 prepare()
-            created = self._commit_locked(message, *paths)
+            try:
+                created = self._commit_locked(message, *paths)
+            except (GitError, OSError):
+                if rollback is not None:
+                    rollback()
+                raise
             touched = self._touched_by(created)
         self._announce(created, touched)
         return created

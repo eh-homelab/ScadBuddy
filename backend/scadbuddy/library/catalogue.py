@@ -1648,6 +1648,10 @@ class Catalogue:
         raised. When the lock itself cannot be had, the edit is written without it
         and only its revision is lost, as it always was -- except an edit with an
         ``expected_version``, which is only ever written once that has been checked.
+        Such an edit is only ever written WITH its revision, too: when the commit
+        fails, the old source is put back under the same lock and the error raised,
+        since a base check against a revision that never moved would pass a second
+        edit over this one unseen (review of #741).
         """
         history = self.history
         if history is None or not history.available:
@@ -1657,23 +1661,34 @@ class Catalogue:
             self.notify_change(slug)
             return
         started = written = False
+        previous: str | None = None
 
         def write() -> None:
-            nonlocal started, written
+            nonlocal started, written, previous
             if expected_version is not None:
                 current = history.last_commit(model_path(slug))
                 if current is None or not current.startswith(expected_version):
                     raise StaleVersionError(slug, expected_version, current)
+                try:
+                    previous = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    raise ModelNotFoundError(slug) from None
             started = True
             self._replace_source(slug, source)
             written = True
 
+        def undo() -> None:
+            nonlocal written
+            if written and previous is not None:
+                self._replace_source(slug, previous)
+                written = False
+
         try:
-            history.commit(message, slug, prepare=write)
+            history.commit(message, slug, prepare=write, rollback=undo)
         except (GitError, OSError):
             if started and not written:
                 raise
-            if not started and expected_version is not None:
+            if expected_version is not None:
                 raise
             if not started:
                 self._replace_source(slug, source)

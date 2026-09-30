@@ -55,9 +55,18 @@ class PatchError(ValueError):
     """The patch does not apply to the source as it stands."""
 
 
+#: Each search and replace text, as long as a whole source may be (``MAX_SOURCE_CHARS``
+#: in api/models.py), so the request declares its own bound (review of #741).
+MAX_EDIT_CHARS = 1_000_000
+
+
 class SearchReplace(BaseModel):
-    search: str = Field(min_length=1, description="Text that occurs exactly once in the source")
-    replace: str = Field(description="What it becomes")
+    search: str = Field(
+        min_length=1,
+        max_length=MAX_EDIT_CHARS,
+        description="Text that occurs exactly once in the source",
+    )
+    replace: str = Field(max_length=MAX_EDIT_CHARS, description="What it becomes")
 
 
 @dataclass

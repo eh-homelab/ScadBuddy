@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.datastructures import Headers
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.authorship import (
     AGENT_AUTHOR_NAME,
     AUTHOR_HEADER,
@@ -20,7 +21,7 @@ from scadbuddy.core.authorship import (
     author_from,
 )
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.history import git_env
+from scadbuddy.library.history import GitError, git_env
 
 pytestmark = pytest.mark.requires_git
 
@@ -219,3 +220,25 @@ def test_a_trailing_newline_is_not_a_valid_author(header: str) -> None:
     # `$` matches before a final newline; the patterns end at \Z (review of #741).
     with pytest.raises(InvalidAuthorError):
         author_from(Headers({header: "token-abc\n"}))
+
+
+def test_a_based_edit_whose_commit_fails_is_undone_and_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review of #741: written without its revision, the base would still check out
+    # and a second edit against it would land over this one unseen.
+    base = upload(client)["version"]
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    history = state.catalogue.history
+    assert history is not None
+
+    def fail(*_args: object) -> str | None:
+        raise GitError("commit failed", "fatal: unable to write")
+
+    monkeypatch.setattr(history, "_commit_locked", fail)
+    response = patch(client, {"base": base, "edits": [{"search": "10", "replace": "11"}]})
+
+    assert response.status_code == 500
+    assert source(client) == FIRST
+    monkeypatch.undo()
+    assert client.get(f"/api/v1/models/{SLUG}").json()["version"] == base

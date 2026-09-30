@@ -186,3 +186,14 @@ def test_hunks_are_bounded() -> None:
     diff = "@@ -1 +1 @@\n-a\n+a\n" * (MAX_HUNKS + 1)
     with pytest.raises(PatchError, match=f"at most {MAX_HUNKS} hunks"):
         apply_unified_diff(SOURCE, diff)
+
+
+def test_search_and_replace_texts_are_bounded() -> None:
+    from pydantic import ValidationError
+
+    from scadbuddy.library.patch import MAX_EDIT_CHARS
+
+    with pytest.raises(ValidationError):
+        SearchReplace(search="x" * (MAX_EDIT_CHARS + 1), replace="")
+    with pytest.raises(ValidationError):
+        SearchReplace(search="x", replace="x" * (MAX_EDIT_CHARS + 1))
