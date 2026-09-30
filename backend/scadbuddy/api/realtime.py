@@ -76,6 +76,7 @@ from scadbuddy.core.events import (
     OutputEvent,
     PrintEvent,
     PrintRunEvent,
+    SessionBusEvent,
     SettingsChanged,
     SourceChanged,
     Subscription,
@@ -154,6 +155,10 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case SessionBusEvent():
+            # The agent's own (#300): the UI follows sessions over the agent's
+            # chat socket, which knows who may see which.
+            return []
         case BusResync():
             # Not news for a topic: `pump` turns it into a ``resync`` frame.
             return []

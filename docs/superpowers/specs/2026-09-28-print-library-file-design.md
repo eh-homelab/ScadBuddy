@@ -35,7 +35,7 @@ could be printed that way.
 | Slots | `filament-requirements` of the uploaded copy, colors from `meta.colors` | `filament-requirements` of the file itself |
 | Replate for the printer (#105) | yes | no: the file is laid out as its author left it |
 | Recolor for the spools (#476) | yes | no: the plate thumbnail keeps the file's colors |
-| Nozzle refusals (#469) | yes | yes: they read the printer, not the file |
+| Nozzle refusals (#469) | none: the run no longer checks the mounted nozzles (#768) | none |
 | Remembered choices | per model slug | per library file id |
 | Where the run is recorded | the output's `meta.json` (progress, History) | nowhere in ScadBuddy; Bambuddy's queue and archives (#305 owns print history) |
 
@@ -95,6 +95,6 @@ An agent tool for library prints is a follow-up.
 
 - The Library page lists 3MF files, and Advanced lists every file type.
 - **Print** on a 3MF opens the Print dialog, and a run queues it through
-  resolve → slice → queue, with #469's refusals applied.
+  resolve → slice → queue (#469's nozzle refusals were removed by #768).
 - Reopening the dialog on the same file starts from the last choices.
 - Backend, frontend, agent and e2e gates pass, with an msw mock for the new routes.

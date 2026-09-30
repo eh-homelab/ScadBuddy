@@ -14,6 +14,7 @@ test.describe('library', () => {
 
     await page.getByTestId('library-print-89').click()
     let dialog = page.getByRole('dialog', { name: 'Print' })
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await dialog.getByRole('radio', { name: /0\.2 mm/ }).check()
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
@@ -22,6 +23,8 @@ test.describe('library', () => {
 
     await page.getByTestId('library-print-89').click()
     dialog = page.getByRole('dialog', { name: 'Print' })
+    // Simple mode again (#768): the remembered size is sent unseen, and shown in Advanced.
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })
 

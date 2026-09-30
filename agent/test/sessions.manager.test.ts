@@ -95,6 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(plan).not.toContain('Seq Scan')
       expect(plan).toContain('ai_sessions_owner')
       expect(plan).toContain('ai_sessions_creator')
+      expect(plan).toContain('ai_sessions_pending_owner')
     })
 
     it('starts a session with limits from ai_settings, and defaults without them', async () => {
@@ -462,7 +463,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
       })
 
-      it('moves ownership only explicitly: owner to anyone, browser takes over, nobody else', async () => {
+      it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {
         const paths = await tempPaths()
         const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
         const m = manager({ sql: db.sql, paths, run: runner })
@@ -478,8 +479,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // The creator still sees it after handing it off.
         expect((await m.list(agentA)).map((s) => s.id)).toEqual([session.id])
 
-        // The owner hands it to another agent, which can then send.
-        await m.handoff(session.id, browser, agentB)
+        // The owner offers it to another agent, which must accept before it can send.
+        expect((await m.handoff(session.id, browser, agentB)).owner).toEqual(browser)
+        await expect(m.send(session.id, agentB, 'not yet')).rejects.toMatchObject({ code: 'forbidden' })
+        await m.handoff(session.id, agentB, agentB)
         expect(await (await m.send(session.id, agentB, 'agent b here')).done).toMatchObject({ kind: 'result' })
         await expect(m.send(session.id, browser, 'x')).rejects.toMatchObject({ code: 'forbidden' })
 

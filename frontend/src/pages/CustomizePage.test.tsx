@@ -1223,6 +1223,8 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const dialog = await screen.findByRole('dialog')
+    // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
+    await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
     expect(dialogPicker).toHaveValue('2')
 
@@ -1248,6 +1250,8 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const dialog = await screen.findByRole('dialog')
+    // #768 — the project is an Advanced step in the dialog; the page's own picker is not.
+    await user.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId<HTMLSelectElement>('project-select')
     await user.selectOptions(dialogPicker, 'new')
     await user.type(within(dialog).getByTestId('new-project-name'), 'Workshop Bins')
