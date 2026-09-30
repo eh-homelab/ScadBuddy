@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import time
+import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,7 +21,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
-from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.temporal import WorkflowReaper
 
 pytestmark = pytest.mark.requires_openscad
 
@@ -32,10 +33,22 @@ color("#0000FF") translate([size, 0, 0]) cube(size);
 
 
 @pytest.fixture
-def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestClient]:
+def client(
+    data_dir: Path,
+    seed_dir: Path,
+    pg_conninfo: str,
+    temporal_address: str,
+    workflow_reaper: WorkflowReaper,
+) -> Iterator[TestClient]:
+    """The app renders on the session's Temporal with its own in-process worker on a
+    task queue of its own, as the ``settings`` fixture does, but with the real openscad."""
+    queue = f"real-{uuid.uuid4().hex[:12]}"
     settings = Settings(
         database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        temporal_address=temporal_address,
+        temporal_namespace="default",
+        temporal_task_queue_render=queue,
+        temporal_worker_inprocess=True,
         openscad=load_config().openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
@@ -45,6 +58,7 @@ def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestCli
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+    workflow_reaper.terminate(queue)
 
 
 def test_upload_render_and_persist_against_a_real_openscad(client: TestClient) -> None:
