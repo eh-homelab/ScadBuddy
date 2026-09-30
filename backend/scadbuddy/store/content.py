@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from psycopg.errors import DeadlockDetected
+
 from scadbuddy.store.content_models import (
     SWEPT_KINDS,
     BlobCorruptError,
@@ -29,6 +31,7 @@ from scadbuddy.store.content_models import (
     BlobScope,
     BlobStat,
     RefusedDeleteError,
+    ReuseLostError,
     StoreFullError,
     StoreUsage,
 )
@@ -109,21 +112,37 @@ class ContentStore:
                 f" past SCADBUDDY_STORE_MAX_TOTAL_BYTES ({self.max_total_bytes})"
             )
 
-    async def _store(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> BlobRef:
+    async def _store(
+        self,
+        kind: BlobKind,
+        data: bytes,
+        *,
+        name: str,
+        scope: BlobScope,
+        lost_reuse: bool = False,
+    ) -> tuple[BlobRef, bool]:
+        """The stored object, and whether it is an existing one reused. Its row must then
+        be written with ``reuse=True``, which fails if a release freed it meanwhile.
+        ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
+        like the re-put it replaces, no room check."""
         sha = hashlib.sha256(data).hexdigest()
-        existing = await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+        existing = (
+            None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
+        )
         if existing is not None and await self.backend.exists(existing.backend_id):
-            return existing  # a re-put: never refused, never uploaded twice
-        try:
-            await asyncio.to_thread(self._require_room, len(data))
-        except StoreFullError:
-            self._count("put", "full")
-            raise
+            return existing, True  # a re-put: never refused, never uploaded twice
+        if not lost_reuse:
+            try:
+                await asyncio.to_thread(self._require_room, len(data))
+            except StoreFullError:
+                self._count("put", "full")
+                raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
-        return BlobRef(
+        ref = BlobRef(
             sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data)
         )
+        return ref, False
 
     async def _release(self, ref: BlobRef) -> None:
         """Remove the object unless an index row still names it. Refuses a ref on another
@@ -144,14 +163,31 @@ class ContentStore:
         key: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> BlobRef:
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         key = key or f"{kind}-{ref.sha256}"
-        previous = await asyncio.to_thread(
-            self.index.put, key, ref, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            try:
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=reused
+                )
+            except ReuseLostError:
+                # Freed between the lookup and this row: store this put's own copy.
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                previous = await asyncio.to_thread(
+                    self.index.put, key, ref, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if previous is not None and previous.backend_id != ref.backend_id:
             await self._release_replaced(key, previous)
         return ref
+
+    async def _release_unindexed(self, ref: BlobRef, reused: bool) -> None:
+        """After the index gave up on a deadlock: remove what this call uploaded, which
+        no row will name. A reused object is another row's, and stays."""
+        if not reused:
+            await self._release(ref)
 
     async def _release_replaced(self, key: str, previous: BlobRef) -> None:
         if previous.backend != self.name:
@@ -182,11 +218,27 @@ class ContentStore:
     ) -> BlobRef | None:
         """`put` under ``key`` only if the key still names ``expected``; None if it
         moved on, and this call's own upload is removed again."""
-        ref = await self._store(kind, data, name=name, scope=scope)
+        ref, reused = await self._store(kind, data, name=name, scope=scope)
         previous = await asyncio.to_thread(self.index.get, key)
-        landed = await asyncio.to_thread(
-            self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
-        )
+        try:
+            try:
+                landed = await asyncio.to_thread(
+                    self.index.swap,
+                    key,
+                    ref,
+                    expected=expected,
+                    slug=scope.slug,
+                    meta=meta or {},
+                    reuse=reused,
+                )
+            except ReuseLostError:
+                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                landed = await asyncio.to_thread(
+                    self.index.swap, key, ref, expected=expected, slug=scope.slug, meta=meta or {}
+                )
+        except DeadlockDetected:
+            await self._release_unindexed(ref, reused)
+            raise
         if not landed:
             await self._release(ref)
             return None
@@ -318,6 +370,7 @@ __all__ = [
     "ContentBackend",
     "ContentStore",
     "RefusedDeleteError",
+    "ReuseLostError",
     "StoreFullError",
     "StoreUsage",
     "sweep_content",

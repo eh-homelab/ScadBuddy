@@ -176,26 +176,32 @@ class CachedBlobStore:
         return sum(_size(self.local.root / key) for key in cached)
 
     def evict(self, *, now: float | None = None) -> list[str]:
-        """Least recently used first, down to `max_bytes`; only published directories
-        (a marker) not touched within `min_age`."""
+        """Least recently used first, down to `max_bytes`: any directory not touched
+        within `min_age`. That includes one never published (a render that crashed) and a
+        dot-named `unpack_dir` staging directory a crash left; one in use is recent, as
+        rendering and unpacking both touch it."""
         cutoff = (time.time() if now is None else now) - self.min_age
         entries = []
         cached = self.local.keys()  # a list of blob keys, not a dict view
         for key in cached:
-            if key.startswith("."):
-                continue  # an `unpack_dir` staging directory, gone in a moment
             directory = self.local.root / key  # not dir_for: that would touch it
             try:
                 mtime = directory.stat().st_mtime
             except FileNotFoundError:
                 continue
-            entries.append((mtime, key, _size(directory), read_marker(directory)))
-        total = sum(size for _, _, size, _ in entries)
+            entries.append((mtime, key, _size(directory)))
+        total = sum(size for _, _, size in entries)
         removed: list[str] = []
-        for mtime, key, size, marker in sorted(entries):
+        for mtime, key, size in sorted(entries):
             if total <= self.max_bytes:
                 break
-            if marker is None or mtime > cutoff:
+            if mtime > cutoff:
+                continue
+            try:  # re-read: a `dir_for` or `unpack_dir` since the scan touches it first
+                if (self.local.root / key).stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                total -= size  # gone already
                 continue
             self.local.remove(key)
             total -= size

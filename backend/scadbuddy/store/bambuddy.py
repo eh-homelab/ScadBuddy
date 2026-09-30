@@ -187,14 +187,14 @@ class BambuddyContentBackend:
         return True
 
     async def remove(self, backend_id: str) -> None:
-        async with self._client() as (client, _):
+        async with self._client() as (client, inbox):
             try:
                 file = await client.library_file(int(backend_id))
             except ApiError as error:
                 if error.status == 404:
                     return
                 raise
-            work = await asyncio.to_thread(self._work_folders)
+            work = await asyncio.to_thread(self._work_folders, inbox)
             if file.folder_id not in work:
                 raise RefusedDeleteError(
                     f"library file {backend_id} is in folder {file.folder_id}, not a ScadBuddy"
@@ -301,9 +301,12 @@ class BambuddyContentBackend:
         for role in ("template", "work"):
             self._folders.pop((inbox, slug, role), None)
 
-    def _work_folders(self) -> set[int]:
+    def _work_folders(self, inbox: int) -> set[int]:
+        """The `Work/` folders recorded under the configured inbox. One recorded under an
+        inbox Settings no longer names is not ScadBuddy's to delete from."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT folder_id FROM store_folders WHERE role = 'work'"
+                "SELECT folder_id FROM store_folders WHERE role = 'work' AND inbox_id = %s",
+                (inbox,),
             ).fetchall()
         return {int(row["folder_id"]) for row in rows}

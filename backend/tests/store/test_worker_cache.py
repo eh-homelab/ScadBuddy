@@ -139,19 +139,44 @@ def test_packing_is_deterministic_and_leaves_out_dotfiles(tmp_path: Path) -> Non
     assert zipfile.ZipFile(io.BytesIO(first)).namelist() == ["a.txt"]
 
 
-async def test_eviction_keeps_unpublished_and_recent_pieces(
+async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     tmp_path: Path, content: ContentStore
 ) -> None:
     a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
     for key in ("old", "recent"):
         (a.dir_for(key) / "m").write_bytes(b"x" * 10)
         await a.publish(key, scope=SCOPE)
-    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # never published, in flight
+    (a.dir_for("crashed") / "m").write_bytes(b"x" * 10)  # never published, abandoned
+    staging = a.local.root / ".staging-1"
+    staging.mkdir()
+    (staging / "m").write_bytes(b"x" * 10)  # an `unpack_dir` a crash left
     past = time.time() - 3600
-    os.utime(a.local.root / "old", (past, past))
-    os.utime(a.local.root / "rendering", (past, past))
-    assert a.evict() == ["old"]
+    for name in ("old", "crashed", ".staging-1"):
+        os.utime(a.local.root / name, (past, past))
+    assert sorted(a.evict()) == [".staging-1", "crashed", "old"]
     assert a.local.exists("recent") and a.local.exists("rendering")
+
+
+async def test_eviction_skips_a_directory_touched_after_the_scan(
+    tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scadbuddy.store import cache as cache_module
+
+    a = worker(tmp_path / "a", content, max_bytes=0, min_age=60.0)
+    (a.dir_for("claimed") / "m").write_bytes(b"x" * 10)
+    past = time.time() - 3600
+    os.utime(a.local.root / "claimed", (past, past))
+    size = cache_module._size
+
+    def size_then_claim(directory: Path) -> int:
+        counted = size(directory)
+        a.dir_for(directory.name)  # a claim lands between the scan and the removal
+        return counted
+
+    monkeypatch.setattr(cache_module, "_size", size_then_claim)
+    assert a.evict() == []
+    assert a.local.exists("claimed")
 
 
 async def test_render_main_on_a_worker_without_the_piece_publishes_over_the_index(
