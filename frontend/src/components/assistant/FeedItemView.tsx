@@ -8,6 +8,34 @@ import { RiskBadge } from './badges'
 
 type Tool = Extract<FeedItem, { kind: 'tool' }>
 type Approval = Extract<FeedItem, { kind: 'approval' }>
+type Memory = Extract<FeedItem, { kind: 'memory' }>
+
+function memoryHeadline(item: Memory): string {
+  if (item.action === 'recall') {
+    if (item.outcome === 'timeout') return 'Memory recall timed out'
+    if (item.outcome === 'error') return 'Memory recall failed'
+    const n = item.count ?? 0
+    return n === 0 ? 'No memories recalled' : `Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`
+  }
+  if (item.outcome === 'timeout') return 'Saving to memory timed out'
+  if (item.outcome === 'error') return 'Could not save to memory'
+  return 'Saved to memory'
+}
+
+/** #818: an automatic recall or retain, as a quiet line. The memories themselves are never shown. */
+function MemoryLine({ item }: { item: Memory }) {
+  const failed = item.outcome !== 'ok'
+  return (
+    <details className="text-[11.5px] text-faint" data-testid="agent-memory">
+      <summary className={`cursor-pointer ${failed ? 'text-warn' : ''}`}>{memoryHeadline(item)}</summary>
+      <p className="mt-0.5 pl-3 text-muted">
+        Bank <span className="font-mono">{item.bank}</span>
+        {item.action === 'recall' && item.outcome === 'ok' && <> · {item.count ?? 0} found</>}
+        {item.detail && <> · {item.detail}</>}
+      </p>
+    </details>
+  )
+}
 
 function ToolCard({ item }: { item: Tool }) {
   const { result } = item
@@ -144,6 +172,8 @@ export function FeedItemView({
       return <ToolCard item={item} />
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
+    case 'memory':
+      return <MemoryLine item={item} />
     case 'error':
       return (
         <p role="alert" className="text-[12.5px] text-warn">

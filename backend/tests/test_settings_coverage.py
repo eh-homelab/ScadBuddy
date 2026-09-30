@@ -59,6 +59,7 @@ def test_every_env_seeded_field_is_shown_and_no_secret_is() -> None:
         ("event_log_retention_rows", -1, "SCADBUDDY_EVENT_LOG_RETENTION_ROWS must be at least 0"),
         ("asset_sweep_grace", 60, "SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"),
         ("log_level", "loud", "SCADBUDDY_LOG_LEVEL must be one of"),
+        ("bambuddy_web_urls", "https://ok.example, bambuddy.lan", "not an http\\(s\\) URL"),
     ],
 )
 def test_a_value_out_of_bounds_is_refused_by_name(name: str, value: object, message: str) -> None:

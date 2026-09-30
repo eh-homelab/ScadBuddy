@@ -28,6 +28,9 @@ export interface FieldValue {
   value: string | boolean
   invalid?: boolean
   error?: string
+  /** A select's options, label and value, capped at `MAX_OPTIONS`. */
+  options?: { label: string; value: string }[]
+  optionsTruncated?: boolean
 }
 
 export interface Snapshot {
@@ -51,6 +54,7 @@ export interface Snapshot {
 }
 
 export const MAX_ELEMENTS = 150
+export const MAX_OPTIONS = 50
 const MAX_TEXT = 300
 
 function clip(text: string): string {
@@ -147,6 +151,11 @@ export function takeSnapshot({
       label,
       role,
       value: typeof value === 'string' ? clip(value) : (value ?? ''),
+    }
+    if (element instanceof HTMLSelectElement && !isUserOnly(element)) {
+      const options = [...element.options].map((option) => ({ label: clip(option.text), value: clip(option.value) }))
+      field.options = options.slice(0, MAX_OPTIONS)
+      if (options.length > MAX_OPTIONS) field.optionsTruncated = true
     }
     if (element.getAttribute('aria-invalid') === 'true' || (element as HTMLInputElement).validity?.valid === false) {
       field.invalid = true

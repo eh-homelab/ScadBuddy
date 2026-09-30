@@ -134,6 +134,8 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     origin: OriginSchema,
     owner: OwnerSchema,
     title: z.string().optional(),
+    /** What the session may spend in all (#790); absent on sessions started before it. */
+    budgetUsd: z.number().positive().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -202,6 +204,18 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId,
     costUsd: z.number().nonnegative().optional(),
     turns: z.number().int().nonnegative(),
+    budgetUsd: z.number().positive().optional(),
+  }),
+  /**
+   * #790 — the session's budget changed (the user raised it), or a send was refused
+   * because it is spent: what it has spent and may spend, for the header's meter.
+   */
+  z.object({
+    v,
+    type: z.literal('session.budget'),
+    sessionId,
+    costUsd: z.number().nonnegative(),
+    budgetUsd: z.number().positive(),
   }),
   z.object({
     v,
@@ -209,6 +223,23 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     sessionId: sessionId.optional(),
     code: z.string().optional(),
     message: z.string().min(1),
+  }),
+  /**
+   * An automatic Hindsight recall or retain (#818): memory the agent read or wrote
+   * without a tool call. A retain finishes after its turn, so this can arrive after
+   * the turn's last `session.status`. It never carries the query or a memory, only
+   * the bank, a recall's count and, when it failed, why.
+   */
+  z.object({
+    v,
+    type: z.literal('memory'),
+    sessionId,
+    turnId: z.string().min(1),
+    action: z.enum(['recall', 'retain']),
+    bank: z.string(),
+    outcome: z.enum(['ok', 'timeout', 'error']),
+    count: z.number().int().nonnegative().optional(),
+    detail: z.string().optional(),
   }),
 ])
 export type ServerEvent = z.infer<typeof ServerEventSchema>

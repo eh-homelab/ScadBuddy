@@ -11,7 +11,8 @@ import path from 'node:path'
 // that fetches another origin from page JavaScript. `other` is a second origin
 // the browser must not reach. Every request each server receives is recorded
 // with its headers, which is how the tests see the agent-actor marker and
-// whether page JavaScript reached another origin.
+// whether page JavaScript reached another origin. A WebSocket upgrade is
+// recorded too (method `UPGRADE`) and then dropped.
 
 export type Hit = { method: string; url: string; headers: IncomingHttpHeaders }
 
@@ -31,6 +32,10 @@ async function serve(handler: Handler): Promise<PageServer> {
       })
     })
   })
+  server.on('upgrade', (req, socket) => {
+    hits.push({ method: 'UPGRADE', url: req.url ?? '/', headers: req.headers })
+    socket.destroy()
+  })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
@@ -44,8 +49,15 @@ async function serve(handler: Handler): Promise<PageServer> {
   }
 }
 
+/** Another origin: a page for any path, and `/redirect?to=<url>` answers a 302 there. */
 export async function startOtherOrigin(): Promise<PageServer> {
-  return serve((_url, _method, res) => {
+  return serve((url, _method, res) => {
+    const to = new URL(url, 'http://x').searchParams.get('to')
+    if (url.startsWith('/redirect?') && to) {
+      res.writeHead(302, { location: to })
+      res.end()
+      return
+    }
     res.writeHead(200, { 'content-type': 'text/html', 'access-control-allow-origin': '*' })
     res.end('<!doctype html><title>Other origin</title><h1>other origin reached</h1>')
   })
@@ -73,6 +85,8 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
   <p id="probe-result">probe not run</p>
   <button id="redirected-fetch" onclick="fetch('/redirect-home').then(() => document.getElementById('fetch-result').textContent = 'fetch followed', () => document.getElementById('fetch-result').textContent = 'fetch failed')">Redirected fetch</button>
   <p id="fetch-result">fetch not run</p>
+  <button id="socket" onclick="const ws = new WebSocket('${otherOrigin.replace(/^http/, 'ws')}/socket'); ws.onopen = () => document.getElementById('socket-result').textContent = 'socket open'; ws.onerror = ws.onclose = () => document.getElementById('socket-result').textContent = 'socket closed'">Socket</button>
+  <p id="socket-result">socket not run</p>
   <script>localStorage.setItem('seen', (localStorage.getItem('seen') || '') + 'x'); document.title = 'Customizer seen=' + localStorage.getItem('seen')</script>
 </body></html>`
   return serve(async (url, method, res, headers) => {

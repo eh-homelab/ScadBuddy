@@ -19,6 +19,7 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
 
@@ -30,6 +31,7 @@ const AssistantPanel = lazy(async () => ({
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
+  { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
@@ -50,6 +52,7 @@ interface Props {
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   useLoadDisplayUnit()
+  useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
   useGlobalAgentTools()
   const ai = useAiAvailability()
@@ -133,7 +136,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             Scad<span className="text-accent">Buddy</span>
           </span>
           {!embedded && (
-            <span className="text-[11px] text-faint">OpenSCAD customizer</span>
+            <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
           )}
         </NavLink>
 

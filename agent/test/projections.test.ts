@@ -82,7 +82,7 @@ describe('registry projections', () => {
     const result = await client.callTool({ name: 'update_source', arguments: { slug: 'box', source: 'cube(1);' } })
     await client.close()
     expect(result.isError, JSON.stringify(result)).toBeFalsy()
-    expect(bodies).toEqual([{ source: 'cube(1);', message: null, force: false }])
+    expect(bodies).toEqual([{ source: 'cube(1);', message: null, force: false, base: null }])
   })
 
   it('still refuse an omitted required argument in-process', async () => {
@@ -124,8 +124,10 @@ describe('registry projections', () => {
     for (const tool of ALL_TOOLS) {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.risk === 'read')
       expect(tool.annotations.destructiveHint, tool.name).toBe(tool.risk === 'outward')
-      // Every outward tool is gated, except the gate's own confirm.
-      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && tool.name !== 'confirm_action')
+      // Every outward tool is gated, except the approval path itself: the
+      // gate's own confirm, and deciding another agent's approval (#300).
+      const approvalPath = ['confirm_action', 'sessions_approve', 'sessions_deny'].includes(tool.name)
+      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && !approvalPath)
     }
   })
 

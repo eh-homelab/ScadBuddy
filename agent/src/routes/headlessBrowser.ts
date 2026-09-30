@@ -1,5 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import { SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -20,7 +22,8 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 export type SettingsRepo = {
   get<T>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown): Promise<void>
+  /** `context` says who wrote it, for the audit row (credentials.ts SettingsStore.set). */
+  set(key: string, value: unknown, context: AuditContext): Promise<void>
 }
 
 export type HeadlessBrowserRouteDeps = {
@@ -75,7 +78,7 @@ export function registerHeadlessBrowserRoutes(app: Hono, deps: HeadlessBrowserRo
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    await settings.set(SETTING_HEADLESS_BROWSER, body.enabled)
+    await settings.set(SETTING_HEADLESS_BROWSER, body.enabled, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
     const view: HeadlessBrowserSettingView = { enabled: body.enabled }
     return c.json(view)
   })

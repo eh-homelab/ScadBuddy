@@ -65,6 +65,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import split_urls
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
@@ -86,18 +87,25 @@ class BambuddyConfig:
     upload_timeout: float = DEFAULT_UPLOAD_TIMEOUT
     slice_timeout: float = DEFAULT_SLICE_TIMEOUT
     slice_poll_interval: float = DEFAULT_SLICE_POLL
+    #: Where a browser reaches Bambuddy (#775); ``base_url`` when unset.
+    web_base_url: str | None = None
 
     @classmethod
     def from_settings(cls, settings: StoredSettings) -> BambuddyConfig:
         if not settings.bambuddy_url:
             raise not_configured("no Bambuddy URL is configured; set one in Settings")
-        return cls(base_url=settings.bambuddy_url.rstrip("/"), api_key=settings.bambuddy_api_key)
+        web = split_urls(settings.bambuddy_web_urls)
+        return cls(
+            base_url=settings.bambuddy_url.rstrip("/"),
+            api_key=settings.bambuddy_api_key,
+            web_base_url=web[0] if web else None,
+        )
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{API_PREFIX}{path}"
 
     def web_url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
+        return f"{self.web_base_url or self.base_url}{path}"
 
 
 class BambuddyClient:
@@ -645,7 +653,11 @@ class BambuddyClient:
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
-            what=f"queue library file {item.library_file_id}",
+            what=(
+                f"queue archive {item.archive_id}"
+                if item.library_file_id is None
+                else f"queue library file {item.library_file_id}"
+            ),
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())

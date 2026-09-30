@@ -1,4 +1,4 @@
-import { cleanup, screen, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { FilamentOptions, SlotChoice } from '../api/types'
@@ -10,12 +10,10 @@ import { FilamentPicker } from './FilamentPicker'
 function Harness({
   options,
   copies = 1,
-  nozzleSize,
   onChange,
 }: {
   options: FilamentOptions
   copies?: number
-  nozzleSize?: string
   onChange?: (plan: SlotChoice[]) => void
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
@@ -24,7 +22,6 @@ function Harness({
       options={options}
       plan={plan}
       copies={copies}
-      nozzleSize={nozzleSize}
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -33,13 +30,11 @@ function Harness({
   )
 }
 
-function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1, nozzleSize?: string) {
+function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1) {
   const onChange = vi.fn()
   return {
     onChange,
-    ...renderPage(
-      <Harness options={options} copies={copies} nozzleSize={nozzleSize} onChange={onChange} />,
-    ),
+    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />),
   }
 }
 
@@ -49,13 +44,6 @@ const slot = (id: number) => screen.getByTestId(`filament-slot-${id}`)
 const switched: FilamentOptions = fixtures.filamentOptions
 /** The same printer as if each AMS were wired to one side. */
 const wired: FilamentOptions = { ...fixtures.filamentOptions, track_switch: false }
-const bothAt02: FilamentOptions = {
-  ...switched,
-  nozzles: [
-    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
-    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
-  ],
-}
 
 describe('FilamentPicker', () => {
   // #469 — the fixture printer has the 0.2 on the right (extruder 0) and the 0.4 on the
@@ -69,29 +57,19 @@ describe('FilamentPicker', () => {
     expect(within(slot(1)).getByTestId('slot-side-1')).toHaveTextContent('R')
   })
 
-  it('disables a spool whose side has another nozzle fitted, and says which', () => {
-    open(wired, 1, '0.4')
+  it('rules out no spool for the nozzle mounted on its side (#768)', () => {
+    open(wired)
 
-    expect(within(slot(2)).getByTestId('spool-9')).toBeDisabled()
-    expect(within(slot(2)).getByTestId('mismatch-9')).toHaveTextContent('R · 0.2 fitted')
-    expect(within(slot(2)).getByTestId('spool-22')).toBeEnabled()
-    expect(within(slot(2)).queryByTestId('mismatch-22')).toBeNull()
-    // A shelf spool has no side, so nothing rules it out.
-    expect(within(slot(2)).getByTestId('spool-27')).toBeEnabled()
+    for (const id of [9, 22, 27]) expect(within(slot(2)).getByTestId(`spool-${id}`)).toBeEnabled()
+    expect(screen.queryByText(/nozzle is fitted/)).toBeNull()
+    expect(screen.queryByText(/Neither nozzle/)).toBeNull()
+    expect(screen.queryByText(/spreads a multi-color print/)).toBeNull()
+    // Nor does it list the mounted nozzles: nothing is judged by them.
+    expect(screen.queryByText(/mounted\./)).toBeNull()
   })
 
-  it('says why a chosen spool on the wrong side will not print', () => {
-    // The suggestion puts spool 21, on the right's 0.2, in slot 1.
-    open(wired, 1, '0.4')
-
-    expect(screen.getByTestId('slot-mismatch-1')).toHaveTextContent(
-      "This spool feeds the right extruder, where the 0.2 mm nozzle is fitted, so it can't print at 0.4 mm.",
-    )
-    expect(screen.queryByTestId('slot-mismatch-2')).toBeNull()
-  })
-
-  it('with the track switch, a side is only where the spool rests and rules nothing out', () => {
-    open(switched, 1, '0.4')
+  it('with the track switch, a side is only where the spool rests', () => {
+    open(switched)
 
     expect(within(slot(2)).getByTestId('side-9')).toHaveTextContent('rests on R')
     expect(within(slot(2)).getByTestId('side-9')).toHaveAttribute(
@@ -99,78 +77,6 @@ describe('FilamentPicker', () => {
       'Rests on the right inlet; the Filament Track Switch can feed it to either nozzle.',
     )
     expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
-    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
-  })
-
-  it('says up front that a multi-color print can not run when only one side fits', () => {
-    open(switched, 1, '0.4')
-    expect(screen.getByTestId('one-fitting-nozzle')).toHaveTextContent(
-      "Only the left nozzle is 0.4 mm, and the slicer spreads a multi-color print across both, so this can't print.",
-    )
-    expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
-  })
-
-  it('lets a single-nozzle printer print in several colors', () => {
-    open({ ...wired, nozzles: [{ nozzle_type: 'HS00', nozzle_diameter: '0.4' }] }, 1, '0.4')
-    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
-    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
-  })
-
-  it('does not refuse up front when one side of two is unreported', () => {
-    open(
-      {
-        ...wired,
-        nozzles: [
-          { nozzle_type: 'HS00', nozzle_diameter: '0.4' },
-          { nozzle_type: 'HH01', nozzle_diameter: '' },
-        ],
-      },
-      1,
-      '0.4',
-    )
-    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
-  })
-
-  it('counts a spare of the size in the rack, and names it when it serves one side', () => {
-    // Both sides 0.4 and a 0.2 in the rack: one side can print 0.2, so two colors can't.
-    const both04: FilamentOptions = {
-      ...wired,
-      nozzles: [
-        { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
-        { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
-      ],
-      rack: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }],
-    }
-    open(both04, 1, '0.2')
-    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
-    expect(screen.getByTestId('one-fitting-nozzle')).toHaveTextContent(
-      'Neither nozzle is 0.2 mm and the rack holds one spare, enough for one side',
-    )
-    cleanup()
-    // A second 0.2 in the rack, beside the mounted one: both sides can print it.
-    open({ ...wired, rack: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }] }, 1, '0.2')
-    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
-    expect(within(slot(1)).getByTestId('spool-22')).toBeEnabled()
-    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
-  })
-
-  it('says nothing about sides when both nozzles fit', () => {
-    open(bothAt02, 1, '0.2')
-    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
-    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
-  })
-
-  it('says so up front when neither nozzle is the chosen size', () => {
-    open(switched, 1, '0.6')
-    expect(screen.getByTestId('no-fitting-nozzle')).toHaveTextContent(
-      'Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm.',
-    )
-  })
-
-  it('rules nothing out before a nozzle size is chosen', () => {
-    open()
-    expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
-    expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
   })
 
   it('heads each slot with its colour, number, material and the grams it needs', () => {

@@ -93,7 +93,10 @@ for the project picker).
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`,
+  `SCADBUDDY_BAMBUDDY_WEB_URLS` (comma-separated URLs browsers reach Bambuddy at, when
+  `SCADBUDDY_BAMBUDDY_URL` is one only the server can; the first is where links point),
+  `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
   1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
   from the UI it wins; a field the UI never saved keeps following the variable,
@@ -326,8 +329,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each
-  described below. With no database
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and
+  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
@@ -389,6 +392,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     peer, is accepted. This is what stops DNS rebinding: an attacker's page
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
+- **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It always opens the
+  backend (`SCADBUDDY_BACKEND_URL`), and a URL on `SCADBUDDY_PUBLIC_URL` or
+  `SCADBUDDY_ALLOWED_ORIGINS` is rewritten onto it. **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
+  (comma-separated origins, or `*` for any) lets it open other origins too, each only
+  after a human approves it once per session in the ScadBuddy UI. Unset, it opens
+  nothing else. `*` plus that approval is the intended setting for full use; it also
+  lets the model ask to open services on your LAN, so read the risks in that doc first.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -510,6 +521,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`

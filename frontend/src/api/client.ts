@@ -17,6 +17,8 @@ import type {
   FontCatalogue,
   FontFamily,
   HeadlessBrowserSetting,
+  AiSessionView,
+  SessionLimits,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -45,6 +47,9 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrintAgain,
+  PrintDetail,
+  PrintPage,
   PrintProgress,
   PrintCheck,
   PrintRun,
@@ -79,6 +84,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 
 export const API_BASE = '/api/v1'
@@ -707,6 +713,23 @@ export const api = {
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
 
+  /**
+   * #311 — one print. `printerMedia` also lists what the printer still holds, which
+   * asks the printer, so the page does it only when told to.
+   */
+  getPrint: (archiveId: number, { printerMedia = false } = {}) =>
+    request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+
+  /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
+  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+
+  /** #311 — attaches a timelapse still on the printer to the print. */
+  pullTimelapse: (archiveId: number, filename: string) =>
+    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
+
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
@@ -828,8 +851,8 @@ export const api = {
   },
 
   /**
-   * #755 — the run's nozzle verdict (`plan_extruders`) for the body the run would take:
-   * `errors` are what it would refuse as a 422, `warnings` its advisories. Reads only.
+   * #755 — the check before Print for the body the run would take: `errors` are what
+   * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
   checkPrint: (outputId: string, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
@@ -908,6 +931,19 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #308 — the print history, newest first, a page at a time; `cursor` is the last
+   * page's `next_cursor`. */
+  listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== '') search.set(key, String(value))
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<PrintPage>(`/prints${suffix}`)
+  },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   listLibrary: (query: { folderId: number | null; all: boolean }) => {
@@ -1093,6 +1129,26 @@ export const api = {
     request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
+    }),
+
+  /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
+  getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
+
+  putSessionLimits: (limits: SessionLimits) =>
+    request<SessionLimits>('/ai/settings/session-limits', {
+      method: 'PUT',
+      body: JSON.stringify(limits),
+    }),
+
+  /** #790 — "Continue in a new chat": a new session with this one's transcript and a fresh budget. */
+  forkAiSession: (id: string) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST' }),
+
+  /** #790 — adds to one session's budget; only the user can (it spends money). */
+  raiseAiSessionBudget: (id: string, addUsd: number) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/budget`, {
+      method: 'POST',
+      body: JSON.stringify({ add_usd: addUsd }),
     }),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */

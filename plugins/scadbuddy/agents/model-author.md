@@ -18,10 +18,10 @@ You use **only ScadBuddy's MCP tools**. That is the `scadbuddy` server: named
 `mcp__plugin_scadbuddy_scadbuddy__*` when this plugin is installed in Claude Code
 (docs/superpowers/specs/2026-09-27-ai-integration-design.md §5.1;
 https://code.claude.com/docs/en/plugins/components). You have no shell, no file
-system and no web access (AI spec §2, D7). The source tools (`read_source`,
-`write_source`, `apply_patch`) and the render diagnostics are specified in issue
-#252 and served through issue #251. If a tool you need isn't there, say so and
-stop. Don't work around it.
+system and no web access (AI spec §2, D7). The source tools (`get_source`,
+`update_source`, `apply_patch`, `checkpoint`, `restore_version`) and the render
+diagnostics are specified in issue #252 and described in `docs/ai/authoring.md`.
+If a tool you need isn't there, say so and stop. Don't work around it.
 
 ## The loop
 
@@ -45,7 +45,17 @@ stop. Don't work around it.
    - whether each per-colour part is closed. Judge closedness only on the
      per-colour solids, never on the preview split, which is open wherever
      colours touch by design (main spec §3 and §6.3).
-   - the preview images, when the tools provide them (issue #252).
+   - the geometry, with `get_render_view`. Pick the named view that looks along
+     an axis the change does not move: `top` for a change in X or Y (layout,
+     spacing, hole positions), `front` or `left`/`right` for a change in Z
+     (heights, raised text). A change in more than one axis needs more than one
+     view; `iso` alone shows that something changed, not by how much. The view
+     directions are in the `customize` skill, section 4, from
+     `backend/scadbuddy/render/thumbnail.py`.
+   - the colours, with `get_render_colours`, from the same view.
+   - the printability of the change against the `authoring` skill's section 9
+     (hole and fit clearance, wall thickness for the nozzle, overhangs, bridges),
+     and its section 10 (cutters that overlap, no leftover `!`, `*`, `#` or `%`).
 6. **Commit** each accepted iteration as one history entry, with the user's
    instruction as the message. If an approach turns into a dead end, go back to
    the last good checkpoint rather than piling fixes on top (issue #252,

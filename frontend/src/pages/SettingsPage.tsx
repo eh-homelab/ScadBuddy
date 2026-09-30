@@ -11,6 +11,7 @@ import type { McpAuthMode } from '../api/mcpTokens'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -21,7 +22,9 @@ import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
 import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
+import { formatBytes } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
 import {
@@ -36,19 +39,6 @@ import {
 } from './settings/fields'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { useLeaveGuard } from './settings/useLeaveGuard'
-
-/** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */
-function formatBytes(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`
-  const units = ['kB', 'MB', 'GB', 'TB']
-  let value = bytes / 1000
-  let unit = 0
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000
-    unit += 1
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
-}
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -66,7 +56,7 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
-  connection: ['bambuddy_url', 'bambuddy_api_key', 'public_url'],
+  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'public_url'],
   printing: ['printer_id'],
   projects: ['library_folder_id', 'last_project_id'],
   preview: ['display_unit', 'default_plate'],
@@ -271,6 +261,7 @@ export function SettingsPage() {
       reseed.current = fieldsOf(id, next)
       settingsState.setData(next)
       if (id === 'preview') setDisplayUnit(next.display_unit)
+      if (id === 'connection') setBambuddyLinks(next)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
       if (id === 'connection') {
         targetsState.reload()
@@ -317,6 +308,7 @@ export function SettingsPage() {
       const next = await api.putSettings({ reset: [name] })
       reseed.current = [name]
       settingsState.setData(next)
+      setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
         targetsState.reload()
         projectsState.reload()
@@ -591,6 +583,23 @@ export function SettingsPage() {
                   value={value('bambuddy_url')}
                   onChange={(event) => setField('bambuddy_url', event.target.value)}
                   placeholder="https://bambuddy.internal.example"
+                  className="sb-field sb-num"
+                />
+              </FieldRow>
+
+              <FieldRow
+                id="bambuddy-web-urls"
+                label="Bambuddy web URLs"
+                badge={badge('bambuddy_web_urls')}
+                error={errors.bambuddy_web_urls}
+                help="Where browsers reach Bambuddy, when the URL above is one only ScadBuddy's server can. Comma-separated: links use the first, or whichever of them ScadBuddy is opened inside."
+              >
+                <input
+                  id="bambuddy-web-urls"
+                  type="text"
+                  value={value('bambuddy_web_urls')}
+                  onChange={(event) => setField('bambuddy_web_urls', event.target.value)}
+                  placeholder="https://bambuddy.example, https://bambuddy.lan"
                   className="sb-field sb-num"
                 />
               </FieldRow>
@@ -953,6 +962,8 @@ export function SettingsPage() {
               </p>
             </div>
             <HeadlessBrowserSetting />
+            {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
+            <SessionLimitsSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}
