@@ -56,8 +56,9 @@ request), and the manager's rules apply unchanged (spec §6):
 - Only the owner hands off, and to another MCP principal only as an offer that
   principal accepts (§2.1); the browser user may also take any session over (the panel
   and `POST /api/v1/ai/sessions/:id/handoff`). A change of owner cancels pending
-  approvals. An offer to a `token:<id>` that is not live (unknown, revoked or expired)
-  is refused at once rather than left to lapse; an OIDC subject has no row to check
+  approvals. An offer is made whether or not `to` names a live token, so the answer
+  never tells a caller which token ids are live; one nobody can accept lapses at its
+  `until` (an hour), and the owner can withdraw it with `sessions_cancel_handoff`
   (PR #715 review).
 - A turn a token sends runs its in-process tools with **that token's tiers**
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in

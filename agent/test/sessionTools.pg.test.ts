@@ -352,10 +352,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { prompt: 'hi', wait_seconds: 10 }))
       const id = session.id
 
-      // A token that does not exist is refused at once (PR #715 review).
-      expect(
-        errorText(await a.call('sessions_handoff', { session_id: id, to: 'token:00000000-0000-4000-8000-000000000000' })),
-      ).toMatch(/no live MCP token/)
+      // An offer to a token id that is not live is made like any other, so the
+      // answer says nothing about which ids are live (PR #715 review); withdrawn.
+      const ghost = 'token:00000000-0000-4000-8000-000000000000'
+      ok(await a.call('sessions_handoff', { session_id: id, to: ghost }))
+      ok(await a.call('sessions_cancel_handoff', { session_id: id }))
 
       // A offers it to B: nothing moves yet, and the offer is announced.
       const offered = ok<{ owner: { kind: string; id?: string }; offer: { to: { id?: string }; until: string } }>(
