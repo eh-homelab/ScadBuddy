@@ -31,7 +31,7 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import type { ProjectList } from '../lib/projects'
+import { useProjectList, type ProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -116,6 +116,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
+  /**
+   * The dialog's own project list, read here rather than by its ProjectPicker, which only
+   * Advanced mounts (#768): a Simple-mode print still goes to the last project, as the
+   * picker would have opened on. Read again on each open, since closing clears the value.
+   */
+  const ownProjects = useProjectList(setOwnProjectId, open && !project)
 
   const runPrint = useRunPrint({
     source,
@@ -464,11 +470,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                   {project ? (
                     <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
                   ) : (
-                    <ProjectPicker
-                      value={ownProjectId}
-                      onChange={setOwnProjectId}
-                      onLoaded={setOwnProjectId}
-                    />
+                    <ProjectPicker value={ownProjectId} onChange={setOwnProjectId} list={ownProjects} />
                   )}
 
                   <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />

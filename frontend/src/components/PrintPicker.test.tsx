@@ -960,6 +960,26 @@ describe('PrintPicker · Projects', () => {
     await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
     expect(bodies).toEqual([])
   })
+
+  it('sends the last project in Simple mode, with no project from the page (#772 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    let listed = false
+    server.use(
+      http.get('/api/v1/print/projects', () => {
+        listed = true
+        return HttpResponse.json({ projects: [...fixtures.projectViews], last_project_id: 2 })
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByTestId('project-select')).toBeNull()
+
+    await waitFor(() => expect(listed).toBe(true))
+    await act(async () => {})
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ project_id: 2 })
+  })
 })
 
 describe('PrintPicker · Remembered choices', () => {
