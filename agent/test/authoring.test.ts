@@ -3,7 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { AUTHOR_HEADER, AUTHOR_SESSION_HEADER, principalHeader } from '../src/tools/authorship.js'
+import { AUTHOR_HEADER, AUTHOR_SESSION_HEADER, authorHeaders, principalHeader } from '../src/tools/authorship.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -133,6 +133,14 @@ describe('agent authorship (#252)', () => {
     await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);' }, ctx(client, { session: 'sess-1' }))
     expect(seen[0]!.headers.get(AUTHOR_HEADER)).toBe('token:t1')
     expect(seen[0]!.headers.get(AUTHOR_SESSION_HEADER)).toBe('sess-1')
+  })
+
+  it('never sends a session id with a newline (review of #741)', () => {
+    // A JS `$` without the m flag matches only at the very end, unlike Python's
+    // (core/authorship.py uses \Z); this pins that down.
+    const principal = { id: 'token:t1', kind: 'bearer' as const, tiers: tiersUpTo('write') }
+    expect(authorHeaders(principal, 'sess-1\n')).not.toHaveProperty(AUTHOR_SESSION_HEADER)
+    expect(authorHeaders(principal, 'sess-1')).toHaveProperty(AUTHOR_SESSION_HEADER, 'sess-1')
   })
 
   it('leaves out the session outside one, and never sends the headless-browser marker', async () => {

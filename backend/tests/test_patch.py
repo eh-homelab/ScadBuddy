@@ -54,6 +54,13 @@ def test_a_removed_and_an_added_line_that_look_like_a_file_header_are_hunk_lines
     assert apply_unified_diff("-- foo\nx\n", diff) == "++ bar\nx\n"
 
 
+def test_header_lookalikes_are_hunk_lines_whatever_the_counts_say() -> None:
+    # Review of #741: the @@ line undercounts (1 and 1 for 2 and 2); `--- x` /
+    # `+++ y` at the end, with no hunk after them, are still this hunk's lines.
+    diff = "--- a/model.scad\n+++ b/model.scad\n@@ -2,1 +2,1 @@\n-b\n+B\n--- x\n+++ y\n"
+    assert apply_unified_diff("a\nb\n-- x\nd\n", diff) == "a\nB\n++ y\nd\n"
+
+
 def test_no_trailing_newline_is_kept_as_the_source_had_it() -> None:
     diff = "@@ -2 +2 @@\n-b\n+B\n\\ No newline at end of file\n"
     assert apply_unified_diff("a\nb", diff) == "a\nB"

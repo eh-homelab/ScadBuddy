@@ -54,10 +54,6 @@ class SearchReplace(BaseModel):
 class _Hunk:
     number: int
     old_start: int
-    # The header's line counts (1 when left out); only used to tell a hunk's own
-    # lines from a following file header.
-    old_count: int = 1
-    new_count: int = 1
     old: list[str] = field(default_factory=list)
     new: list[str] = field(default_factory=list)
     # "\ No newline at end of file" after that side's last line.
@@ -91,13 +87,13 @@ def _parse(diff: str) -> list[_Hunk]:
     lines = diff.splitlines()
     for index, line in enumerate(lines):
         following = lines[index + 1] if index + 1 < len(lines) else ""
-        # A file header is a `--- ` line followed by a `+++ ` one, outside a hunk's
-        # counted lines: inside one, `--- a` then `+++ b` removes "-- a" and adds
-        # "++ b" (review of #741).
-        in_hunk = current is not None and (
-            len(current.old) < current.old_count or len(current.new) < current.new_count
-        )
-        if not in_hunk and line.startswith("--- ") and following.startswith("+++ "):
+        after = lines[index + 2] if index + 2 < len(lines) else ""
+        # A file header is a `--- ` line then a `+++ ` one, before any hunk or with a
+        # hunk straight after it. Anywhere else `--- a` then `+++ b` removes "-- a"
+        # and adds "++ b". The @@ counts are not asked: a hand-written diff often
+        # gets them wrong (review of #741).
+        header_like = line.startswith("--- ") and following.startswith("+++ ")
+        if header_like and (current is None or _HUNK.match(after)):
             files += 1
             if files > 1:
                 raise PatchError("the diff changes more than one file; send one per file")
@@ -107,12 +103,7 @@ def _parse(diff: str) -> list[_Hunk]:
             continue
         header = _HUNK.match(line)
         if header:
-            current = _Hunk(
-                number=len(hunks) + 1,
-                old_start=int(header.group(1)),
-                old_count=int(header.group(2) or 1),
-                new_count=int(header.group(4) or 1),
-            )
+            current = _Hunk(number=len(hunks) + 1, old_start=int(header.group(1)))
             hunks.append(current)
             continue
         if current is None:
