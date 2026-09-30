@@ -132,7 +132,7 @@ describe('PrintsPage (#310): the global print history', () => {
     const { user } = render('/prints?printer=2')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
     expect(screen.getByLabelText('Printer')).toHaveValue('2')
-    expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
+    expect(await within(screen.getByLabelText('Printer')).findByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
 
     await user.selectOptions(screen.getByLabelText('Printer'), '')
     await waitFor(async () => expect(await shown()).toHaveLength(4))
@@ -182,6 +182,8 @@ describe('PrintsPage (#310): the global print history', () => {
     const { user } = render()
     await waitFor(async () => expect(await shown()).toHaveLength(4))
     const printer = screen.getByLabelText('Printer')
+    // The printers are gathered from the items after they render.
+    await within(printer).findByRole('option', { name: '3DP-H2C-042' })
     await user.selectOptions(printer, '2')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
     expect(within(printer).getByRole('option', { name: '3DP-31B-598' })).toHaveValue('1')
