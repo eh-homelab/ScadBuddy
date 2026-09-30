@@ -223,7 +223,10 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
 
 - **Generate** saves the current render as an output, with its parameters and a
   thumbnail.
-- **Download 3MF** downloads that output.
+- **Download 3MF** downloads that output. When the template declares default slicer
+  settings (`print_settings` in its `model.json`, such as the name keychain's prime
+  tower), the file carries them, and Bambu Studio shows them as changes to the system
+  process. **Print** slices with them too.
 - **Send to Bambuddy** uploads the output to the library, laid out for the printer set
   in Settings, or on the default plate without one. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
   is set, the library file gets an "Edit in ScadBuddy" link that opens these parameters
