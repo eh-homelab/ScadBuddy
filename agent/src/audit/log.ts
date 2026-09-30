@@ -34,6 +34,10 @@ import { redact } from '../secrets.js'
 //               action `recall` or `retain`, `input_summary` the bank and the
 //               document id or result count as JSON (never the query or a
 //               memory), `detail` the redacted reason it failed or timed out
+//   http        every request the `http_request` tool makes (#827,
+//               harness/httpRequest.ts), each redirect hop its own row:
+//               action the method, `input_summary` the scheme, host, status
+//               and size as JSON (never a path, a header or a body)
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -49,7 +53,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]

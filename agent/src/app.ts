@@ -24,6 +24,7 @@ import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
 import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
 import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
+import { registerHttpRequestRoutes } from './routes/httpRequest.js'
 import { registerPluginRoutes } from './routes/plugins.js'
 import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
 import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
@@ -39,7 +40,8 @@ import type { SessionManager } from './sessions/manager.js'
 // routes/approvals.ts), the plugin registry routes (#297, routes/plugins.ts),
 // the plugin package routes (#297, routes/pluginPackages.ts), the MCP token and
 // auth-mode routes (#251, routes/mcpTokens.ts, routes/mcpAuthMode.ts), the
-// headless-browser setting (#349, routes/headlessBrowser.ts), the session routes
+// headless-browser setting (#349, routes/headlessBrowser.ts), the HTTP request
+// tool's setting (#827, routes/httpRequest.ts), the session routes
 // and the assistant's chat socket (#300, #256, routes/sessions.ts,
 // routes/chat.ts), the browser bridge's tab socket (#254, routes/bridge.ts),
 // and /mcp when `mcp` is given (#251, mcp/http.ts).
@@ -96,8 +98,8 @@ export type AppDeps = {
   /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
   approvals?: ApprovalService
   /**
-   * `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) and the session
-   * limits (#790) answer 503 without it.
+   * `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349), the HTTP
+   * request tool's setting (#827) and the session limits (#790) answer 503 without it.
    */
   settings?: SettingsRepo | undefined
   /**
@@ -419,6 +421,13 @@ export function createApp(deps: AppDeps): AgentApp {
   })
 
   registerHeadlessBrowserRoutes(app, {
+    settings: deps.settings,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+
+  registerHttpRequestRoutes(app, {
     settings: deps.settings,
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,

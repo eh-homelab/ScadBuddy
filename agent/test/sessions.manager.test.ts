@@ -5,6 +5,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
 import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
 import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
@@ -508,6 +509,27 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const bare = manager({ sql: db.sql, paths, run: runner, settings })
       await (await bare.send(session.id, agentA, 'once more')).done
       expect(runs[2]!.headlessBrowser).toBeUndefined()
+    })
+
+    it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      const m = manager({ sql: db.sql, paths, run: runner, settings, httpRequest: {} })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'fetch' })
+      await turn!.done
+      expect(Object.keys(runs[0]!.mcpServers ?? {})).toContain(HTTP_SERVER)
+      // Its tier follows the method: a GET runs, a POST waits for approval.
+      expect(runs[0]!.tierOf?.(HTTP_TOOL_NAME, { method: 'GET', url: 'http://x/' })).toBe('read')
+      expect(runs[0]!.tierOf?.(HTTP_TOOL_NAME, { method: 'POST', url: 'http://x/' })).toBe('outward')
+
+      await settings.set(SETTING_HTTP_REQUEST, false)
+      await (await m.send(session.id, agentA, 'fetch again')).done
+      expect(Object.keys(runs[1]!.mcpServers ?? {})).not.toContain(HTTP_SERVER)
+
+      await settings.set(SETTING_HTTP_REQUEST, true)
+      await (await m.send(session.id, agentA, 'and again')).done
+      expect(Object.keys(runs[2]!.mcpServers ?? {})).toContain(HTTP_SERVER)
     })
 
     describe('ownership and handoff', () => {

@@ -223,7 +223,7 @@ export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>)
   const base = run.tierOf ?? (() => undefined)
   if (!run.remotePlugins?.length) return base
   const plugins = pluginTierResolver(run.remotePlugins)
-  return (toolName) => plugins(toolName) ?? base(toolName)
+  return (toolName, input) => plugins(toolName) ?? base(toolName, input)
 }
 
 function linkedController(signal: AbortSignal | undefined): AbortController {
@@ -251,7 +251,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
-    tierOf = (name) => browserTierOf(name) ?? ownTiers(name)
+    tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
     guard = (name, input) => browserInputProblem(name, input, browser.allowedOrigin)
   }
   const options: Options = {

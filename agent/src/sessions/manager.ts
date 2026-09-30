@@ -21,6 +21,15 @@ import {
 } from '../harness/run.js'
 import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
+import {
+  HTTP_SERVER,
+  type HttpLimits,
+  httpRequestEnabled,
+  httpRequestServer,
+  httpTierOf,
+  SETTING_HTTP_REQUEST,
+} from '../harness/httpRequest.js'
+import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -321,6 +330,17 @@ export type SessionManagerDeps = {
     executablePath?: string
     /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
     sandbox?: () => Promise<boolean>
+  }
+  /**
+   * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
+   * session's turns get it when this is set and the `http_request_enabled`
+   * setting is not `false`; it is on by default.
+   */
+  httpRequest?: {
+    /** Tests only: a resolver other than the system's. */
+    resolve?: Resolver
+    /** Tests only: smaller caps. */
+    limits?: Partial<HttpLimits>
   }
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
@@ -820,12 +840,14 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    const tierOf = this.deps.tierOf ?? (() => undefined)
+    const registryTierOf = this.deps.tierOf ?? (() => undefined)
+    // The http tools' tier depends on the method in their input (#827).
+    const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
-    let eventTierOf: TierResolver = (name) => browserTierOf(name) ?? tierOf(name)
-    const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
+    let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
+    const mapper = new SdkEventMapper(id, (name, input) => eventTierOf(name, input))
     let lost = false
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
@@ -835,7 +857,7 @@ export class SessionManager {
           sessionId: id,
           turnId,
           actor: session.owner,
-          tierOf: (name) => eventTierOf(name),
+          tierOf: (name, input) => eventTierOf(name, input),
           secrets: () => secrets,
         })
       : undefined
@@ -880,7 +902,7 @@ export class SessionManager {
       secrets.push(...(forwarded?.secrets ?? []))
       const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
       const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
-      eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
+      eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
       // A plugin left out of this turn is said so in the session, not only in the log.
       const unavailable = (message: string) =>
         this.events.append(id, [
@@ -916,12 +938,30 @@ export class SessionManager {
           }
         }
       }
-      const [cwd, resume, model, browserSetting] = await Promise.all([
+      const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
+        this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
       ])
+      // The http_request tool (#827): on unless the setting is `false`. Its
+      // saved bodies live in the session's own directory, and it never sees
+      // the turn's secrets except to refuse a request that carries one.
+      const http =
+        this.deps.httpRequest && httpRequestEnabled(httpSetting)
+          ? httpRequestServer({
+              saveDir: path.join(cwd, 'http'),
+              secrets: () => secrets,
+              audit: this.deps.audit,
+              actor: session.owner,
+              sessionId: id,
+              turnId,
+              signal: controller.signal,
+              ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+              ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
+            })
+          : undefined
       const gate = this.approvals.gate({
         sessionId: id,
         turnId,
@@ -967,10 +1007,11 @@ export class SessionManager {
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers || browser
+        ...(this.deps.mcpServers || browser || http
           ? {
               mcpServers: {
                 ...(this.deps.mcpServers ? this.deps.mcpServers(session, principal) : {}),
+                ...(http ? { [HTTP_SERVER]: http } : {}),
                 // The one way past the backend's agent-actor gate: a human
                 // approves one exact outward request (harness/headlessGrants.ts).
                 ...(browser

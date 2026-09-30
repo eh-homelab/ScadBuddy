@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
+import { HTTP_TOOL_NAME, httpTierOf } from '../src/harness/httpRequest.js'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
 import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
 import { expectPanelAccepts, frontendParseServerEvent } from './support/frontendProtocol.js'
@@ -23,6 +24,22 @@ function mapAll(messages: SDKMessage[]): ServerEvent[] {
 }
 
 describe('SdkEventMapper', () => {
+  it('shows an http_request call at the tier its method gets (#827)', () => {
+    const mapper = new SdkEventMapper(S, httpTierOf)
+    const risks = mapper
+      .map(
+        assistant('msg_h', [
+          { type: 'tool_use', id: 'toolu_get', name: HTTP_TOOL_NAME, input: { method: 'GET', url: 'http://x/' } },
+          { type: 'tool_use', id: 'toolu_post', name: HTTP_TOOL_NAME, input: { method: 'POST', url: 'http://x/' } },
+        ]),
+      )
+      .flatMap((e) => (e.type === 'tool.call' ? [[e.id, e.risk]] : []))
+    expect(risks).toEqual([
+      ['toolu_get', 'read'],
+      ['toolu_post', 'outward'],
+    ])
+  })
+
   it('maps streamed text to deltas and done, in the order the SDK yields it', () => {
     // The order measured on SDK 0.3.283: the complete assistant message comes
     // before its content_block_stop.

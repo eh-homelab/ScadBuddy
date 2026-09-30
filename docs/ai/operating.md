@@ -503,7 +503,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   ([§8](#8-per-query-limits));
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
-  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); and `mcp_oidc`, the
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
+  ([§12](#12-the-http-request-tool-827)); and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no
   route yet.
@@ -721,3 +722,24 @@ with the forwarder).
 Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). One is
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
+
+## 12. The HTTP request tool (#827)
+
+Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
+unless Settings → AI → **AI HTTP requests** is switched off. It is on by default; the
+switch is the `ai_settings` key `http_request_enabled` (`false` turns it off),
+written by `PUT /api/v1/ai/settings/http-request` and read at the start of every turn,
+so a change applies from the next turn.
+
+- **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
+  cluster services, plain `http:` included. Only link-local and cloud metadata
+  addresses are refused. If the pod must not reach something, an egress NetworkPolicy
+  is the way to say so; see [security.md](security.md#http-request-tool-827).
+- `GET` and `HEAD` run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait for an
+  approval in the UI.
+- Limits: 30 s per request by default (the model may ask for up to 120 s), 5
+  redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved under the
+  state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
+  that volume for it.
+- Every request is listed in Settings → **AI activity** under **HTTP requests**, with
+  its method, host, status and size.
