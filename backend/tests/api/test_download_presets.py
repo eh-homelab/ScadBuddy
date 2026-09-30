@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -381,7 +382,7 @@ def test_an_unreachable_bambuddy_still_gets_the_print_settings(
 
 @respx.mock
 def test_a_file_too_big_for_the_printer_still_gets_the_print_settings(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     configure(client, printer_id=1)
     output_id = make_output(client, model)
@@ -396,8 +397,19 @@ def test_a_file_too_big_for_the_printer_still_gets_the_print_settings(
     printer = {**recording("printers.json")[0], "model": "A1 mini"}
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer]))
     respx.get(f"{API}/printers/1").mock(return_value=httpx.Response(200, json=printer))
+    stored = _stored(paths, model, output_id)
+    reads: list[Path] = []
+    read_bytes = Path.read_bytes
+
+    def counting(self: Path) -> bytes:
+        reads.append(self)
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting)
 
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
 
     assert response.status_code == 200
-    _assert_stored_with_print_settings(response.content, _stored(paths, model, output_id))
+    _assert_stored_with_print_settings(response.content, stored)
+    # The file is read once, not again for the fallback (#852).
+    assert [path.name for path in reads].count("model.3mf") == 1

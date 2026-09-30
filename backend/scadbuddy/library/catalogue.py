@@ -250,13 +250,16 @@ def _print_setting_problem(key: str, value: str) -> str | None:
         if value in allowed:
             return None
         return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
-    try:
-        width = float(value)
-    except ValueError:
-        width = -1.0
-    if 0 <= width < float("inf"):
+    # Plain digits only ("5", "2.5"), as the file stores it and a download writes it:
+    # float() would also take "1e2", "5_0" and " 5 " (#851).
+    whole, point, fraction = value.partition(".")
+    parts = (whole, fraction) if point else (whole,)
+    if all(part.isascii() and part.isdigit() for part in parts):
         return None
-    return f"{key} is {value!r}; it must be a non-negative number of millimetres"
+    return (
+        f"{key} is {value!r}; it must be a non-negative number of millimetres "
+        "in plain digits, like '5' or '2.5'"
+    )
 
 
 class ModelMeta(BaseModel):
@@ -283,7 +286,15 @@ class ModelMeta(BaseModel):
     #: The template's default slicer settings (#770): process overrides on the print
     #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
     #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
-    print_settings: dict[str, StrictStr] = Field(default_factory=dict)
+    print_settings: dict[str, StrictStr] = Field(
+        default_factory=dict,
+        description=(
+            "The template's own default slicer settings, as Bambu Studio process keys "
+            "and values from its model.json. The server applies them to every slice and "
+            "every downloaded 3MF; for clients they are informational, and no request "
+            "sets them."
+        ),
+    )
 
     @field_validator("print_settings")
     @classmethod
