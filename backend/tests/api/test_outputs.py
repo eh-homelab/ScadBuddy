@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import zipfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.provenance import Provenance, source_version
@@ -466,6 +468,28 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
     assert response.status_code == 404
     assert "is gone" in response.json()["detail"]
+    assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())
+
+
+def test_a_copy_that_fails_otherwise_is_the_same_404_without_a_path(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any copy failure, not only a missing file, is the result being gone: the problem
+    names no server path, and no partial output is left behind."""
+    job_id = _finished_job(client, model)
+    denied = str(paths.root / "blobs" / "denied")
+
+    def copyfile(*args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(13, "Permission denied", denied)
+
+    monkeypatch.setattr(
+        outputs_module, "shutil", SimpleNamespace(copyfile=copyfile, rmtree=shutil.rmtree)
+    )
+    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == f"the result of job {job_id!r} is gone"
     assert str(paths.root) not in response.text
     outputs = paths.output_dir(model, "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())

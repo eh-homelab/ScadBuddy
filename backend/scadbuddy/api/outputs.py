@@ -164,8 +164,9 @@ async def create_output(
     public_url = (await asyncio.to_thread(store.load)).public_url
     try:
         meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
-    except FileNotFoundError:
-        # Evicted or swept after the check above: the same answer, not the copy's path.
+    except OSError:
+        # Evicted or swept after the check above, or unreadable: the same answer, not
+        # the copy's path.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
