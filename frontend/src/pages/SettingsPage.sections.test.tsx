@@ -501,10 +501,12 @@ describe('SettingsPage blob store (#426)', () => {
     await seeded()
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
     await user.clear(screen.getByLabelText('Bambuddy URL'))
-    expect(screen.getByLabelText('Blob store')).toHaveValue('local')
+    // The choice follows the saved URL, so it moves once Connection is saved.
+    expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy')
     await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('local'))
   })
 
   it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
@@ -562,6 +564,24 @@ describe('SettingsPage blob store (#426)', () => {
     await user.click(screen.getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_render_api_key: '' })
+  })
+
+  it('offers the Bambuddy store only once its URL is saved, then marks choosing it unsaved', async () => {
+    serve({ ...stored, bambuddy_url: null })
+    const { user } = renderPage(<SettingsPage />)
+    // Saved: an inbox folder, no Bambuddy URL.
+    const url = await screen.findByLabelText('Bambuddy URL')
+    await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
+    await user.type(url, 'https://bambuddy.new.test')
+    const option = screen.getByRole('option', { name: /Bambuddy library/ })
+    expect(option).toBeDisabled()
+    expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(option).toBeEnabled())
+    expect(screen.queryByTestId('store-backend-hint')).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Blob store'), 'bambuddy')
+    expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
