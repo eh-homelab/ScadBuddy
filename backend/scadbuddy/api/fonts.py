@@ -11,7 +11,12 @@ from pydantic import BaseModel, Field
 from scadbuddy.api.deps import EventsDep, FontsDep, StateDep
 from scadbuddy.core.events import FontInstalled, emit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.fonts import FontFamily, FontNotFoundError, InstalledFamily
+from scadbuddy.library.fonts import (
+    FontFamily,
+    FontNotFoundError,
+    FontNotResolvedError,
+    InstalledFamily,
+)
 from scadbuddy.library.googlefonts import CatalogueSource, FontVariant, GoogleFontsError
 
 router = APIRouter(tags=["fonts"])
@@ -108,6 +113,12 @@ async def get_catalogue(
     "/fonts/install",
     response_model=InstalledFamily,
     summary="Install a family onto the data volume",
+    description=(
+        "Downloads every face of the family, rebuilds fontconfig's cache and then checks "
+        "that fontconfig resolves the family under the environment renders run in. A 500 "
+        "when it does not: the files are on the volume, but a render naming the family "
+        "would silently fall back to the default font (#253)."
+    ),
 )
 async def install_font(
     body: InstallRequest, fonts: FontsDep, events: EventsDep, state: StateDep
@@ -118,6 +129,17 @@ async def install_font(
         raise ApiError(404, f"{body.family!r} is not in the Google Fonts catalogue") from exc
     except GoogleFontsError as exc:
         raise ApiError(502, f"{body.family!r} could not be downloaded: {exc}") from exc
+    except FontNotResolvedError as exc:
+        # Nothing to emit: fontconfig, and so every render, sees no new family.
+        raise ApiError(
+            500,
+            f"{exc.family!r} was downloaded ({', '.join(exc.files)}), but fontconfig does "
+            "not resolve that family afterwards, so a render naming it would fall back to "
+            "the default font; its files may name another family, see GET /fonts. A repeat "
+            "install answers this again without a download; force=true fetches it anew",
+            family=exc.family,
+            files=exc.files,
+        ) from exc
     emit(events, FontInstalled(family=installed.family))
     if state.store.fonts is not None:
         try:

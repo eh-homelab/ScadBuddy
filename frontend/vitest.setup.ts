@@ -4,6 +4,8 @@ import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
+import { resetAiAvailability } from './src/agent/chat/availability'
+import { FakeIntersectionObserver } from './src/test/intersection'
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -11,6 +13,7 @@ afterEach(() => {
   resetMockState()
   resetDisplayUnit()
   resetRealtime()
+  resetAiAvailability()
 })
 afterAll(() => server.close())
 
@@ -40,17 +43,9 @@ if (!URL.createObjectURL) {
   URL.revokeObjectURL = () => {}
 }
 
-// Embla watches which slides are in view; jsdom lays nothing out, so none ever is.
+// Embla watches which slides are in view, and a catalogue card waits to be near it
+// (#558); jsdom lays nothing out, so nothing is until a test says so with `intersect`.
 if (!globalThis.IntersectionObserver) {
-  globalThis.IntersectionObserver = class {
-    readonly root = null
-    readonly rootMargin = ''
-    readonly thresholds = []
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-    takeRecords() {
-      return []
-    }
-  } as unknown as typeof IntersectionObserver
+  globalThis.IntersectionObserver =
+    FakeIntersectionObserver as unknown as typeof IntersectionObserver
 }

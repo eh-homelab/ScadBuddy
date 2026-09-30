@@ -213,6 +213,7 @@ describe('checkPlan', () => {
   function options(rest: Partial<FilamentOptions> = {}): FilamentOptions {
     return {
       library_file_id: 1,
+      track_switch: false,
       printer_id: 1,
       printer_name: 'Printer A',
       slots: [{ slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 100 }],
@@ -264,6 +265,7 @@ describe('checkPlan', () => {
 describe('seedPlan', () => {
   const options: FilamentOptions = {
     library_file_id: 1,
+    track_switch: false,
     slots: [slot({ slot_id: 1 }), slot({ slot_id: 2, colour: '#FF1493' })],
     spools: [spool({ spool_id: 1 }), spool({ spool_id: 2 }), spool({ spool_id: 3 })],
     suggested: [

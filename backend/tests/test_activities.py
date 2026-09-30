@@ -16,6 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 import trimesh
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -36,6 +37,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.worker import make_current_until_polled
 from scadbuddy.workflows import activities
 from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
@@ -59,7 +61,7 @@ from scadbuddy.workflows.models import (
     piece_key,
 )
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import fake_3mf_openscad, write_openscad_3mf
+from tests.conftest import PgPool, fake_3mf_openscad, write_openscad_3mf
 from tests.support.store import local_content, store_pool
 from tests.support.temporal import temporal_client
 
@@ -547,6 +549,17 @@ async def test_project_for_an_unknown_job_returns(
 # ── the real workflows over the real activities ────────────────────────────────
 
 
+async def _make_current(client: Client) -> None:
+    """As the worker does: Temporal 1.28 takes the build only once it polls."""
+    assert await make_current_until_polled(
+        lambda: make_current(client, namespace=client.namespace, build_id="test"),
+        build_id="test",
+        backoff=(0.1,),
+        every=0.2,
+        deadline=30,
+    )
+
+
 @pytest.mark.requires_postgres
 @pytest.mark.requires_temporal
 async def test_a_job_renders_end_to_end_on_the_render_worker(
@@ -570,7 +583,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
@@ -621,7 +634,7 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             build_id="test",
             max_concurrent_activities=2,
         ):
-            await make_current(client, namespace=client.namespace, build_id="test")
+            await _make_current(client)
 
             async def rendered(job: Job) -> Path:
                 projection.submit(job, render_key("demo", {"width": 1}, None))
@@ -653,7 +666,11 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
 
 @pytest.mark.parametrize("stage", ["render_main", "render_solids"])
 async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch, stage: str
+    tmp_path: Path,
+    pg_conninfo: str,
+    pg_pool: PgPool,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
 ) -> None:
     missing = "f" * 64
 
@@ -664,7 +681,7 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
                 parameters=[Parameter(name="label", type="file", initial="", accept=["svg"])]
             ),
             {"label": missing},
-            AssetStore(tmp_path / "empty"),
+            AssetStore(tmp_path / "empty", pg_pool),
             tmp_path,
         )
 
@@ -674,6 +691,7 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
             _deps(tmp_path, paths),
+            assets=AssetStore(paths.assets, pg_pool),
             remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
         )
         acts = RenderActivities(deps)

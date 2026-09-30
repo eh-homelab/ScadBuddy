@@ -59,6 +59,11 @@ export function ownerOf(principal: Principal): Owner {
     }
     case 'browser':
       return { kind: 'browser', id: principal.id, label: 'You' }
+    case 'flow':
+      // A flow's session runs its tools in-process (tools/harness.ts), where
+      // outward calls park in the harness, not here; mapped so it never
+      // falls through to the browser user.
+      return { kind: 'flow', id: principal.id, label: `flow ${principal.id}` }
     default: {
       // A new PrincipalKind must be mapped here, never fall through to the browser user.
       const unknown: never = principal.kind
