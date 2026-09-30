@@ -1,5 +1,5 @@
 import type { BusEvent, EventSource } from '../events/bus.js'
-import { affectedBy } from './events.js'
+import { affectedBy, NOTIFY_ONLY_PREFIXES } from './events.js'
 
 // From the event bus to each MCP session's subscriptions (issue #264).
 //
@@ -89,6 +89,11 @@ export class Subscriptions {
     this.#push(LIST)
   }
 
+  /** The bus reconnected: NOTIFY-only resources (events.ts) may have changed unseen. */
+  onReconnect(): void {
+    for (const uri of this.#uris) if (NOTIFY_ONLY_PREFIXES.some((p) => uri.startsWith(p))) this.#push(uri)
+  }
+
   close(): void {
     this.#closed = true
     for (const w of this.#windows.values()) clearTimeout(w.timer)
@@ -138,6 +143,9 @@ export class ResourceHub {
         },
         onResync: () => {
           for (const s of this.#sessions) s.onResync()
+        },
+        onReconnect: () => {
+          for (const s of this.#sessions) s.onReconnect()
         },
       }) ?? (() => {})
   }

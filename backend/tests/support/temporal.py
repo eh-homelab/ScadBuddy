@@ -161,8 +161,11 @@ def current_address(client: Client) -> str:
 class WorkerThread:
     """Run a Temporal `Worker` on its own loop in a thread, for sync TestClient tests."""
 
-    def __init__(self, make_worker: Callable[[], Awaitable[Worker]]) -> None:
+    def __init__(
+        self, make_worker: Callable[[], Awaitable[Worker]], *, join_timeout: float = 30
+    ) -> None:
         self._make_worker = make_worker
+        self._join_timeout = join_timeout
         self._stop = asyncio.Event()
         self._thread = threading.Thread(target=self._run, name="temporal-worker", daemon=True)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -191,9 +194,14 @@ class WorkerThread:
     def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
         assert self._loop is not None
         self._loop.call_soon_threadsafe(self._stop.set)
-        self._thread.join(timeout=30)
-        if not self._thread.is_alive():
-            self._loop.close()
+        self._thread.join(timeout=self._join_timeout)
+        if self._thread.is_alive():
+            # Its loop and Worker live on: fail here, not in whichever test they disturb.
+            raise RuntimeError(
+                f"the Temporal worker thread is still running {self._join_timeout:g} s"
+                " after it was told to stop"
+            )
+        self._loop.close()
         if self._error is None:
             return
         if exc_type is None:

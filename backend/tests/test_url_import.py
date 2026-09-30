@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import socket
 import threading
@@ -16,6 +17,7 @@ from scadbuddy.library import url_import
 from scadbuddy.library.url_import import (
     ImportRefusedError,
     PublicOnlyBackend,
+    ResolverBusyError,
     fetch_model,
     is_public,
     unreachable,
@@ -114,6 +116,77 @@ async def test_an_https_redirect_is_followed_and_the_pasted_url_is_the_origin() 
 
     assert imported.source == SOURCE
     assert imported.origin_url == "https://example.com/latest.scad"
+
+
+@pytest.mark.parametrize(
+    "failure", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")], ids=["refused", "slow"]
+)
+@respx.mock
+async def test_a_redirect_target_that_does_not_answer_is_the_host_named(
+    failure: Exception,
+) -> None:
+    respx.get("https://example.com/latest.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://cdn.example.com/v2.scad"})
+    )
+    respx.get("https://cdn.example.com/v2.scad").mock(side_effect=failure)
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://example.com/latest.scad", limit=LIMIT)
+
+    assert str(caught.value) == str(unreachable("cdn.example.com", redirected_from="example.com"))
+    assert "cdn.example.com (redirected from example.com)" in str(caught.value)
+
+
+@respx.mock
+async def test_a_redirect_target_past_the_deadline_is_the_host_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(url_import, "IMPORT_TIMEOUT", 0.05)
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline should have cut this off")
+
+    respx.get("https://example.com/latest.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://cdn.example.com/v2.scad"})
+    )
+    respx.get("https://cdn.example.com/v2.scad").mock(side_effect=hang)
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://example.com/latest.scad", limit=LIMIT)
+
+    assert str(caught.value) == str(unreachable("cdn.example.com", redirected_from="example.com"))
+
+
+@respx.mock
+async def test_a_redirect_into_the_cluster_reads_like_a_redirect_that_did_not_answer(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["internal.example.com"] = ["10.0.0.7"]
+    respx.get("https://example.com/a.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://internal.example.com/x"})
+    )
+    respx.get("https://example.com/b.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://slow.example.com/x"})
+    )
+    internal = respx.get("https://internal.example.com/x")
+    respx.get("https://slow.example.com/x").mock(side_effect=httpx.ConnectTimeout("slow"))
+
+    with pytest.raises(ImportRefusedError) as blocked:
+        await fetch_model("https://example.com/a.scad", limit=LIMIT)
+    with pytest.raises(ImportRefusedError) as silent:
+        await fetch_model("https://example.com/b.scad", limit=LIMIT)
+
+    assert str(blocked.value) == str(silent.value).replace(
+        "slow.example.com", "internal.example.com"
+    )
+    assert not internal.called
+
+
+async def test_the_pasted_host_is_not_repeated_when_it_is_the_one_that_failed() -> None:
+    assert str(unreachable("example.com", redirected_from="example.com")) == str(
+        unreachable("example.com")
+    )
 
 
 class _WatchedBody(httpx.AsyncByteStream):
@@ -381,9 +454,10 @@ async def test_with_every_resolver_thread_busy_a_lookup_is_refused_not_queued(
     # out this whole deadline before it gave up.
     monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 3.0)
     started = time.monotonic()
-    with pytest.raises(ImportRefusedError) as caught:
+    # Busy, not the refusal: the lookup never started, so it says nothing about the
+    # host, and the route turns it into its retryable 503.
+    with pytest.raises(ResolverBusyError):
         await fetch_model("https://third.invalid/model.scad", limit=LIMIT)
-    assert str(caught.value) == str(unreachable("third.invalid"))
     assert time.monotonic() - started < 1
 
     # Once the two threads are free: a queued third lookup would run now.

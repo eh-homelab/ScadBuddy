@@ -15,9 +15,11 @@ import {
   isAssistantShortcut,
 } from '../agent/chat/shortcut'
 import type { ChatTransportFactory } from '../agent/chat/transport'
+import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
 
@@ -29,8 +31,14 @@ const AssistantPanel = lazy(async () => ({
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
+  { to: '/prints', label: 'Prints', end: false },
+  { to: '/library', label: 'Library', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
+
+// #254 — this tab's socket to the agent, and the pairing prompt, while the assistant is
+// available; like the panel, loaded only then.
+const AgentLink = lazy(async () => ({ default: (await import('./AgentLink')).AgentLink }))
 
 const PANEL_ID = 'assistant-panel'
 
@@ -38,10 +46,13 @@ interface Props {
   embedded?: boolean
   /** Tests inject the mock agent; the app loads whichever this build has. */
   assistantTransport?: ChatTransportFactory
+  /** Tests inject the browser bridge's link (null for none); the app makes its own. */
+  tabLink?: TabLinkFactory | null
 }
 
-export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props) {
+export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   useLoadDisplayUnit()
+  useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
   useGlobalAgentTools()
   const ai = useAiAvailability()
@@ -49,6 +60,21 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   // Mounted from the first open on, and hidden rather than unmounted when closed, so
   // closing the panel doesn't drop the connection or the transcript.
   const [mounted, setMounted] = useState(false)
+  // A mounted panel rides out an outage: while the agent restarts, or its status
+  // read fails for a moment, the panel's transport keeps reconnecting with its
+  // transcript and anything queued for the reconnect (a decision, say) intact,
+  // where unmounting would drop them. The panel goes only when the agent says the
+  // assistant is off for this page: not set up, or its chat gate refuses this
+  // address. Until it is first opened, the agent's answer alone decides.
+  const off = ai.state === 'not_configured' || ai.chat === 'refused'
+  const shown = ai.available || (mounted && !off)
+  useEffect(() => {
+    // Gone for good: the next time the agent is available it starts afresh.
+    if (!shown) {
+      setOpen(false)
+      setMounted(false)
+    }
+  }, [shown])
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
 
@@ -80,7 +106,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   }, [open, closePanel, openPanel])
 
   useEffect(() => {
-    if (!ai.available) return
+    if (!shown) return
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !isAssistantShortcut(event)) return
       event.preventDefault()
@@ -88,7 +114,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ai.available, toggle])
+  }, [shown, toggle])
 
   const onPanelKey = (event: ReactKeyboardEvent) => {
     if (event.key === 'Escape' && !event.defaultPrevented) {
@@ -100,8 +126,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
       <header
-        className={`flex shrink-0 items-center gap-5 border-b border-line bg-surface px-4 ${
-          embedded ? 'h-10' : 'h-14'
+        className={`flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-surface px-4 py-1.5 sm:gap-x-5 ${
+          embedded ? 'min-h-10' : 'min-h-14'
         }`}
         data-embedded={embedded ? 'true' : 'false'}
       >
@@ -110,7 +136,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
             Scad<span className="text-accent">Buddy</span>
           </span>
           {!embedded && (
-            <span className="text-[11px] text-faint">OpenSCAD customizer</span>
+            <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
           )}
         </NavLink>
 
@@ -135,7 +161,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
 
         <div className="ml-auto flex items-center gap-2">
           <LiveUpdatesIndicator />
-          {ai.available && (
+          {shown && (
             <button
               ref={toggleButton}
               type="button"
@@ -154,11 +180,16 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
         </div>
       </header>
 
+      {ai.available && (
+        <Suspense fallback={null}>
+          <AgentLink factory={tabLink} />
+        </Suspense>
+      )}
       <div className="relative flex min-h-0 flex-1">
         <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <Outlet />
         </main>
-        {ai.available && mounted && (
+        {shown && mounted && (
           <aside
             id={PANEL_ID}
             aria-label="Assistant"

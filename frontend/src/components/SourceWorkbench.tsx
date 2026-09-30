@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { committed, touch, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
 import type { SourceCheck } from '../api/types'
+import type { DefinitionFile } from '../lib/lsp'
 import { refusedCheck } from '../lib/problems'
 import { useDebounced } from '../lib/useDebounced'
 import { SourceEditor, type SourceEditHandle } from './SourceEditor'
@@ -95,6 +96,13 @@ export function SourceWorkbench({
   const check = verdict?.source === source ? verdict.result : undefined
   const refused = check !== undefined && !check.ok
   const busy = checking || saving
+
+  // #185 — a saved model's sibling files and pinned libraries, for go-to-definition.
+  // Memoized: a new function would start a new language server session.
+  const readFile = useMemo(
+    () => (slug ? (file: DefinitionFile) => api.getDefinitionFile(slug, file) : undefined),
+    [slug],
+  )
 
   // #254 — the source editor's browser tools.
   const editRef = useRef<SourceEditHandle | null>(null)
@@ -231,6 +239,7 @@ export function SourceWorkbench({
           errors={check?.diagnostics ?? []}
           uri={uri}
           languageServer={api.languageServerPath(slug)}
+          readFile={readFile}
           label="OpenSCAD source"
           readOnly={readOnly}
         />
