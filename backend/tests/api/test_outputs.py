@@ -9,6 +9,7 @@ import pytest
 import trimesh
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -423,3 +424,17 @@ def test_an_old_records_upload_keys_are_ignored() -> None:
     )
     dumped = meta.model_dump()
     assert not {"library_file_id", "library_file_plate", "library_files"} & dumped.keys()
+
+
+def test_saving_a_job_whose_result_is_gone_is_a_404(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Not a 500 carrying a server path: the store no longer has the piece's files."""
+    job_id = _finished_job(client, model)
+    result = getattr(client.app.state, STATE_ATTR).render.store.read(job_id).result  # type: ignore[attr-defined]
+    (paths.root / result.model_3mf).unlink()
+    response = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id})
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "is gone" in response.json()["detail"]
+    assert str(paths.root) not in response.text
