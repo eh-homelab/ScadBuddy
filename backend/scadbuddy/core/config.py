@@ -7,6 +7,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,13 @@ DEFAULT_ASSET_SWEEP_GRACE = 7 * 86400.0
 MIN_ASSET_SWEEP_GRACE = 3600.0
 # How often the sweep runs after the one at boot; 0 turns the sweep off entirely.
 DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
+#: Where blobs live (spec 2026-09-27 §6.2). `local` is the data volume and is correct
+#: only with one render worker sharing the API's volume; `bambuddy` is Bambuddy's library.
+StoreBackend = Literal["local", "bambuddy"]
+DEFAULT_STORE_MAX_TOTAL_BYTES = 50 * 1024**3
+DEFAULT_STORE_MAX_COUNT = 200_000
+#: A worker's local copy of pieces it fetched or rendered; least recently used goes first.
+DEFAULT_WORKER_CACHE_MAX_BYTES = 10 * 1024**3
 # How old a duplicate's staging folder must be before a sweep treats it as a crashed
 # copy rather than another replica's copy in flight (#212).
 DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
@@ -123,6 +131,9 @@ class Config:
     temporal_address: str = ""
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
+    store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
+    store_max_count: int = DEFAULT_STORE_MAX_COUNT
+    worker_cache_max_bytes: int = DEFAULT_WORKER_CACHE_MAX_BYTES
 
     @property
     def activity_timeout(self) -> float:
@@ -302,6 +313,13 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         # Not `or`: a 0 is refused, not quietly turned into the default.
         duplicate_staging_max_age=_float_or(
             source.get("SCADBUDDY_DUPLICATE_STAGING_MAX_AGE"), DEFAULT_DUPLICATE_STAGING_MAX_AGE
+        ),
+        store_max_total_bytes=_int_or(
+            source.get("SCADBUDDY_STORE_MAX_TOTAL_BYTES"), DEFAULT_STORE_MAX_TOTAL_BYTES
+        ),
+        store_max_count=_int_or(source.get("SCADBUDDY_STORE_MAX_COUNT"), DEFAULT_STORE_MAX_COUNT),
+        worker_cache_max_bytes=_int_or(
+            source.get("SCADBUDDY_WORKER_CACHE_MAX_BYTES"), DEFAULT_WORKER_CACHE_MAX_BYTES
         ),
     )
 

@@ -202,6 +202,21 @@ class Metrics:
             registry=r,
         )
 
+        # The content store under the blob store (spec 2026-09-27 §6.2, #426).
+        self.store_ops = Counter(
+            "scadbuddy_store_operations_total",
+            "Blob store calls by operation (put, get, delete) and outcome"
+            " (ok, full, corrupt, missing).",
+            ["op", "outcome"],
+            registry=r,
+        )
+        self.worker_cache = Counter(
+            "scadbuddy_worker_cache_total",
+            "Piece fetches answered from this process's local cache (hit) or downloaded (miss).",
+            ["result"],
+            registry=r,
+        )
+
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the render queue's from the projection.
         self.assets_stored = Gauge(
