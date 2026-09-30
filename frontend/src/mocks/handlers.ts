@@ -1832,8 +1832,14 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug/versions/:commit/schema`, ({ params }) => {
-    const schema = state.schemas[String(params['slug'])]
-    return schema ? HttpResponse.json(schema) : problem(404, 'Model not found')
+    const slug = String(params['slug'])
+    const schema = state.schemas[slug]
+    // The revision's own `ui` (the backend reads that revision's model.json); a mock
+    // revision declares what the model does now.
+    const model = state.models.find((m) => m.slug === slug)
+    return schema
+      ? HttpResponse.json({ ...schema, ui: model?.ui ?? null, ui_error: model?.ui_error ?? null })
+      : problem(404, 'Model not found')
   }),
 
   http.get(`${base}/models/:slug/versions/:commit/source`, ({ params }) => {

@@ -199,3 +199,22 @@ def test_the_spa_sends_the_csp_on_the_document_and_client_routes(tmp_path: objec
         unchanged = spa.get("/", headers={"If-None-Match": etag})
         assert unchanged.status_code == 304
         assert unchanged.headers["content-security-policy"] == PAGE_CSP
+
+
+@pytest.mark.requires_git
+def test_a_revisions_schema_carries_that_revisions_ui(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """ "Customize this version" mounts the revision's own interface, or none."""
+    before = _commit(paths, "no ui yet")
+    _with_ui(paths, model, {"index.js": b"export function mount() {}\n"})
+    head = _commit(paths, "ui")
+    _with_ui(paths, model, {}, ui={"module": "ui/x.txt", "api": 1})
+    broken = _commit(paths, "bad ui")
+    old = client.get(f"/api/v1/models/{model}/versions/{before}/schema")
+    assert old.status_code == 200, old.text
+    assert old.json()["ui"] is None and old.json()["ui_error"] is None
+    assert old.json()["parameters"]
+    assert client.get(f"/api/v1/models/{model}/versions/{head}/schema").json()["ui"] == UI
+    bad = client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()
+    assert bad["ui"] is None and bad["ui_error"].startswith("model.json's ui is not valid")

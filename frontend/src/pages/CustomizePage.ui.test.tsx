@@ -234,6 +234,26 @@ describe('CustomizePage with a template UI', () => {
     )
   })
 
+  it("opens a revision with that revision's ui declaration, not the current one", async () => {
+    const imports: string[] = []
+    setUiModuleLoader(async (url) => {
+      imports.push(url)
+      return { mount: demo }
+    })
+    const old = 'b'.repeat(40)
+    // The current record declares a UI; the revision from before it declares none.
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+        HttpResponse.json({ ...keychainSchema, ui: null, ui_error: null }),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?version=${old}`, path: '/m/:slug' })
+    await waitFor(() => expect(document.querySelector('[data-param]')).not.toBeNull())
+    expect(document.querySelector('[data-testid="template-ui"]')).toBeNull()
+    expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
+    expect(imports).toEqual([])
+  })
+
   it('tries the interface again on another revision after one failed', async () => {
     setUiModuleLoader(async (url) => {
       if (url.includes(`/versions/${'a'.repeat(40)}/`)) return { mount: () => { throw new Error('old revision broke') } }

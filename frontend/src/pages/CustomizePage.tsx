@@ -166,9 +166,12 @@ export function CustomizePage() {
   const extra = edits.extra ?? reopenedInputs?.extra ?? NO_EXTRA
 
   // #425 — a template's own interface (spec 2026-09-27 §4). Whether there is one is the
-  // record's `ui` declaration, never `extra` being non-empty.
+  // `ui` declaration, never `extra` being non-empty: the record's for the live template,
+  // the revision's own (on its schema) for an old one, which may declare another or none.
   const record = modelState.data
-  const declared = (record?.ui ?? null) as UiDeclaration | null
+  const pinned = version !== undefined && schema && 'ui' in schema ? schema : undefined
+  const declaration = version === undefined ? record : pinned
+  const declared = (declaration?.ui ?? null) as UiDeclaration | null
   // Keyed by the revision as well: another revision's interface may work.
   const [uiFailure, setUiFailure] = useState<{
     slug: string
@@ -178,8 +181,8 @@ export function CustomizePage() {
   const failure =
     uiFailure?.slug === slug && uiFailure.version === version
       ? uiFailure.failure
-      : record?.ui_error
-        ? { file: 'model.json', message: record.ui_error }
+      : declaration?.ui_error
+        ? { file: 'model.json', message: declaration.ui_error }
         : null
   const customUi = declared && !failure ? declared : null
   // Wait for the record and the schema before choosing, so a template with a UI never
