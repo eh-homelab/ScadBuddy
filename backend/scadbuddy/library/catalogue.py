@@ -216,18 +216,47 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+_BOOLEAN = ("0", "1")
+
 #: The process settings a template may declare in ``print_settings`` (#770), in the
-#: order a download lists them as edits. Each is a Bambu Studio process key, and its
-#: value the string a Bambu config stores. Only these: a template states how it prints
-#: best, not a whole profile.
-PRINT_SETTING_KEYS: tuple[str, ...] = (
-    "enable_prime_tower",
-    "wipe_tower_no_sparse_layers",
-    "enable_support",
-    "support_type",
-    "brim_width",
-    "brim_type",
-)
+#: order a download lists them as edits, each with the values it takes. Each is a
+#: Bambu Studio process key, and its value the string a Bambu config stores; the
+#: enums are ``s_keys_map_SupportType`` and ``s_keys_map_BrimType`` in Bambu Studio's
+#: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
+#: number of millimetres. Only these: a template states how it prints best, not a
+#: whole profile.
+PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
+    "enable_prime_tower": _BOOLEAN,
+    "wipe_tower_no_sparse_layers": _BOOLEAN,
+    "enable_support": _BOOLEAN,
+    "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
+    "brim_width": None,
+    "brim_type": (
+        "auto_brim",
+        "brim_ears",
+        "outer_only",
+        "inner_only",
+        "outer_and_inner",
+        "no_brim",
+    ),
+}
+PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
+
+
+def _print_setting_problem(key: str, value: str) -> str | None:
+    """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
+    allowed = PRINT_SETTING_VALUES[key]
+    if allowed is not None:
+        if value in allowed:
+            return None
+        return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
+    try:
+        width = float(value)
+    except ValueError:
+        width = -1.0
+    if 0 <= width < float("inf"):
+        return None
+    return f"{key} is {value!r}; it must be a non-negative number of millimetres"
 
 
 class ModelMeta(BaseModel):
@@ -259,14 +288,18 @@ class ModelMeta(BaseModel):
     @field_validator("print_settings")
     @classmethod
     def _known_print_settings(cls, value: dict[str, str]) -> dict[str, str]:
-        """Only the allowlisted keys, in its order. An unknown key is refused rather
-        than dropped: a template that means a setting must not print without it."""
-        for key in value:
-            if key not in PRINT_SETTING_KEYS:
+        """Only the allowlisted keys, each with a value it takes, in the allowlist's
+        order. An unknown key or value is refused rather than dropped: a template that
+        means a setting must not print without it."""
+        for key, setting in value.items():
+            if key not in PRINT_SETTING_VALUES:
                 raise ValueError(
                     f"{key!r} is not a print setting a template can set; "
                     f"the allowed keys are {', '.join(PRINT_SETTING_KEYS)}"
                 )
+            problem = _print_setting_problem(key, setting)
+            if problem is not None:
+                raise ValueError(problem)
         return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
 
     @field_validator("media", mode="before")

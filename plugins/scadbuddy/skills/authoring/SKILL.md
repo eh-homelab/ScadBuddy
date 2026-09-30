@@ -58,7 +58,13 @@ A template that prints best with a process setting changed says so in `model.jso
 - Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
   `support_type`, `brim_width` and `brim_type`. Any other key makes the template fail
   to load, and the error names the key.
-- Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`).
+- Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`),
+  and each must be one its key takes (`PRINT_SETTING_VALUES`, from Bambu Studio's
+  [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp)):
+  `"0"` or `"1"` for the three switches; `support_type` one of `normal(auto)`,
+  `tree(auto)`, `normal(manual)`, `tree(manual)`; `brim_type` one of `auto_brim`,
+  `brim_ears`, `outer_only`, `inner_only`, `outer_and_inner`, `no_brim`; `brim_width` a
+  non-negative number of millimetres. A bad value fails the load, as an unknown key does.
 - The print run sends them as the slice's `process_overrides`, over the process preset
   the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
   `SlicePlan`). A downloaded 3MF carries them in `project_settings.config` and lists

@@ -35,9 +35,71 @@ def test_no_print_settings_is_empty() -> None:
 
 
 def test_every_allowlisted_key_is_accepted() -> None:
-    raw = {key: "1" for key in PRINT_SETTING_KEYS}
+    raw = {
+        "enable_prime_tower": "1",
+        "wipe_tower_no_sparse_layers": "0",
+        "enable_support": "1",
+        "support_type": "tree(auto)",
+        "brim_width": "5",
+        "brim_type": "outer_only",
+    }
+    assert tuple(raw) == PRINT_SETTING_KEYS
 
     assert meta_from_raw({"print_settings": raw}, "demo").print_settings == raw
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("support_type", "normal(auto)"),
+        ("support_type", "tree(auto)"),
+        ("support_type", "normal(manual)"),
+        ("support_type", "tree(manual)"),
+        *[
+            ("brim_type", brim)
+            for brim in (
+                "auto_brim",
+                "brim_ears",
+                "outer_only",
+                "inner_only",
+                "outer_and_inner",
+                "no_brim",
+            )
+        ],
+        ("brim_width", "0"),
+        ("brim_width", "2.5"),
+    ],
+)
+def test_bambus_own_values_are_accepted(key: str, value: str) -> None:
+    assert meta_from_raw({"print_settings": {key: value}}, "demo").print_settings == {key: value}
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "says"),
+    [
+        ("enable_prime_tower", "true", "must be one of '0', '1'"),
+        ("wipe_tower_no_sparse_layers", "2", "must be one of '0', '1'"),
+        ("enable_support", "", "must be one of '0', '1'"),
+        ("support_type", "tree", "must be one of 'normal(auto)'"),
+        ("brim_type", "outer", "must be one of 'auto_brim'"),
+        ("brim_width", "-1", "non-negative number"),
+        ("brim_width", "wide", "non-negative number"),
+        ("brim_width", "nan", "non-negative number"),
+        ("brim_width", "inf", "non-negative number"),
+    ],
+)
+def test_a_value_the_key_does_not_take_is_refused(key: str, value: str, says: str) -> None:
+    with pytest.raises(ValidationError, match=f"{key} is {value!r}") as caught:
+        meta_from_raw({"print_settings": {key: value}}, "demo")
+
+    assert says in str(caught.value)
+
+
+def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
+    catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"brim_type": "wide"}})
+
+    with pytest.raises(InvalidModelMetaError, match="brim_type is 'wide'"):
+        catalogue.print_settings("demo")
 
 
 def test_an_unknown_key_is_refused_by_name() -> None:

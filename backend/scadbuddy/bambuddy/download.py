@@ -12,7 +12,12 @@ size is never taken for it.
 A printer the resolver has no presets for, or a refusal (no spool for a color, no
 preset for the size), still gets the re-plated file, on the placeholders. Without a
 default printer, with Bambuddy unreachable, or when the file does not fit the printer,
-the stored file is served unchanged: a download never fails for want of either.
+the stored file keeps its plate and placeholders: a download never fails for want of
+either.
+
+A template's ``print_settings`` (#770) are written into ``project_settings.config`` on
+every path, re-plated or not, and listed as edits to the system process. Only a
+template without them, on one of those fallbacks, gets the stored file byte for byte.
 """
 
 from __future__ import annotations

@@ -12,13 +12,15 @@ import httpx
 import psycopg
 import pytest
 import respx
+import trimesh
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.render.bambu3mf import PRESET_PLACEHOLDER, replate_3mf
+from scadbuddy.render.bambu3mf import PRESET_PLACEHOLDER, replate_3mf, write_bambu_3mf
 from scadbuddy.render.plate import PlateGeometry, plate_for
+from scadbuddy.render.split import ColourPart
 from tests.api.test_print import printers_route
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -346,3 +348,56 @@ def test_without_a_default_printer_the_print_settings_are_still_written(
         "different_settings_to_system",
     }
     assert (settings["brim_width"], settings["brim_type"]) == ("5", "outer_only")
+
+
+def _assert_stored_with_print_settings(content: bytes, stored: bytes) -> None:
+    """The stored file's plate and presets, with the template's settings added."""
+    assert _item_transform(content) == _item_transform(stored)
+    settings = _project_settings(content)
+    before = _project_settings(stored)
+    assert {key: value for key, value in settings.items() if key in before} == before
+    assert settings["printer_settings_id"] == PRESET_PLACEHOLDER
+    assert settings["enable_prime_tower"] == "1"
+    assert settings["different_settings_to_system"][0] == (
+        "enable_prime_tower;wipe_tower_no_sparse_layers;enable_support"
+    )
+
+
+@respx.mock
+def test_an_unreachable_bambuddy_still_gets_the_print_settings(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _declare(paths, model, KEYCHAIN)
+    respx.route(host="bambuddy.test").mock(side_effect=httpx.ConnectError("refused"))
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    assert 'filename="demo-elan.3mf"' in response.headers["content-disposition"]
+    _assert_stored_with_print_settings(response.content, _stored(paths, model, output_id))
+
+
+@respx.mock
+def test_a_file_too_big_for_the_printer_still_gets_the_print_settings(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _declare(paths, model, KEYCHAIN)
+    # 200 mm across does not fit an A1 mini's 180 mm bed.
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
+        paths.output_dir(model, output_id) / "model.3mf",
+        thumbnails=None,
+        model_name=model,
+    )
+    printer = {**recording("printers.json")[0], "model": "A1 mini"}
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer]))
+    respx.get(f"{API}/printers/1").mock(return_value=httpx.Response(200, json=printer))
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    _assert_stored_with_print_settings(response.content, _stored(paths, model, output_id))
