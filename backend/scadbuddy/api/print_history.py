@@ -60,6 +60,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     download_filename,
 )
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -457,7 +458,9 @@ async def list_prints(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
-    slug: Annotated[str | None, Query(max_length=200)] = None,
+    slug: Annotated[
+        str | None, Query(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
+    ] = None,
     print_status: Annotated[str | None, Query(alias="status", max_length=64)] = None,
     printer_id: int | None = None,
     date_from: Annotated[date | None, Query(alias="from")] = None,

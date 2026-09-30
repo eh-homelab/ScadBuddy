@@ -259,7 +259,17 @@ def test_a_selective_filter_scans_a_bounded_number_of_prints_per_request(
     assert second["next_cursor"] is None
 
 
-@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"cursor": "nope"}])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"limit": 0},
+        {"limit": 101},
+        {"cursor": "nope"},
+        # #609 review: a slug is a template's, never a path under data/outputs/.
+        {"slug": "../../etc"},
+        {"slug": "/proc"},
+    ],
+)
 def test_a_bad_limit_or_cursor_is_rejected(client: TestClient, params: dict[str, Any]) -> None:
     configure(client)
     assert client.get("/api/v1/prints", params=params).status_code == 422
