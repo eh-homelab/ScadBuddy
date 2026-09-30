@@ -220,7 +220,7 @@ export function assertHttpUrl(url: string, label: string): URL {
   return target
 }
 
-type LookupCallback =(err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void
+type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void
 
 /** GETs `url` and parses the body as JSON. Every refusal or failure is an EgressError. */
 export async function egressGetJson(url: string, options: EgressGetOptions): Promise<unknown> {
