@@ -13,6 +13,7 @@ import {
 } from '../sessions/manager.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from './headlessBrowser.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/session-limits (#790): what a new assistant session may
 // spend in all, and how many turns one reply may take. Stored in `ai_settings`
@@ -98,4 +99,16 @@ export function registerSessionLimitsRoutes(app: Hono, deps: SessionLimitsRouteD
     await settings.set(SETTING_SESSION_MAX_TURNS, view.max_turns, context)
     return c.json(view)
   })
+}
+
+/** The session limits in Settings (#790). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerSessionLimitsRoutes(app, {
+      settings: deps.settings,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

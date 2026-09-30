@@ -5,6 +5,7 @@ import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from './headlessBrowser.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/http-request (#827): turns the assistant's `http_request`
 // tool on or off for session turns. Stored in `ai_settings` under
@@ -75,4 +76,16 @@ export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps)
     const view: HttpRequestSettingView = { enabled: body.enabled }
     return c.json(view)
   })
+}
+
+/** The HTTP request tool's setting (#827). `deps.settings` is declared in routes/headlessBrowser.ts. */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerHttpRequestRoutes(app, {
+      settings: deps.settings,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

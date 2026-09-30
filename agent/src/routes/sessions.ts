@@ -13,6 +13,7 @@ import {
 import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/sessions (#300): the same sessions as the chat socket
 // (routes/chat.ts), over plain HTTP, for anything that is not the panel: a
@@ -324,4 +325,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       })
     }),
   )
+}
+
+/** The session routes (#300); their event streams end when the app closes. */
+export const route: RouteModule = {
+  register(app, deps, shutdown) {
+    registerSessionRoutes(app, {
+      sessions: deps.sessions,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      shutdown,
+    })
+  },
 }
