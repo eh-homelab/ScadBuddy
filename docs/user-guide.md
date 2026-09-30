@@ -188,8 +188,13 @@ stored on ScadBuddy's server and is never sent to the browser.
    a second one.
 5. Press **Save changes**.
 
+If the Bambuddy URL is one only ScadBuddy's server can reach (an in-cluster address,
+say), list the addresses browsers use under **Bambuddy web URLs**, comma-separated.
+"Open in Bambuddy" links use the first, or, when ScadBuddy is open inside one of the
+others, that one.
+
 The same values can be set on first start with `SCADBUDDY_BAMBUDDY_URL`,
-`SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
+`SCADBUDDY_BAMBUDDY_WEB_URLS`, `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
 saved from the UI, the saved values take precedence.
 
 ![Settings](images/settings.png)

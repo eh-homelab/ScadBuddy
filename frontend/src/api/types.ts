@@ -79,6 +79,12 @@ export type ModelLibrary = Schemas['ModelLibrary']
 /** #217 — a `libraries` entry in model.json that is not a pin, and why. */
 export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
 export type LibraryPinRequest = Schemas['LibraryPinRequest']
+/** #169 — the upgrade flow: who pins a library, a candidate ref's check, and a re-pin. */
+export type LibraryUser = Schemas['LibraryUser']
+export type LibraryCheck = Schemas['LibraryCheck']
+export type LibraryCheckRequest = Schemas['LibraryCheckRequest']
+export type LibraryRepinRequest = Schemas['LibraryRepinRequest']
+export type InstalledLibrary = Schemas['InstalledLibrary']
 export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']
@@ -102,7 +108,7 @@ export type FilamentPresetOption = Schemas['FilamentPresetOption']
 
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
-/** #755 — the run's nozzle verdict for the dialog's choices, before Print. */
+/** #755, #760 — what the run would refuse for the dialog's choices, before Print. */
 export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 

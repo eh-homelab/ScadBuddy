@@ -19,8 +19,10 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
+import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
+import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
 import {
@@ -65,7 +67,7 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
-  connection: ['bambuddy_url', 'bambuddy_api_key', 'public_url'],
+  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'public_url'],
   printing: ['printer_id'],
   projects: ['library_folder_id', 'last_project_id'],
   preview: ['display_unit', 'default_plate'],
@@ -270,6 +272,7 @@ export function SettingsPage() {
       reseed.current = fieldsOf(id, next)
       settingsState.setData(next)
       if (id === 'preview') setDisplayUnit(next.display_unit)
+      if (id === 'connection') setBambuddyLinks(next)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
       if (id === 'connection') {
         targetsState.reload()
@@ -316,6 +319,7 @@ export function SettingsPage() {
       const next = await api.putSettings({ reset: [name] })
       reseed.current = [name]
       settingsState.setData(next)
+      setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
         targetsState.reload()
         projectsState.reload()
@@ -595,6 +599,23 @@ export function SettingsPage() {
               </FieldRow>
 
               <FieldRow
+                id="bambuddy-web-urls"
+                label="Bambuddy web URLs"
+                badge={badge('bambuddy_web_urls')}
+                error={errors.bambuddy_web_urls}
+                help="Where browsers reach Bambuddy, when the URL above is one only ScadBuddy's server can. Comma-separated: links use the first, or whichever of them ScadBuddy is opened inside."
+              >
+                <input
+                  id="bambuddy-web-urls"
+                  type="text"
+                  value={value('bambuddy_web_urls')}
+                  onChange={(event) => setField('bambuddy_web_urls', event.target.value)}
+                  placeholder="https://bambuddy.example, https://bambuddy.lan"
+                  className="sb-field sb-num"
+                />
+              </FieldRow>
+
+              <FieldRow
                 id="bambuddy-key"
                 label="API key"
                 badge={badge('bambuddy_api_key')}
@@ -869,6 +890,14 @@ export function SettingsPage() {
           {saved('rendering', runtimeRows('rendering'))}
 
           {saved('fonts', runtimeRows('fonts'))}
+
+          <Section
+            id="libraries"
+            title={sectionTitle('libraries')}
+            description="Move a library to another tag or branch across the models that pin it. Check each model against the candidate first; each ticked model is then re-pinned on its own, as one revision of that model."
+          >
+            <LibraryUpgrade />
+          </Section>
 
           {saved(
             'preview',
