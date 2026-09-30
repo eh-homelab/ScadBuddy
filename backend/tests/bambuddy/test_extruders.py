@@ -23,7 +23,7 @@ from scadbuddy.bambuddy.extruders import (
     with_sides,
 )
 from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 from tests.bambuddy.conftest import recording
 
 
@@ -148,14 +148,34 @@ def _nozzles(*types: tuple[str, str]) -> PrinterStatus:
     )
 
 
+STANDARD_04 = [NozzleChoice(size="0.4")]
+
+
 def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about() -> None:
-    """#723: queue item 149's printer, a standard right and a High Flow left, both 0.4."""
-    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), "0.4")
-    assert warning.kind == "hf-unsupported"
-    assert warning.message.startswith("The left nozzle is High Flow.")
+    """#723, #797: queue item 149's printer, a standard right and a High Flow left, both
+    0.4, and a print chosen for Standard flow."""
+    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), STANDARD_04)
+    assert warning.kind == "hf-mounted"
+    assert warning.message.startswith("The left nozzle is High Flow")
+
+
+def test_index_0_is_the_right_nozzle() -> None:
+    """``PrinterStatus.nozzles[0]`` is the right (main) extruder."""
+    [warning] = high_flow_warnings(_nozzles(("HH01", "0.4"), ("HS01", "0.4")), STANDARD_04)
+    assert warning.message.startswith("The right nozzle is High Flow")
 
 
 def test_no_high_flow_warning_for_standard_nozzles_another_size_or_no_status() -> None:
-    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), "0.4") == []
-    assert high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), "0.2") == []
-    assert high_flow_warnings(None, "0.4") == []
+    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), STANDARD_04) == []
+    assert (
+        high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), [NozzleChoice(size="0.2")])
+        == []
+    )
+    assert high_flow_warnings(None, STANDARD_04) == []
+
+
+def test_no_mounted_high_flow_warning_when_high_flow_is_chosen() -> None:
+    """#797: the warning is for a Standard choice; a High Flow choice has the resolver's
+    own ``hf-unsupported`` note instead."""
+    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
+    assert high_flow_warnings(status, [NozzleChoice(size="0.4", flow="high_flow")]) == []

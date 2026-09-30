@@ -67,7 +67,11 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  * of a multi-plate 3MF (#83), and following the run to completion (#89).
  */
 
-/** The warnings about nozzles, shown in Advanced mode only (#772). */
+/**
+ * The notes about the nozzle step, shown in Advanced mode only (#772): the High Flow
+ * choice's `hf-unsupported` and the rack's `not-installed`. A mounted High Flow nozzle
+ * with Standard flow chosen (`hf-mounted`, #797) is not one of them, so Simple shows it.
+ */
 const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['hf-unsupported', 'not-installed'])
 
 interface Props {
@@ -245,9 +249,8 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const check = usePrintCheck(source, checkRequest)
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
   /**
-   * #772 — Simple mode shows no nozzle message at all: the High Flow note (#723, kept by
-   * the owner as a non-blocking warning) and the rack's not-installed note are about the
-   * nozzle step, which only Advanced shows.
+   * #772 — Simple mode hides the notes about the nozzle step, which only Advanced shows.
+   * The mounted High Flow warning (#723, #797) is shown in both, and never holds Print.
    */
   const shown = (warnings: FilamentWarning[] | undefined) =>
     picker.advanced
