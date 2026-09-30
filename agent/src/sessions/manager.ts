@@ -22,6 +22,14 @@ import {
 import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { CheckedPlugin } from '../plugins/registry.js'
+import {
+  createMemoryHooks,
+  HindsightClient,
+  type MemoryHooks,
+  type MemoryHooksOptions,
+  hindsightTarget,
+} from '../memory/hindsight.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import {
   ensureSessionDir,
@@ -273,6 +281,13 @@ export type SessionManagerDeps = {
    * package that cannot be loaded is reported in the session and left out.
    */
   packagePlugins?: () => Promise<PackagesForRun>
+  /**
+   * Automatic memory (memory/hindsight.ts): when a turn's remote plugins
+   * include an enabled `hindsight` plugin, its prompt is recalled against and
+   * its transcript retained to that plugin's bank. These are the hook knobs
+   * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
+   */
+  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore'> | false
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
@@ -730,7 +745,7 @@ export class SessionManager {
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
     const query = options.context ? `${prompt}\n\n${options.context}` : prompt
-    const done = this.runTurn(session, turnId, query, local, options.tiers ? { tiers: options.tiers } : {})
+    const done = this.runTurn(session, turnId, query, local, prompt, options.tiers ? { tiers: options.tiers } : {})
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.
@@ -768,6 +783,8 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     local: LocalTurn,
+    /** The user's words without the page context: what memory is recalled against. */
+    userText: string,
     principal: TurnPrincipal,
   ): Promise<TurnOutcome> {
     const { controller } = local
@@ -831,6 +848,7 @@ export class SessionManager {
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
+      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText) : undefined
       const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
       eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
       // A plugin left out of this turn is said so in the session, not only in the log.
@@ -940,6 +958,7 @@ export class SessionManager {
           : {}),
         ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
+        ...(memory ? { memoryHooks: memory.hooks } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
       for await (const message of this.run(run)) {
@@ -981,6 +1000,35 @@ export class SessionManager {
     if (lost) return { kind: 'lost_claim' }
     const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
     return this.finish(session, turnId, stopped, result, failure, secrets)
+  }
+
+  /**
+   * The turn's memory hooks, for the `hindsight` plugin this turn loaded (so
+   * only an enabled plugin whose endpoint passed its egress check this turn).
+   * Recall is against the user's words (`recallQuery`), not the page context
+   * appended after them, unless a fixed query is configured. Undefined when
+   * memory is off or the plugin's URL is not a bank endpoint (logged).
+   */
+  private memoryHooks(plugin: CheckedPlugin, secrets: readonly string[], userText: string): MemoryHooks | undefined {
+    const config = this.deps.memory
+    if (config === false) return undefined
+    const log = (line: string) => this.deps.stderr?.(line)
+    let client: HindsightClient
+    try {
+      client = new HindsightClient(hindsightTarget(plugin))
+    } catch (err) {
+      log(`hindsight: automatic memory is off for this turn: ${describe(err)}\n`)
+      return undefined
+    }
+    const fixed = config?.hookConfig?.recallQuery
+    return createMemoryHooks({
+      ...config,
+      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText },
+      client,
+      secrets,
+      log,
+      sessionStore: this.store,
+    })
   }
 
   /**

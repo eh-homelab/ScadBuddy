@@ -15,6 +15,9 @@ import {
   titleFrom,
   type TurnOutcome,
 } from '../src/sessions/manager.js'
+import type { PluginsForRun } from '../src/plugins/forwarder.js'
+import type { CheckedPlugin } from '../src/plugins/registry.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
@@ -328,6 +331,47 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = (await m.events.read(session.id)).map((e) => e.event)
       expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: 'spawn failed' })
       expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+    })
+
+    it('gives a turn memory hooks only when it loaded an enabled hindsight plugin, recalling the user’s words', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/b/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        // What forwardForRun gives the manager: the plugin is there only when
+        // it is enabled and its endpoint passed the egress check this turn.
+        let loaded: CheckedPlugin | undefined = hindsight
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), release: () => {} })
+        const context = '<page_context>\n{"route":"/"}\n</page_context>'
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box', context })
+        await turn!.done
+        const hooks = runs[0]!.memoryHooks
+        expect(Object.keys(hooks ?? {}).sort()).toEqual(['Stop', 'UserPromptSubmit'])
+        await hooks!.UserPromptSubmit![0]!.hooks[0]!(
+          { session_id: session.id, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[0]!.prompt as string },
+          undefined,
+          { signal: new AbortController().signal },
+        )
+        expect(runs[0]!.prompt).toBe(`Make a box\n\n${context}`)
+        expect(fake.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['Make a box'])
+
+        loaded = undefined
+        await (await m.send(session.id, agentA, 'again')).done
+        expect(runs[1]!.memoryHooks).toBeUndefined()
+
+        loaded = hindsight
+        const off = manager({ sql: db.sql, paths, run: runner, remotePlugins, memory: false })
+        await (await off.send(session.id, agentA, 'once more')).done
+        expect(runs[2]!.memoryHooks).toBeUndefined()
+      } finally {
+        await fake.close()
+      }
     })
 
     it('refuses sends once the session budget is spent, and passes what is left to the SDK', async () => {
