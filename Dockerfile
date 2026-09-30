@@ -523,7 +523,16 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
 # frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
 # A factory, not a module-level app: building one reads Settings, which refuses to
-# start without SCADBUDDY_DATABASE_URL (#401), and importing the module must not.
+# start without SCADBUDDY_DATABASE_URL (#401) or SCADBUDDY_TEMPORAL_ADDRESS (#546),
+# and importing the module must not.
+# The render worker (#424) is this same image run as `python -m scadbuddy.worker`: it
+# serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
+# is the API's 8080). Phase 1 runs one replica, sharing /data with the API.
+# SIGTERM starts its drain (tini forwards it; no preStop needed): it polls until no
+# workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
+# + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
+# terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
+# plus a little slack for teardown (e.g. 30 s): 690 s at the default.
 CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short

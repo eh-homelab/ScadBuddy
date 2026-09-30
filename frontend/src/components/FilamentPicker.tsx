@@ -57,6 +57,7 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'not-installed': 'text-warn',
   'plate-differs': 'text-muted',
   'hf-unsupported': 'text-muted',
+  'hf-mounted': 'text-warn',
 }
 
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {

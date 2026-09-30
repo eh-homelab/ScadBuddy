@@ -4,8 +4,9 @@ import asyncio
 import importlib
 import logging
 import pkgutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -31,6 +32,10 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.store import sweep_blobs
+from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
+from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.client import connect
 
 API_PREFIX = "/api/v1"
 
@@ -85,9 +90,14 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
 
 
 async def _close_quietly(state: AppState) -> None:
-    """Close the queue and the bus after a failed start, logging (not raising) what
-    fails, so the start's own error is the one that propagates."""
-    for close in (state.events.aclose, state.queue.aclose):
+    """Close the render service and the bus after a failed start, logging (not
+    raising) what fails, so the start's own error is the one that propagates."""
+    closes: list[Callable[[], Awaitable[object]]] = [
+        state.events.aclose,
+        state.render.aclose,
+        partial(asyncio.to_thread, state.projection.close),
+    ]
+    for close in closes:
         try:
             await close()
         except Exception:
@@ -97,12 +107,12 @@ async def _close_quietly(state: AppState) -> None:
 def sweep_assets(state: AppState) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
-    The references are read first -- every job in the queue's store, then every
+    The references are read first -- every job in the projection, then every
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
     """
-    jobs = state.queue.store.list_jobs()
+    jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
@@ -159,11 +169,19 @@ async def sweep_library_checkouts(state: AppState) -> list[str]:
     return removed
 
 
+async def drop_swept_assets(state: AppState, removed: list[str]) -> None:
+    """The store's copies of what `sweep_assets` just removed from the volume."""
+    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
+    if store is not None and store.remote_assets is not None and removed:
+        await store.remote_assets.drop(removed)
+
+
 async def _sweep_assets_logged(state: AppState) -> None:
     # Best effort, like the boot's other sweeps: a store or volume error skips this
     # sweep (removing nothing it could not prove unused) and the next one retries.
     try:
-        await asyncio.to_thread(sweep_assets, state)
+        removed = await asyncio.to_thread(sweep_assets, state)
+        await drop_swept_assets(state, removed)
     except Exception:
         logger.exception("could not sweep unused uploads")
 
@@ -175,10 +193,26 @@ async def _sweep_duplicate_staging_logged(state: AppState) -> None:
         logger.exception("could not sweep duplicate staging folders")
 
 
+async def _sweep_blobs_logged(state: AppState) -> None:
+    """The Temporal path's blob store: the pieces no job references any more."""
+    if state.blobs is None or state.refs is None:
+        return
+    try:
+        removed = await asyncio.to_thread(
+            sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+        )
+    except Exception:
+        logger.exception("could not sweep unreferenced blobs")
+        return
+    if removed:
+        logger.info("removed unreferenced blobs", extra={"count": len(removed)})
+
+
 async def _asset_sweeper(state: AppState) -> None:
     while True:
         await asyncio.sleep(state.config.asset_sweep_interval)
         await _sweep_assets_logged(state)
+        await _sweep_blobs_logged(state)
         # The periodic housekeeping pass: a crashed duplicate's staging otherwise
         # waits for the next boot or duplicate (#397).
         await _sweep_duplicate_staging_logged(state)
@@ -206,7 +240,7 @@ async def _prepare_catalogue(state: AppState) -> None:
     # is duplicating yet: no request has been served.
     await _sweep_duplicate_staging_logged(state)
     # Before the orphan sweep, which forgets the saved presets of templates that are
-    # gone: the database, and its migrations, as the render queue's store opens it.
+    # gone: the database, and its migrations, as the projection opens it.
     await asyncio.to_thread(state.presets.open)
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
@@ -247,11 +281,66 @@ async def _prepare_catalogue(state: AppState) -> None:
         logger.exception("could not sweep library checkouts")
 
 
+async def _start_render(state: AppState) -> None:
+    """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
+    queue left running, connect the in-process worker's client, adopt what it left
+    pending, prune, and start the reconciler. A failure closes the projection again."""
+    projection, service, settings = state.projection, state.render, state.settings
+    await asyncio.to_thread(projection.open)
+    try:
+        await _prepare_catalogue(state)
+        # Before the reconciler: what a pre-Temporal release was running, nothing
+        # will finish (#546).
+        failed = await asyncio.to_thread(projection.fail_legacy_running)
+        if failed:
+            logger.warning(
+                "failed the renders a pre-Temporal release left running",
+                extra={"job_ids": [job.id for job in failed]},
+            )
+        if settings.temporal_worker_inprocess:
+            # Eager: a worker cannot run on the API's lazy client (dev and tests).
+            state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+        # Before the reconciler's first pass (`service.start`), which starts only rows
+        # that name a workflow: what a pre-Temporal release's queue left pending
+        # becomes this path's.
+        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+        if adopted:
+            logger.info(
+                "adopted the renders the legacy queue left pending",
+                extra={"count": len(adopted), "job_ids": adopted},
+            )
+        await service.prune()
+        await service.start()
+    except BaseException:
+        await asyncio.to_thread(projection.close)
+        raise
+
+
+def _worker_exited(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
+    """An in-process worker that ends before shutdown asked it to leaves renders
+    pending: say so when it happens, not at shutdown."""
+    if stop.is_set() or task.cancelled():
+        return
+    logger.error("the in-process render worker exited early", exc_info=task.exception())
+
+
+async def _stop_worker(state: AppState, worker: asyncio.Task[None], deps: WorkerDeps) -> None:
+    """Let the in-process worker drain for up to one activity, then cancel it."""
+    try:
+        await asyncio.wait_for(worker, state.config.activity_timeout)
+    except TimeoutError:
+        logger.warning("the in-process render worker did not drain in time; cancelled it")
+    except Exception:
+        logger.exception("the in-process render worker failed")
+    if deps.thumbnail_executor is not None:
+        deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     # First: without its database ScadBuddy has no settings, so it does not start.
-    # It also brings the schema up to date, before the queue's store opens.
+    # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
@@ -265,19 +354,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # fontconfig at the fonts on the data volume.
     state.fonts.prepare()
     state.openscad_version = await probe_openscad_version(state.config)
-    # Before the first catalogue listing: that reads the previews, which live in the
-    # database when there is one. Closed again if the boot fails before the queue
-    # has started and taken it over.
-    await state.queue.open_store()
-    try:
-        await _prepare_catalogue(state)
-        # RenderQueue.start() fails unfinished jobs and prunes expired ones before
-        # it spawns its workers, so a restart never leaves a job stuck "running".
-        await state.queue.start()
-    except BaseException:
-        await state.queue.close_store()
-        raise
-    # After the queue, whose store migrated the database: the bus writes the event
+    await _start_render(state)
+    # After the projection, which migrated the database: the bus writes the event
     # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
     # was published before now (the built-in sync's commits) waited.
     if isinstance(state.events, PgNotifyEventBus):
@@ -285,27 +363,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await state.events.start()
         except BaseException:
             # Before the `try` below, so its `finally` never runs: release the
-            # queue that did start (workers, reaper, listener, pool) here, as
-            # `RenderQueue.start` releases its store when it fails.
+            # render service that did start (reconciler, listener, pool) here.
             await _close_quietly(state)
             raise
 
-    # Everything from here holds the queue's resources (the Postgres pool, its
-    # workers), so it runs inside the `try` whose `finally` releases them: a
-    # failure while starting up closes the queue as a shutdown does, rather than
-    # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
+    # Everything from here holds the render service's resources (the Postgres pool,
+    # its reconciler), so it runs inside the `try` whose `finally` releases them: a
+    # failure while starting up closes them as a shutdown does, rather than leaking.
     sweeper: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
     components = AsyncExitStack()
+    worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
+    stop = asyncio.Event()
     try:
         # Every component's `run` (`core/components.py`), now that the database and
         # the bus are up. One that fails exits those already running and fails the
         # boot; closed below, before the queue it may be using.
         await components.enter_async_context(state.components.running())
+        if state.temporal is not None:
+            deps = worker_deps_from_state(state)
+            task = asyncio.create_task(
+                run_inprocess_worker(state.settings, deps, state.temporal, stop)
+            )
+            task.add_done_callback(partial(_worker_exited, stop))
+            worker = (task, deps)
         # Follows the prints a previous process was following (#268).
         await state.print_watcher.start()
-        # After the queue has opened its store: the jobs in it are references too.
+        # After the projection has opened: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
             sweeper = asyncio.create_task(_asset_sweeper(state))
@@ -346,8 +431,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # runs this process leaves unfinished as failed).
         await state.print_runs.aclose()
         await state.print_watcher.aclose()
+        if worker is not None:
+            stop.set()
+            await _stop_worker(state, *worker)
         await components.aclose()
-        await state.queue.aclose()
+        await state.render.aclose()
+        await asyncio.to_thread(state.projection.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
         grants = getattr(app.state, "agent_grants", None)

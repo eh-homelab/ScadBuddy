@@ -16,7 +16,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library import scad
 from scadbuddy.library.scad import check_source, parse_diagnostics
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 StrPath = str | PathLike[str]
 
@@ -125,6 +125,7 @@ async def test_the_checks_cap_is_its_own_knob() -> None:
             check_concurrency=3,
             frontend_dir=Path("/nonexistent"),
             database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
         )
     )
 

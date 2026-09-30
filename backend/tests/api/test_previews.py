@@ -15,7 +15,6 @@ import asyncio
 import itertools
 import subprocess
 import threading
-import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,14 +22,18 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.previews import PreviewScheduler
-from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
+from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.render.submit import RenderService
+from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -53,7 +56,11 @@ class StubRender:
         self.released = threading.Event()
         self.released.set()
 
-    async def __call__(self, slug: str) -> bytes:
+    async def __call__(self, slug: str, timeout: float) -> bytes:
+        # As the app's runners do, it applies the timeout the scheduler hands it.
+        return await asyncio.wait_for(self._render(slug), timeout)
+
+    async def _render(self, slug: str) -> bytes:
         self.started.append(slug)
         while not self.released.is_set():
             await asyncio.sleep(0.01)
@@ -80,7 +87,7 @@ def state(app: FastAPI) -> AppState:
 @pytest.fixture
 def stub(state: AppState, paths: DataPaths) -> StubRender:
     render = StubRender(paths)
-    scheduler(state).render = render
+    scheduler(state).runner = render
     scheduler(state).debounce = 0.0
     scheduler(state).interval = 0.0
     return render
@@ -124,8 +131,7 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
         f"/api/v1/models/{SLUG}/render", json={"params": {"width": next(_WIDTHS)}}
     ).json()["job_id"]
     wait_for_job(client, job_id)
-    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
-        archive.writestr(PLATE_THUMBNAIL, cover)
+    set_plate_image(client, job_id, cover)
     response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text
     output_id: str = response.json()["id"]
@@ -341,7 +347,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
     paths: DataPaths,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    stub.fail = RuntimeError("openscad exited with 1")
+    stub.fail = OpenSCADError("openscad exited with 1", ["ERROR: boom"])
     _create(client)
     settle(client, state)
 
@@ -424,7 +430,7 @@ def _boot(settings: Settings, stub: StubRender) -> tuple[FastAPI, AppState]:
     app = create_app(settings)
     booted: AppState = getattr(app.state, STATE_ATTR)
     if booted.previews is not None:
-        booted.previews.render = stub
+        booted.previews.runner = stub
         booted.previews.debounce = 0.0
         booted.previews.interval = 0.0
     return app, booted
@@ -509,7 +515,7 @@ def _failing_backfill(
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []
-    for name, part in (("previews", scheduler(booted)), ("queue", booted.queue)):
+    for name, part in (("previews", scheduler(booted)), ("queue", booted.render)):
         aclose = part.aclose
 
         async def recording(name: str = name, aclose: Any = aclose) -> None:
@@ -523,8 +529,8 @@ def _failing_backfill(
 def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
     settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Anything the backfill raises past the queue opening is cleaned up as a
-    shutdown is: the queue's store (a Postgres pool) and workers are released."""
+    """Anything the backfill raises past the render service starting is cleaned up as
+    a shutdown is: its reconciler and the projection's pool are released."""
     app, booted = _boot(settings, StubRender(paths))
     closed = _failing_backfill(booted, monkeypatch, RuntimeError("listing blew up"))
 
@@ -532,7 +538,9 @@ def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
         pass
 
     assert closed == ["previews", "queue"]
-    assert booted.queue._tasks == []
+    assert isinstance(booted.render, RenderService)
+    assert booted.render._reconciler is None
+    assert booted.projection is not None and booted.projection.pool.closed
 
 
 def test_a_listing_error_costs_the_backfill_not_the_boot(
@@ -550,3 +558,31 @@ def test_a_listing_error_costs_the_backfill_not_the_boot(
     # JSON to stdout, which is captured here.
     assert "could not list the models to render their previews" in capsys.readouterr().out
     assert closed == ["previews", "queue"]
+
+
+def test_a_render_that_failed_on_the_worker_is_recorded_like_one_that_failed_here(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    stub.fail = WorkflowFailureError(
+        cause=ApplicationError("openscad exited with 1", type="OpenSCADError")
+    )
+    _create(client)
+    settle(client, state)
+
+    record = scheduler(state).store.record(SLUG)
+    assert record is not None and not record.ok
+
+
+def test_an_infrastructure_error_is_not_recorded_and_the_next_pass_tries_again(
+    client: TestClient, state: AppState, stub: StubRender
+) -> None:
+    stub.fail = RPCError("no worker is polling", RPCStatusCode.UNAVAILABLE, b"")
+    _create(client)
+    settle(client, state)
+    assert scheduler(state).store.record(SLUG) is None
+
+    stub.fail = None
+    scheduler(state).request(SLUG)
+    settle(client, state)
+    assert len(stub.calls) == 2
+    assert _model(client)["thumbnail_source"] == "preview"

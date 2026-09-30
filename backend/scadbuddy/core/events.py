@@ -31,8 +31,8 @@ database (#266's "without the database"). The Postgres bus:
 - does **not** deliver locally -- the process hears its own NOTIFY like every other
   replica, so each subscriber sees each event exactly once whichever replica
   published it;
-- decodes each payload heard on its process's one LISTEN connection (shared with the
-  render queue's wake-ups, `scadbuddy.core.pg_listener`) with :func:`decode_event`
+- decodes each payload heard on its process's one LISTEN connection
+  (`scadbuddy.core.pg_listener`) with :func:`decode_event`
   into an embedded :class:`InProcessEventBus`, whose
   :meth:`~InProcessEventBus.subscribe` it exposes unchanged;
 - delivers :class:`BusResync` (``bus.resync``) to every subscription when that

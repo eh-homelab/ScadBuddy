@@ -15,6 +15,7 @@ from unittest import mock
 import psycopg
 import pytest
 import trimesh
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -30,8 +31,8 @@ from scadbuddy.library.previews import (
 )
 from scadbuddy.render import previews as previews_module
 from scadbuddy.render.jobs import ModelSource
-from scadbuddy.render.pg_store import PostgresJobStore
-from scadbuddy.render.previews import render_preview
+from scadbuddy.render.previews import PreviewFailedError, is_render_error, render_preview
+from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -82,10 +83,10 @@ def test_the_source_key_follows_the_source_and_its_libraries_only(paths: DataPat
 
 @pytest.fixture
 def store(pg_conninfo: str, paths: DataPaths) -> Iterator[PreviewStore]:
-    database = PostgresJobStore(pg_conninfo, paths, pool_size=3)
+    database = JobProjection(pg_conninfo, pool_size=3)
     database.open()
     try:
-        yield PreviewStore(database.connection)
+        yield PreviewStore(database.pool.connection)
     finally:
         database.close()
 
@@ -361,14 +362,14 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
 ) -> None:
     """A second pool is a second process: it reads what the first wrote after the
     first is gone, and its drop waits behind the first one's write in progress."""
-    first = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    first = JobProjection(pg_conninfo, pool_size=2)
     first.open()
-    second = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    second = JobProjection(pg_conninfo, pool_size=2)
     second.open()
     try:
         mine, theirs = (
-            PreviewStore(first.connection),
-            PreviewStore(second.connection),
+            PreviewStore(first.pool.connection),
+            PreviewStore(second.pool.connection),
         )
         writer, _, release = _held_write(mine)
         dropper = threading.Thread(target=lambda: theirs.drop(SLUG))
@@ -384,14 +385,14 @@ def test_previews_outlive_the_process_and_are_locked_across_processes(
     finally:
         first.close()
     try:
-        assert PreviewStore(second.connection).image(SLUG) == b"png"
+        assert PreviewStore(second.pool.connection).image(SLUG) == b"png"
     finally:
         second.close()
 
 
 @pytest.mark.requires_postgres
 def test_a_row_has_its_image_exactly_when_it_rendered(pg_conninfo: str, paths: DataPaths) -> None:
-    database = PostgresJobStore(pg_conninfo, paths, pool_size=1)
+    database = JobProjection(pg_conninfo, pool_size=1)
     database.open()
     database.close()
     insert = (
@@ -448,3 +449,45 @@ async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
 
     assert leased_during == [[f"preview:{SLUG}"]]
     assert gate.leased(checkout) == []
+
+
+# -- is_render_error: the source's fault, or the run's? ---------------------------
+
+
+def _caused_by(cause: BaseException) -> RuntimeError:
+    error = RuntimeError("the preview failed")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OpenSCADError("openscad exited 1", []),
+        PreviewFailedError("no colours"),
+        TimeoutError(),
+        ApplicationError("openscad exited 1", type="OpenSCADError"),
+        ApplicationError("no colours", type="PreviewFailedError"),
+        _caused_by(OpenSCADError("openscad exited 1", [])),
+        _caused_by(_caused_by(ApplicationError("openscad exited 1", type="OpenSCADError"))),
+    ],
+    ids=["openscad", "preview", "timeout", "app-openscad", "app-preview", "wrapped", "nested"],
+)
+def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -> None:
+    """The scheduler records it against the source and does not retry until it changes."""
+    assert is_render_error(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("worker not polling"),
+        ApplicationError("the store is gone", type="StaleBlobError"),
+        _caused_by(OSError("no such file")),
+        ApplicationError("unknown", type=None),
+    ],
+    ids=["runtime", "app-other", "wrapped-os", "app-untyped"],
+)
+def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
+    """Infrastructure: the scheduler tries again rather than blaming the source."""
+    assert not is_render_error(error)
