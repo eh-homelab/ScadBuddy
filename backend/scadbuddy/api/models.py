@@ -1316,11 +1316,13 @@ async def patch_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"the source of {slug!r} is not UTF-8 text"
         ) from None
     try:
+        # `to_thread`: a diff whose hunks miss their lines scans the source per hunk,
+        # CPU the event loop should not wait on (review of #741).
         if body.patch is not None:
-            patched = apply_unified_diff(source, body.patch)
+            patched = await asyncio.to_thread(apply_unified_diff, source, body.patch)
         else:
             assert body.edits is not None  # the model validator's guarantee
-            patched = apply_edits(source, body.edits)
+            patched = await asyncio.to_thread(apply_edits, source, body.edits)
     except PatchError as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"the patch does not apply: {error}"

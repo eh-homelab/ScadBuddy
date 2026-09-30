@@ -36,6 +36,9 @@ from pydantic import BaseModel, Field
 
 #: A bound on edits per call, so one request cannot turn into a long scan.
 MAX_EDITS = 100
+#: The same bound on a diff's hunks: each one that misses its stated line scans the
+#: rest of the source (review of #741).
+MAX_HUNKS = 100
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _FILE_HEADERS = ("diff --git ", "index ", "new file mode", "deleted file mode", "similarity ")
@@ -103,6 +106,8 @@ def _parse(diff: str) -> list[_Hunk]:
             continue
         header = _HUNK.match(line)
         if header:
+            if len(hunks) == MAX_HUNKS:
+                raise PatchError(f"at most {MAX_HUNKS} hunks per patch")
             current = _Hunk(number=len(hunks) + 1, old_start=int(header.group(1)))
             hunks.append(current)
             continue
@@ -142,8 +147,17 @@ def _parse(diff: str) -> list[_Hunk]:
 
 
 def _occurrences(lines: list[str], block: list[str], start: int) -> list[int]:
+    """Where ``block`` starts at or below ``start``: the first two places at most, which
+    is all the caller needs to tell one from ambiguous (review of #741)."""
     width = len(block)
-    return [i for i in range(start, len(lines) - width + 1) if lines[i : i + width] == block]
+    first = block[0]
+    found: list[int] = []
+    for i in range(start, len(lines) - width + 1):
+        if lines[i] == first and lines[i : i + width] == block:
+            found.append(i)
+            if len(found) == 2:
+                break
+    return found
 
 
 def apply_unified_diff(source: str, diff: str) -> str:
@@ -169,7 +183,7 @@ def apply_unified_diff(source: str, diff: str) -> str:
             if len(found) > 1:
                 raise PatchError(
                     f"hunk {hunk.number}: its lines are not at line {hunk.old_start} and occur "
-                    f"{len(found)} times below the previous hunk; add context so it names one"
+                    "more than once below the previous hunk; add context so it names one"
                 )
             at = found[0]
         if not floor <= at <= len(lines):

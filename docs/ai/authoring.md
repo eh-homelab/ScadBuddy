@@ -38,7 +38,8 @@ or search/replace `edits`. The backend applies it to the source as it stands
 - File headers are skipped; a diff naming a second file is refused.
 - A hunk is tried at the line its header names, then at the one other place below the
   previous hunk where its old lines occur. Two such places is ambiguous and refused.
-  There is no fuzz: a context line that differs is a conflict.
+  There is no fuzz: a context line that differs is a conflict. At most 100 hunks
+  (`MAX_HUNKS`), as at most 100 edits, and the patch is applied off the event loop.
 - `\ No newline at end of file` applies to the line before it, on that line's side
   ([GNU diffutils, "Incomplete Lines"](https://www.gnu.org/software/diffutils/manual/html_node/Incomplete-Lines.html)),
   so a diff can add or drop the file's trailing newline. The hunk carrying it must reach

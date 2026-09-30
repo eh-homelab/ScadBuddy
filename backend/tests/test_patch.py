@@ -4,6 +4,7 @@ import pytest
 
 from scadbuddy.library.patch import (
     MAX_EDITS,
+    MAX_HUNKS,
     PatchError,
     SearchReplace,
     apply_edits,
@@ -122,7 +123,7 @@ def test_context_that_is_not_there_is_a_conflict_naming_the_hunk() -> None:
 
 
 def test_lines_found_more_than_once_elsewhere_are_ambiguous() -> None:
-    with pytest.raises(PatchError, match="occur 2 times"):
+    with pytest.raises(PatchError, match="occur more than once"):
         apply_unified_diff("x\ny\nx\ny\n", "@@ -9,1 +9,1 @@\n-x\n+X\n")
 
 
@@ -158,3 +159,9 @@ def test_edits_are_bounded() -> None:
         apply_edits(SOURCE, [])
     with pytest.raises(PatchError, match=f"at most {MAX_EDITS}"):
         apply_edits(SOURCE, [SearchReplace(search="a", replace="a")] * (MAX_EDITS + 1))
+
+
+def test_hunks_are_bounded() -> None:
+    diff = "@@ -1 +1 @@\n-a\n+a\n" * (MAX_HUNKS + 1)
+    with pytest.raises(PatchError, match=f"at most {MAX_HUNKS} hunks"):
+        apply_unified_diff(SOURCE, diff)
