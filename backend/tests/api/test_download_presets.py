@@ -413,3 +413,28 @@ def test_a_file_too_big_for_the_printer_still_gets_the_print_settings(
     _assert_stored_with_print_settings(response.content, stored)
     # The file is read once, not again for the fallback (#852).
     assert [path.name for path in reads].count("model.3mf") == 1
+
+
+@respx.mock
+def test_a_malformed_stored_file_is_an_error_not_a_placeholder_download(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _bambuddy()
+    stored = paths.output_dir(model, output_id) / "model.3mf"
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(stored.read_bytes())) as source,
+        zipfile.ZipFile(buffer, "w") as out,
+    ):
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "Metadata/project_settings.config":
+                data = b"{not json"
+            out.writestr(info, data)
+    stored.write_bytes(buffer.getvalue())
+
+    # Not taken for a file that does not fit: the corrupt file surfaces as an error.
+    with pytest.raises(json.JSONDecodeError):
+        client.get(f"/api/v1/outputs/{output_id}/model.3mf")
