@@ -17,6 +17,8 @@ import type {
   FontCatalogue,
   FontFamily,
   HeadlessBrowserSetting,
+  AiSessionView,
+  SessionLimits,
   InstalledFamily,
   Job,
   CatalogueLibrary,
@@ -828,8 +830,8 @@ export const api = {
   },
 
   /**
-   * #755 — the run's nozzle verdict (`plan_extruders`) for the body the run would take:
-   * `errors` are what it would refuse as a 422, `warnings` its advisories. Reads only.
+   * #755 — the check before Print for the body the run would take: `errors` are what
+   * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
   checkPrint: (outputId: string, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
@@ -1093,6 +1095,26 @@ export const api = {
     request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
+    }),
+
+  /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
+  getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
+
+  putSessionLimits: (limits: SessionLimits) =>
+    request<SessionLimits>('/ai/settings/session-limits', {
+      method: 'PUT',
+      body: JSON.stringify(limits),
+    }),
+
+  /** #790 — "Continue in a new chat": a new session with this one's transcript and a fresh budget. */
+  forkAiSession: (id: string) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/fork`, { method: 'POST' }),
+
+  /** #790 — adds to one session's budget; only the user can (it spends money). */
+  raiseAiSessionBudget: (id: string, addUsd: number) =>
+    request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/budget`, {
+      method: 'POST',
+      body: JSON.stringify({ add_usd: addUsd }),
     }),
 
   /** #251 — the agent service's MCP bearer tokens: metadata only. */

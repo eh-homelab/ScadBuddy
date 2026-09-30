@@ -42,7 +42,8 @@ type V = { v: typeof PROTOCOL_VERSION }
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string }
+    /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
+    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     | { type: 'user.turn'; sessionId: string; turnId: string; text: string; author: Owner }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
@@ -54,7 +55,9 @@ export type ServerEvent = V &
     /** Expired and cancelled approvals resolve as not approved, without `by`. */
     | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
-    | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number }
+    | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
+    /** The budget changed (a raise, #790), or a send was refused because it is spent. */
+    | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
     | { type: 'error'; sessionId?: string; code?: string; message: string }
   )
 
@@ -74,13 +77,61 @@ export function sameOwner(a: Pick<Owner, 'kind' | 'id'>, b: Pick<Owner, 'kind' |
 
 /**
  * Spec §6 visibility: the browser user sees every session (with a "controlled
- * by …" badge); any other principal sees the sessions it owns or started.
+ * by …" badge); any other principal sees the sessions it owns or started, and
+ * one offered to it (a pending handoff, manager.ts `handoff`), so it can read
+ * what it is asked to take over before it accepts. `offer` is only ever a
+ * live one: the manager leaves an expired offer out.
  */
 export function canSee(
   principal: Owner,
-  session: { owner: Pick<Owner, 'kind' | 'id'>; creator: Pick<Owner, 'kind' | 'id'> },
+  session: {
+    owner: Pick<Owner, 'kind' | 'id'>
+    creator: Pick<Owner, 'kind' | 'id'>
+    offer?: { to: Pick<Owner, 'kind' | 'id'> } | null
+  },
 ): boolean {
-  return principal.kind === 'browser' || sameOwner(principal, session.owner) || sameOwner(principal, session.creator)
+  return (
+    principal.kind === 'browser' ||
+    sameOwner(principal, session.owner) ||
+    sameOwner(principal, session.creator) ||
+    (session.offer != null && sameOwner(principal, session.offer.to))
+  )
+}
+
+/** A principal as another principal is shown it: without its id when that is not the viewer's own. */
+export type SeenOwner = { kind: Owner['kind']; id?: string; label: string }
+
+/**
+ * What a label may say to a principal that is not the one it names. An MCP
+ * token's and an OIDC principal's labels carry their id (approvals/mcp.ts
+ * `ownerOf`: `MCP token:<id>`, `MCP OIDC <sub>`), and an anonymous client's its
+ * address, so they are replaced by their kind; the browser user's ("You") and a
+ * flow's name no MCP principal.
+ */
+export function publicLabel(owner: Owner): string {
+  switch (owner.kind) {
+    case 'bearer':
+      return 'another MCP token'
+    case 'oidc':
+      return 'another MCP OIDC principal'
+    case 'anonymous':
+      return 'an anonymous MCP client'
+    default:
+      return owner.label
+  }
+}
+
+/**
+ * PR #715 review: a principal id is what `sessions_handoff` addresses, so an
+ * MCP caller is shown only its own. Anyone else in a session (its owner, a
+ * pending offer's target, a turn's author, a decider) is shown by kind and a
+ * label that does not name it (`publicLabel`). The browser user sees every id
+ * (spec §6: it sees every session; the panel's badges and Take over read them),
+ * and the browser user's own id, `browser`, names nobody's token.
+ */
+export function ownerSeenBy(viewer: Pick<Owner, 'kind' | 'id'>, owner: Owner): SeenOwner {
+  if (viewer.kind === 'browser' || owner.kind === 'browser' || sameOwner(viewer, owner)) return owner
+  return { kind: owner.kind, label: publicLabel(owner) }
 }
 
 /**

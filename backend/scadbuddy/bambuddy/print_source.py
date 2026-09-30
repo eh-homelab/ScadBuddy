@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget, Slice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import plate_filaments, plates_of
+from scadbuddy.render.bambu3mf import plates_of
 
 
 @dataclass(frozen=True)
@@ -59,11 +59,6 @@ class PrintSource(Protocol):
         ...
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
-
-    async def used_slots(self, client: BambuddyClient, plate_ids: list[int]) -> set[int]:
-        """The filament slots the printed plates use (#469), which the run's extruder
-        check reads before anything is uploaded or sliced."""
-        ...
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
 
@@ -126,13 +121,6 @@ class OutputSource:
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return [plate.index for plate in plates_of(self.store.directory(self.meta.id) / MODEL_NAME)]
-
-    async def used_slots(self, client: BambuddyClient, plate_ids: list[int]) -> set[int]:
-        """Read from the local 3MF so the check still runs before the upload. A plate
-        the file doesn't say about counts as using every filament of the model."""
-        every = set(range(1, len(self.meta.colors) + 1))
-        by_plate = plate_filaments(self.store.directory(self.meta.id) / MODEL_NAME)
-        return set().union(*(by_plate.get(plate, every) for plate in plate_ids)) & every
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         copy = await copy_to_read(client, self.store, self.uploads, self.meta, self.settings)
@@ -273,17 +261,6 @@ class LibrarySource:
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
-
-    async def used_slots(self, client: BambuddyClient, plate_ids: list[int]) -> set[int]:
-        """The slots Bambuddy marks used on each printed plate. A plate it reads no
-        slots for counts as using every filament of the file, as an output's does."""
-        every = set(range(1, len(self.colours) + 1))
-        used: set[int] = set()
-        for plate_id in plate_ids:
-            answer = await client.filament_requirements(self.file_id, plate_id=plate_id)
-            own = {need.slot_id for need in answer.filaments if need.used_in_plate}
-            used |= own or every
-        return used & every
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         return ReadFile(self.file_id)

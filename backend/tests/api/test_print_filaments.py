@@ -147,8 +147,8 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
     assert [nozzle["nozzle_diameter"] for nozzle in body["nozzles"]] == ["0.2", "0.4"]
-    # The rack's spares (ids 17-21), not the mounted pair (rack ids 0 and 1).
-    assert [nozzle["nozzle_diameter"] for nozzle in body["rack"]] == ["0.4"] * 5
+    # #768: nothing is judged against the rack any more, so its spares aren't sent.
+    assert "rack" not in body
     assert "pipeline_nozzle_diameter" not in body
     assert not local.called
     assert not pipeline.called

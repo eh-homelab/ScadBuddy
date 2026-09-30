@@ -7,9 +7,11 @@ import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/st
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
+import { api, ApiError } from '../../api/client'
 import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
+import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 
@@ -17,8 +19,13 @@ function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
-function formatCost(usd: number): string {
-  return usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`
+function formatCost(amount: number): string {
+  return amount < 0.01 ? '<$0.01' : usd(amount)
+}
+
+/** What a failed agent call says, for the budget card. */
+function reason(caught: unknown): Error {
+  return new Error(caught instanceof ApiError ? caught.detail : 'The assistant service did not answer; try again.')
 }
 
 interface Props {
@@ -103,6 +110,32 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
     }
   }
 
+  const startNewChat = () => {
+    chat.select(null)
+    setPickerOpen(false)
+    composer.current?.focus()
+  }
+
+  // #790 — a chat that used its budget. Forking copies the transcript into a new
+  // session with a fresh budget; the panel then shows that one (attach replays it).
+  const continueInNewChat = async (id: string) => {
+    try {
+      const { session } = await api.forkAiSession(id)
+      chat.select(session.id)
+      composer.current?.focus()
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
+  // The raised budget arrives over the socket (`session.budget`), which clears the card.
+  const raiseBudget = async (id: string, addUsd: number) => {
+    try {
+      await api.raiseAiSessionBudget(id, addUsd)
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
+
   const prompts = suggestedPrompts(pathname)
   const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
 
@@ -120,15 +153,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           >
             Sessions ({sessions.length})
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              chat.select(null)
-              setPickerOpen(false)
-              composer.current?.focus()
-            }}
-          >
+          <Button variant="ghost" size="sm" onClick={startNewChat}>
             New chat
           </Button>
           <Button variant="ghost" size="sm" aria-label="Close assistant" onClick={onClose}>
@@ -184,6 +209,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
               Stop
             </Button>
           )}
+          <BudgetMeter session={active} />
           {!owned && (
             <div className="flex w-full items-center gap-2">
               <span className="text-muted">Controlled by {active.owner.label}</span>
@@ -227,6 +253,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
               ))}
             </ul>
           </div>
+        )}
+        {active?.budgetSpent && !busy && owned && (
+          <BudgetSpent
+            // A new card, with its own amount and errors, for each chat.
+            key={active.id}
+            session={active}
+            onContinue={() => continueInNewChat(active.id)}
+            onRaise={(addUsd) => raiseBudget(active.id, addUsd)}
+            onStartNew={startNewChat}
+          />
         )}
         {active?.result && !busy && (
           <p className="text-[11px] text-faint">
