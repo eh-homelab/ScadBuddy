@@ -82,7 +82,7 @@ describe('registry projections', () => {
     const result = await client.callTool({ name: 'update_source', arguments: { slug: 'box', source: 'cube(1);' } })
     await client.close()
     expect(result.isError, JSON.stringify(result)).toBeFalsy()
-    expect(bodies).toEqual([{ source: 'cube(1);', message: null, force: false }])
+    expect(bodies).toEqual([{ source: 'cube(1);', message: null, force: false, base: null }])
   })
 
   it('still refuse an omitted required argument in-process', async () => {
