@@ -65,7 +65,7 @@ export type ServerEvent = V &
      * status. `count` is a recall's; `detail` is why one failed, redacted.
      * `input` is what was sent (a recall's query, the start of a retain's
      * content) and `memories` what a recall injected, both redacted and capped
-     * (MEMORY_TEXT_MAX); the panel shows them collapsed.
+     * (MEMORY_TEXT_MAX); the panel shows them only in Advanced mode.
      */
     | {
         type: 'memory'

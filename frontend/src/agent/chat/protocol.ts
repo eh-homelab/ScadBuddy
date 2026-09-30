@@ -229,7 +229,7 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
    * without a tool call. A retain finishes after its turn, so this can arrive after
    * the turn's last `session.status`. `input` is what was sent (a recall's query, the
    * start of a retain's content) and `memories` what a recall injected, redacted and
-   * capped by the agent; shown collapsed.
+   * capped by the agent; shown only in Advanced mode.
    */
   z.object({
     v,
