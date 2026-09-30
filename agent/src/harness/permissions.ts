@@ -58,8 +58,14 @@ export type RiskTier = (typeof RISK_TIERS)[number]
  * tools, per https://code.claude.com/docs/en/agent-sdk/custom-tools) to its
  * tier. `undefined` means "not ScadBuddy's": treated as `outward` (spec §8.1,
  * "A plugin tool ScadBuddy doesn't recognise defaults to outward").
+ *
+ * `input` is the call's arguments as the model sent them, for the one tool
+ * whose tier depends on them: `http_request` (#827, httpRequest.ts), `read`
+ * for GET and HEAD and `outward` for every other method. Every other resolver
+ * ignores it. A resolver that reads it must fail closed (`outward`) on input
+ * it does not recognise, since the input has not been validated yet.
  */
-export type TierResolver = (toolName: string) => RiskTier | undefined
+export type TierResolver = (toolName: string, input?: unknown) => RiskTier | undefined
 
 /** What an InputGuard says about one call; undefined means "nothing to add". */
 export type GuardVerdict =
@@ -83,7 +89,7 @@ export type ToolDecision =
   | { decision: 'deny'; tier: RiskTier; reason: string }
 
 export function decide(toolName: string, tierOf: TierResolver, input?: unknown, guard?: InputGuard): ToolDecision {
-  const tier = tierOf(toolName) ?? 'outward'
+  const tier = tierOf(toolName, input) ?? 'outward'
   const verdict = guard?.(toolName, input)
   if (verdict && 'deny' in verdict) return { decision: 'deny', tier, reason: verdict.deny }
   if (verdict && 'outward' in verdict) return { decision: 'needs_approval', tier: 'outward', reason: verdict.outward }
