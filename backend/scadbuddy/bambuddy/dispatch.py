@@ -51,6 +51,10 @@ class SlicePlan(BaseModel):
     filament_presets: list[PresetRef]
     filament_colours: list[str]
     bed_type: str
+    #: The template's ``print_settings`` (#770), written over the process preset.
+    #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
+    #: when they are, an explicit fix goes over these.
+    process_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 async def slice_and_queue(
@@ -89,6 +93,7 @@ async def slice_and_queue(
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
         plate=plate_id,
+        process_overrides=plan.process_overrides or None,
     )
     accepted = await client.slice(library_file_id, request)
     job = await client.await_slice(accepted.job_id)

@@ -58,6 +58,49 @@ def test_the_real_presets_replace_the_placeholders(tmp_path: Path) -> None:
     assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
 
 
+def test_print_settings_are_written_as_edits_to_the_system_process(tmp_path: Path) -> None:
+    """#770, in the shape the maintainer's own Bambu Studio save has:
+    ``["enable_prime_tower;wipe_tower_no_sparse_layers", "", "", ""]`` for two filaments."""
+    before = _written(tmp_path)
+
+    settings = _settings(
+        with_presets(
+            before,
+            PRESETS,
+            {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"},
+        )
+    )
+
+    assert settings["print_settings_id"] == PRESETS.print_settings_id
+    assert settings["enable_prime_tower"] == "1"
+    assert settings["wipe_tower_no_sparse_layers"] == "1"
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wipe_tower_no_sparse_layers",
+        "",
+        "",
+        "",
+    ]
+
+
+def test_print_settings_alone_keep_the_placeholders(tmp_path: Path) -> None:
+    before = _written(tmp_path)
+
+    settings = _settings(with_presets(before, None, {"enable_support": "0"}))
+
+    added = {"enable_support", "different_settings_to_system"}
+    assert {key: value for key, value in settings.items() if key not in added} == {
+        key: value for key, value in _settings(before).items() if key not in added
+    }
+    assert settings["enable_support"] == "0"
+    assert settings["different_settings_to_system"] == ["enable_support", "", "", ""]
+
+
+def test_no_print_settings_add_no_edit_list(tmp_path: Path) -> None:
+    assert "different_settings_to_system" not in _settings(
+        with_presets(_written(tmp_path), PRESETS)
+    )
+
+
 def test_every_other_entry_is_kept_byte_for_byte(tmp_path: Path) -> None:
     before = _written(tmp_path)
     after = with_presets(before, PRESETS)

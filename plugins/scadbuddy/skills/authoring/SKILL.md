@@ -37,7 +37,7 @@ in `models/name-keychain/`:
 | File | What it holds |
 |---|---|
 | `model.scad` | The source. Included files sit beside it, because OpenSCAD runs with the model's directory as its working directory (main spec §6.1). |
-| `model.json` | `name`, `description`, `tags` and `source` (see `models/name-keychain/model.json`). It never holds the schema (main spec §4.2). |
+| `model.json` | `name`, `description`, `tags` and `source` (see `models/name-keychain/model.json`), and optionally `print_settings` (below). It never holds the schema (main spec §4.2). |
 | `presets.json` | Named parameter sets, `{"presets": [{"name", "params"}]}` (see `models/name-keychain/presets.json`). A preset holds only the values it changes (`backend/openapi.json`, `GET /api/v1/models/{slug}/presets`). |
 | `README.md`, `thumbnail.png` | Catalogue text and image. |
 | `verify.sh` | The template's render checks (section 8 below). |
@@ -45,6 +45,27 @@ in `models/name-keychain/`:
 
 On a running instance the same layout lives in the data volume's `models/` git
 repository, and every save is a commit (main spec §4.2 and §4.3).
+
+### Default slicer settings: `print_settings`
+
+A template that prints best with a process setting changed says so in `model.json`
+(issue #770; `PRINT_SETTING_KEYS` in `backend/scadbuddy/library/catalogue.py`):
+
+```json
+"print_settings": {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1", "enable_support": "0"}
+```
+
+- Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
+  `support_type`, `brim_width` and `brim_type`. Any other key makes the template fail
+  to load, and the error names the key.
+- Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`).
+- The print run sends them as the slice's `process_overrides`, over the process preset
+  the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
+  `SlicePlan`). A downloaded 3MF carries them in `project_settings.config` and lists
+  them in `different_settings_to_system`, so Bambu Studio shows them as changes to the
+  system process (`backend/scadbuddy/bambuddy/download.py`, `with_presets`).
+- Set only what the geometry needs (a prime tower for thin two-colour layers, supports
+  off for a flat part). This last point is ScadBuddy's judgement, not a source's rule.
 
 Through ScadBuddy's tools (issue #252; AI spec
 `docs/superpowers/specs/2026-09-27-ai-integration-design.md` §8.6, "As built for

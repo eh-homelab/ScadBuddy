@@ -183,7 +183,15 @@ async def post_run(
         if chosen_project(body, settings) is not None
         else None
     )
-    source = OutputSource(outputs, uploads, meta, settings, stem=stem)
+    # Read before the 202, so a model.json that refuses them fails the request (#770).
+    source = OutputSource(
+        outputs,
+        uploads,
+        meta,
+        settings,
+        stem=stem,
+        print_settings=catalogue.print_settings(meta.slug),
+    )
     try:
         async with client_for(settings) as client:
             prepared = await prepare_run(client, source, settings, body)

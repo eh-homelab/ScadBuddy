@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import zipfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import get_args
@@ -62,8 +63,15 @@ class ProjectPresets:
     printer_model: str
 
 
-def with_presets(payload: bytes, presets: ProjectPresets) -> bytes:
-    """``payload`` with ``presets`` in place of the placeholders it was written with.
+def with_presets(
+    payload: bytes, presets: ProjectPresets | None, print_settings: Mapping[str, str] | None = None
+) -> bytes:
+    """``payload`` with ``presets`` in place of the placeholders it was written with,
+    and the template's ``print_settings`` (#770) over the process.
+
+    The print settings are listed in ``different_settings_to_system``, whose first
+    entry is the process's edits, then one per filament and one for the printer, as
+    Bambu Studio saves a project; so it shows them as changes to the system preset.
 
     Only ``project_settings.config`` changes; every other key stays, so the five the
     slicer dereferences (``render/bambu3mf.py``, above ``PRESET_PLACEHOLDER``) are all
@@ -75,7 +83,17 @@ def with_presets(payload: bytes, presets: ProjectPresets) -> bytes:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
         for name, data in entries:
             if name == PROJECT_SETTINGS_NAME:
-                settings = {**json.loads(data), **asdict(presets)}
+                settings = json.loads(data)
+                if presets is not None:
+                    settings.update(asdict(presets))
+                if print_settings:
+                    settings.update(print_settings)
+                    filaments = len(settings.get("filament_settings_id") or [])
+                    settings["different_settings_to_system"] = [
+                        ";".join(print_settings),
+                        *[""] * filaments,
+                        "",
+                    ]
                 data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
             info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
             # The writer's policy: covers stored, everything else deflated.
@@ -86,13 +104,23 @@ def with_presets(payload: bytes, presets: ProjectPresets) -> bytes:
     return buffer.getvalue()
 
 
-async def download_3mf(path: Path, meta: OutputMeta, settings: StoredSettings) -> Response:
-    """``path``'s 3MF as an attachment, for the default printer when there is one.
+async def download_3mf(
+    path: Path,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    print_settings: Mapping[str, str] | None = None,
+) -> Response:
+    """``path``'s 3MF as an attachment, for the default printer when there is one, with
+    the template's ``print_settings`` (#770) whether or not there is.
 
     The stored file itself, as a :class:`FileResponse` (so Range and conditional GET
     still work), whenever nothing about it changes."""
     filename = download_filename(meta)
-    payload = await for_default_printer(path, meta, settings)
+    payload = await for_default_printer(path, meta, settings, print_settings)
+    if payload is None and print_settings:
+        payload = await asyncio.to_thread(
+            lambda: with_presets(path.read_bytes(), None, print_settings)
+        )
     if payload is None:
         return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=filename)
     quoted = quote(filename)
@@ -108,7 +136,10 @@ async def download_3mf(path: Path, meta: OutputMeta, settings: StoredSettings) -
 
 
 async def for_default_printer(
-    path: Path, meta: OutputMeta, settings: StoredSettings
+    path: Path,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    print_settings: Mapping[str, str] | None = None,
 ) -> bytes | None:
     """``path``'s 3MF re-plated for the default printer and, when they resolve, naming
     its presets; ``None`` when the stored file is served as it is.
@@ -137,7 +168,7 @@ async def for_default_printer(
         )
         return None
     try:
-        return await asyncio.to_thread(_rewrite, path, target.plate, presets)
+        return await asyncio.to_thread(_rewrite, path, target.plate, presets, print_settings)
     except (PlateFitError, ValueError) as error:
         logger.info(
             "download served as stored: it does not fit the default printer",
@@ -146,9 +177,16 @@ async def for_default_printer(
         return None
 
 
-def _rewrite(path: Path, plate: PlateGeometry, presets: ProjectPresets | None) -> bytes:
+def _rewrite(
+    path: Path,
+    plate: PlateGeometry,
+    presets: ProjectPresets | None,
+    print_settings: Mapping[str, str] | None,
+) -> bytes:
     replated = replate_3mf(path.read_bytes(), plate)
-    return with_presets(replated, presets) if presets is not None else replated
+    if presets is None and not print_settings:
+        return replated
+    return with_presets(replated, presets, print_settings)
 
 
 async def _presets(

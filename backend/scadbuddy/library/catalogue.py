@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, StrictStr, ValidationError, field_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
@@ -216,6 +216,20 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: The process settings a template may declare in ``print_settings`` (#770), in the
+#: order a download lists them as edits. Each is a Bambu Studio process key, and its
+#: value the string a Bambu config stores. Only these: a template states how it prints
+#: best, not a whole profile.
+PRINT_SETTING_KEYS: tuple[str, ...] = (
+    "enable_prime_tower",
+    "wipe_tower_no_sparse_layers",
+    "enable_support",
+    "support_type",
+    "brim_width",
+    "brim_type",
+)
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -237,6 +251,23 @@ class ModelMeta(BaseModel):
     #: ships them. A template of mine keeps its list in `template_media` instead, and
     #: this is never written for one.
     media: list[MediaItem] = Field(default_factory=list)
+    #: The template's default slicer settings (#770): process overrides on the print
+    #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
+    #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
+    print_settings: dict[str, StrictStr] = Field(default_factory=dict)
+
+    @field_validator("print_settings")
+    @classmethod
+    def _known_print_settings(cls, value: dict[str, str]) -> dict[str, str]:
+        """Only the allowlisted keys, in its order. An unknown key is refused rather
+        than dropped: a template that means a setting must not print without it."""
+        for key in value:
+            if key not in PRINT_SETTING_KEYS:
+                raise ValueError(
+                    f"{key!r} is not a print setting a template can set; "
+                    f"the allowed keys are {', '.join(PRINT_SETTING_KEYS)}"
+                )
+        return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
 
     @field_validator("media", mode="before")
     @classmethod
@@ -260,7 +291,9 @@ class ModelMeta(BaseModel):
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
-DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries", "media"})
+DEFAULTED_META_FIELDS = frozenset(
+    {"name", "description", "tags", "libraries", "media", "print_settings"}
+)
 
 
 def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
@@ -601,6 +634,12 @@ class Catalogue:
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version, self._has_history)
 
+    def print_settings(self, slug: str) -> dict[str, str]:
+        """The template's ``print_settings`` as its model.json has them now (#770);
+        none for a template that is gone. One whose model.json is invalid is
+        :class:`InvalidModelMetaError`, naming the key."""
+        return self._meta(slug, self.read_raw_meta(slug)).print_settings
+
     def _record(
         self,
         slug: str,
@@ -790,7 +829,9 @@ class Catalogue:
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
-            self.write_raw_meta(slug, meta.model_dump(exclude={"media"}))
+            # No print settings is no key, as a hand-written model.json leaves it (#770).
+            excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            self.write_raw_meta(slug, meta.model_dump(exclude=excluded))
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)

@@ -11,7 +11,7 @@ shared unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from fastapi import status
@@ -56,6 +56,12 @@ class PrintSource(Protocol):
     @property
     def options_slug(self) -> str | None:
         """The model whose remembered print options apply (#88); ``None`` for none."""
+        ...
+
+    @property
+    def print_settings(self) -> dict[str, str]:
+        """The template's default slicer settings (#770), the slice's process
+        overrides; none for a file ScadBuddy did not render."""
         ...
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
@@ -110,6 +116,8 @@ class OutputSource:
     settings: StoredSettings
     #: Names a copy uploaded into a project's folder (``project_filename``, #317).
     stem: str | None = None
+    #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
+    print_settings: dict[str, str] = field(default_factory=dict)
 
     @property
     def colours(self) -> list[str]:
@@ -258,6 +266,10 @@ class LibrarySource:
         # No plate metadata is one plate, and no filaments is one of unknown color: a
         # file laid out that way still has something on the bed to print.
         return cls(file_id=file_id, colours=colours or [UNKNOWN_COLOUR], plates=plates or [1])
+
+    @property
+    def print_settings(self) -> dict[str, str]:
+        return {}
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)

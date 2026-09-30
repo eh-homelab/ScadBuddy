@@ -288,3 +288,61 @@ def test_a_printer_without_presets_still_gets_its_plate(
     assert 'filename="demo-elan.3mf"' in response.headers["content-disposition"]
     stored = _stored(paths, model, output_id)
     _assert_refitted_on_placeholders(response.content, stored, plate_for("A1 mini"))
+
+
+def _declare(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["print_settings"] = settings
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+
+
+KEYCHAIN = {"enable_support": "0", "enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"}
+
+
+@respx.mock
+def test_a_download_carries_the_templates_print_settings(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#770: written over the derived process, and listed as edits to it, so Bambu
+    Studio shows them as changes to the system preset."""
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _declare(paths, model, KEYCHAIN)
+    _bambuddy()
+
+    settings = _project_settings(client.get(f"/api/v1/outputs/{output_id}/model.3mf").content)
+
+    assert settings["print_settings_id"] == "0.10mm Standard @BBL H2C 0.2 nozzle"
+    assert settings["enable_prime_tower"] == "1"
+    assert settings["wipe_tower_no_sparse_layers"] == "1"
+    assert settings["enable_support"] == "0"
+    # The process first, then one per filament, then the printer: as Bambu Studio saves it.
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wipe_tower_no_sparse_layers;enable_support",
+        "",
+        "",
+    ]
+
+
+def test_without_a_default_printer_the_print_settings_are_still_written(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    _declare(paths, model, {"brim_type": "outer_only", "brim_width": "5"})
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    settings = _project_settings(response.content)
+    assert settings["printer_settings_id"] == PRESET_PLACEHOLDER
+    assert settings["different_settings_to_system"][0] == "brim_width;brim_type"
+    # Everything else is the stored file's.
+    stored = _project_settings(_stored(paths, model, output_id))
+    assert {key: value for key, value in settings.items() if key in stored} == stored
+    assert settings.keys() - stored.keys() == {
+        "brim_width",
+        "brim_type",
+        "different_settings_to_system",
+    }
+    assert (settings["brim_width"], settings["brim_type"]) == ("5", "outer_only")
