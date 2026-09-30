@@ -3,6 +3,7 @@ import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
 // Libraries & fonts (issue #251): the library catalogue, pinning a library to a
 // model (a revision of the model's `libraries` list), installed fonts, the
@@ -38,13 +39,14 @@ function repin(backend: BackendClient, slug: string, name: string, ref: string |
 export const libraryTools: Tool[] = [
   defineTool({
     name: 'list_libraries',
-    description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.',
-    input: z.object({}),
+    description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/libraries'), 'list libraries')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/libraries'), 'list libraries'), args, (l) => l.name, 'list_libraries')),
   }),
 
   // Pinning is split by WHAT THE BACKEND FETCHES, because a tool's tier is static:
@@ -214,14 +216,21 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'list_installed_libraries',
-    description: 'Every library checkout on the data volume, with the models whose live pins read it.',
-    input: z.object({}),
+    description: 'The library checkouts on the data volume, with the models whose live pins read them.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries/installed'],
-    handler: async (_args, { backend }) =>
-      json(await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries')),
+    handler: async (args, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries'),
+          args,
+          (l) => compositeKey(l.name, l.commit),
+          'list_installed_libraries',
+        ),
+      ),
   }),
 
   defineTool({
@@ -288,13 +297,14 @@ export const libraryTools: Tool[] = [
     description:
       'Font families installed for rendering. A `// font` value must name one of them (case and spaces do not ' +
       'matter): OpenSCAD itself would silently draw a missing family in DejaVu Sans with other geometry, so ' +
-      'render_model and save_preset refuse one with an error naming it. install_font adds a family.',
-    input: z.object({}),
+      'render_model and save_preset refuse one with an error naming it. install_font adds a family.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'installed font names, some fetched from the web',
     routes: ['GET /api/v1/fonts'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/fonts'), 'list fonts')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/fonts'), 'list fonts'), args, (f) => f.family, 'list_fonts')),
   }),
 
   defineTool({

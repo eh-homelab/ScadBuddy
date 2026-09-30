@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -288,14 +289,18 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_print_projects',
-    description: "Bambuddy's projects, to file prints under.",
-    input: z.object({}),
+    description: "Bambuddy's projects, to file prints under, and the one last used." + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Projects'],
     routes: ['GET /api/v1/print/projects'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/print/projects'), 'list projects')),
+    handler: async (args, { backend }) => {
+      const { last_project_id, projects } = await ok(backend.GET('/api/v1/print/projects'), 'list projects')
+      const { items, ...rest } = page(projects ?? [], args, (p) => String(p.id), 'list_print_projects')
+      return json({ last_project_id, projects: items, ...rest })
+    },
   }),
 
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
