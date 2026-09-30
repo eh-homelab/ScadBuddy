@@ -279,7 +279,7 @@ describe('SettingsPage', () => {
     expect(within(usage).getByText('Files').nextElementSibling).toHaveTextContent(
       /^12 \(no limit\)$/,
     )
-    expect(screen.queryByTestId('asset-usage')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Uploaded files' })).toBeNull()
     expect(
       screen.getByText(
         'The Where row is the store this process uses; it moves to the Blob store choice above at its next restart, so the two can differ until then.',
@@ -308,6 +308,28 @@ describe('SettingsPage', () => {
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toMatchObject({ store_backend: 'bambuddy' })
+  })
+
+  it('falls back to the local store when the Bambuddy store loses its inbox', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const bambuddy = { ...stored, store_backend: 'bambuddy', has_render_api_key: true }
+    server.use(
+      http.get('/api/v1/settings', () => HttpResponse.json(bambuddy)),
+      http.put('/api/v1/settings', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json({ ...bambuddy, store_backend: 'local', library_folder_id: null })
+      }),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const store = screen.getByLabelText('Blob store')
+    await waitFor(() => expect(store).toHaveValue('bambuddy'))
+    await user.selectOptions(screen.getByLabelText('Library folder'), '')
+    expect(screen.getByRole('option', { name: /Bambuddy library/ })).toBeDisabled()
+    expect(store).toHaveValue('local')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ store_backend: 'local', library_folder_id: null })
   })
 
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {

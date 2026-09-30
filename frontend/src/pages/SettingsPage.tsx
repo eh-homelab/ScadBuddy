@@ -60,6 +60,10 @@ export function SettingsPage() {
   const [printerId, setPrinterId] = useState('')
   const [defaultPlate, setDefaultPlate] = useState('')
   const [unit, setUnit] = useState<DisplayUnit>('mm')
+  // The Bambuddy store needs a URL and an inbox folder in the form: clearing either while
+  // it is chosen shows, sends and compares the local store instead.
+  const bambuddyStoreReady = url !== '' && folderId !== ''
+  const chosenBackend = bambuddyStoreReady ? storeBackend : 'local'
 
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
@@ -118,7 +122,7 @@ export function SettingsPage() {
     // Omitted entirely, so an unchanged field leaves the stored key alone.
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
     if (renderKey.length > 0) body.bambuddy_render_api_key = renderKey
-    body.store_backend = storeBackend
+    body.store_backend = chosenBackend
     return body
   }
 
@@ -149,7 +153,7 @@ export function SettingsPage() {
     renderKey.length > 0 ||
     (settings !== undefined &&
       (url !== (settings.bambuddy_url ?? '') ||
-        storeBackend !== settings.store_backend ||
+        chosenBackend !== settings.store_backend ||
         publicUrl !== (settings.public_url ?? '') ||
         folderId !== idValue(settings.library_folder_id) ||
         pipelineId !== idValue(settings.pipeline_id) ||
@@ -397,12 +401,12 @@ export function SettingsPage() {
               </label>
               <select
                 id="store-backend"
-                value={storeBackend}
+                value={chosenBackend}
                 onChange={(event) => setStoreBackend(event.target.value as 'local' | 'bambuddy')}
                 className="sb-field mt-1.5"
               >
                 <option value="local">This server&rsquo;s volume (one render worker)</option>
-                <option value="bambuddy" disabled={!settings?.bambuddy_url || folderId === ''}>
+                <option value="bambuddy" disabled={!bambuddyStoreReady}>
                   Bambuddy library (any number of render workers)
                 </option>
               </select>
