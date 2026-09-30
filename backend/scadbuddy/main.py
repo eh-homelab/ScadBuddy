@@ -330,36 +330,33 @@ async def _prepare_catalogue(state: AppState) -> None:
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
     queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure closes the projection again."""
+    pending, prune, and start the reconciler. A failure leaves the projection to the
+    lifespan's guard, which closes everything a failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
-    try:
-        await _prepare_catalogue(state)
-        # Before the reconciler: what a pre-Temporal release was running, nothing
-        # will finish (#546).
-        failed = await asyncio.to_thread(projection.fail_legacy_running)
-        if failed:
-            logger.warning(
-                "failed the renders a pre-Temporal release left running",
-                extra={"job_ids": [job.id for job in failed]},
-            )
-        if settings.temporal_worker_inprocess:
-            # Eager: a worker cannot run on the API's lazy client (dev and tests).
-            state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-        # Before the reconciler's first pass (`service.start`), which starts only rows
-        # that name a workflow: what a pre-Temporal release's queue left pending
-        # becomes this path's.
-        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-        if adopted:
-            logger.info(
-                "adopted the renders the legacy queue left pending",
-                extra={"count": len(adopted), "job_ids": adopted},
-            )
-        await service.prune()
-        await service.start()
-    except BaseException:
-        await asyncio.to_thread(projection.close)
-        raise
+    await _prepare_catalogue(state)
+    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # will finish (#546).
+    failed = await asyncio.to_thread(projection.fail_legacy_running)
+    if failed:
+        logger.warning(
+            "failed the renders a pre-Temporal release left running",
+            extra={"job_ids": [job.id for job in failed]},
+        )
+    if settings.temporal_worker_inprocess:
+        # Eager: a worker cannot run on the API's lazy client (dev and tests).
+        state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+    # Before the reconciler's first pass (`service.start`), which starts only rows
+    # that name a workflow: what a pre-Temporal release's queue left pending
+    # becomes this path's.
+    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+    if adopted:
+        logger.info(
+            "adopted the renders the legacy queue left pending",
+            extra={"count": len(adopted), "job_ids": adopted},
+        )
+    await service.prune()
+    await service.start()
 
 
 def _worker_exited(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
