@@ -47,6 +47,9 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrintAgain,
+  PrintDetail,
+  PrintPage,
   PrintProgress,
   PrintCheck,
   PrintRun,
@@ -81,6 +84,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 
 export const API_BASE = '/api/v1'
@@ -709,6 +713,23 @@ export const api = {
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
 
+  /**
+   * #311 — one print. `printerMedia` also lists what the printer still holds, which
+   * asks the printer, so the page does it only when told to.
+   */
+  getPrint: (archiveId: number, { printerMedia = false } = {}) =>
+    request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+
+  /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
+  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+
+  /** #311 — attaches a timelapse still on the printer to the print. */
+  pullTimelapse: (archiveId: number, filename: string) =>
+    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
+
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
@@ -910,6 +931,19 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #308 — the print history, newest first, a page at a time; `cursor` is the last
+   * page's `next_cursor`. */
+  listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== '') search.set(key, String(value))
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<PrintPage>(`/prints${suffix}`)
+  },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   listLibrary: (query: { folderId: number | null; all: boolean }) => {
