@@ -29,6 +29,11 @@ import { redact } from '../secrets.js'
 //               (both through app.ts `auditWrites`)
 //   settings    every ai_settings write (credentials.ts SettingsStore.set)
 //   token       MCP token mint and revoke (auditedTokenStore below)
+//   memory      every automatic Hindsight recall and retain of a session turn
+//               (memory/hindsight.ts `onActivity`, sessions/manager.ts):
+//               action `recall` or `retain`, `input_summary` the bank and the
+//               document id or result count as JSON (never the query or a
+//               memory), `detail` the redacted reason it failed or timed out
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -44,7 +49,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]

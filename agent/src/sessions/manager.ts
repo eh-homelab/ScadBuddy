@@ -26,6 +26,7 @@ import type { CheckedPlugin } from '../plugins/registry.js'
 import {
   createMemoryHooks,
   HindsightClient,
+  type MemoryActivity,
   type MemoryHooks,
   type MemoryHooksOptions,
   hindsightTarget,
@@ -40,7 +41,7 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
-import type { AuditLog } from '../audit/log.js'
+import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
@@ -119,12 +120,29 @@ import { PostgresSessionStore } from './store.js'
 // ai_settings at start (keys below; defaults from harness/run.ts). max_turns
 // is the SDK's per-query `maxTurns`; the budget is for the whole session: a
 // turn is given what is left as `maxBudgetUsd`, and a spent session refuses
-// sends.
+// sends. Settings writes the two keys (routes/sessionLimits.ts, #790); only
+// the browser user can raise one session's budget (`raiseBudget`), because
+// that spends money.
 
 /** ai_settings keys (non-secret, spec §9). */
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+
+/** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
+export const MAX_SESSION_BUDGET_USD = 100
+/** The largest `max_turns` per reply Settings takes. */
+export const MAX_SESSION_MAX_TURNS = 200
+
+/** Money as the user reads it: dollars, rounded to cents ("$0.03", never "$0.025546000000000007"). */
+export function usd(amount: number): string {
+  return `$${amount.toFixed(2)}`
+}
+
+/** Dollars to whole cents, so a budget stored from a form is never a long float. */
+export function cents(amount: number): number {
+  return Math.round(amount * 100) / 100
+}
 
 /** abortAll()'s abort reason: a shutdown, which leaves pending approvals pending. */
 export const SHUTTING_DOWN = 'shutting down'
@@ -174,10 +192,13 @@ export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
   readonly status: SessionErrorStatus
-  constructor(code: SessionErrorCode, message: string) {
+  /** With `budget_exhausted`: what the session spent and may spend, for the panel's meter. */
+  readonly budget: { costUsd: number; budgetUsd: number } | undefined
+  constructor(code: SessionErrorCode, message: string, budget?: { costUsd: number; budgetUsd: number }) {
     super(message)
     this.code = code
     this.status = STATUS_OF[code]
+    this.budget = budget
   }
 }
 
@@ -287,7 +308,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore'> | false
+  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
   /**
    * The headless browser (#349, spec §5.3). A session's turns get it only when
    * this is set AND the `headless_browser_enabled` setting is `true`; it is off
@@ -618,7 +639,14 @@ export class SessionManager {
       parentId: null,
     }, { rateLimited: true })
     await this.events.append(id, [
-      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title }),
+      event({
+        type: 'session.started',
+        sessionId: id,
+        origin: session.origin,
+        owner: session.owner,
+        title,
+        budgetUsd: session.budgetUsd,
+      }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     if (!prompt) return { session }
@@ -769,7 +797,9 @@ export class SessionManager {
     if (now.costUsd >= now.budgetUsd) {
       return new SessionError(
         'budget_exhausted',
-        `session ${id} has spent its budget (${now.costUsd.toFixed(4)} of ${now.budgetUsd} USD); fork it or start a new one`,
+        `session ${id} has spent its budget (${usd(now.costUsd)} of ${usd(now.budgetUsd)}); ` +
+          'continue in a new chat, raise its budget, or start a new one',
+        { costUsd: now.costUsd, budgetUsd: now.budgetUsd },
       )
     }
     return new SessionError(
@@ -848,7 +878,7 @@ export class SessionManager {
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText) : undefined
+      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
       const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
       eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
       // A plugin left out of this turn is said so in the session, not only in the log.
@@ -1008,8 +1038,18 @@ export class SessionManager {
    * Recall is against the user's words (`recallQuery`), not the page context
    * appended after them, unless a fixed query is configured. Undefined when
    * memory is off or the plugin's URL is not a bank endpoint (logged).
+   *
+   * Each recall and retain becomes an audit row and a `memory` panel event
+   * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
+   * retain reports after the turn ended; both writes work then too, since
+   * they need only the session row. A failure is logged by the hooks.
    */
-  private memoryHooks(plugin: CheckedPlugin, secrets: readonly string[], userText: string): MemoryHooks | undefined {
+  private memoryHooks(
+    plugin: CheckedPlugin,
+    secrets: readonly string[],
+    userText: string,
+    turn: { session: SessionRecord; turnId: string },
+  ): MemoryHooks | undefined {
     const config = this.deps.memory
     if (config === false) return undefined
     const log = (line: string) => this.deps.stderr?.(line)
@@ -1028,7 +1068,56 @@ export class SessionManager {
       secrets,
       log,
       sessionStore: this.store,
+      onActivity: (activity) => this.recordMemory(turn.session, turn.turnId, activity, secrets),
     })
+  }
+
+  /** One recall or retain: its audit row (never fails, audit/log.ts) and its panel event. */
+  private async recordMemory(
+    session: SessionRecord,
+    turnId: string,
+    a: MemoryActivity,
+    secrets: readonly string[],
+  ): Promise<void> {
+    const id = session.id
+    const summary = {
+      bank: a.bank,
+      ...(a.documentId ? { document_id: a.documentId } : {}),
+      ...(a.count === undefined ? {} : { results: a.count }),
+      ...(a.tool ? { tool: a.tool } : {}),
+    }
+    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+    await Promise.all([
+      this.deps.audit?.record({
+        kind: 'memory',
+        action: a.action,
+        surface: 'harness',
+        actor: session.owner,
+        sessionId: id,
+        turnId,
+        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+        inputSummary: JSON.stringify(summary),
+        outcome: a.outcome === 'ok' ? 'ok' : 'error',
+        ...detail,
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+      }),
+      this.events.append(id, [
+        scrubForLog(
+          event({
+            type: 'memory',
+            sessionId: id,
+            turnId,
+            action: a.action,
+            bank: a.bank,
+            outcome: a.outcome,
+            ...(a.count === undefined ? {} : { count: a.count }),
+            ...detail,
+          }),
+          secrets,
+        ),
+      ]),
+    ])
   }
 
   /**
@@ -1077,8 +1166,14 @@ export class SessionManager {
       costUsd = total >= session.costUsd ? total : session.costUsd + total
       turns = session.turns + result.num_turns
       status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
+      // Its budget is filled in from the row once the claim is released below.
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      if (result.subtype !== 'success') {
+      if (result.subtype === 'error_max_budget_usd') {
+        // The SDK's own text names this turn's share of the budget as an
+        // unrounded float; the session's budget, in cents, is what the user
+        // set. Worded below, once the row says what the budget is now.
+        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: 'the chat used its budget' }))
+      } else if (result.subtype !== 'success') {
         const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
         tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
       }
@@ -1096,13 +1191,23 @@ export class SessionManager {
     if (keepWaiting) status = 'waiting_approval'
     tail.push(event({ type: 'session.status', sessionId: id, status }))
 
-    const released = await this.deps.sql`
+    const [released] = await this.deps.sql<{ budget_usd: number }[]>`
       UPDATE ai_sessions
       SET status = ${status}, cost_usd = ${costUsd}, turns = ${turns},
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
-      WHERE id = ${id} AND turn_id = ${turnId}`
-    if (released.count === 0) return { kind: 'lost_claim' }
-    await this.events.append(id, tail.map((e) => scrubForLog(e, secrets)))
+      WHERE id = ${id} AND turn_id = ${turnId}
+      RETURNING budget_usd`
+    if (!released) return { kind: 'lost_claim' }
+    // Read from the row, not `session`: the user may have raised it while the turn ran.
+    const budgetUsd = released.budget_usd
+    const worded = tail.map((e): ServerEvent => {
+      if (e.type === 'session.result') return { ...e, budgetUsd }
+      if (e.type === 'error' && e.code === 'error_max_budget_usd') {
+        return { ...e, message: `this chat used its ${usd(budgetUsd)} budget (${usd(costUsd)} spent)` }
+      }
+      return e
+    })
+    await this.events.append(id, worded.map((e) => scrubForLog(e, secrets)))
     // A decision that landed while this turn was finishing saw it still
     // holding the session and took it for parked (approvals/service.ts
     // decide), so nobody resumes for it: void an approval of this turn's
@@ -1289,7 +1394,7 @@ export class SessionManager {
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin } = {},
+    options: { title?: string; origin?: Origin; rateLimited?: boolean } = {},
   ): Promise<SessionRecord> {
     const parent = await this.get(id, principal)
     if (!(await this.store.exists(id))) {
@@ -1311,7 +1416,7 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
-    }, { rateLimited: true })
+    }, { rateLimited: options.rateLimited ?? true })
     // The conversation so far, re-addressed to the child. Lifecycle events
     // (status, owner, result) are the parent's own and are not copied.
     const history: ServerEvent[] = []
@@ -1332,11 +1437,83 @@ export class SessionManager {
       }
     }
     await this.events.append(childId, [
-      event({ type: 'session.started', sessionId: childId, origin: child.origin, owner: child.owner, title }),
+      event({
+        type: 'session.started',
+        sessionId: childId,
+        origin: child.origin,
+        owner: child.owner,
+        title,
+        budgetUsd: child.budgetUsd,
+      }),
       ...history,
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
     return child
+  }
+
+  /**
+   * Adds `addUsd` to one session's budget (#790). User-only and owner-only:
+   * it spends money, so only the browser user may raise it, and only on a
+   * session it owns (take one over first). `agentActor` is set when the
+   * request carried the headless browser's agent-actor marker
+   * (harness/headlessBrowser.ts AGENT_ACTOR_HEADER), and is refused like any
+   * other principal. No tool calls this; the one caller is the HTTP route
+   * (routes/sessions.ts). A raise is a `settings` audit row on the session
+   * (action `session_budget_usd`); a refused or failed one is recorded by
+   * app.ts's `auditWrites` from the route's status, like other refused writes.
+   */
+  async raiseBudget(
+    id: string,
+    principal: Owner,
+    addUsd: number,
+    context: Omit<AuditContext, 'actor'> & { agentActor?: boolean },
+  ): Promise<SessionRecord> {
+    const startedAt = new Date()
+    if (context.agentActor || principal.kind !== 'browser') {
+      throw new SessionError('forbidden', "only you can raise a chat's budget, in the ScadBuddy UI")
+    }
+    const add = cents(addUsd)
+    if (!Number.isFinite(add) || add <= 0) throw new SessionError('invalid', 'the raise must be at least $0.01')
+    const session = await this.get(id, principal)
+    if (!sameOwner(principal, session.owner)) {
+      throw new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${session.owner.label}; take it over before raising its budget`,
+      )
+    }
+    // One statement, so two raises add up and the owner cannot change in between.
+    const [row] = await this.deps.sql.unsafe<Row[]>(
+      `UPDATE ai_sessions SET budget_usd = round((budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND round((budget_usd + $2)::numeric, 2) <= $5
+       RETURNING ${COLUMNS}`,
+      [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],
+    )
+    if (!row) {
+      const now = (await this.row(id)) ?? session
+      throw sameOwner(principal, now.owner)
+        ? new SessionError(
+            'invalid',
+            `a chat's budget can be at most ${usd(MAX_SESSION_BUDGET_USD)}; this one is ${usd(now.budgetUsd)}`,
+          )
+        : new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
+    }
+    const raised = record(row)
+    await this.deps.audit?.record({
+      kind: 'settings',
+      action: 'session_budget_usd',
+      surface: context.surface,
+      actor: principal,
+      clientIp: context.clientIp,
+      sessionId: id,
+      outcome: 'ok',
+      detail: `${usd(raised.budgetUsd - add)} + ${usd(add)} = ${usd(raised.budgetUsd)} (${usd(raised.costUsd)} spent)`,
+      startedAt,
+      finishedAt: new Date(),
+    })
+    await this.events.append(id, [
+      event({ type: 'session.budget', sessionId: id, costUsd: raised.costUsd, budgetUsd: raised.budgetUsd }),
+    ])
+    return raised
   }
 
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */

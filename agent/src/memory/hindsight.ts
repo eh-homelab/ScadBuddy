@@ -71,6 +71,12 @@ import { redact } from '../secrets.js'
 //     (http/pinned.ts, as the plugin forwarder does).
 //   - The injected memories escape `<` and `>` (as `\u003c`/`\u003e`, still
 //     the same JSON), so recalled text cannot close `<hindsight_memories>`.
+//   - Every recall and retain is reported to `onActivity` (#818), which the
+//     session manager turns into an audit row and a panel event: hooks make
+//     no SDK message, so nothing else would record them. The report carries
+//     the bank, the document id, the count, the timing and the outcome, never
+//     the query or a memory. A report is not awaited by the turn, and a
+//     failing one is logged like the hooks' other failures.
 //   - The PostToolUse matcher is anchored (`^(?:a|b)$`); upstream's bare
 //     alternation also matches tool names that merely contain one.
 //
@@ -364,6 +370,30 @@ export type MemoryHooksOptions = {
   sessionStore?: Pick<SessionStore, 'load'>
   recallTimeoutMs?: number
   retainTimeoutMs?: number
+  /**
+   * Told of every recall and retain once it has finished (sessions/manager.ts:
+   * an audit row and a panel event). May run after the turn ended; never
+   * awaited by it. A rejection is logged.
+   */
+  onActivity?: (activity: MemoryActivity) => Promise<void> | void
+}
+
+/** One automatic recall or retain, as `onActivity` is told of it. Never holds the query or a memory. */
+export type MemoryActivity = {
+  action: 'recall' | 'retain'
+  bank: string
+  outcome: 'ok' | 'timeout' | 'error'
+  /** Recall: how many memories were injected. */
+  count?: number
+  /** Retain: the document it upserted (transcript mode). */
+  documentId?: string
+  /** A PostToolUse retain: the tool whose result it was, and that call's id. */
+  tool?: string
+  toolUseId?: string
+  /** Why it failed, redacted of the turn's secrets. */
+  reason?: string
+  startedAt: Date
+  finishedAt: Date
 }
 
 export type MemoryHooks = {
@@ -421,18 +451,49 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   const scrub = (text: string) => redact(text, options.secrets)
   const log = (line: string) => options.log(`${scrub(line)}\n`)
   const inFlight = new Set<Promise<void>>()
-
-  /** Starts a retain and returns at once; a failure is logged, never thrown. */
-  const retainNow = (what: string, item: RetainItem): Promise<void> =>
-    client
-      .retain({ ...item, content: scrub(item.content) }, AbortSignal.timeout(retainTimeoutMs))
-      .catch((err: unknown) => log(`hindsight: ${what} was not retained to bank ${client.bankId}: ${describe(err)}`))
   const track = (run: Promise<void>) => {
     inFlight.add(run)
     void run.finally(() => inFlight.delete(run))
   }
+
+  /** Tells `onActivity`; settles once it has, and never rejects (a failure is logged). */
+  const report = (activity: Omit<MemoryActivity, 'bank' | 'finishedAt'>): Promise<void> => {
+    const onActivity = options.onActivity
+    if (!onActivity) return Promise.resolve()
+    const full: MemoryActivity = {
+      ...activity,
+      bank: client.bankId,
+      finishedAt: new Date(),
+      ...(activity.reason ? { reason: scrub(activity.reason) } : {}),
+    }
+    const run = Promise.resolve()
+      .then(() => onActivity(full))
+      .catch((err: unknown) => log(`hindsight: the ${full.action} on bank ${client.bankId} was not recorded: ${describe(err)}`))
+    track(run)
+    return run
+  }
+
+  /** Runs a retain; a failure is logged and reported, never thrown. */
+  const retainNow = async (
+    what: string,
+    item: RetainItem,
+    about: Pick<MemoryActivity, 'tool' | 'toolUseId'> = {},
+  ): Promise<void> => {
+    const startedAt = new Date()
+    const documentId = item.document_id ? { documentId: item.document_id } : {}
+    try {
+      await client.retain({ ...item, content: scrub(item.content) }, AbortSignal.timeout(retainTimeoutMs))
+    } catch (err) {
+      const why = describe(err)
+      log(`hindsight: ${what} was not retained to bank ${client.bankId}: ${why}`)
+      await report({ action: 'retain', outcome: why === 'timed out' ? 'timeout' : 'error', reason: why, startedAt, ...documentId, ...about })
+      return
+    }
+    await report({ action: 'retain', outcome: 'ok', startedAt, ...documentId, ...about })
+  }
   /** Starts a retain and returns at once; a failure is logged, never thrown. */
-  const retainLater = (what: string, item: RetainItem) => track(enqueueRetain(undefined, () => retainNow(what, item)))
+  const retainLater = (what: string, item: RetainItem, about: Pick<MemoryActivity, 'tool' | 'toolUseId'>) =>
+    track(enqueueRetain(undefined, () => retainNow(what, item, about)))
 
   const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
 
@@ -450,15 +511,19 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       }
       let results: string[]
       const timeout = AbortSignal.timeout(recallTimeoutMs)
+      const startedAt = new Date()
       try {
         results = await client.recall(body, AbortSignal.any([signal, timeout]))
       } catch (err) {
         const why = timeout.aborted ? `timed out after ${recallTimeoutMs} ms` : describe(err)
         log(`hindsight: recall from bank ${client.bankId} failed (${why}); no memories were injected`)
+        // Not awaited: the turn goes on while it is recorded.
+        void report({ action: 'recall', outcome: timeout.aborted ? 'timeout' : 'error', reason: why, startedAt })
         return {}
       }
-      if (results.length === 0) return {}
       const lines = results.slice(0, cfg.recallMaxResults).map((text, i) => `${i + 1}. ${text}`)
+      void report({ action: 'recall', outcome: 'ok', count: lines.length, startedAt })
+      if (lines.length === 0) return {}
       // JSON leaves `<` and `>` as they are, so a memory holding "</hindsight_memories>"
       // could close the outer tag early; escaped, the envelope is still the same JSON.
       const memories = wrapUntrustedText(
@@ -511,8 +576,23 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       // last reply; the next turn's retain finds it in the file.
       const last = input.last_assistant_message?.trim() ?? ''
       const refId = `conversation:${sessionId}`
+      const stopped = new Date()
       const started = enqueueRetain(cfg.retainMode === 'transcript' ? refId : undefined, async () => {
-        const entries = await readEntries(input.transcript_path, sessionId)
+        let entries: TranscriptLine[]
+        try {
+          entries = await readEntries(input.transcript_path, sessionId)
+        } catch (err) {
+          const why = `cannot read its transcript (${describe(err)})`
+          log(`hindsight: session ${sessionId} was not retained: ${why}`)
+          await report({
+            action: 'retain',
+            outcome: 'error',
+            reason: why,
+            startedAt: stopped,
+            ...(cfg.retainMode === 'transcript' ? { documentId: refId } : {}),
+          })
+          return
+        }
         if (cfg.retainMode === 'result') {
           const result = last || extractResultFromTranscript(entries)
           if (!result || result.length < 20) return
@@ -535,7 +615,7 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
           ...(cfg.retainTags.length ? { tags: cfg.retainTags } : {}),
           metadata: { source: 'scadbuddy-assistant', session_id: sessionId },
         })
-      }).catch((err: unknown) => log(`hindsight: session ${sessionId} was not retained: cannot read its transcript (${describe(err)})`))
+      }).catch((err: unknown) => log(`hindsight: session ${sessionId} was not retained: ${describe(err)}`))
       track(started)
       return {}
     }
@@ -552,7 +632,11 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       if (!response || response.length < 20) return Promise.resolve({})
       const args = typeof input.tool_input === 'string' ? input.tool_input : JSON.stringify(input.tool_input ?? {})
       const content = `Tool ${input.tool_name} called with: ${args.slice(0, 500)}\nResult: ${response.slice(0, 2000)}`
-      retainLater(`the result of ${input.tool_name}`, { content, tags: [...cfg.retainTags, `tool:${input.tool_name}`] })
+      retainLater(
+        `the result of ${input.tool_name}`,
+        { content, tags: [...cfg.retainTags, `tool:${input.tool_name}`] },
+        { tool: input.tool_name, toolUseId: input.tool_use_id },
+      )
       return Promise.resolve({})
     }
     hooks.PostToolUse = [{ matcher, hooks: [toolRetain] }]

@@ -432,6 +432,17 @@ choice the way the print dialog opens, then slices and queues behind a single ap
 (It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
 pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
+As built for authoring (#252, `docs/ai/authoring.md`): `apply_patch` sends a unified
+diff or search/replace edits against a `base` revision to
+`POST /api/v1/models/{slug}/source/patch`, which answers 409 with the `current`
+revision when the model has moved on, checked again under the history's write lock
+(`update_source` takes the same optional `base`). Every backend call a tool makes
+names the principal it runs as and, in a harness session, the session
+(`agent/src/tools/authorship.ts`); the backend authors any commit that call makes as
+"ScadBuddy agent" with both as git trailers (`backend/scadbuddy/core/authorship.py`),
+and `list_versions` reports them as `agent`. `checkpoint` is a `read` tool that
+answers the current revision to `restore_version` to; nothing new is stored.
+
 As built (#253, dependencies): `check_dependencies` (read) calls a new read-only
 `POST /api/v1/models/{slug}/dependencies`, which reports each `include <…>`/`use <…>`
 as resolved (file and library) or unresolved (reason, and a catalogue or installed

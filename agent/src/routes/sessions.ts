@@ -1,9 +1,15 @@
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
+import { AGENT_ACTOR_HEADER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
-import { type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
+import {
+  MAX_SESSION_BUDGET_USD,
+  type SessionManager,
+  SessionError,
+  type SessionRecord,
+} from '../sessions/manager.js'
 import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -31,6 +37,16 @@ import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } fr
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
+//   POST /api/v1/ai/sessions/:id/fork             {title?} → 201 {session}: a new session with the
+//                                                 transcript so far and a fresh budget, owned by
+//                                                 the browser user; counted against the new-session
+//                                                 limit (429). The panel's "Continue in a new chat"
+//                                                 (#790). #793 adds `up_to`, the socket message and audit.
+//   POST /api/v1/ai/sessions/:id/budget           {add_usd} → {session}: adds to that session's
+//                                                 budget (#790). User-only and owner-only
+//                                                 (manager.ts raiseBudget): a request with the
+//                                                 headless browser's agent-actor marker is refused,
+//                                                 and no tool reaches it. Audited, refusals included.
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
 // status is used as it is (404, 403, 409, 429, 400).
@@ -93,6 +109,8 @@ const StartBody = z.strictObject({
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
+const ForkBody = z.strictObject({ title: z.string().max(200).optional() })
+const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
@@ -229,6 +247,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) =>
       c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
     ),
+  )
+
+  app.post(
+    `${base}/:id/fork`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, ForkBody, {})
+      if (!body.ok) return body.response
+      const child = await sessions.fork(idOf(c), BROWSER_USER, {
+        ...(body.value.title ? { title: body.value.title } : {}),
+        rateLimited: true,
+      })
+      return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
+    }),
+  )
+
+  app.post(
+    `${base}/:id/budget`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, BudgetBody, undefined)
+      if (!body.ok) return body.response
+      const session = await sessions.raiseBudget(idOf(c), BROWSER_USER, body.value.add_usd, {
+        surface: 'http',
+        clientIp: deps.remoteAddress(c),
+        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
+      })
+      return c.json({ session: sessionView(session, BROWSER_USER) })
+    }),
   )
 
   app.get(

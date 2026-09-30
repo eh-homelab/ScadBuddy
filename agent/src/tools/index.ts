@@ -1,4 +1,5 @@
 import { approvalTools } from './approvals.js'
+import { authoringTools } from './authoring.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
@@ -29,6 +30,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...historyTools,
   ...sourceFileTools,
   ...templateTools,
+  ...authoringTools,
   ...inspectTools,
   ...guideTools,
   ...libraryTools,

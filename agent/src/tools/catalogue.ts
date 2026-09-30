@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, fileForm, slug } from './common.js'
+import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
 
 // Catalogue & models (issue #251): list, get, create, import, check, duplicate,
@@ -156,21 +156,23 @@ export const catalogueTools: Tool[] = [
     name: 'update_source',
     description:
       "Replace a model's OpenSCAD source as one revision in its history (undo with restore_version). " +
-      'Refused when the parse check fails unless `force` is true.',
+      'Refused when the parse check fails unless `force` is true. Pass `base` (the `version` you read ' +
+      'the source at) to have it refused if someone else saved since; for a small change, apply_patch.',
     input: z.object({
       slug,
       source: z.string().max(1_000_000),
       message: z.string().max(200).optional().describe('What the revision is called in the history'),
       force: z.boolean().default(false),
+      base: commit.optional().describe('Refuse (409, naming the current revision) unless the model is still here'),
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/source'],
-    handler: async ({ slug, source, message, force }, { backend }) =>
+    handler: async ({ slug, source, message, force, base }, { backend }) =>
       json(
         await ok(
           backend.PUT('/api/v1/models/{slug}/source', {
             params: { path: { slug } },
-            body: { source, message: message ?? null, force },
+            body: { source, message: message ?? null, force, base: base ?? null },
           }),
           `update source of ${slug}`,
         ),
