@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
 import type {
   AnalysisRequest,
+  FilamentWarning,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
@@ -30,7 +31,7 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import type { ProjectList } from '../lib/projects'
+import { type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -53,13 +54,21 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  *   #313), prints. A 422 is the resolver refusing a
  *   combination (an unpicked slot, no process, no preset for a spool at this size); its
  *   `detail` is shown above Print and the dialog stays open.
- * - Simple mode offers the tiers; Advanced adds the full process list, per-side flow and
- *   a per-slot filament preset override.
+ * - Simple mode shows only what the user has to choose (#768): the printer, when there is
+ *   more than one, the spools, which plate of a multi-plate file, and Print, with the
+ *   Checks. The nozzles, quality, plate type, print options, project and copies are
+ *   Advanced steps, and Simple sends what they open on: the size and tier this model
+ *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
+ *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
+ *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
  * (#88), the project (#79), copies with the remembered quantity (#124/#145), which plate
  * of a multi-plate 3MF (#83), and following the run to completion (#89).
  */
+
+/** The warnings about nozzles, shown in Advanced mode only (#772). */
+const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['hf-unsupported', 'not-installed'])
 
 interface Props {
   open: boolean
@@ -96,7 +105,6 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     source,
     choices,
     plate,
-    size,
   )
 
   // null until the user sets it, so a remembered quantity is not overridden by the
@@ -109,6 +117,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
+  /**
+   * #768 — the dialog's own list, read here rather than by its picker, which is an
+   * Advanced step: Simple mode must still seed the project from the last one printed to.
+   * Read on each open, as the picker was, and never when the page passes its project.
+   */
+  const ownProjects = useProjectList(setOwnProjectId, open && !project)
 
   const runPrint = useRunPrint({
     source,
@@ -230,12 +244,22 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : null
   const check = usePrintCheck(source, checkRequest)
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
+  /**
+   * #772 — Simple mode shows no nozzle message at all: the High Flow note (#723, kept by
+   * the owner as a non-blocking warning) and the rack's not-installed note are about the
+   * nozzle step, which only Advanced shows.
+   */
+  const shown = (warnings: FilamentWarning[] | undefined) =>
+    picker.advanced
+      ? (warnings ?? [])
+      : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
+  const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
   const verdict = (
-    <PrintVerdict verdict={check.verdict} error={check.error} onRetry={check.reload} />
+    <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
   )
   const verdictShown =
     check.error !== undefined ||
-    (check.verdict?.errors ?? []).length + (check.verdict?.warnings ?? []).length > 0
+    (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
@@ -256,7 +280,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       description={
         result || unanswered !== null
           ? undefined
-          : 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+          : picker.advanced
+            ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+            : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
       footer={
@@ -288,7 +314,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || loading || !choices || refused || runRefuses}
+              // Held while the dialog's own project list loads, so a Simple-mode print
+              // cannot go out before the last project has seeded it.
+              disabled={
+                running || loading || !choices || refused || runRefuses || ownProjects.loading
+              }
               data-testid="run-print"
               {...USER_ONLY}
             >
@@ -301,7 +331,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     >
       {result ? (
         <QueuedPanel
-          result={result}
+          result={{ ...result, warnings: shown(result.warnings) }}
           printerName={printer?.name ?? null}
           progress={progress}
           polling={polling}
@@ -377,7 +407,6 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                   plan={plan}
                   onChange={setPlan}
                   copies={effectiveCopies}
-                  nozzleSize={size}
                 />
               )}
 
@@ -391,36 +420,6 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                 />
               )}
 
-              <NozzleStep
-                sizes={choices.nozzle_sizes ?? []}
-                installed={choices.installed ?? []}
-                advanced={picker.advanced}
-                value={nozzles}
-                onChange={picker.changeNozzles}
-              />
-              <QualityStep
-                size={size}
-                tiers={choices.tiers?.[size] ?? []}
-                processes={choices.processes?.[size] ?? []}
-                advanced={picker.advanced}
-                tier={tier}
-                processName={processName}
-                onChange={picker.changeQuality}
-              />
-              {bedType !== null && (
-                <PlateStep
-                  bedTypes={
-                    (choices.bed_types ?? []).includes(bedType)
-                      ? (choices.bed_types ?? [])
-                      : [bedType, ...(choices.bed_types ?? [])]
-                  }
-                  value={bedType}
-                  lastBedType={choices.last_bed_type ?? null}
-                  printerName={printer?.name ?? null}
-                  onChange={picker.setBedType}
-                />
-              )}
-
               {picker.plates.length > 1 && source && (
                 <PlatesToPrint
                   plates={picker.plates}
@@ -430,28 +429,57 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                 />
               )}
 
-              <PrintOptionsDisclosure
-                slug={slug}
-                printerId={printerId}
-                value={copies === null ? options : { ...options, quantity: copies }}
-                onChange={({ quantity, ...rest }) => {
-                  setCopies(quantity ?? null)
-                  setOptions(rest)
-                }}
-              />
+              {/* #768 — Simple mode sends these steps' defaults without showing them. */}
+              {picker.advanced && (
+                <>
+                  <NozzleStep
+                    sizes={choices.nozzle_sizes ?? []}
+                    installed={choices.installed ?? []}
+                    value={nozzles}
+                    onChange={picker.changeNozzles}
+                  />
+                  <QualityStep
+                    size={size}
+                    tiers={choices.tiers?.[size] ?? []}
+                    processes={choices.processes?.[size] ?? []}
+                    tier={tier}
+                    processName={processName}
+                    onChange={picker.changeQuality}
+                  />
+                  {bedType !== null && (
+                    <PlateStep
+                      bedTypes={
+                        (choices.bed_types ?? []).includes(bedType)
+                          ? (choices.bed_types ?? [])
+                          : [bedType, ...(choices.bed_types ?? [])]
+                      }
+                      value={bedType}
+                      lastBedType={choices.last_bed_type ?? null}
+                      printerName={printer?.name ?? null}
+                      onChange={picker.setBedType}
+                    />
+                  )}
 
-              {/* #79 — a send to a project uploads into that project's folder. */}
-              {project ? (
-                <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
-              ) : (
-                <ProjectPicker
-                  value={ownProjectId}
-                  onChange={setOwnProjectId}
-                  onLoaded={setOwnProjectId}
-                />
+                  <PrintOptionsDisclosure
+                    slug={slug}
+                    printerId={printerId}
+                    value={copies === null ? options : { ...options, quantity: copies }}
+                    onChange={({ quantity, ...rest }) => {
+                      setCopies(quantity ?? null)
+                      setOptions(rest)
+                    }}
+                  />
+
+                  {/* #79 — a send to a project uploads into that project's folder. */}
+                  {project ? (
+                    <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
+                  ) : (
+                    <ProjectPicker value={ownProjectId} onChange={setOwnProjectId} list={ownProjects} />
+                  )}
+
+                  <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                </>
               )}
-
-              <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
 
               {/* The analyzers judge an output's own 3MF; a library file has none (#313), so its
                   Checks are the nozzle verdict alone (#755). */}

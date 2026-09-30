@@ -26,6 +26,7 @@ from scadbuddy.core.events import (
     ModelEvent,
     OutputEvent,
     PrintEvent,
+    SessionBusEvent,
     SettingsChanged,
     Subscription,
 )
@@ -349,6 +350,7 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             ),
             ["analyzers"],
         ),
+        (SessionBusEvent(kind="session.message", session_id="s", seq=3), []),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:

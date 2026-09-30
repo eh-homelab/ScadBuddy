@@ -134,8 +134,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     (operation) => ({
       operation,
       reason:
-        "The print dialog's pre-submit nozzle verdict (#755). An agent's print_output run refuses the same " +
-        'verdict as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
+        "The print dialog's check before Print (#755). An agent's print_output run makes the same refusals " +
+        'itself, as a 422 with the same words, before anything is uploaded, so a separate check adds nothing.',
     }),
   ),
   ...(

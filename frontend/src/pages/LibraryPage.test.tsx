@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
+import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -65,6 +67,32 @@ describe('LibraryPage', () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-print-89'))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('prints a file in Simple mode under the last project printed to (#768)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 2 }),
+      ),
+    )
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await user.click(await screen.findByTestId('library-print-89'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print' })
+    await within(dialog).findByTestId('filament-slot-1')
+
+    expect(within(dialog).queryByTestId('project-select')).toBeNull()
+    const print = within(dialog).getByRole('button', { name: /^Print$/ })
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+    await waitFor(() =>
+      expect(run).toHaveBeenCalledWith(
+        89,
+        expect.objectContaining({ project_id: 2 }),
+        expect.any(AbortSignal),
+      ),
+    )
+    run.mockRestore()
   })
 
   it('clears the old listing while a new folder is loading, so its Print buttons go away', async () => {
