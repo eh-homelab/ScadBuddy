@@ -289,8 +289,8 @@ reports AI available, which today is the msw-mocked build: nothing routes
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
-| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`, `status` (`active`, `expired` or `revoked`) and `approval_grant`. It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in?, approval_grant? }`, strict. `approval_grant: true` lets the token decide other agents' outward approvals (#300, [agent-sessions.md §3](agent-sessions.md#3-approvals-by-another-agent-the-per-token-grant)); only with `tier: "outward"`, else `400`. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
 | `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
 
 "Read guard" is `uiReadProblem()` in
@@ -507,13 +507,16 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
-  through the chat socket and the session routes (README, "Sessions and the
-  assistant's chat").
+  through the chat socket, the session routes and the `sessions_*` tools
+  ([agent-sessions.md](agent-sessions.md)). Every event-log append is also announced
+  as `session.*` on `scadbuddy_events` (NOTIFY only, no table).
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
   [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
-  name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
+  name, tier, `created_at`, `expires_at`, `revoked_at`, `last_used_at` and
+  `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,
+  and a `CHECK` allows it only on an `outward` token). Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
   `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or

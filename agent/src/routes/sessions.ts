@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import { type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
-import { SESSION_STATUSES } from '../sessions/protocol.js'
+import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
@@ -48,7 +48,11 @@ export type SessionView = {
   id: string
   title: string
   origin: SessionRecord['origin']
-  owner: SessionRecord['owner']
+  owner: SeenOwner
+  /** A live handoff offer (sessions/manager.ts `handoff`): to whom, until when. */
+  offer: { to: SeenOwner; until: string } | null
+  /** The session is offered to the viewer, who may accept or decline it. */
+  offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
   turns: number
@@ -59,12 +63,20 @@ export type SessionView = {
   updated_at: string
 }
 
-export function sessionView(s: SessionRecord): SessionView {
+/**
+ * A session as `viewer` is shown it. The browser user (these routes, the
+ * panel) sees every principal's id; an MCP caller (tools/sessions.ts) sees
+ * only its own, and anyone else by kind and a label that does not name them
+ * (sessions/protocol.ts `ownerSeenBy`, PR #715 review).
+ */
+export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>): SessionView {
   return {
     id: s.id,
     title: s.title,
     origin: s.origin,
-    owner: s.owner,
+    owner: ownerSeenBy(viewer, s.owner),
+    offer: s.offer ? { to: ownerSeenBy(viewer, s.offer.to), until: s.offer.until } : null,
+    offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
     turns: s.turns,
@@ -165,7 +177,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(status ? { status: status as SessionRecord['status'] } : {}),
         ...(limit ? { limit } : {}),
       })
-      return c.json({ sessions: list.map(sessionView) })
+      return c.json({ sessions: list.map((one) => sessionView(one, BROWSER_USER)) })
     }),
   )
 
@@ -183,13 +195,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
       })
-      return c.json({ session: sessionView(session), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
+      return c.json({ session: sessionView(session, BROWSER_USER), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
     }),
   )
 
   app.get(
     `${base}/:id`,
-    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER)))),
+    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER))),
   )
 
   app.post(
@@ -215,7 +227,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/handoff`,
     limit,
     route('write', async (c, sessions) =>
-      c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER))),
+      c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
     ),
   )
 

@@ -21,6 +21,7 @@ from scadbuddy.core.events import (
     InProcessEventBus,
     JobEvent,
     ModelEvent,
+    SessionBusEvent,
     SettingsChanged,
     Subscription,
     decode_event,
@@ -181,6 +182,22 @@ def test_events_round_trip_through_their_wire_form() -> None:
     assert set(event.model_dump()) == {"id", "at", "kind", "job_id", "slug"}
 
 
+def test_decodes_the_agents_session_events() -> None:
+    # What agent/src/sessions/busEvents.ts NOTIFYs (#300): decoded, not logged
+    # as undecodable, whether or not it carries a status.
+    wire = (
+        '{"id":"0123456789abcdef0123456789abcdef","at":"2026-09-29T02:49:00.000Z",'
+        '"kind":"session.done","session_id":"0e5a3c1e-1111-4222-8333-944455556666",'
+        '"seq":12,"status":"idle","replica":"r1"}'
+    )
+    event = decode_event(wire)
+    assert isinstance(event, SessionBusEvent)
+    assert (event.kind, event.seq, event.status) == ("session.done", 12, "idle")
+    bare = decode_event('{"id":"x","kind":"session.message","session_id":"s","seq":1}')
+    assert isinstance(bare, SessionBusEvent)
+    assert bare.status is None
+
+
 def test_every_kind_from_the_spec_is_known() -> None:
     assert {
         "job.pending",
@@ -205,6 +222,12 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "font.installed",
         "settings.changed",
         "analyzer.decision",
+        # The agent service's own (#300, agent/src/sessions/busEvents.ts).
+        "session.started",
+        "session.owner",
+        "session.waiting",
+        "session.done",
+        "session.message",
         # Not a state change: the Postgres bus's marker for a listener gap.
         "bus.resync",
     } == EVENT_KINDS

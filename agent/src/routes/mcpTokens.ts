@@ -2,7 +2,7 @@ import type { Hono } from 'hono'
 import { z } from 'zod'
 import type { McpAuthMode, McpAuthSettings } from '../auth/authenticate.js'
 import { TIERS } from '../auth/principal.js'
-import type { TokenRecord, TokenStore } from '../auth/tokens.js'
+import { mintProblem, type TokenRecord, type TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
@@ -14,6 +14,9 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 //   nothing else to show, and no route ever returns the hash.
 // - POST returns the plaintext token exactly once, in its 201 body, marked
 //   `Cache-Control: no-store`. It is never logged and cannot be read again.
+// - POST takes `approval_grant: true` to mint a token that may decide other
+//   agents' outward approvals (#300, spec §6); only with `tier: "outward"`,
+//   else 400. It cannot be changed later: mint a new token instead.
 // - DELETE /:id revokes. A revoked token stays listed, so Settings shows when it
 //   was revoked; it never verifies again.
 //
@@ -50,6 +53,8 @@ export type McpTokenView = {
   last_used_at: string | null
   revoked_at: string | null
   status: McpTokenStatus
+  /** May decide other agents' outward approvals (#300). */
+  approval_grant: boolean
 }
 
 export type McpTokenList = {
@@ -80,6 +85,8 @@ const PostBody = z.strictObject({
   tier: z.enum(TIERS),
   /** Seconds from now; left out, the token does not expire. */
   expires_in: z.number().int().min(60).max(MAX_EXPIRES_IN_SECONDS).optional(),
+  /** May decide other agents' outward approvals (#300, spec §6); outward tokens only. */
+  approval_grant: z.boolean().optional(),
 })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -100,6 +107,7 @@ export function tokenView(record: TokenRecord, now: Date): McpTokenView {
     last_used_at: record.lastUsedAt?.toISOString() ?? null,
     revoked_at: record.revokedAt?.toISOString() ?? null,
     status,
+    approval_grant: record.approvalGrant,
   }
 }
 
@@ -156,11 +164,15 @@ export function registerMcpTokenRoutes(app: Hono, deps: McpTokenRouteDeps): void
       return c.json({ detail }, 400)
     }
     const at = now()
-    const { token, record } = await tokens.mint({
+    const request = {
       name: body.name,
       tier: body.tier,
+      ...(body.approval_grant ? { approvalGrant: true } : {}),
       ...(body.expires_in === undefined ? {} : { expiresAt: new Date(at.getTime() + body.expires_in * 1000) }),
-    })
+    }
+    const problem = mintProblem(request)
+    if (problem) return c.json({ detail: `approval_grant: ${problem}` }, 400)
+    const { token, record } = await tokens.mint(request)
     const minted: MintedMcpToken = { token, record: tokenView(record, at) }
     c.header('Cache-Control', 'no-store')
     return c.json(minted, 201)

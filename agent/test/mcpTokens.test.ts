@@ -58,8 +58,26 @@ describe('/api/v1/ai/mcp-tokens', () => {
     expect(text).not.toContain(minted.token)
     expect(text).not.toContain(hashToken(minted.token))
     expect(Object.keys(listed.tokens[0]!).sort()).toEqual(
-      ['created_at', 'expires_at', 'id', 'last_used_at', 'name', 'revoked_at', 'status', 'tier'].sort(),
+      ['approval_grant', 'created_at', 'expires_at', 'id', 'last_used_at', 'name', 'revoked_at', 'status', 'tier'].sort(),
     )
+    expect(minted.record.approval_grant).toBe(false)
+  })
+
+  it('mints an approval grant only on an outward token (#300)', async () => {
+    const { fetch, tokens } = setup()
+    const refused = await mint(fetch, { name: 'reviewer', tier: 'write', approval_grant: true })
+    expect(refused.status).toBe(400)
+    expect(((await refused.json()) as { detail: string }).detail).toMatch(/approval_grant: .*outward token/)
+    expect(await tokens.list()).toEqual([])
+
+    const res = await mint(fetch, { name: 'reviewer', tier: 'outward', approval_grant: true })
+    expect(res.status).toBe(201)
+    const minted = (await res.json()) as MintedMcpToken
+    expect(minted.record.approval_grant).toBe(true)
+    expect(await tokens.approvalGrant(minted.record.id)).toBe(true)
+    // Revoking the token withdraws the grant with it.
+    await tokens.revoke(minted.record.id)
+    expect(await tokens.approvalGrant(minted.record.id)).toBe(false)
   })
 
   it('sets the expiry from expires_in, and reports expired tokens', async () => {
