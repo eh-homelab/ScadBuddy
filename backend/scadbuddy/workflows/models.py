@@ -213,3 +213,17 @@ class TemplateCall(BaseModel):
     timeout_s: float
     #: The job that holds (refs) the blob the call emits.
     job_id: str = ""
+
+
+class MigrateRequest(BaseModel):
+    """`migrate(inputs, from_version)` (§8.2) of ``slug`` at ``revision``."""
+
+    slug: str
+    revision: str | None
+    inputs: dict[str, Any]
+
+
+class MigrateResult(BaseModel):
+    inputs: dict[str, Any]
+    from_version: int
+    to_version: int

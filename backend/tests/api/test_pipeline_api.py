@@ -152,3 +152,34 @@ def test_a_malformed_pipeline_declaration_reaches_the_worker(
         time.sleep(0.05)
     assert job["status"] == "failed", job
     assert "model.json's pipeline is not valid" in str(job["error"])
+
+
+def test_migrate_upgrades_old_inputs(client: TestClient, model: str, paths: DataPaths) -> None:
+    with_pipeline(paths, model)
+    response = client.post(
+        f"/api/v1/models/{model}/inputs/migrate", json={"inputs": {"params": {}, "v": 0}}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "inputs": {"params": {}, "house": {}, "v": 1},
+        "from_version": 0,
+        "to_version": 1,
+    }
+
+
+def test_migrate_refuses_newer_inputs_with_the_reason(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    with_pipeline(paths, model)
+    response = client.post(
+        f"/api/v1/models/{model}/inputs/migrate", json={"inputs": {"params": {}, "v": 9}}
+    )
+    assert response.status_code == 422
+    assert "these inputs are v9" in response.json()["detail"]
+
+
+def test_the_record_carries_the_inputs_version(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    with_pipeline(paths, model)
+    assert client.get(f"/api/v1/models/{model}").json()["inputs_version"] == 1

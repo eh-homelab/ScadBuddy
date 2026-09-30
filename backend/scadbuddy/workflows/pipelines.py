@@ -26,6 +26,8 @@ with workflow.unsafe.imports_passed_through():
         Failure,
         LoadedPipeline,
         LoadRequest,
+        MigrateRequest,
+        MigrateResult,
         OutputRequest,
         PieceOutcome,
         PieceRequest,
@@ -525,3 +527,19 @@ def _output_timeout(req: OutputRequest) -> timedelta:
     store move: each piece and each `Blob` it fetches, and the output it publishes."""
     moves = len(req.parts) + sum(isinstance(v, Blob) for v in req.files.values()) + 1
     return _openscad_timeout() + moves * TRANSFER
+
+
+@workflow.defn(name="MigrateInputs")
+class MigrateInputs:
+    """Saved inputs brought up to the template's `INPUTS_VERSION` (§8.2), on a worker."""
+
+    @workflow.run
+    async def run(self, req: MigrateRequest) -> MigrateResult:
+        result: MigrateResult = await workflow.execute_activity(
+            "migrate_inputs",
+            req,
+            result_type=MigrateResult,
+            start_to_close_timeout=SHORT,
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+        return result

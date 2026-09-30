@@ -108,10 +108,12 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
+from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 from scadbuddy.render.submit import RenderService
+from scadbuddy.workflows.models import MigrateResult
 
 logger = logging.getLogger(__name__)
 
@@ -1338,3 +1340,23 @@ def install_model_handlers(app: FastAPI) -> None:
         return problem_response(
             request, status.HTTP_409_CONFLICT, str(exc), title="Invalid Model Metadata"
         )
+
+
+class MigrateInputsRequest(BaseModel):
+    inputs: dict[str, Any]
+    #: The template revision to migrate for; the live template by default.
+    version: str | None = None
+
+
+@router.post(
+    "/models/{slug}/inputs/migrate", response_model=MigrateResult, summary="Migrate saved inputs"
+)
+async def migrate_inputs(
+    slug: SlugPath, body: MigrateInputsRequest, render: RenderDep, catalogue: CatalogueDep
+) -> MigrateResult:
+    """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
+    require_model(catalogue, slug)  # 404 for an unknown template, as `get_model` does
+    try:
+        return await render.migrate_inputs(slug, body.inputs, version=body.version)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None

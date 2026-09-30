@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ from scadbuddy.workflows.models import (
     Layout,
     LoadedPipeline,
     LoadRequest,
+    MigrateRequest,
+    MigrateResult,
     OutputRequest,
     PackRequest,
     PlateSize,
@@ -44,6 +47,10 @@ from scadbuddy.workflows.models import (
 from scadbuddy.workflows.outputs import build_output
 from scadbuddy.workflows.packing import PackError, shelf_pack
 from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
+
+#: `migrate`'s own bound: under the activity's `SHORT` (60 s), so the subprocess's kill
+#: fires before Temporal's, as `Ctx.activity`'s +30 s does.
+MIGRATE_SECONDS = 30.0
 
 
 def _refuse(message: str) -> ApplicationError:
@@ -79,7 +86,13 @@ class PipelineActivities:
         self._calls: dict[str, asyncio.Lock] = {}
 
     def all(self) -> Sequence[Callable[..., Any]]:
-        return [self.load_pipeline, self.pack, self.write_output, self.run_template_activity]
+        return [
+            self.load_pipeline,
+            self.pack,
+            self.write_output,
+            self.run_template_activity,
+            self.migrate_inputs,
+        ]
 
     async def model_dir(self, slug: str, revision: str | None) -> Path:
         """The template's directory at ``revision``: the live one, or its export."""
@@ -170,6 +183,33 @@ class PipelineActivities:
         model_dir = await self.model_dir(req.slug, req.record.revision)
         return await _heartbeating(
             asyncio.create_task(build_output(req, self.deps, model_dir=model_dir))
+        )
+
+    @activity.defn(name="migrate_inputs")
+    async def migrate_inputs(self, req: MigrateRequest) -> MigrateResult:
+        """The template's `migrate`, in the template process (§8.2): it runs template code,
+        so it runs here on the worker, never in the API (§9)."""
+        d = self.deps
+        model_dir = await self.model_dir(req.slug, req.revision)
+        with tempfile.TemporaryDirectory(prefix="scadbuddy-migrate-") as out:
+            try:
+                migrated = await run_template(
+                    model_dir,
+                    {"mode": "migrate", "inputs": req.inputs},
+                    out=Path(out),
+                    out_key="",
+                    python=d.template_python,
+                    data_dir=d.config.data_dir,
+                    timeout=MIGRATE_SECONDS,
+                )
+            except TemplateError as error:
+                raise ApplicationError(
+                    str(error), type="MigrateError", non_retryable=True
+                ) from None
+        return MigrateResult(
+            inputs=migrated,
+            from_version=int(req.inputs.get("v", 0)),
+            to_version=int(migrated.get("v", 0)),
         )
 
     async def _localize(self, value: Any) -> Any:

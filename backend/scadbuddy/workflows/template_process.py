@@ -150,10 +150,12 @@ async def run_template(
                 _kill_group(process)
                 await process.wait()
                 await _drained(output)
-                name = request.get("name")
-                raise TemplateError(
-                    f"pipeline/activities.py:{name} timed out after {timeout:g}s", output.tail()
-                ) from None
+                what = (
+                    "pipeline/pipeline.py:migrate"
+                    if request.get("mode") == "migrate"
+                    else f"pipeline/activities.py:{request.get('name')}"
+                )
+                raise TemplateError(f"{what} timed out after {timeout:g}s", output.tail()) from None
             except asyncio.CancelledError:
                 _kill_group(process)
                 await process.wait()

@@ -21,23 +21,29 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.render.inputs import inputs_key, legacy_inputs
+from scadbuddy.render.inputs import InputsError, inputs_key, legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
-from scadbuddy.workflows.pipelines import PREVIEW_TRANSFER, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.models import MigrateRequest, MigrateResult
+from scadbuddy.workflows.pipelines import (
+    PREVIEW_TRANSFER,
+    MigrateInputs,
+    RenderPreview,
+    TemplatePipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +261,32 @@ class RenderService:
         )
         png: bytes = await asyncio.wait_for(handle.result(), wait)
         return png
+
+    async def migrate_inputs(
+        self, slug: str, inputs: Mapping[str, Any], *, version: str | None
+    ) -> MigrateResult:
+        """``inputs`` brought up to the template's `INPUTS_VERSION` by its `migrate`, run
+        on a worker (§8.2, §9). The template's refusal is an `InputsError` with its
+        message. On the bambuddy store the worker has no volume, so the latest version
+        is the snapshot of the last commit, as for a render."""
+        revision = version
+        if revision is None and self.snapshots is not None:
+            revision = await self.snapshots.pin(slug, None)
+        try:
+            result: MigrateResult = await self.client.execute_workflow(
+                MigrateInputs.run,
+                MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs)),
+                id=f"migrate-{uuid.uuid4().hex}",
+                task_queue=self.task_queue,
+                execution_timeout=timedelta(seconds=120),
+            )
+        except WorkflowFailureError as error:
+            cause: BaseException | None = error.cause
+            while cause is not None and not isinstance(cause, ApplicationError):
+                cause = cause.__cause__
+            message = cause.message if isinstance(cause, ApplicationError) else str(error)
+            raise InputsError(message) from None
+        return result
 
     def retry_after(self) -> int:
         return max(1, math.ceil(INITIAL_RENDER_ESTIMATE))
