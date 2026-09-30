@@ -90,7 +90,7 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
     await drop()
   })
 
-  async function replica(enabled: boolean): Promise<SessionManager> {
+  async function replica(enabled: boolean, browserAllowedOrigins?: string): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
@@ -101,7 +101,7 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
       paths,
       credential: () => Promise.resolve({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve(values[key] as T) },
-      headlessBrowser: { backendUrl: ui.origin, ...chromium },
+      headlessBrowser: { backendUrl: ui.origin, ...(browserAllowedOrigins ? { browserAllowedOrigins } : {}), ...chromium },
       approvalPollMs: 50,
     })
   }
@@ -142,6 +142,39 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
     const [grant] = await db.sql<{ used: boolean; approval_id: string }[]>`
       SELECT used_at IS NOT NULL AS used, approval_id FROM ai_headless_grants WHERE session_id = ${session.id}`
     expect(grant).toEqual({ used: true, approval_id: required.id })
+  }, 120_000)
+
+  it('asks once per origin per session before opening an allowed origin off the backend (SCADBUDDY_BROWSER_ALLOWED_ORIGINS)', async () => {
+    const nav = (p: string): Reply => ({ toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${other.origin}${p}` } } })
+    fake = await startFakeAnthropic((r) => {
+      const n = toolResults(r).length
+      const second = JSON.stringify(r.body?.messages ?? []).includes('second look')
+      if (!second) return n === 0 ? nav('/one') : n === 1 ? nav('/two') : { text: 'Looked twice.' }
+      return n === 2 ? nav('/three') : { text: 'Looked again.' }
+    })
+
+    const m = await replica(true, other.origin)
+    const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look at the other site' })
+    const events = await m.attach(session.id, agentA, { signal: stop.signal })
+    const seen = await collectUntil(events, (e) => e.event.type === 'approval.required', 60_000)
+    const required = seen.at(-1)!.event
+    if (required.type !== 'approval.required') throw new Error('unreachable')
+    // Parked: nothing reached the other origin before the human decided.
+    expect(other.hits).toEqual([])
+
+    await m.approvals.decide(browser, required.id, true)
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // A later turn of the same session: the origin is remembered, in Postgres.
+    expect(await (await m.send(session.id, agentA, 'second look')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+
+    expect(other.hits.map((h) => h.url)).toEqual(['/one', '/two', '/three'])
+    for (const hit of other.hits) expect(hit.headers[AGENT_ACTOR_HEADER.toLowerCase()]).toBeUndefined()
+    const approvals = await db.sql<{ id: string; tool: string }[]>`
+      SELECT id, tool FROM ai_approvals WHERE session_id = ${session.id}`
+    expect(approvals).toEqual([{ id: required.id, tool: `${TOOL_PREFIX}browser_navigate` }])
+    const origins = await db.sql<{ origin: string; approval_id: string }[]>`
+      SELECT origin, approval_id FROM ai_browser_origins WHERE session_id = ${session.id}`
+    expect(origins).toEqual([{ origin: other.origin, approval_id: required.id }])
   }, 120_000)
 
   it('gives a turn no browser while the setting is off', async () => {

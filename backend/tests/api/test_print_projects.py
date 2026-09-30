@@ -11,7 +11,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -21,11 +21,18 @@ API = f"{BASE}/api/v1"
 def upload_route(file_id: int = 41) -> respx.Route:
     """The folder is a **query parameter** on this route, so the assertions below read
     it off the request URL rather than out of a body."""
+    folder_listing()
     return respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(
             200, json={"id": file_id, "filename": "demo-elan.3mf", "file_type": "3mf"}
         )
     )
+
+
+def folder_listing() -> respx.Route:
+    """What the project folder already holds, which its copy's name must not collide
+    with (#317)."""
+    return respx.get(f"{API}/library/files").mock(return_value=httpx.Response(200, json=[]))
 
 
 @respx.mock
@@ -87,9 +94,7 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )
 
-    body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7)
-    ).json()
+    body = run_print(client, output_id, json=run_request(project_id=7)).json()
     assert body["project_id"] == 7
     assert body["folder_id"] == 9
     # The folder is a query parameter on the upload, not part of the body.
@@ -108,6 +113,7 @@ def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder
     report a folder the file is not in."""
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
+    folder_listing()
     uploaded = respx.post(f"{API}/library/files").mock(
         side_effect=[
             httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
@@ -125,13 +131,11 @@ def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder
     )
 
     # First run, no project: the 3MF lands in the folder from Settings.
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+    run_print(client, output_id, json=run_request())
     assert uploaded.call_count == 1
 
     # Second run, this time filed under a project.
-    body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7)
-    ).json()
+    body = run_print(client, output_id, json=run_request(project_id=7)).json()
     assert (body["library_file_id"], body["folder_id"]) == (42, 9)
     assert uploaded.calls.last.request.url.params["folder_id"] == "9"
     assert not moved.called
@@ -154,7 +158,7 @@ def test_the_queue_route_files_the_item_under_the_project_with_no_race(
     slice_routes()
     queued = queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=7))
+    run_print(client, output_id, json=run_request(project_id=7))
     sent: dict[str, Any] = json.loads(queued.calls.last.request.content)
     assert sent["project_id"] == 7
 

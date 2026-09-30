@@ -8,13 +8,12 @@ import secrets
 import shutil
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
-    contextmanager,
     nullcontext,
     suppress,
 )
@@ -473,13 +472,13 @@ async def plates_thumbnails(
     return rendered, []
 
 
-@contextmanager
-def staged_assets(
+@asynccontextmanager
+async def staged_assets(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
     model_dir: Path,
     store: AssetStore,
-) -> Iterator[dict[str, ParamValue]]:
+) -> AsyncIterator[dict[str, ParamValue]]:
     """``params`` with each uploaded file copied beside the model (#204).
 
     OpenSCAD resolves `import()` and `surface()` relative to the file that calls
@@ -489,11 +488,16 @@ def staged_assets(
     its file parameter against paths still takes it. Each render gets its own
     copies: two renders of one model overlap routinely, and a shared name would be
     deleted from under the one still running.
+
+    The lookup runs in a worker thread, as at every other call site: `use` is a
+    database round trip (#591) that can wait on a row lock, and on the loop that
+    wait would stall every other request and render in the process.
     """
+    found = await asyncio.to_thread(file_assets, schema, params, store, model_dir)
     staged = dict(params)
     created: list[Path] = []
     try:
-        for name, meta in file_assets(schema, params, store, model_dir).items():
+        for name, meta in found.items():
             target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
             shutil.copyfile(store.blob_path(meta), target)
             created.append(target)
@@ -796,11 +800,9 @@ async def render_main(
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
         work.mkdir(parents=True, exist_ok=True)
-        with (
-            staged_assets(schema, params, prepared.scad.parent, assets) as staged,
-            stage("render"),
-        ):
-            return await _render_main(prepared, schema, staged, params, work, config=config)
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+            with stage("render"):
+                return await _render_main(prepared, schema, staged, params, work, config=config)
 
 
 async def render_solids_stage(
@@ -820,7 +822,7 @@ async def render_solids_stage(
     beside the files it names, which is what :func:`finish_piece_stage` reads."""
     async with library_lease(checkouts, holder, prepared.library_path):
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
-        with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
+        async with staged_assets(schema, params, prepared.scad.parent, assets) as staged:
             return await _render_solids(
                 prepared, schema, staged, params, work, output, config=config, stage=stage
             )
@@ -931,7 +933,7 @@ async def render_job(
         work = paths.cache / "render-job" / job.id
         work.mkdir(parents=True, exist_ok=True)
 
-        with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:
+        async with staged_assets(schema, job.params, prepared.scad.parent, assets) as params:
             with stage("render"):
                 output = await _render_main(
                     prepared, schema, params, job.params, work, config=config

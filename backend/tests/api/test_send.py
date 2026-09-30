@@ -18,20 +18,9 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
-from tests.bambuddy.conftest import recording
 
 BASE = "https://bambuddy.test"
 API = f"{BASE}/api/v1"
-
-PRESETS: dict[str, Any] = {
-    "printer_preset": {"source": "cloud", "id": "GM041"},
-    "process_preset": {"source": "cloud", "id": "GP252"},
-    "filament_presets": [
-        {"source": "cloud", "id": "GFSA05_22"},
-        {"source": "cloud", "id": "GFSA00_22"},
-    ],
-    "bed_type": "Textured PEI Plate",
-}
 
 
 def make_output(client: TestClient, slug: str, name: str = "Elan") -> str:
@@ -76,43 +65,15 @@ def upload_route(file_id: int = 41) -> respx.Route:
     )
 
 
-def plate_routes(
-    *,
-    pipeline_id: int | None = None,
-    printer_id: int | None = None,
-    model: str = "H2C",
-    printer_preset: dict[str, str] | None = None,
-) -> None:
-    """Mock what the send path reads to learn which printer's plate to lay out for.
-
-    Registered by every test that configures a pipeline or a printer, because
-    ``upload_output`` re-places the 3MF for that printer before uploading (#105).
-    """
-    respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "pipelines": [
-                    {
-                        "id": pipeline_id,
-                        "name": "keychains",
-                        "target_kind": "printer_class",
-                        "target_model_class": model,
-                        "fanout_strategy": "max_parallel",
-                        "printer_preset": printer_preset,
-                    }
-                ]
-                if pipeline_id is not None
-                else []
-            },
-        )
-    )
+def plate_routes(*, printer_id: int = 1, model: str = "H2C") -> None:
+    """Mock what the send reads to learn which printer's plate to lay out for (#105):
+    the printer list, for the model of the printer set in Settings."""
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(
             200,
             json=[
                 {
-                    "id": printer_id if printer_id is not None else 1,
+                    "id": printer_id,
                     "name": "3DP-31B-598",
                     "model": model,
                     "is_active": True,
@@ -121,6 +82,19 @@ def plate_routes(
             ],
         )
     )
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_links_point_at_the_first_web_url_not_the_api_url(client: TestClient, model: str) -> None:
+    """#775: the API URL may be one only the server reaches (an in-cluster Service)."""
+    configure(client, bambuddy_web_urls="https://bambuddy.sso.test/, https://bambuddy.lan.test")
+    output_id = make_output(client, model)
+    upload_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    assert body["bambuddy_url"] == "https://bambuddy.sso.test/library"
 
 
 # --- #25 library mode ---------------------------------------------------------------
@@ -139,10 +113,9 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["mode"] == "library"
+    assert set(body) == {"library_file_id", "filename", "bambuddy_url", "edit_url"}
     assert body["library_file_id"] == 41
     assert body["bambuddy_url"] == f"{BASE}/library"
-    assert body["queue_item_id"] is None
 
     request = route.calls.last.request
     assert request.url.params["folder_id"] == "2"
@@ -215,211 +188,67 @@ def test_sending_an_unknown_output_is_a_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-# --- #26 queue mode -----------------------------------------------------------------
+# --- #312 the send bar only uploads --------------------------------------------------
 
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_queue_mode_runs_the_configured_pipeline(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4)
+def test_queue_mode_is_refused_and_nothing_is_uploaded(client: TestClient, model: str) -> None:
+    """A stale client still asking to queue gets a 422, not a silent library upload."""
+    configure(client)
     output_id = make_output(client, model)
-    upload_route()
-    run = respx.post(f"{API}/slicer-pipelines/4/run").mock(
-        return_value=httpx.Response(
-            202,
-            json={
-                "id": 12,
-                "pipeline_id": 4,
-                "source_library_file_id": 41,
-                "copies": 3,
-                "status": "queued",
-                "slice_job_id": None,
-                "sliced_library_file_id": None,
-                "eligibility_overridden": False,
-                "created_by": None,
-                "created_at": "2026-09-23T01:00:00Z",
-                "started_at": None,
-                "completed_at": None,
-            },
-        )
-    )
+    upload = upload_route()
 
-    body = client.post(
-        f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 3}
-    ).json()
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2})
 
-    assert body["pipeline_run_id"] == 12
-    assert body["queue_item_id"] is None
-    assert body["bambuddy_url"] == f"{BASE}/queue"
-    assert json.loads(run.calls.last.request.read())["copies"] == 3
-
-    meta = json.loads(
-        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert meta["pipeline_run_id"] == 12
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
-    client: TestClient, model: str
-) -> None:
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4)
-    output_id = make_output(client, model)
-    upload_route()
-    report = {
-        "ok": False,
-        "target_printer_name": "3DP-31B-598",
-        "issues": [
-            {"kind": "filament_type_mismatch", "slot_index": 0, "expected": "PLA", "actual": "PETG"}
-        ],
-    }
-    respx.post(f"{API}/slicer-pipelines/4/run").mock(return_value=httpx.Response(409, json=report))
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 409
-    assert response.headers["content-type"] == "application/problem+json"
-    assert response.json()["bambuddy_body"] == report
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_queue_mode_without_a_pipeline_slices_then_enqueues(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    configure(client, printer_id=1, **PRESETS)
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    slice_route = respx.post(f"{API}/library/files/41/slice").mock(
-        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
-    )
-    respx.get(f"{API}/slice-jobs/9").mock(
-        side_effect=[
-            httpx.Response(200, json={"id": 9, "status": "running"}),
-            httpx.Response(
-                200,
-                json={"id": 9, "status": "completed", "result": {"library_file_id": 52}},
-            ),
-        ]
-    )
-    queue = respx.post(f"{API}/queue/").mock(
-        return_value=httpx.Response(200, json=recording("queue-item.json"))
-    )
-
-    body = client.post(
-        f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2}
-    ).json()
-
-    assert body["queue_item_id"] == 9
-    assert body["pipeline_run_id"] is None
-    assert body["bambuddy_url"] == f"{BASE}/queue"
-
-    sliced = json.loads(slice_route.calls.last.request.read())
-    # The output's colours are the extruder order, so they are the slot colours.
-    assert sliced["filament_colours"] == ["#FF0000"]
-    assert sliced["bed_type"] == "Textured PEI Plate"
-    assert sliced["plate"] == 1
-
-    queued = json.loads(queue.calls.last.request.read())
-    assert queued["library_file_id"] == 52  # the SLICED file, not the uploaded one
-    assert queued["printer_id"] == 1
-    assert queued["quantity"] == 2
-
-    meta = json.loads(
-        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert meta["queue_item_id"] == 9
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model: str) -> None:
-    configure(client, printer_id=1, **PRESETS)
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    respx.post(f"{API}/library/files/41/slice").mock(
-        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
-    )
-    respx.get(f"{API}/slice-jobs/9").mock(
-        return_value=httpx.Response(
-            200, json={"id": 9, "status": "failed", "error": "unprintable geometry"}
-        )
-    )
-    queue = respx.post(f"{API}/queue/")
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 502
-    assert "unprintable geometry" in response.json()["detail"]
-    assert not queue.called
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
-    client: TestClient, model: str
-) -> None:
-    configure(client, printer_id=1)
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 409
-    assert "presets" in response.json()["detail"]
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_queue_mode_with_no_printer_and_no_pipeline_says_so(client: TestClient, model: str) -> None:
-    configure(client, **PRESETS)
-    output_id = make_output(client, model)
-    upload_route()
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 409
-    assert "printer" in response.json()["detail"]
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_more_colours_than_filament_slots_is_refused_before_slicing(
-    client: TestClient, model: str
-) -> None:
-    configure(
-        client,
-        printer_id=1,
-        printer_preset=PRESETS["printer_preset"],
-        process_preset=PRESETS["process_preset"],
-        filament_presets=[],
-    )
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    sliced = respx.post(f"{API}/library/files/41/slice")
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 409
-    assert not sliced.called
-
-
-@pytest.mark.parametrize("copies", [0, 1001])
-def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
-    output_id = make_output(client, model)
-    response = client.post(
-        f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": copies}
-    )
     assert response.status_code == 422
+    assert not upload.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_an_old_clients_extra_fields_are_ignored(client: TestClient, model: str) -> None:
+    """The dialog used to send ``options`` with every library send; that still uploads."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+
+    response = client.post(
+        f"/api/v1/outputs/{output_id}/send",
+        json={"mode": "library", "options": {"timelapse": False}},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_stored_pipeline_is_never_read_by_the_send(client: TestClient, model: str) -> None:
+    """``pipeline_id`` is gone from Settings (#312), so a client that still sends one
+    changes nothing: the plate is the Settings printer's, and no ``/slicer-pipelines/``
+    route is mocked, so reading one would fail this test."""
+    configure(client, pipeline_id=4, printer_id=1)
+    plate_routes(printer_id=1, model="H2C")
+    output_id = make_output(client, model)
+    upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+    assert all("slicer-pipelines" not in str(call.request.url) for call in respx.calls)
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_send_starts_no_print(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert client.get(f"/api/v1/print/outputs/{output_id}/progress").json() is None
+    record = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert record["queue_item_id"] is None
+    assert record["print_route"] is None
 
 
 # --- #105 the plate follows the target printer --------------------------------------
@@ -427,38 +256,18 @@ def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_the_upload_is_laid_out_for_the_target_printers_plate(
+def test_the_upload_is_laid_out_for_the_settings_printers_plate(
     client: TestClient, model: str
 ) -> None:
     """An H2C reaches x 25..325, so its centre is 175,160 — not the 256-plate's 128,128."""
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4, model="H2C")
+    configure(client, printer_id=1)
+    plate_routes(printer_id=1, model="H2C")
     output_id = make_output(client, model)
     upload = upload_route()
-    respx.post(f"{API}/slicer-pipelines/4/run").mock(
-        return_value=httpx.Response(
-            202,
-            json={
-                "id": 12,
-                "pipeline_id": 4,
-                "source_library_file_id": 41,
-                "copies": 1,
-                "status": "queued",
-                "slice_job_id": None,
-                "sliced_library_file_id": None,
-                "eligibility_overridden": False,
-                "created_by": None,
-                "created_at": "2026-09-23T01:00:00Z",
-                "started_at": None,
-                "completed_at": None,
-            },
-        )
-    )
 
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).status_code
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
 
-    uploaded = _uploaded_3mf(upload)
-    with zipfile.ZipFile(io.BytesIO(uploaded)) as archive:
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
         root = ET.fromstring(archive.read("3D/3dmodel.model"))
     item = root.find(".//{*}item")
     assert item is not None
@@ -510,16 +319,7 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     assert not upload.called
 
 
-# --- #126 the 3MF states the target pipeline's nozzle ------------------------------
-
-#: In the recorded catalogue: "Bambu Lab A1 0.2 nozzle".
-A1_02_NOZZLE = {"source": "cloud", "id": "GM029"}
-
-
-def presets_route(response: httpx.Response | None = None) -> respx.Route:
-    return respx.get(f"{API}/slicer/presets").mock(
-        return_value=response or httpx.Response(200, json=recording("slicer-presets.json"))
-    )
+# --- #126 the send bar states no nozzle; the print run does ------------------------
 
 
 def _uploaded_nozzle(route: respx.Route) -> list[str]:
@@ -531,87 +331,11 @@ def _uploaded_nozzle(route: respx.Route) -> list[str]:
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, model: str) -> None:
-    """A 0.2-nozzle pipeline's file must not tell someone at the printer it is 0.4."""
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
-    presets_route()
-    output_id = make_output(client, model)
-    upload = upload_route()
-
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
-
-    assert _uploaded_nozzle(upload) == ["0.2"]
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
-    client: TestClient, model: str
-) -> None:
-    """A printer alone names no preset, so there is no nozzle to state — and no reason
-    to read the preset catalogue at all."""
+def test_the_send_bar_upload_keeps_the_placeholder_nozzle(client: TestClient, model: str) -> None:
+    """The send bar chooses no nozzle, so the 3MF keeps the placeholder and the preset
+    catalogue is never read (#126 now applies to the print run only)."""
     configure(client, printer_id=1)
     plate_routes(printer_id=1, model="A1")
-    presets = presets_route()
-    output_id = make_output(client, model)
-    upload = upload_route()
-
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
-
-    assert _uploaded_nozzle(upload) == ["0.4"]
-    assert not presets.called
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
-    client: TestClient, model: str
-) -> None:
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4, model="A1", printer_preset={"source": "cloud", "id": "GM999"})
-    presets_route()
-    output_id = make_output(client, model)
-    upload = upload_route()
-
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
-
-    assert _uploaded_nozzle(upload) == ["0.4"]
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
-    client: TestClient, model: str
-) -> None:
-    """The nozzle is reported, never sliced with, so it is not worth failing a send for."""
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
-    presets_route(httpx.Response(500, json={"detail": "boom"}))
-    output_id = make_output(client, model)
-    upload = upload_route()
-
-    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
-
-    assert _uploaded_nozzle(upload) == ["0.4"]
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        httpx.Response(200, text="<html>not json</html>"),
-        httpx.Response(200, json={"cloud": "not a tier"}),
-    ],
-    ids=["not-json", "wrong-shape"],
-)
-@pytest.mark.requires_postgres
-@respx.mock
-def test_a_malformed_preset_catalogue_does_not_fail_the_send(
-    client: TestClient, model: str, response: httpx.Response
-) -> None:
-    configure(client, pipeline_id=4)
-    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
-    presets_route(response)
     output_id = make_output(client, model)
     upload = upload_route()
 
@@ -642,9 +366,6 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
     in Bambuddy: the button would report 409 and the deep link would 404. (A delete
     that fails *after* the new upload is covered in ``test_library_copies.py``.)
     """
-    respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(200, json={"pipelines": []})
-    )
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(
             200,
@@ -739,75 +460,42 @@ def test_nothing_is_attached_when_no_public_url_is_configured(
     assert not annotate.called
 
 
-def pipeline_run_route(run_id: int = 12) -> respx.Route:
-    return respx.post(f"{API}/slicer-pipelines/4/run").mock(
-        return_value=httpx.Response(
-            202,
-            json={
-                "id": run_id,
-                "pipeline_id": 4,
-                "source_library_file_id": 41,
-                "copies": 1,
-                "status": "queued",
-                "slice_job_id": None,
-                "sliced_library_file_id": None,
-                "eligibility_overridden": False,
-                "created_by": None,
-                "created_at": "2026-09-23T01:00:00Z",
-                "started_at": None,
-                "completed_at": None,
-            },
-        )
-    )
-
-
 @pytest.mark.requires_postgres
 @respx.mock
-def test_a_failed_annotation_still_queues_the_print(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """The note is cosmetic; queueing the print is the point of the request."""
-    configure(client, pipeline_id=4, public_url="https://scad.test")
-    plate_routes(pipeline_id=4)
+def test_a_failed_annotation_still_returns_the_upload(client: TestClient, model: str) -> None:
+    """The note is cosmetic; the upload is the point of the request."""
+    configure(client, public_url="https://scad.test")
     output_id = make_output(client, model)
-    upload_route()
-    run = pipeline_run_route()
+    upload = upload_route()
     annotate_route()  # the read succeeds; the write is what fails
     annotate = respx.put(f"{API}/library/files/41").mock(
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
 
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["pipeline_run_id"] == 12
+    assert body["library_file_id"] == 41
     # Nothing was attached, so the result does not claim a link.
     assert body["edit_url"] is None
     assert annotate.called
-    assert run.called
-
-    meta = json.loads(
-        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert meta["pipeline_run_id"] == 12
+    assert upload.called
 
 
 @pytest.mark.requires_postgres
 @respx.mock
-def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
-    """A slow or broken annotate must not sit in front of the pipeline run."""
-    configure(client, pipeline_id=4, public_url="https://scad.test")
-    plate_routes(pipeline_id=4)
+def test_the_annotation_runs_after_the_upload(client: TestClient, model: str) -> None:
+    """A slow or broken annotate must not sit in front of the upload."""
+    configure(client, public_url="https://scad.test")
     output_id = make_output(client, model)
     upload_route()
-    pipeline_run_route()
     annotate_route()
 
-    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
     order = [(call.request.method, call.request.url.path) for call in respx.calls]
-    assert order.index(("POST", "/api/v1/slicer-pipelines/4/run")) < order.index(
+    assert order.index(("POST", "/api/v1/library/files")) < order.index(
         ("PUT", "/api/v1/library/files/41")
     )
 
@@ -827,85 +515,6 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
     assert json.loads(annotate.calls.last.request.content) == {
         "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
     }
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_the_slice_and_queue_branch_annotates_both_files_last(
-    client: TestClient, model: str
-) -> None:
-    """The third send path reaches attach_edit_link too, and only after enqueueing.
-
-    Slicing leaves a second library entry, and it is that one the queue references —
-    so it is the one a reader opens from the queue, and it needs the link as much as
-    the 3MF ScadBuddy uploaded.
-    """
-    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    respx.post(f"{API}/library/files/41/slice").mock(
-        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
-    )
-    respx.get(f"{API}/slice-jobs/9").mock(
-        return_value=httpx.Response(
-            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
-        )
-    )
-    respx.post(f"{API}/queue/").mock(
-        return_value=httpx.Response(200, json=recording("queue-item.json"))
-    )
-    annotate = annotate_route()
-    annotate_sliced = annotate_route(52)
-
-    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).json()
-
-    assert body["queue_item_id"] == 9
-    assert body["edit_url"] == f"https://scad.test/edit/{output_id}"
-    assert annotate.called
-    assert annotate_sliced.called
-    assert json.loads(annotate_sliced.calls.last.request.content) == {
-        "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
-    }
-
-    order = [(call.request.method, call.request.url.path) for call in respx.calls]
-    assert order.index(("POST", "/api/v1/queue/")) < order.index(
-        ("PUT", "/api/v1/library/files/41")
-    )
-    assert order.index(("POST", "/api/v1/queue/")) < order.index(
-        ("PUT", "/api/v1/library/files/52")
-    )
-
-
-@pytest.mark.requires_postgres
-@respx.mock
-def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
-    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
-    plate_routes(printer_id=1)
-    output_id = make_output(client, model)
-    upload_route()
-    respx.post(f"{API}/library/files/41/slice").mock(
-        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
-    )
-    respx.get(f"{API}/slice-jobs/9").mock(
-        return_value=httpx.Response(
-            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
-        )
-    )
-    respx.post(f"{API}/queue/").mock(
-        return_value=httpx.Response(200, json=recording("queue-item.json"))
-    )
-    # Both library entries refuse the note; the queued print is unaffected either way.
-    annotate_route()
-    annotate_route(52)
-    respx.put(f"{API}/library/files/41").mock(return_value=httpx.Response(502))
-    respx.put(f"{API}/library/files/52").mock(return_value=httpx.Response(502))
-
-    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
-
-    assert response.status_code == 200
-    assert response.json()["queue_item_id"] == 9
-    assert response.json()["edit_url"] is None
 
 
 @pytest.mark.requires_postgres

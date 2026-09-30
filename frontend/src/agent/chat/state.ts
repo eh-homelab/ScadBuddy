@@ -28,12 +28,26 @@ export type FeedItem =
       summary: string
       /**
        * `pending` until the user decides; `sent` once the decision left the panel but
-       * the server has not confirmed it; `approved`/`denied` from `approval.resolved`.
+       * the server has not confirmed it; `queued` when it is waiting for the connection
+       * to come back (sent first on reconnect); `approved`/`denied` from
+       * `approval.resolved`, the server's confirmation.
        */
-      state: 'pending' | 'sent' | 'approved' | 'denied'
+      state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
+  /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
+  | {
+      kind: 'memory'
+      id: string
+      action: 'recall' | 'retain'
+      bank: string
+      outcome: 'ok' | 'timeout' | 'error'
+      count?: number
+      detail?: string
+      input?: string
+      memories?: string[]
+    }
 
 export interface SessionState {
   id: string
@@ -43,6 +57,22 @@ export interface SessionState {
   status: SessionStatus
   items: FeedItem[]
   result?: { costUsd?: number; turns: number }
+  /**
+   * #790 — what the session has spent and may spend in all, for the header's meter.
+   * Absent until an event carries it (sessions started before #790 have none in their log).
+   */
+  budget?: { costUsd: number; budgetUsd: number }
+  /**
+   * The budget ran out: a turn stopped at it, or a send was refused because of it. The
+   * panel shows one message and its actions instead of the agent's two errors.
+   */
+  budgetSpent?: boolean
+  /**
+   * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
+   * Their decision goes out right after the attach, so the replayed card shows `sent`,
+   * not live buttons, until `approval.resolved`.
+   */
+  queuedDecisions?: string[]
 }
 
 export interface ChatState {
@@ -60,11 +90,16 @@ export interface ChatState {
 export type ChatAction =
   | { type: 'server'; event: ServerEvent }
   | { type: 'connected' }
-  | { type: 'disconnected'; reason?: string }
+  /** `keepStart`: the first turn awaiting its session is queued for the reconnect, not lost. */
+  | { type: 'disconnected'; reason?: string; keepStart?: boolean }
   | { type: 'protocol-error'; message: string }
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
-  | { type: 'decided'; sessionId: string; approvalId: string }
+  | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
+  /** The transport refused a message (its queue is full): nothing was sent. */
+  | { type: 'not-sent'; message: string }
+  /** The transport holds a message until the connection is back; it will be sent. */
+  | { type: 'queued'; message: string }
 
 export const initialChatState: ChatState = {
   sessions: {},
@@ -113,18 +148,49 @@ function push(session: SessionState, item: FeedItem): SessionState {
 
 function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
-    case 'sessions.snapshot':
-      return event.sessions.reduce(upsertSummary, state)
+    case 'sessions.snapshot': {
+      // Sent on connect and again whenever the list changes (the agent re-reads it
+      // while the socket is open), so a session started elsewhere shows up live and
+      // one deleted elsewhere goes. The list replaces the panel's: what the snapshot
+      // leaves out is dropped, except the open session, and sessions already known
+      // keep their transcripts. The open session's live events are newer than a
+      // list read before them, so its status is not taken from the list.
+      const listed = new Set(event.sessions.map((s) => s.sessionId))
+      const sessions: Record<string, SessionState> = {}
+      for (const s of event.sessions) {
+        const existing = state.sessions[s.sessionId]
+        sessions[s.sessionId] = existing
+          ? {
+              ...existing,
+              title: s.title,
+              origin: s.origin,
+              owner: s.owner,
+              status: s.sessionId === state.activeId ? existing.status : s.status,
+            }
+          : blankSession({ id: s.sessionId, ...s })
+      }
+      const active = state.activeId ? state.sessions[state.activeId] : undefined
+      if (active && !listed.has(active.id)) sessions[active.id] = active
+      // Sessions new to the panel go first, newest first as the server lists them;
+      // the rest keep their place.
+      const fresh = event.sessions.map((s) => s.sessionId).filter((id) => !(id in state.sessions))
+      const kept = state.order.filter((id) => id in sessions)
+      return { ...state, sessions, order: [...fresh, ...kept] }
+    }
 
     case 'session.started': {
       const known = event.sessionId in state.sessions
-      const next = upsertSummary(state, {
+      const summarised = upsertSummary(state, {
         sessionId: event.sessionId,
         title: event.title ?? 'New chat',
         origin: event.origin,
         owner: event.owner,
         status: 'running',
       })
+      const next =
+        event.budgetUsd === undefined
+          ? summarised
+          : patchSession(summarised, event.sessionId, (s) => withBudget(s, 0, event.budgetUsd!))
       // Newest first (a replay on attach keeps its place); the panel's own new chat
       // becomes the active one.
       const order = known
@@ -196,7 +262,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           id: event.id,
           tool: event.tool,
           summary: event.summary,
-          state: 'pending',
+          state: s.queuedDecisions?.includes(event.id) ? 'sent' : 'pending',
         }),
       )
 
@@ -221,19 +287,73 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       })
 
     case 'session.result':
-      return patchSession(state, event.sessionId, (s) => ({
-        ...s,
-        result: { costUsd: event.costUsd, turns: event.turns },
-      }))
+      return patchSession(state, event.sessionId, (s) => {
+        const next = { ...s, result: { costUsd: event.costUsd, turns: event.turns } }
+        return event.budgetUsd === undefined || event.costUsd === undefined
+          ? next
+          : withBudget(next, event.costUsd, event.budgetUsd)
+      })
+
+    case 'session.budget':
+      return patchSession(state, event.sessionId, (s) => withBudget(s, event.costUsd, event.budgetUsd))
+
+    case 'memory':
+      // Appended where it arrives: a retain that finished after its turn lands after
+      // the turn's replies, in the same place on a replay (the event log's order).
+      return patchSession(state, event.sessionId, (s) =>
+        push(s, {
+          kind: 'memory',
+          id: `memory-${s.items.length}`,
+          action: event.action,
+          bank: event.bank,
+          outcome: event.outcome,
+          ...(event.count === undefined ? {} : { count: event.count }),
+          ...(event.detail === undefined ? {} : { detail: event.detail }),
+          ...(event.input === undefined ? {} : { input: event.input }),
+          ...(event.memories === undefined ? {} : { memories: event.memories }),
+        }),
+      )
 
     case 'error': {
+      if (event.sessionId && BUDGET_CODES.has(event.code ?? '') && state.sessions[event.sessionId]) {
+        // Shown once, in the panel's words (`budgetSpent`), not as the agent's text.
+        return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
+      }
+      const message = errorMessage(event.code, event.message)
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(s, { kind: 'error', id: `error-${s.items.length}`, message: event.message }),
+          push(s, { kind: 'error', id: `error-${s.items.length}`, message }),
         )
       }
-      return { ...state, notice: event.message, awaitingStart: false }
+      return { ...state, notice: message, awaitingStart: false }
     }
+  }
+}
+
+/**
+ * The two ways the agent says a session's budget ran out: a turn stopped at it (the
+ * SDK's result subtype), or a send was refused because of it (agent `manager.ts`).
+ */
+const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
+
+/** New budget numbers; the session is spent exactly when they say so. */
+function withBudget(s: SessionState, costUsd: number, budgetUsd: number): SessionState {
+  return { ...s, budget: { costUsd, budgetUsd }, budgetSpent: costUsd >= budgetUsd }
+}
+
+/**
+ * The words for an agent `error` frame. The connection limits (agent
+ * `src/routes/chat.ts`) get the panel's own wording, since what was refused is the
+ * message the user just sent and they need to know to send it again.
+ */
+function errorMessage(code: string | undefined, message: string): string {
+  switch (code) {
+    case 'busy':
+      return 'The assistant is still working through the messages already sent, so this one was not taken. Wait a moment, then send it again.'
+    case 'rate_limited':
+      return 'Too many new chats started in a short time, so this one was not started. Wait a minute, then send it again.'
+    default:
+      return message
   }
 }
 
@@ -247,7 +367,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return {
         ...state,
         connected: false,
-        awaitingStart: false,
+        awaitingStart: action.keepStart ? state.awaitingStart : false,
         notice: action.reason ?? 'Lost the connection to the assistant.',
       }
     case 'protocol-error':
@@ -259,14 +379,25 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Attaching replays the transcript from the start (protocol: `session.attach`),
       // so the feed is rebuilt from the replay rather than appended to.
       return action.sessionId
-        ? patchSession(next, action.sessionId, (s) => ({ ...s, items: [] }))
+        ? patchSession(next, action.sessionId, (s) => ({
+            ...s,
+            items: [],
+            // Replayed from the log; the numbers stay for a log that has none.
+            budgetSpent: false,
+            queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
+          }))
         : next
     }
+    case 'not-sent':
+      return { ...state, awaitingStart: false, notice: action.message }
+    case 'queued':
+      // Still awaiting its session's start, if it starts one: the message goes out on reconnect.
+      return { ...state, notice: action.message }
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
           i.kind === 'approval' && i.id === action.approvalId && i.state === 'pending'
-            ? { ...i, state: 'sent' }
+            ? { ...i, state: action.queued ? 'queued' : 'sent' }
             : i,
         ),
       )
@@ -277,6 +408,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 export function isBusy(session: SessionState | undefined): boolean {
   return session?.status === 'running' || session?.status === 'waiting_approval'
 }
+
+/** How much of its budget the session has spent, 0 to 1 (and past 1 once over); undefined without one. */
+export function budgetUsed(session: SessionState | undefined): number | undefined {
+  const budget = session?.budget
+  return budget ? budget.costUsd / budget.budgetUsd : undefined
+}
+
+/** The share of the budget at which the header warns the chat is close to it. */
+export const BUDGET_WARNING = 0.8
 
 /** The panel's own principal: sessions owned by anyone else show "controlled by …". */
 export function isOwnedByBrowser(session: SessionState): boolean {

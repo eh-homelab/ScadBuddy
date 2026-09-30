@@ -26,12 +26,14 @@ from scadbuddy.core.events import (
     ModelEvent,
     OutputEvent,
     PrintEvent,
+    SessionBusEvent,
     SettingsChanged,
     Subscription,
 )
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 from scadbuddy.main import create_app
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
@@ -239,6 +241,31 @@ def test_any_other_origin_is_refused(client: TestClient, origin: str) -> None:
     assert refused.value.code == 1008
 
 
+def test_an_origin_in_allowed_origins_is_accepted_beside_the_public_url(
+    app: FastAPI, client: TestClient
+) -> None:
+    """One deployment answering on two hostnames (a LAN host and an SSO proxy, say)
+    keeps live updates on both: the other name goes in ``SCADBUDDY_ALLOWED_ORIGINS``."""
+    state = getattr(app.state, STATE_ATTR)
+    state.settings = state.settings.model_copy(
+        update={"allowed_origins": " https://scad.internal.example , https://scad.lan:8443"}
+    )
+    client.put("/api/v1/settings", json={"public_url": "https://scad.example.com"})
+    for origin in (
+        "https://scad.example.com",
+        "https://scad.internal.example",
+        "https://scad.lan:8443",
+    ):
+        with client.websocket_connect(WS, headers={"origin": origin}) as ws:
+            subscribe(ws, "models")
+    with (
+        pytest.raises(WebSocketDisconnect) as refused,
+        client.websocket_connect(WS, headers={"origin": "https://scad.lan"}),
+    ):
+        pass
+    assert refused.value.code == 1008
+
+
 @pytest.mark.parametrize(
     ("origin", "public_url", "allowed"),
     [
@@ -255,6 +282,57 @@ def test_any_other_origin_is_refused(client: TestClient, origin: str) -> None:
 )
 def test_origin_allowed(origin: str | None, public_url: str | None, allowed: bool) -> None:
     assert realtime.origin_allowed(origin, public_url) is allowed
+
+
+@pytest.mark.parametrize(
+    ("origin", "public_url", "allowed_origins", "allowed"),
+    [
+        ("https://scad.internal.example", None, ["https://scad.internal.example"], True),
+        (
+            "https://scad.internal.example",
+            "https://scad.example.com",
+            ["https://scad.internal.example/"],
+            True,
+        ),
+        (
+            "https://scad.example.com",
+            "https://scad.example.com",
+            ["https://scad.internal.example"],
+            True,
+        ),
+        (
+            "http://scad.lan:8080",
+            None,
+            ["https://scad.internal.example", "http://SCAD.lan:8080"],
+            True,
+        ),
+        ("https://scad.lan", None, ["http://scad.lan"], False),
+        ("https://evil.test", "https://scad.example.com", ["https://scad.internal.example"], False),
+        ("https://scad.internal.example", None, ["not a url"], False),
+    ],
+)
+def test_origin_allowed_with_extra_origins(
+    origin: str, public_url: str | None, allowed_origins: list[str], allowed: bool
+) -> None:
+    assert realtime.origin_allowed(origin, public_url, allowed_origins) is allowed
+
+
+def test_allowed_origins_env_is_split_on_commas() -> None:
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        allowed_origins=" https://scad.internal.example ,, https://scad.lan:8443 , ",
+    )
+    assert settings.allowed_origin_list == [
+        "https://scad.internal.example",
+        "https://scad.lan:8443",
+    ]
+    assert (
+        Settings(
+            database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ).allowed_origin_list
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -278,6 +356,7 @@ def test_origin_allowed(origin: str | None, public_url: str | None, allowed: boo
             ),
             ["analyzers"],
         ),
+        (SessionBusEvent(kind="session.message", session_id="s", seq=3), []),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:

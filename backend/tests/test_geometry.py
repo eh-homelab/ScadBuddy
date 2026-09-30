@@ -119,18 +119,25 @@ def test_cubes_sharing_an_edge_are_non_manifold_there() -> None:
 
 def test_an_overhanging_slab_fills_every_bucket() -> None:
     # A 10 mm pillar with a 30 x 10 x 2 slab on top, overhanging 10 mm each side.
+    # Built from three 10 mm segments rather than one box so the middle segment's
+    # triangles sit entirely over the pillar and the outer two entirely off it --
+    # a single 30 mm box's bottom is just two triangles spanning the whole length,
+    # too coarse for the support test below to resolve per-region.
     pillar = _cube()
-    slab = trimesh.creation.box(extents=(30, 10, 2))
-    slab.apply_translation((5, 5, 11))
+    segments = [trimesh.creation.box(extents=(10, 10, 2)) for _ in range(3)]
+    for segment, x in zip(segments, (-5, 5, 15), strict=True):
+        segment.apply_translation((x, 5, 11))
+    slab = cast(trimesh.Trimesh, trimesh.util.concatenate(segments))
     model = [_part(pillar, "#FF0000", 1), _part(slab, "#0000FF", 2)]
 
     analysis = analyze_geometry(model)
 
-    # The slab's whole underside is a 90 degree ceiling (the middle rests on the
-    # pillar, which this measurement does not know), so every bucket holds it.
+    # The slab's whole underside is a 90 degree ceiling, but the 10x10 mm middle
+    # rests flush on the pillar -- support, not overhang (#756) -- so only the
+    # 10 mm overhang on each side (100 mm^2 apiece) fills every bucket.
     for angle in (45, 60, 75):
         bucket = _bucket(analysis, angle)
-        assert bucket.area_mm2 == pytest.approx(300.0)
+        assert bucket.area_mm2 == pytest.approx(200.0)
         assert bucket.bbox is not None
         assert bucket.bbox.min[2] == pytest.approx(10.0)
     assert analysis.bed_contact_area_mm2 == pytest.approx(100.0)
@@ -163,6 +170,50 @@ def test_overhang_buckets_follow_the_angle_below_horizontal() -> None:
     # It touches the bed only along one edge, so there is no contact area.
     assert analysis.bed_contact_area_mm2 == 0
     assert analysis.height_to_base_ratio is None
+
+
+def test_a_part_resting_on_another_part_is_not_reported_as_overhang() -> None:
+    # #756: a second part stacked flush on a base, z 0..4 then 4..6.8 -- the
+    # keychain's letters sitting on its base plate -- is supported by the part
+    # below, not overhanging air.
+    base = trimesh.creation.box(extents=(10, 10, 4))
+    base.apply_translation((5, 5, 2))
+    top = trimesh.creation.box(extents=(10, 10, 2.8))
+    top.apply_translation((5, 5, 4 + 2.8 / 2))
+    model = [_part(base, "#FF0000", 1), _part(top, "#0000FF", 2)]
+
+    analysis = analyze_geometry(model)
+
+    assert all(bucket.area_mm2 == 0 and bucket.bbox is None for bucket in analysis.overhangs)
+
+
+def test_a_slab_five_mm_above_a_pillar_still_overhangs() -> None:
+    # A true overhang must keep reporting even with the support test in place: the
+    # slab floats 5 mm clear of the pillar beneath it -- well past BED_TOLERANCE_MM
+    # -- so nothing actually supports its underside.
+    pillar = trimesh.creation.box(extents=(2, 2, 5))
+    pillar.apply_translation((5, 5, 2.5))
+    slab = trimesh.creation.box(extents=(10, 10, 2))
+    slab.apply_translation((5, 5, 11))  # pillar top at z=5, slab bottom at z=10
+    model = [_part(pillar, "#FF0000", 1), _part(slab, "#0000FF", 2)]
+
+    analysis = analyze_geometry(model)
+
+    assert _bucket(analysis, 60).area_mm2 == pytest.approx(100.0)
+
+
+def test_a_smaller_part_fully_inside_its_base_is_not_overhang() -> None:
+    # Mirrors the keychain shape from #756: a raised part whose footprint sits
+    # entirely inside the part beneath it, so nothing pokes out over open air.
+    base = trimesh.creation.box(extents=(60, 25, 4))
+    base.apply_translation((30, 12.5, 2))
+    raised = trimesh.creation.box(extents=(40, 10, 2.8))
+    raised.apply_translation((30, 12.5, 4 + 2.8 / 2))
+    model = [_part(base, "#0047BB", 1), _part(raised, "#FF1493", 2)]
+
+    analysis = analyze_geometry(model)
+
+    assert all(bucket.area_mm2 == 0 and bucket.bbox is None for bucket in analysis.overhangs)
 
 
 def test_split_parts_are_not_edge_checked() -> None:
