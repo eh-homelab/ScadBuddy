@@ -32,7 +32,11 @@ from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
-from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
+from scadbuddy.render.jobs import (
+    INITIAL_RENDER_ESTIMATE,
+    SnapshotUnavailableError,
+    prune_revision_exports,
+)
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
@@ -231,6 +235,12 @@ class RenderService:
             # The bambuddy store: the worker has no volume, so it renders the snapshot
             # of the last commit (as `submit`), and may first bring it and its fonts in.
             revision = await self.snapshots.pin(slug, None)
+            if revision is None:
+                # Started without one, the worker would look for a live source it has not got.
+                raise SnapshotUnavailableError(
+                    f"no commit of {slug} to snapshot for its preview: the API has no git"
+                    " history, or the template was never committed"
+                )
             wait += PREVIEW_TRANSFER.total_seconds()
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(

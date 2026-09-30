@@ -27,6 +27,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
+from scadbuddy.render.jobs import SnapshotUnavailableError
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
@@ -349,6 +350,37 @@ async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_work
     assert png == PNG + SLUG.encode()
     assert pinning.pinned == [(SLUG, None)]
     assert fake.revisions == ["b" * 40]
+
+
+class _NoCommit(_Pinning):
+    """`SnapshotStore.pin` with no history, or a template with no commit yet."""
+
+    async def pin(self, slug: str, revision: str | None) -> str | None:
+        self.pinned.append((slug, revision))
+        return None
+
+
+async def test_a_preview_on_the_bambuddy_store_with_no_commit_to_pin_is_refused(
+    make_service: ServiceFactory,
+) -> None:
+    """The worker has no live source to fall back to: a clear error, and no run."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        service.snapshots = _NoCommit()  # type: ignore[assignment]
+        fake = FakePreview()
+        fake.release.set()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            with pytest.raises(SnapshotUnavailableError, match=SLUG):
+                await service.render_preview(SLUG, 30.0)
+        await service.aclose()
+
+    assert fake.calls == 0
 
 
 async def test_a_preview_past_its_timeout_stops_waiting_and_leaves_the_shared_run(
