@@ -236,7 +236,7 @@ async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
 @router.post(
     "/outputs/{output_id}/check",
     response_model=PrintCheck,
-    summary="What the nozzles make of the dialog's choices, before Print",
+    summary="What the run would refuse for the dialog's choices, before Print",
 )
 async def post_check(
     output_id: OutputIdPath,
@@ -245,9 +245,10 @@ async def post_check(
     uploads: UploadsDep,
     store: SettingsStoreDep,
 ) -> PrintCheck:
-    """The run's own nozzle verdict for the body the run would take (#755), so the
-    dialog can say before Print what the run would refuse. ``errors`` are exactly the
-    run's 422 for the nozzles; ``warnings`` the advisories it would carry back.
+    """The run's own pre-upload refusals for the body the run would take (#755, #760), so
+    the dialog can say before Print what the run would refuse. ``errors`` is exactly the
+    run's 422 for the plates, printer, choices or nozzles; ``warnings`` the nozzle
+    advisories it would carry back.
 
     Nothing is uploaded, sliced or queued; the used slots are read from the local 3MF.
     """
