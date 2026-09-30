@@ -23,6 +23,9 @@ import {
 } from './headlessBrowser.js'
 import {
   type ApprovalGate,
+  type ApprovalRequest,
+  type ApprovalVerdict,
+  decide,
   type DecisionListener,
   type InputGuard,
   makeCanUseTool,
@@ -229,6 +232,19 @@ export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>)
   return (toolName) => plugins(toolName) ?? base(toolName)
 }
 
+/** `promise`'s value, or undefined once `signal` aborts first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) return Promise.resolve(undefined)
+  return new Promise((resolve) => {
+    const onAbort = () => resolve(undefined)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void promise.then((value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(value)
+    })
+  })
+}
+
 function linkedController(signal: AbortSignal | undefined): AbortController {
   const controller = new AbortController()
   if (signal) {
@@ -249,6 +265,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
+  let gate = run.approvalGate
   let browserPlugin: string | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
@@ -263,7 +280,11 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       // for the session: recorded durably first (a failure denies the call),
       // then in the set the guard and the request guard read, before the
       // navigation runs.
-      gate = async (request) => {
+      // Calls in flight for an origin already waiting on a human wait on
+      // that one decision instead of each asking: approved, they are decided
+      // again (and now allowed); refused, they are refused with it.
+      const asking = new Map<string, Promise<ApprovalVerdict>>()
+      const approveOrigin = async (request: ApprovalRequest): Promise<ApprovalVerdict> => {
         const verdict = await inner(request)
         if (!verdict.approved) return verdict
         const origin = originToApprove(request.toolName, verdict.input, browser.origins, browser.approved)
@@ -272,6 +293,35 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
           browser.approve(origin)
         }
         return verdict
+      }
+      gate = async (request) => {
+        const origin = originToApprove(request.toolName, request.input, browser.origins, browser.approved)
+        if (origin === undefined) return approveOrigin(request)
+        const pending = asking.get(origin)
+        if (pending === undefined) {
+          const own = approveOrigin(request)
+          asking.set(origin, own)
+          try {
+            return await own
+          } finally {
+            asking.delete(origin)
+          }
+        }
+        const first = await untilAborted(
+          pending.catch((err: unknown): ApprovalVerdict => ({
+            approved: false,
+            message: err instanceof Error ? err.message : String(err),
+          })),
+          request.signal,
+        )
+        if (first === undefined) return { approved: false, message: `The call stopped while ${origin} awaited approval.` }
+        if (browser.approved.has(origin)) {
+          const decision = decide(request.toolName, tierOf, request.input, guard)
+          if (decision.decision === 'allow') return { approved: true, input: decision.input ?? request.input }
+          return inner(request)
+        }
+        const why = first.approved ? '' : ` ${first.message}`
+        return { approved: false, message: `Opening ${origin} was not approved for this session.${why}` }
       }
     }
   }
@@ -286,9 +336,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate, guard),
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, gate, guard),
     hooks: mergeHooks(
-      { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate, guard)] },
+      { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, gate, guard)] },
       run.memoryHooks,
     ),
     permissionMode: 'default',

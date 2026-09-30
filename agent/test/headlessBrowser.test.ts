@@ -488,6 +488,59 @@ describe('buildHarnessOptions with the headless browser', () => {
     expect(asked).toHaveLength(1)
   })
 
+  it('asks once for an origin that several calls in flight want to open', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const asked: string[] = []
+    const decisions: ((approved: boolean) => void)[] = []
+    const options = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      approvalGate: (request) => {
+        asked.push((request.input as { url: string }).url)
+        return new Promise((resolve) =>
+          decisions.push((approved) =>
+            resolve(
+              approved
+                ? { approved: true, input: request.input, approvalId: `a${asked.length}`, decision: 'approved' }
+                : { approved: false, message: 'The user denied it.', decision: 'denied' },
+            ),
+          ),
+        )
+      },
+      headlessBrowser: {
+        sessionId: randomUUID(),
+        backendUrl: ORIGIN,
+        browserAllowedOrigins: 'https://docs.example,https://wiki.example',
+        rememberOrigin: () => Promise.resolve(),
+        dir: path.join(stateDir, 'b'),
+      },
+    })
+    const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
+    const go = (url: string) => options.canUseTool!(t('browser_navigate'), { url }, ctx)
+    const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+    const approvedCalls = [go('https://docs.example/a'), go('https://docs.example/b'), go('https://docs.example/c')]
+    await settle()
+    expect(asked).toEqual(['https://docs.example/a'])
+    decisions[0]!(true)
+    await expect(Promise.all(approvedCalls)).resolves.toEqual([
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/a' } },
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/b' } },
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/c' } },
+    ])
+
+    const deniedCalls = [go('https://wiki.example/a'), go('https://wiki.example/b')]
+    await settle()
+    expect(asked).toEqual(['https://docs.example/a', 'https://wiki.example/a'])
+    decisions[1]!(false)
+    await expect(Promise.all(deniedCalls)).resolves.toEqual([
+      { behavior: 'deny', message: 'The user denied it.' },
+      { behavior: 'deny', message: expect.stringMatching(/wiki\.example.*The user denied it\./s) },
+    ])
+    expect(asked).toHaveLength(2)
+  })
+
   it('denies the navigation when the origin cannot be recorded, and without a gate', async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
     const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
