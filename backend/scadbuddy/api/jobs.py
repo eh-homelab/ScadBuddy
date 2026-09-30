@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -361,10 +362,10 @@ COLUMNS_HEADER = "X-ScadBuddy-Colour-Columns"
 
 
 def _draw_breakdown(
-    glb: Path, view: ViewName, size: int, order: list[str]
+    glb: Path, view: ViewName, size: int, order: list[str], deadline: float
 ) -> ColourBreakdown | None:
     parts = read_glb(glb)
-    return render_colour_breakdown(parts, view, size, order) if parts else None
+    return render_colour_breakdown(parts, view, size, order, deadline=deadline) if parts else None
 
 
 @router.get(
@@ -414,10 +415,12 @@ async def get_job_colours(
     glb = paths.root / job.result.preview_glb
     if not glb.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
-    # Off the loop and bounded, as `preview_view`: one raster per colour.
+    # Off the loop and bounded, as `preview_view`: one raster per colour. The wait
+    # cannot stop the thread, so the thread stops itself at the same deadline.
+    deadline = time.monotonic() + config.render_timeout
     try:
         drawn = await asyncio.wait_for(
-            asyncio.to_thread(_draw_breakdown, glb, view, size, job.result.colors),
+            asyncio.to_thread(_draw_breakdown, glb, view, size, job.result.colors, deadline),
             timeout=config.render_timeout,
         )
     except TimeoutError:

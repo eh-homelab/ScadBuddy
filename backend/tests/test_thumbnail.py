@@ -320,6 +320,12 @@ def test_a_breakdown_is_a_near_square_grid_of_tiles() -> None:
     assert read_png(drawn.png).shape == (64, 128, 4)
 
 
+def test_a_breakdown_past_its_deadline_stops_before_the_next_tile() -> None:
+    # Review of #750: the route's timeout cannot stop the worker thread.
+    with pytest.raises(TimeoutError, match="after 0 of 2 tiles"):
+        render_colour_breakdown(_cubes("#FF0000", "#00FF00"), "top", 64, deadline=0.0)
+
+
 def test_a_breakdown_refuses_too_many_colours() -> None:
     colours = [f"#0000{index:02X}" for index in range(MAX_BREAKDOWN_COLOURS + 1)]
     with pytest.raises(ValueError, match="more than a breakdown draws"):

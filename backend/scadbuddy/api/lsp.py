@@ -55,6 +55,16 @@ TEXT_RESPONSE: dict[int | str, dict[str, Any]] = {
 }
 
 
+def _budget_full(state: AppState) -> bool:
+    """Whether every language-server permit is taken. Both callers enter
+    ``async with state.language_servers`` straight after this, with no ``await`` in
+    between, and an asyncio.Semaphore that is not locked() is acquired without
+    yielding, so no other request can take the permit in the gap. Keep it that way:
+    an ``await`` between the two would turn a fast 503 into a wait (review of #750).
+    """
+    return state.language_servers.locked()
+
+
 async def _libraries(state: AppState, slug: str) -> dict[str, Path]:
     """The model's pinned libraries, each by name with the directory ``use
     <name/...>`` resolves into, fetching a checkout that is gone as a render would.
@@ -86,9 +96,7 @@ async def _serve(
         logger.warning("openscad-lsp is not on PATH; the editor runs without it")
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         return
-    # No await between the check and the acquire, so nothing can take the permit
-    # in between.
-    if state.language_servers.locked():
+    if _budget_full(state):
         await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return
     async with state.language_servers:
@@ -252,10 +260,7 @@ async def post_lsp_diagnostics(body: LspDiagnosticsRequest, state: StateDep) -> 
     binary = shutil.which(state.config.openscad_lsp)
     if binary is None:
         return LspDiagnostics(available=False)
-    # One step with the acquire below: nothing awaits in between, and an
-    # asyncio.Semaphore that is not locked() is acquired without yielding, so no
-    # other request can take the permit in the gap (as in `_serve`; review of #750).
-    if state.language_servers.locked():
+    if _budget_full(state):
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "every language server is in use; try again shortly",

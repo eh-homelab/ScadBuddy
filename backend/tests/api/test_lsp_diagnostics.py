@@ -4,11 +4,14 @@ test (`requires_openscad_lsp`) checks those measurements against the real binary
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -195,6 +198,37 @@ def test_requests_at_once_on_one_permit_fail_fast_rather_than_wait(
     assert len(answers) == 4
     assert len(busy) == 3
     assert max(busy) < 1.5
+
+
+async def test_a_cancelled_request_leaves_no_server_behind(
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #750: cancelled mid-exchange (a client gone, a server shutting
+    down), the shielded cleanup still kills and reaps the child."""
+    spawned: list[asyncio.subprocess.Process] = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def recording(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+    call = asyncio.create_task(
+        lsp_diagnostics.lsp_diagnostics(
+            settings.openscad_lsp, tmp_path, "HANG", env={"PATH": os.environ["PATH"]}
+        )
+    )
+    for _ in range(100):
+        if spawned:
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.2)  # into the exchange: the fake is sleeping on HANG
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    [process] = spawned
+    assert process.returncode is not None
 
 
 @pytest.fixture

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import struct
+import time
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -400,12 +401,18 @@ def render_colour_breakdown(
     view: ViewName = "iso",
     size: int = BREAKDOWN_TILE_SIZE,
     order: Sequence[str] = (),
+    *,
+    deadline: float | None = None,
 ) -> ColourBreakdown:
     """One tile per colour, in a near-square grid: the whole model from ``view``, with
     that colour's parts in their colour and every other part in :data:`GHOST_COLOUR`.
     Every tile is framed on the whole model, so they line up, and hidden faces stay
     hidden: a colour buried inside another shows as little or nothing, which is
-    itself worth seeing before a print."""
+    itself worth seeing before a print.
+
+    ``deadline`` (a :func:`time.monotonic` value) is checked before each tile, and
+    TimeoutError raised past it: a caller's timeout cannot stop the worker thread
+    this runs in, so this stops itself within one tile of it (review of #750)."""
     if not parts:
         raise ValueError("a breakdown needs at least one colour part")
     if view not in VIEW_DIRECTIONS:
@@ -422,6 +429,8 @@ def render_colour_breakdown(
     rows = math.ceil(len(colours) / columns)
     sheet = np.zeros((rows * size, columns * size, 4), dtype=np.uint8)
     for index, colour in enumerate(colours):
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError(f"the breakdown stopped after {index} of {len(colours)} tiles")
         tinted = [
             rgb if part.colour == colour else GHOST_COLOUR
             for part, rgb in zip(parts, actual, strict=True)
