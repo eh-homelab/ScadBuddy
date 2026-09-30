@@ -1,11 +1,5 @@
 import { useState } from 'react'
-import type {
-  FilamentOptions,
-  FilamentWarning,
-  NozzleInfo,
-  SlotChoice,
-  SlotNeed,
-} from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed } from '../api/types'
 import { inkOn, normalizeHex } from '../lib/format'
 import {
   NO_FILTERS,
@@ -65,13 +59,6 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'hf-unsupported': 'text-muted',
 }
 
-/** `0.2 mm (HS00) and 0.4 mm (HS01)` — one per extruder, as the printer reports them. */
-function nozzleList(nozzles: NozzleInfo[]): string {
-  return nozzles
-    .map((nozzle) => `${nozzle.nozzle_diameter} mm${nozzle.nozzle_type ? ` (${nozzle.nozzle_type})` : ''}`)
-    .join(' and ')
-}
-
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {
   const hex = normalizeHex(colour ?? '#000000')
   return (
@@ -83,6 +70,47 @@ function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; si
         size === 'sm' ? 'size-4' : 'size-5'
       }`}
     />
+  )
+}
+
+/**
+ * The side a spool feeds, lettered as the printer and Bambuddy letter it (#469): a label
+ * only, since nothing is checked against the nozzle mounted there (#768). Without
+ * the Filament Track Switch the AMS is wired to that side: a square green badge, like
+ * Bambuddy's nozzle-side badge. With the switch the spool only rests there and can be
+ * fed to either nozzle, so it reads "rests on L" in Bambuddy's blue inlet colors.
+ */
+function SideBadge({
+  side,
+  resting,
+  testId,
+}: {
+  side: 'L' | 'R'
+  resting: boolean
+  testId: string
+}) {
+  const word = side === 'L' ? 'left' : 'right'
+  if (resting) {
+    return (
+      <span
+        className="shrink-0 rounded px-1 py-0.5 text-[10px] font-bold"
+        style={{ background: 'var(--sb-inlet-bg)', color: 'var(--sb-inlet-ink)' }}
+        title={`Rests on the ${word} inlet; the Filament Track Switch can feed it to either nozzle.`}
+        data-testid={testId}
+      >
+        rests on {side}
+      </span>
+    )
+  }
+  return (
+    <span
+      className="inline-flex size-4 shrink-0 items-center justify-center rounded text-[10px] font-bold"
+      style={{ background: 'var(--sb-side-bg)', color: 'var(--sb-side-ink)' }}
+      title={`Feeds the ${word} extruder`}
+      data-testid={testId}
+    >
+      {side}
+    </span>
   )
 }
 
@@ -117,7 +145,12 @@ interface Props {
   copies: number
 }
 
-export function FilamentPicker({ options, plan, onChange, copies }: Props) {
+export function FilamentPicker({
+  options,
+  plan,
+  onChange,
+  copies,
+}: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
 
   const spools = options.spools ?? []
@@ -141,8 +174,7 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
   const warnings = checkPlan(options, plan, copies)
-  // #78 — the printer's mounted nozzles; the one to print with is the nozzle step's.
-  const nozzles = (options.nozzles ?? []).filter((nozzle) => nozzle.nozzle_diameter)
+  const resting = options.track_switch ?? false
 
   return (
     <section className="mt-4">
@@ -157,12 +189,6 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
           Reset to the suggested filaments
         </button>
       </div>
-
-      {nozzles.length > 0 && (
-        <p className="mt-1 text-[12px] text-muted" data-testid="nozzles">
-          {options.printer_name ?? 'The chosen printer'} has {nozzleList(nozzles)} mounted.
-        </p>
-      )}
 
       {/* One filter row for every slot: the inventory is the same list each time, and a
           per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}
@@ -281,10 +307,16 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                     <span aria-hidden="true">→</span>
                     <Swatch colour={chosenSpool.colour} size="sm" />
                     prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
+                    {chosenSpool.side && (
+                      <SideBadge
+                        side={chosenSpool.side}
+                        resting={resting}
+                        testId={`slot-side-${slot.slot_id}`}
+                      />
+                    )}
                   </span>
                 )}
               </legend>
-
               <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-[6px] border border-line">
                 {rows.length === 0 && (
                   <li className="px-2.5 py-3 text-[12px] text-muted">
@@ -327,6 +359,13 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                           <span className="shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">
                             {where}
                           </span>
+                        )}
+                        {spool.side && (
+                          <SideBadge
+                            side={spool.side}
+                            resting={resting}
+                            testId={`side-${spool.spool_id}`}
+                          />
                         )}
                         <span className="sb-num shrink-0 text-[11px] text-faint">
                           {spool.remaining_g === null || spool.remaining_g === undefined

@@ -225,6 +225,9 @@ describe.skipIf(cliMissing !== undefined)(
       expect(decisions).toEqual([['mcp__my-memory__recall', { decision: 'allow', tier: 'read' }]])
       expect(mcp.calls).toEqual(['recall:PETG settings'])
       expect(lastContent(fake.messageCalls().at(-1)!)).toContain('remembered: PETG settings')
+      // #258: the plugin's result reached the model inside the untrusted-data envelope, under its harness name.
+      expect(lastContent(fake.messageCalls().at(-1)!)).toContain('untrusted_data')
+      expect(lastContent(fake.messageCalls().at(-1)!)).toContain('mcp__my-memory__recall')
       // The forwarder added the header on every request to the plugin.
       const posts = mcp.requests.filter((r) => r.method === 'POST')
       expect(posts.length).toBeGreaterThan(0)

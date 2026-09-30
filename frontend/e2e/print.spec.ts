@@ -14,18 +14,30 @@ test.describe('print dialog', () => {
     await expect(page.getByText(/^Saved /)).toBeVisible()
     await page.getByTestId('print').click()
     const dialog = page.getByRole('dialog', { name: 'Print' })
-    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toBeVisible()
+    await expect(dialog.getByTestId('filament-slot-1')).toBeVisible()
     return dialog
   }
 
-  test('picks 0.2 mm and Fine, prints and reports the queue entry', async ({ page }) => {
+  test('opens in Simple mode on the spools and Print alone, and prints (#768)', async ({ page }) => {
     const dialog = await openDialog(page)
-    // No pipelines any more: the dialog opens on the spools, nozzles, quality and plate.
+    // No pipelines any more, and no nozzle, quality, plate, options, project or copies
+    // until Advanced is on.
     await expect(dialog.getByText(/pipeline/i)).toHaveCount(0)
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
+    await expect(dialog.getByLabel('Copies')).toHaveCount(0)
+    await expect(dialog.getByLabel('Plate')).toHaveCount(0)
+    await expect(dialog.getByTestId('print-checks')).toBeVisible()
+
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
+  test('picks 0.2 mm and Fine in Advanced, prints and reports the queue entry', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
 
     await dialog.getByRole('radio', { name: /0\.2 mm/ }).check()
-    await dialog.getByRole('radio', { name: /Fine/ }).check()
-    await expect(dialog.getByRole('radio', { name: /Fine — 0\.08mm/ })).toBeChecked()
+    await dialog.getByLabel('Process').selectOption('0.08mm High Quality @BBL H2C 0.2 nozzle')
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
 
     const queued = dialog.getByTestId('queued-items')
@@ -48,6 +60,39 @@ test.describe('print dialog', () => {
     await slotTwo.getByTestId('spool-22').check()
     await expect(dialog.getByTestId('filament-warnings-2')).toBeHidden()
 
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
+  test('lists the checks with their sources, suppresses one, and still prints', async ({ page }) => {
+    const dialog = await openDialog(page)
+    const checks = dialog.getByTestId('print-checks')
+    await expect(checks.getByTestId('checks-headline')).toHaveText('2 suggestions')
+
+    const overhang = checks.getByTestId('diagnostic-SB1003')
+    await expect(overhang).toContainText('Overhangs past the support threshold')
+    await expect(overhang).toContainText('Where: a 18.0 × 8.0 × 1.0 mm region')
+    const source = overhang.getByRole('link', {
+      name: 'Bambu Studio PrintConfig.cpp: support_threshold_angle',
+    })
+    await expect(source).toHaveAttribute('target', '_blank')
+
+    // Suppressed at a scope, with the reason a suppression requires.
+    const edges = checks.getByTestId('diagnostic-SB1002:part-2')
+    await edges.getByRole('button', { name: 'Suppress…' }).click()
+    const form = edges.getByRole('form', { name: 'Suppress SB1002:part-2' })
+    await expect(form.getByRole('button', { name: 'Suppress' })).toBeDisabled()
+    await form.getByLabel('Scope').selectOption({ label: 'This template' })
+    await form.getByLabel('Reason').fill('the seam is inside the ring')
+    await form.getByRole('button', { name: 'Suppress' }).click()
+    await expect(edges).toHaveCount(0)
+    await expect(checks.getByTestId('checks-headline')).toHaveText('1 suggestion')
+    await checks.getByText('1 not shown').click()
+    await expect(checks.getByTestId('checks-set-aside')).toContainText(
+      'suppressed for This template: the seam is inside the ring',
+    )
+
+    // Advisory: Print is not held back by what the checks found.
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })

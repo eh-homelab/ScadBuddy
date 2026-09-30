@@ -1,11 +1,16 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { api } from '../../api/client'
 import type { Asset, Param } from '../../api/types'
+import { imageAsPng } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
+import { MediaPicker, type PickerItem, type PickerSection } from '../media/MediaPicker'
+import { mediaIdOf, mediaPickerItems } from '../media/pickerItems'
 import { Button } from '../ui/Button'
 import { Field } from './Field'
 
 const ASSET_ID = /^[0-9a-f]{64}$/
+
+const SAMPLE_KEY = 'sample:'
 
 const PICKER_ACCEPT: Record<string, string> = {
   svg: '.svg,image/svg+xml',
@@ -21,6 +26,10 @@ const PICKER_ACCEPT: Record<string, string> = {
  * the model: one of its `samples` (offered as a row of thumbnails under the drop
  * zone, so a viewer can pick one without downloading and re-uploading it), or the
  * model's own default.
+ *
+ * Choose… opens the media picker: the samples, the template's own images (turned into
+ * a PNG upload, so a rendered image saved to the template can be used here too), and
+ * uploading a new file, in one place.
  */
 export function FileWidget({
   param,
@@ -44,6 +53,7 @@ export function FileWidget({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string>()
   const [dragging, setDragging] = useState(false)
+  const [picking, setPicking] = useState(false)
   // What an upload already answered, so the widget does not fetch it straight back.
   const [known, setKnown] = useState<Record<string, Asset>>({})
 
@@ -60,23 +70,71 @@ export function FileWidget({
       ? api.sampleContentUrl(slug, value, version)
       : undefined
 
+  // The template's images, read when the picker opens: one saved a moment ago is there.
+  const takesPng = accept.includes('png')
+  const model = useAsync(
+    () => (picking && takesPng ? api.getModel(slug) : Promise.resolve(undefined)),
+    [picking, takesPng, slug],
+  )
+
+  /** Uploads `file` and takes it; throws what went wrong. */
+  async function store(file: File): Promise<void> {
+    const stored = await api.uploadAsset(slug, file)
+    if (!accept.includes(stored.kind)) {
+      throw new Error(
+        `${label} takes ${accept.join(' or ').toUpperCase()}, not ${stored.kind.toUpperCase()}`,
+      )
+    }
+    setKnown((current) => ({ ...current, [stored.id]: stored }))
+    setError(undefined)
+    onChange(stored.id)
+  }
+
   async function upload(file: File): Promise<void> {
     setError(undefined)
     setUploading(true)
     try {
-      const stored = await api.uploadAsset(slug, file)
-      if (!accept.includes(stored.kind)) {
-        setError(`${label} takes ${accept.join(' or ').toUpperCase()}, not ${stored.kind.toUpperCase()}`)
-        return
-      }
-      setKnown((current) => ({ ...current, [stored.id]: stored }))
-      onChange(stored.id)
+      await store(file)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setUploading(false)
     }
   }
+
+  async function pick(item: PickerItem): Promise<void> {
+    if (item.key.startsWith(SAMPLE_KEY)) {
+      setError(undefined)
+      onChange(item.key.slice(SAMPLE_KEY.length))
+      return
+    }
+    const mediaId = mediaIdOf(item)
+    if (!mediaId || !item.src) return
+    const response = await fetch(item.src)
+    if (!response.ok) throw new Error(`Could not read ${item.label} (HTTP ${response.status}).`)
+    await store(await imageAsPng(await response.blob(), item.label))
+  }
+
+  const sections: PickerSection[] = [
+    {
+      title: 'Samples',
+      items: samples.map((name) => ({
+        key: `${SAMPLE_KEY}${name}`,
+        src: api.sampleContentUrl(slug, name, version),
+        label: name,
+      })),
+    },
+  ]
+  if (takesPng) {
+    sections.push({
+      title: "Template's images",
+      items: mediaPickerItems(slug, model.data?.media),
+      empty: model.error
+        ? 'Could not read the template’s images.'
+        : 'None yet. Images added to the template, such as a saved rendered image, show here.',
+    })
+  }
+  const selectedKey = isSample ? `${SAMPLE_KEY}${value}` : undefined
 
   function onDrop(event: DragEvent<HTMLDivElement>): void {
     event.preventDefault()
@@ -163,7 +221,7 @@ export function FileWidget({
             if (file) void upload(file)
           }}
         />
-        <Button size="sm" disabled={uploading} onClick={() => input.current?.click()}>
+        <Button size="sm" disabled={uploading} onClick={() => setPicking(true)}>
           Choose…
         </Button>
         {value !== '' && (
@@ -232,6 +290,21 @@ export function FileWidget({
           {error}
         </p>
       )}
+      <MediaPicker
+        open={picking}
+        title={`Choose ${label}`}
+        description={`${accept.join(' or ').toUpperCase()} for this parameter.`}
+        onClose={() => setPicking(false)}
+        sections={sections}
+        loading={takesPng && model.loading}
+        selected={selectedKey}
+        onPick={pick}
+        upload={{
+          accept: accept.map((kind) => PICKER_ACCEPT[kind] ?? `.${kind}`).join(','),
+          hint: `${accept.join(' or ').toUpperCase()}, up to 8 MB`,
+          onFile: store,
+        }}
+      />
     </Field>
   )
 }

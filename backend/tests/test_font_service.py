@@ -13,9 +13,15 @@ from scadbuddy.library.fonts import (
     MANIFEST_NAME,
     FontFamily,
     FontNotFoundError,
+    FontNotResolvedError,
     FontService,
     InstalledFamily,
+    cut_by_dash,
+    font_families,
     list_fonts,
+    normalise_family,
+    parse_fc_list,
+    resolvable_families,
 )
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
@@ -111,6 +117,21 @@ class FakeClient:
 
 def service(tmp_path: Path, client: FakeClient | None = None, **kwargs: object) -> FontService:
     return FontService(tmp_path, client=client or FakeClient(), **kwargs)  # type: ignore[arg-type]
+
+
+def _downloaded(self: FontService) -> set[str]:
+    """What a working fc-cache would make resolvable: every family an install recorded."""
+    return {
+        normalise_family(json.loads(manifest.read_text(encoding="utf-8"))["family"])
+        for manifest in self.root.glob(f"*/{MANIFEST_NAME}")
+    }
+
+
+@pytest.fixture(autouse=True)
+def _downloads_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fake TTFs here are not fonts, so no real fontconfig would resolve them;
+    a test that is about resolution replaces this."""
+    monkeypatch.setattr(FontService, "resolvable", _downloaded)
 
 
 def test_prepare_writes_the_fontconfig_config(tmp_path: Path) -> None:
@@ -217,7 +238,7 @@ async def test_an_installed_family_is_returned_without_touching_the_network(
     client = FakeClient()
     fonts = service(tmp_path, client)
     monkeypatch.setattr(
-        FontService, "installed", lambda self: [FontFamily(family="Pacifico", styles=["Regular"])]
+        FontService, "renderable", lambda self: [FontFamily(family="Pacifico", styles=["Regular"])]
     )
 
     installed = await fonts.install("Pacifico")
@@ -234,11 +255,58 @@ async def test_force_reinstalls_a_family_fontconfig_already_has(
 ) -> None:
     client = FakeClient()
     fonts = service(tmp_path, client)
-    monkeypatch.setattr(FontService, "installed", lambda self: [])
+    monkeypatch.setattr(FontService, "renderable", lambda self: [])
 
     await fonts.install("Pacifico", force=True)
 
     assert client.downloads == ["https://raw/ofl/pacifico/Pacifico-Regular.ttf"]
+
+
+async def test_a_family_only_in_a_face_a_render_cannot_use_is_not_already_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #740: `fc-list :` lists a bitmap Pacifico, the render's filter does
+    not, so the fast path must not report it installed while renders refuse it."""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        stdout = "Pacifico:style=Regular\n" if argv[:2] == ["fc-list", ":"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    client = FakeClient()
+    fonts = service(tmp_path, client)
+
+    # GET /fonts still lists every face fontconfig has.
+    assert [family.family for family in fonts.installed()] == ["Pacifico"]
+    assert fonts.renderable() == []
+    assert fonts.installed_family("Pacifico") is None
+    assert fonts.installed_families() == set()
+
+    await fonts.install("Pacifico")
+
+    assert client.downloads == ["https://raw/ofl/pacifico/Pacifico-Regular.ttf"]
+
+
+def test_the_renderable_listing_asks_with_the_renders_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    list_fonts()
+    list_fonts(renderable=True)
+
+    assert seen == [
+        ["fc-list", ":", "family", "style"],
+        ["fc-list", ":outline=true:scalable=true", "family", "style"],
+    ]
 
 
 REAL_FONTCONFIG = shutil.which("fc-list") and shutil.which("fc-cache")
@@ -297,3 +365,111 @@ def test_fc_tools_never_see_the_process_environment(monkeypatch: pytest.MonkeyPa
     assert len(seen) == 2
     assert all("SCADBUDDY_BAMBUDDY_API_KEY" not in env for env in seen)
     assert seen[1] == {"PATH": "/usr/bin"}
+
+
+# ── resolution (#253) ────────────────────────────────────────────────────────────
+
+
+async def test_an_install_fontconfig_does_not_resolve_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The files landing is not the family resolving: a render would fall back."""
+    monkeypatch.setattr(FontService, "resolvable", lambda self: set())
+
+    with pytest.raises(FontNotResolvedError) as raised:
+        await service(tmp_path).install("Pacifico")
+
+    assert raised.value.family == "Pacifico"
+    assert raised.value.files == ["Pacifico-Regular.ttf"]
+
+
+async def test_a_repeat_install_that_did_not_resolve_is_refused_without_a_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #740: a retry after the 500 does not fetch again; force does."""
+    monkeypatch.setattr(FontService, "resolvable", lambda self: set())
+    client = FakeClient()
+    fonts = service(tmp_path, client)
+    with pytest.raises(FontNotResolvedError):
+        await fonts.install("Pacifico")
+    downloads = len(client.downloads)
+
+    with pytest.raises(FontNotResolvedError) as again:
+        await fonts.install("Pacifico")
+    assert again.value.files == ["Pacifico-Regular.ttf"]
+    assert len(client.downloads) == downloads
+
+    with pytest.raises(FontNotResolvedError):
+        await fonts.install("Pacifico", force=True)
+    assert len(client.downloads) == 2 * downloads
+
+
+async def test_without_fontconfig_an_install_is_not_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FontService, "resolvable", lambda self: None)
+
+    installed = await service(tmp_path).install("Pacifico")
+
+    assert installed.files == ["Pacifico-Regular.ttf"]
+
+
+def test_missing_families_compares_as_fontconfig_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FontService, "resolvable", lambda self: {normalise_family("DejaVu Sans")})
+
+    assert service(tmp_path).missing_families(["dejavu sans", "DejaVuSans", "Lobster"]) == [
+        "Lobster"
+    ]
+
+
+def test_a_font_string_names_its_families_as_fcnameparse_reads_them() -> None:
+    assert font_families("Liberation Sans:style=Bold Italic") == ["Liberation Sans"]
+    assert font_families("A, B:style=Bold") == ["A", "B"]
+    assert font_families("Unifont-JP") == ["Unifont"]
+    assert font_families("Unifont\\-JP:style=Regular") == ["Unifont-JP"]
+    assert font_families("") == []
+    assert font_families(":style=Bold") == []
+
+
+def test_a_bare_dash_in_the_family_is_noticed() -> None:
+    assert cut_by_dash("Unifont-JP:style=Regular")
+    assert not cut_by_dash("Unifont\\-JP:style=Regular")
+    assert not cut_by_dash("DejaVu Sans:style=Condensed-Bold")
+
+
+def test_fc_list_escapes_are_undone() -> None:
+    parsed = parse_fc_list("IBM 3270 Semi\\-Narrow,IBM 3270:style=Regular\n")
+    assert parsed == [FontFamily(family="IBM 3270 Semi-Narrow", styles=["Regular"])]
+
+
+def test_resolvable_families_keeps_every_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)
+        out = "DejaVu Sans,DejaVu Sans Condensed\nIBM 3270 Semi\\-Narrow\n\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert resolvable_families({}) == {"dejavusans", "dejavusanscondensed", "ibm3270semi-narrow"}
+    # Outline, scalable faces: what OpenSCAD's FontCache asks fontconfig for.
+    assert seen == [["fc-list", ":outline=true:scalable=true", "family"]]
+
+
+def test_without_fc_list_nothing_is_resolvable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert resolvable_families({}) is None
+
+
+@pytest.mark.skipif(not REAL_FONTCONFIG, reason="fontconfig is not installed")
+def test_a_real_fontconfig_resolves_the_families_it_lists() -> None:
+    families = list_fonts()
+    known = resolvable_families()
+    if not families or known is None:
+        pytest.skip("fontconfig lists no fonts here")
+    assert "nosuchfamilyanywhere" not in known
+    assert any(normalise_family(family.family) in known for family in families)

@@ -25,10 +25,10 @@ from tests.api.conftest import read_stored, set_plate_image, wait_for_job
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_routes
+from tests.api.test_print_options_picker import queue_route
 from tests.api.test_print_run_choices import body as choices_body
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import run_print, run_request, run_routes
 from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route
 from tests.bambuddy.conftest import recording
 from tests.test_bambu3mf import add_plate
 
@@ -77,9 +77,7 @@ def test_a_chosen_plate_type_is_sliced_with_and_queued_on_the_printer(
     sliced = slice_routes()
     queue = queue_route()
 
-    result = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=choices_body(bed_type="Supertack Plate")
-    ).json()
+    result = run_print(client, output_id, json=choices_body(bed_type="Supertack Plate")).json()
 
     sent = json.loads(sliced.calls.last.request.read())
     # The first layer follows the plate: the slice is where the bed type goes.
@@ -102,7 +100,7 @@ def test_no_plate_type_slices_on_textured_pei(client: TestClient, model: str) ->
     sliced = slice_routes()
     queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=choices_body())
+    run_print(client, output_id, json=choices_body())
 
     assert json.loads(sliced.calls.last.request.read())["bed_type"] == "Textured PEI Plate"
 
@@ -162,9 +160,7 @@ def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
     sliced = slice_routes()
     queue = queue_route()
 
-    body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(plate_id=2)
-    ).json()
+    body = run_print(client, output_id, json=run_request(plate_id=2)).json()
 
     assert json.loads(sliced.calls.last.request.read())["plate"] == 2
     assert json.loads(queue.calls.last.request.read())["plate_id"] == 2
@@ -184,9 +180,7 @@ def test_all_plates_are_queued_as_one_item_each(
     sliced = slice_routes()
     queue = queue_route()
 
-    body = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True, copies=2)
-    ).json()
+    body = run_print(client, output_id, json=run_request(all_plates=True, copies=2)).json()
 
     assert [json.loads(call.request.read())["plate"] for call in sliced.calls] == [1, 2]
     queued = [json.loads(call.request.read()) for call in queue.calls]
@@ -223,9 +217,7 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     )
     queue = queue_route()
 
-    answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
-    )
+    answer = run_print(client, output_id, json=run_request(all_plates=True))
 
     assert answer.status_code == 502
     assert queue.call_count == 1
@@ -272,9 +264,7 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
         ]
     )
 
-    answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
-    )
+    answer = run_print(client, output_id, json=run_request(all_plates=True))
 
     assert answer.status_code == 200
     meta = client.get(f"/api/v1/outputs/{output_id}").json()
@@ -295,9 +285,7 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
     _drop_plates(_output_3mf(paths, output_id))
     queue = queue_route()
 
-    answer = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
-    )
+    answer = run_print(client, output_id, json=run_request(all_plates=True))
 
     assert answer.status_code == 422
     assert "no plates" in answer.json()["detail"]
@@ -369,8 +357,9 @@ def _plan_run(
     _plates_use(used, grams)
     slice_routes()
     queue = filament_queue_route()
-    response = client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
+    response = run_print(
+        client,
+        output_id,
         json=run_request(
             all_plates=all_plates,
             # Picked against plate 1, as the picker does for "all plates".

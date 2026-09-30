@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import type { Principal } from '../../src/auth/principal.js'
+import type { Principal, Tier } from '../../src/auth/principal.js'
 import {
   hashToken,
   type MintRequest,
+  mintProblem,
   newToken,
   principalFor,
   type TokenRecord,
@@ -31,6 +32,8 @@ export class InMemoryTokenStore implements TokenStore {
   }
 
   async mint(request: MintRequest): Promise<{ token: string; record: TokenRecord }> {
+    const problem = mintProblem(request)
+    if (problem) throw new Error(problem)
     const token = newToken()
     const record: TokenRecord = {
       id: randomUUID(),
@@ -40,6 +43,7 @@ export class InMemoryTokenStore implements TokenStore {
       expiresAt: request.expiresAt,
       revokedAt: undefined,
       lastUsedAt: undefined,
+      approvalGrant: request.approvalGrant ?? false,
     }
     const stored = { hash: hashToken(token), record }
     this.#byHash.set(stored.hash, stored)
@@ -56,5 +60,17 @@ export class InMemoryTokenStore implements TokenStore {
 
   async list(): Promise<TokenRecord[]> {
     return [...this.#byId.values()].map((s) => s.record)
+  }
+
+  async approvalGrant(id: string, now: Date = new Date()): Promise<boolean> {
+    const record = this.#byId.get(id)?.record
+    if (!record || record.revokedAt || !record.approvalGrant || record.tier !== 'outward') return false
+    return !record.expiresAt || record.expiresAt.getTime() > now.getTime()
+  }
+
+  async liveTier(id: string, now: Date = new Date()): Promise<Tier | null> {
+    const record = this.#byId.get(id)?.record
+    if (!record || record.revokedAt) return null
+    return !record.expiresAt || record.expiresAt.getTime() > now.getTime() ? record.tier : null
   }
 }

@@ -240,10 +240,14 @@ export class PackageStore implements PackageRepo {
       const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
       if (current.pending_commit_sha === commit && current.pending_content_hash === contentHash) {
-        // The re-pin under review becomes the pin; enabled stays as it was.
+        // The re-pin under review becomes the pin. A new commit from the same
+        // place keeps `enabled`; one fetched from another repository or path
+        // (a marketplace entry that moved) is a new source to trust, so it is
+        // approved disabled and loads only once an admin enables it again.
+        const moved = current.pending_fetch_url !== current.fetch_url || current.pending_fetch_path !== current.fetch_path
         const [row] = await tx<Row[]>`
           UPDATE ai_plugin_packages SET
-            source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
+            enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
             commit_sha = pending_commit_sha, content_hash = pending_content_hash,
             files = pending_files, review = pending_review, approved_at = now(),
             pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,

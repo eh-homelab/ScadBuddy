@@ -21,12 +21,14 @@ import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
 interface Props {
-  /** The model being sent — the key the per-model scope is remembered under. */
-  slug: string
   /**
-   * The printer the send will reach, when the caller already knows it — #86's picker
-   * will. Left undefined the server says which one the per-printer scope keys on,
-   * resolving a configured pipeline's target the same way the send does.
+   * The model being sent — the key the per-model scope is remembered under. A library
+   * file has none (#313), so the per-model scope is not offered.
+   */
+  slug?: string
+  /**
+   * The printer the print will reach, when the caller already knows it. Left undefined,
+   * the server says which one the per-printer scope keys on: the printer set in Settings.
    */
   printerId?: number | null
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
@@ -86,21 +88,22 @@ export function PrintOptionsDisclosure({
     }
   }, [slug])
 
-  // The per-printer scope only applies once the printer is known; with a printer-class
-  // pipeline and no configured printer nothing knows it, and saving there would go
-  // nowhere — hence the disabled option and the note below.
+  // The per-printer scope only applies once the printer is known; with none chosen and
+  // none in Settings, saving there would go nowhere — hence the disabled option and the note below.
   const resolvedPrinterId = printerId ?? serverPrinterId
   const printerKey = resolvedPrinterId === null ? null : String(resolvedPrinterId)
   // A `<select>` keeps a disabled option as its value, so "This printer" can still be
   // selected when no printer is known. Falling back here means a click always does
   // something visible, rather than hitting a guard and changing nothing on screen.
-  const activeScope: OptionScope = scope === 'printer' && !printerKey ? 'model' : scope
+  const fallback: OptionScope = slug ? 'model' : 'global'
+  const activeScope: OptionScope =
+    (scope === 'printer' && !printerKey) || (scope === 'model' && !slug) ? fallback : scope
 
   const layers = useMemo<OptionLayer[]>(
     () => [
       { scope: 'global', options: remembered?.global_options },
       { scope: 'printer', options: printerKey ? remembered?.printers?.[printerKey] : undefined },
-      { scope: 'model', options: remembered?.models?.[slug] },
+      { scope: 'model', options: slug ? remembered?.models?.[slug] : undefined },
       { scope: 'request', options: value },
     ],
     [remembered, printerKey, slug, value],
@@ -125,7 +128,7 @@ export function PrintOptionsDisclosure({
   function storedFor(target: OptionScope): PrintOptions | undefined {
     if (target === 'global') return remembered?.global_options
     if (target === 'printer') return printerKey ? remembered?.printers?.[printerKey] : undefined
-    return remembered?.models?.[slug]
+    return slug ? remembered?.models?.[slug] : undefined
   }
 
   async function remember(clear: boolean) {
@@ -136,7 +139,7 @@ export function PrintOptionsDisclosure({
       const view = await api.putPrintOptions({
         scope: activeScope,
         key:
-          activeScope === 'global' ? null : activeScope === 'printer' ? printerKey : slug,
+          activeScope === 'global' ? null : activeScope === 'printer' ? printerKey : (slug ?? null),
         // Merged with what that scope already holds, never just this dialog's edits: the
         // PUT replaces a scope wholesale, so sending only the current overlay would
         // delete every option remembered there on an earlier visit.
@@ -199,7 +202,7 @@ export function PrintOptionsDisclosure({
                 <option value="printer" disabled={!printerKey}>
                   This printer
                 </option>
-                <option value="model">This model</option>
+                {slug && <option value="model">This model</option>}
                 <option value="global">Every print</option>
               </select>
               <Button onClick={() => void remember(false)} disabled={busy || !remembered}>
@@ -228,8 +231,8 @@ export function PrintOptionsDisclosure({
             )}
             {!printerKey && (
               <p className="mt-2 text-[12px] text-faint">
-                No printer is picked yet, so options can only be remembered for this model or
-                every print.
+                No printer is picked yet, so options can only be remembered{' '}
+                {slug ? 'for this model or every print' : 'for every print'}.
               </p>
             )}
             {error && (

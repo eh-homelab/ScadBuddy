@@ -258,6 +258,15 @@ describe('useRenderJob', () => {
       expect(realtime.following()).toEqual([])
     })
 
+    it('stops following a job once it is cancelled, same as a failure', async () => {
+      vi.mocked(api.getJob).mockImplementation(async (id) => job(id, 'cancelled'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.job?.status).toBe('cancelled')
+      expect(realtime.following()).toEqual([])
+    })
+
     it('stops following a job when the view goes', async () => {
       const { unmount } = mount({ slug: 'demo', params: { n: 1 } })
       await settle()

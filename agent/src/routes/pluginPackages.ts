@@ -7,6 +7,7 @@ import { validateRef, validateSource } from '../plugins/packages/source.js'
 import type { PackageRepo } from '../plugins/packages/store.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/plugin-packages (issue #297, "Installing a plugin"): Claude plugin
 // packages (skills, subagents, hooks, .mcp.json) from a git URL or a
@@ -221,4 +222,26 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     await deps.installer?.evict(name).catch(() => undefined)
     return c.body(null, 204)
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
+    pluginPackages?: PackageRepo | undefined
+    /** Fetches and caches plugin packages; undefined disables installing. */
+    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
+  }
+}
+
+/** The plugin package routes (#297). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerPluginPackageRoutes(app, {
+      packages: deps.pluginPackages,
+      installer: deps.packageInstaller,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

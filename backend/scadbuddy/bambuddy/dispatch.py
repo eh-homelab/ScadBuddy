@@ -18,6 +18,7 @@ route. The spools are loaded in one machine, which is the printer the item goes 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -50,6 +51,10 @@ class SlicePlan(BaseModel):
     filament_presets: list[PresetRef]
     filament_colours: list[str]
     bed_type: str
+    #: The template's ``print_settings`` (#770), written over the process preset.
+    #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
+    #: when they are, an explicit fix goes over these.
+    process_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 async def slice_and_queue(
@@ -63,6 +68,7 @@ async def slice_and_queue(
     copies: int = 1,
     project_id: int | None = None,
     options: PrintOptions | None = None,
+    before_enqueue: Callable[[], Awaitable[None]] | None = None,
 ) -> QueueOutcome:
     """Slice ``plate_id`` with ``plan``, wait for it, then queue the result once.
 
@@ -76,6 +82,9 @@ async def slice_and_queue(
     ``options`` are the resolved print options (#88); ``copies`` and ``project_id``
     still win over the quantity and project they carry, because those two are what
     the caller asked for on this request.
+
+    ``before_enqueue`` is awaited just before ``POST /queue/``: past it, the print may
+    be on the queue whatever this raises (#470).
     """
     request = SliceRequest(
         printer_preset=plan.printer_preset,
@@ -84,6 +93,7 @@ async def slice_and_queue(
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
         plate=plate_id,
+        process_overrides=plan.process_overrides or None,
     )
     accepted = await client.slice(library_file_id, request)
     job = await client.await_slice(accepted.job_id)
@@ -107,6 +117,8 @@ async def slice_and_queue(
     remembered = options.queue_fields() if options is not None else {}
     remembered.pop("quantity", None)
     remembered.pop("project_id", None)
+    if before_enqueue is not None:
+        await before_enqueue()
     item = await client.enqueue(
         QueueItemCreate(
             **remembered,

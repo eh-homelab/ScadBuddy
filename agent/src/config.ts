@@ -1,3 +1,4 @@
+import { BrowserOriginsError, parseBrowserAllowedOrigins } from './harness/browserOrigins.js'
 import { OriginConfigError, originPolicy } from './http/origins.js'
 
 // The agent service's whole environment surface. Design spec §9
@@ -11,6 +12,10 @@ import { OriginConfigError, originPolicy } from './http/origins.js'
 // key-encryption key (and the previous one while rotating it), and how the pod
 // is reached (its public URL and the proxies in front of it). The last two
 // cannot live in Settings: they decide which requests may change Settings.
+// SCADBUDDY_BROWSER_ALLOWED_ORIGINS is here for the same reason: it decides
+// what on the network the headless browser inside the pod may reach
+// (harness/browserOrigins.ts), which is the operator's call, not a setting a
+// request could change.
 
 export type Config = {
   /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
@@ -27,8 +32,20 @@ export type Config = {
    * accepted on writes (src/http/origins.ts). Unset → loopback only.
    */
   publicUrl: string | undefined
+  /**
+   * Comma-separated origins the UI is also served under (the LAN hostname beside
+   * an SSO proxy, say), accepted on writes like the public URL's; the backend
+   * reads the same variable for its realtime socket. Unset → the public URL only.
+   */
+  allowedOrigins: string | undefined
   /** CIDR list of proxies whose X-Forwarded-* headers are believed. Unset → none. */
   trustedProxies: string | undefined
+  /**
+   * Origins beyond the backend's that the headless browser may open, each once
+   * a human approves it for the session (harness/browserOrigins.ts): a
+   * comma-separated list, or `*` for any. Unset → none.
+   */
+  browserAllowedOrigins: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
@@ -40,7 +57,9 @@ export const ENV_VARS = [
   'SCADBUDDY_SECRET_KEY_FILE',
   'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE',
   'SCADBUDDY_PUBLIC_URL',
+  'SCADBUDDY_ALLOWED_ORIGINS',
   'SCADBUDDY_AGENT_TRUSTED_PROXIES',
+  'SCADBUDDY_BROWSER_ALLOWED_ORIGINS',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -84,11 +103,19 @@ export function loadConfig(env: Env = process.env): Config {
   }
 
   const publicUrl = present(env.SCADBUDDY_PUBLIC_URL)
+  const allowedOrigins = present(env.SCADBUDDY_ALLOWED_ORIGINS)
   const trustedProxies = present(env.SCADBUDDY_AGENT_TRUSTED_PROXIES)
   try {
-    originPolicy(publicUrl, trustedProxies)
+    originPolicy(publicUrl, trustedProxies, allowedOrigins)
   } catch (err) {
     if (err instanceof OriginConfigError) throw new ConfigError(err.message)
+    throw err
+  }
+  const browserAllowedOrigins = present(env.SCADBUDDY_BROWSER_ALLOWED_ORIGINS)
+  try {
+    parseBrowserAllowedOrigins(browserAllowedOrigins)
+  } catch (err) {
+    if (err instanceof BrowserOriginsError) throw new ConfigError(err.message)
     throw err
   }
 
@@ -99,6 +126,8 @@ export function loadConfig(env: Env = process.env): Config {
     secretKeyFile: present(env.SCADBUDDY_SECRET_KEY_FILE),
     previousSecretKeyFile: present(env.SCADBUDDY_SECRET_KEY_PREVIOUS_FILE),
     publicUrl,
+    allowedOrigins,
     trustedProxies,
+    browserAllowedOrigins,
   }
 }

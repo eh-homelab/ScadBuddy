@@ -28,6 +28,9 @@ export interface FieldValue {
   value: string | boolean
   invalid?: boolean
   error?: string
+  /** A select's options, label and value, capped at `MAX_OPTIONS`. */
+  options?: { label: string; value: string }[]
+  optionsTruncated?: boolean
 }
 
 export interface Snapshot {
@@ -51,6 +54,7 @@ export interface Snapshot {
 }
 
 export const MAX_ELEMENTS = 150
+export const MAX_OPTIONS = 50
 const MAX_TEXT = 300
 
 function clip(text: string): string {
@@ -59,6 +63,13 @@ function clip(text: string): string {
 }
 
 function valueOf(element: Element): string | boolean | undefined {
+  // What a user-only control holds (the pairing code, PairingPrompt.tsx) is never
+  // read back either: the agent may not fill it, and reading it would hand one agent
+  // the code the user is typing to pair another (#746).
+  if (isUserOnly(element) && !(element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio'))) {
+    const typed = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+    if (typed) return element.value ? '(typed, hidden)' : ''
+  }
   if (element instanceof HTMLInputElement) {
     if (element.type === 'checkbox' || element.type === 'radio') return element.checked
     // A password is never read back, typed or stored.
@@ -140,6 +151,11 @@ export function takeSnapshot({
       label,
       role,
       value: typeof value === 'string' ? clip(value) : (value ?? ''),
+    }
+    if (element instanceof HTMLSelectElement && !isUserOnly(element)) {
+      const options = [...element.options].map((option) => ({ label: clip(option.text), value: clip(option.value) }))
+      field.options = options.slice(0, MAX_OPTIONS)
+      if (options.length > MAX_OPTIONS) field.optionsTruncated = true
     }
     if (element.getAttribute('aria-invalid') === 'true' || (element as HTMLInputElement).validity?.valid === false) {
       field.invalid = true
