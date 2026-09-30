@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -200,3 +200,14 @@ class OutputRequest(BaseModel):
 class OutputRef(BaseModel):
     index: int
     name: str | None
+
+
+class TemplateCall(BaseModel):
+    """`ctx.activity(name, …)` (§5.2): JSON arguments, `Blob`/`Part` as their dicts."""
+
+    slug: str
+    revision: str | None
+    name: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: float

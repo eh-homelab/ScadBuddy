@@ -3,9 +3,11 @@ by `cached_piece` from its params (width `w`, depth `d`), `pack` is the real one
 
 from __future__ import annotations
 
+import importlib.util
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from temporalio import activity
@@ -32,6 +34,7 @@ from scadbuddy.workflows.models import (
     PieceResult,
     PlateSize,
     Projection,
+    TemplateCall,
 )
 from scadbuddy.workflows.pipeline_activities import pack_layout
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
@@ -49,15 +52,30 @@ def a_job(**inputs: Any) -> Job:
 
 
 class FakeWorld:
-    def __init__(self, source: str | None = None, *, fail: str | None = None) -> None:
+    def __init__(
+        self,
+        source: str | None = None,
+        *,
+        fail: str | None = None,
+        activities_py: Path | None = None,
+    ) -> None:
         self.source = source
         self.fail = fail  # a file whose render fails
+        self.activities_py = activities_py
         self.pieces: list[PieceRequest] = []
         self.projections: list[Projection] = []
         self.outputs: list[OutputRequest] = []
+        self.calls: list[TemplateCall] = []
 
     def activities(self) -> list[Callable[..., Any]]:
-        return [self.load_pipeline, self.cached_piece, self.pack, self.write_output, self.project]
+        return [
+            self.load_pipeline,
+            self.cached_piece,
+            self.pack,
+            self.write_output,
+            self.project,
+            self.run_template_activity,
+        ]
 
     @activity.defn(name="load_pipeline")
     async def load_pipeline(self, req: LoadRequest) -> LoadedPipeline:
@@ -105,6 +123,18 @@ class FakeWorld:
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:
         self.projections.append(projection)
+
+    @activity.defn(name="run_template_activity")
+    async def run_template_activity(self, call: TemplateCall) -> Any:
+        """In-process stand-in for the subprocess runner (`test_template_activities`
+        tests the real one)."""
+        self.calls.append(call)
+        assert self.activities_py is not None
+        spec = importlib.util.spec_from_file_location("template_activities", self.activities_py)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return getattr(module, call.name)(*call.args, **call.kwargs)
 
     def final(self) -> Projection:
         return self.projections[-1]

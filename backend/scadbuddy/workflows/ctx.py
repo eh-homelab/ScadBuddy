@@ -4,8 +4,10 @@ the sandbox as an activity or a child workflow; nothing here does I/O."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -23,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
         PackRequest,
         PieceRequest,
         PlateSize,
+        TemplateCall,
         piece_key,
     )
     from scadbuddy.workflows.packing import explicit_plate
@@ -160,8 +163,43 @@ class Ctx:
     async def activity(
         self, name: str, *args: Any, timeout: float | None = None, **kwargs: Any
     ) -> Any:
-        """A function of the template's `pipeline/activities.py` (§5.2)."""
-        raise NotImplementedError("ctx.activity arrives with template activities (phase 4 Task 5)")
+        """A function of the template's `pipeline/activities.py` (§5.2), run in its own
+        process. ``timeout`` defaults to a piece's openscad bound and is capped at
+        `template_activity_max_timeout`."""
+        # Here, not at the top: `pipelines` imports this module.
+        from scadbuddy.workflows.pipelines import HEARTBEAT, RETRY
+
+        default = workflow.memo_value("activity_timeout", default=180.0, type_hint=float)
+        ceiling = workflow.memo_value(
+            "template_activity_max_timeout", default=1800.0, type_hint=float
+        )
+        seconds = min(timeout if timeout is not None else default, ceiling)
+        call = TemplateCall(
+            slug=self._job.slug,
+            revision=self._job.model_version,
+            name=name,
+            args=[_json(a) for a in args],
+            kwargs={k: _json(v) for k, v in kwargs.items()},
+            timeout_s=seconds,
+        )
+        # The subprocess's own kill (at ``seconds``) always fires before Temporal's.
+        return await workflow.execute_activity(
+            "run_template_activity",
+            call,
+            start_to_close_timeout=timedelta(seconds=seconds + 30),
+            heartbeat_timeout=HEARTBEAT,
+            retry_policy=RETRY,
+        )
+
+
+def _json(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, list | tuple):
+        return [_json(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _json(v) for k, v in value.items()}
+    return value
 
 
 def _file(name: str, value: str | bytes | Blob | Mapping[str, Any]) -> str | Blob:

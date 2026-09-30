@@ -41,6 +41,11 @@ DEFAULT_TEMPORAL_TASK_QUEUE_RENDER = "render"
 # tunes (§3.4): the subprocess is killed at render_timeout, and Temporal gives up on
 # the attempt this much later, so the two can never invert.
 ACTIVITY_TIMEOUT_MARGIN = 60.0
+#: The longest a template's own activity (`ctx.activity`, §5.2) may ask to run.
+DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT = 1800.0
+#: A pipeline's whole run (§5.2): this many of the longest template activity. Bounds
+#: a `pipeline.py` that never yields, which the SDK would otherwise retry forever.
+PIPELINE_TIMEOUT_FACTOR = 4
 
 #: Library clones at once, in the API and the render worker alike.
 INSTALL_CONCURRENCY = 2
@@ -101,6 +106,7 @@ class Config:
     openscad: str = DEFAULT_OPENSCAD
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
+    template_activity_max_timeout: float = DEFAULT_TEMPLATE_ACTIVITY_MAX_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
@@ -139,6 +145,11 @@ class Config:
     def activity_timeout(self) -> float:
         """start_to_close for the openscad activities: `render_timeout` plus the margin."""
         return self.render_timeout + ACTIVITY_TIMEOUT_MARGIN
+
+    @property
+    def pipeline_timeout(self) -> float:
+        """`TemplatePipeline`'s execution timeout."""
+        return PIPELINE_TIMEOUT_FACTOR * self.template_activity_max_timeout
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be

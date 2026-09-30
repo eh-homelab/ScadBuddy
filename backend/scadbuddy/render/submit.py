@@ -21,7 +21,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import status
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -111,7 +111,10 @@ class RenderService:
             self._reconciler = None
 
     def _memo(self) -> dict[str, Any]:
-        return {"activity_timeout": self.config.activity_timeout}
+        return {
+            "activity_timeout": self.config.activity_timeout,
+            "template_activity_max_timeout": self.config.template_activity_max_timeout,
+        }
 
     async def submit(
         self,
@@ -279,6 +282,8 @@ class RenderService:
             task_queue=self.task_queue,
             id_conflict_policy=conflict,
             memo=self._memo(),
+            # Bounds a pipeline that never yields; `settle_timed_out` fails its row.
+            execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
             rpc_timeout=RPC_TIMEOUT,
         )
 
@@ -323,6 +328,32 @@ class RenderService:
             )
             self.metrics.store_errors.labels("cancel_workflow").inc()
 
+    async def settle_timed_out(self) -> int:
+        """Fail every running row whose workflow ended without settling it: timed out
+        (a pipeline that never yields), terminated, or failed. Returns how many."""
+        timeout = self.config.pipeline_timeout
+        stale = await asyncio.to_thread(self.store.stale_running, timeout)
+        settled = 0
+        for job in stale:
+            try:
+                handle = self.client.get_workflow_handle(workflow_id_for(job.id))
+                status = (await handle.describe(rpc_timeout=RPC_TIMEOUT)).status
+            except RPCError:
+                status = None  # gone from the server's retention
+            if status == WorkflowExecutionStatus.RUNNING:
+                continue
+            job.state = "failed"
+            job.finished_at = now()
+            job.error = (
+                f"the pipeline did not finish within {timeout:g}s"
+                if status == WorkflowExecutionStatus.TIMED_OUT
+                else "the job's workflow ended without settling it"
+            )
+            if await asyncio.to_thread(self.store.finish, job):
+                self._settled(job, "failed")
+                settled += 1
+        return settled
+
     async def _reconcile_forever(self) -> None:
         loop = asyncio.get_running_loop()
         pruned = loop.time()
@@ -330,6 +361,7 @@ class RenderService:
             await asyncio.sleep(self.reconcile_interval)
             try:
                 await self.reconcile_once()
+                await self.settle_timed_out()
             except Exception:
                 logger.exception("the render reconciler's pass failed")
             if loop.time() - pruned >= self.prune_interval:

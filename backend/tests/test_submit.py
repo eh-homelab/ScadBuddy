@@ -19,7 +19,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
-from scadbuddy.core.config import load_config
+from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -34,8 +34,10 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import Projection
-from scadbuddy.workflows.pipelines import RenderPreview
+from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from tests.support.pipelines import FakeWorld
 from tests.support.temporal import temporal_client
+from tests.test_template_pipeline import NEVER_YIELDS
 from tests.test_workflows import FakeActivities, _worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -98,12 +100,14 @@ ServiceFactory = Callable[..., RenderService]
 
 @pytest.fixture
 def make_service(projection: JobProjection, deps: WorkerDeps) -> ServiceFactory:
-    def make(client: Client, task_queue: str, **kwargs: Any) -> RenderService:
+    def make(
+        client: Client, task_queue: str, *, config: Config | None = None, **kwargs: Any
+    ) -> RenderService:
         return RenderService(
             projection=projection,
             client=client,
             task_queue=task_queue,
-            config=deps.config,
+            config=config or deps.config,
             paths=deps.paths,
             metrics=Metrics(),
             **kwargs,
@@ -678,3 +682,52 @@ async def test_with_a_snapshot_store_a_submit_names_the_pinned_revision(
     assert pinned.asked == [(SLUG, None)]
     assert job.model_version == "f" * 40
     assert (await asyncio.to_thread(projection.read, job.id)).model_version == "f" * 40
+
+
+class _ProjectingWorld(FakeWorld):
+    """FakeWorld, but `project` writes the row, as `ProjectingActivities` does: without
+    it the row never leaves `pending` and `stale_running` never sees it."""
+
+    def __init__(self, source: str, deps: WorkerDeps) -> None:
+        super().__init__(source)
+        self._real = RenderActivities(deps)
+
+    @activity.defn(name="project")
+    async def project(self, projection: Projection) -> None:
+        await super().project(projection)
+        await self._real.project(projection)
+
+
+async def test_a_timed_out_pipeline_is_failed_by_the_reconciler(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    world = _ProjectingWorld(NEVER_YIELDS, deps)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(
+            client, queue, config=replace(deps.config, template_activity_max_timeout=2.0)
+        )
+        assert service.config.pipeline_timeout == 8.0
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            job = await service.submit(
+                "demo", {}, model_version=None, supersedes=None, inputs={"params": {}, "v": 0}
+            )
+            async with asyncio.timeout(60):
+                while (await asyncio.to_thread(projection.read, job.id)).state not in (
+                    "done",
+                    "failed",
+                ):
+                    await service.settle_timed_out()
+                    await asyncio.sleep(1)
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert stored.state == "failed"
+    # The reconciler's message; the only other way to fail is the pipeline's own
+    # raise, should a machine ever finish the loop inside 8 s (N3).
+    assert stored.error == "the pipeline did not finish within 8s" or (
+        stored.error or ""
+    ).startswith("pipeline/pipeline.py:")

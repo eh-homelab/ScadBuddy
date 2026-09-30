@@ -4,6 +4,7 @@ pipeline, packing parts onto plates, and writing an output."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -24,17 +25,21 @@ from scadbuddy.library.pipelines import (
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.plate import plate_for
+from scadbuddy.store.content import BlobScope
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
 from scadbuddy.workflows.models import (
+    Failure,
     Layout,
     LoadedPipeline,
     LoadRequest,
     OutputRequest,
     PackRequest,
     PlateSize,
+    TemplateCall,
 )
 from scadbuddy.workflows.outputs import build_output
 from scadbuddy.workflows.packing import PackError, shelf_pack
+from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
 
 
 def _refuse(message: str) -> ApplicationError:
@@ -67,7 +72,7 @@ class PipelineActivities:
         self._render = RenderActivities(deps)
 
     def all(self) -> Sequence[Callable[..., Any]]:
-        return [self.load_pipeline, self.pack, self.write_output]
+        return [self.load_pipeline, self.pack, self.write_output, self.run_template_activity]
 
     async def model_dir(self, slug: str, revision: str | None) -> Path:
         """The template's directory at ``revision``: the live one, or its export."""
@@ -159,3 +164,71 @@ class PipelineActivities:
         return await _heartbeating(
             asyncio.create_task(build_output(req, self.deps, model_dir=model_dir))
         )
+
+    async def _localize(self, value: Any) -> Any:
+        """Give a template activity the local path of every `Blob`/`Part` it is passed."""
+        blobs = self.deps.blobs
+        if isinstance(value, list):
+            return [await self._localize(v) for v in value]
+        if isinstance(value, dict):
+            if value.get("kind") == "blob":
+                await blobs.fetch(value["key"])
+                root = blobs.dir_for(value["key"]).resolve()
+                path = (root / value["path"]).resolve()
+                if not path.is_relative_to(root):
+                    raise ApplicationError(
+                        f"blob path {value['path']!r} leaves its blob",
+                        type="TemplateActivityError",
+                        non_retryable=True,
+                    )
+                return {**value, "local": str(path)}
+            if value.get("kind") == "part":
+                await blobs.fetch(value["piece_key"])
+                return {**value, "local": str(blobs.dir_for(value["piece_key"]))}
+            return {k: await self._localize(v) for k, v in value.items()}
+        return value
+
+    @activity.defn(name="run_template_activity")
+    async def run_template_activity(self, call: TemplateCall) -> Any:
+        """One function of the template's `pipeline/activities.py`, in its own process
+        group (`template_process`). The template's exception is non-retryable; a crash
+        or kill of the process is retried."""
+        d = self.deps
+        model_dir = await self.model_dir(call.slug, call.revision)
+        source = model_dir / "pipeline" / "activities.py"
+        source_sha = (
+            hashlib.sha256(await asyncio.to_thread(source.read_bytes)).hexdigest()
+            if source.is_file()
+            else ""
+        )
+        out_key = template_out_key(call, source_sha)
+        out = d.blobs.dir_for(out_key)
+        request = {
+            "mode": "call",
+            "name": call.name,
+            "args": await self._localize(call.args),
+            "kwargs": await self._localize(call.kwargs),
+        }
+        work = asyncio.create_task(
+            run_template(
+                model_dir,
+                request,
+                out=out,
+                out_key=out_key,
+                python=d.template_python,
+                data_dir=d.config.data_dir,
+                timeout=call.timeout_s,
+            )
+        )
+        try:
+            value = await _heartbeating(work)
+        except TemplateError as error:
+            raise ApplicationError(
+                str(error),
+                Failure(error=str(error), log_tail=error.log_tail),
+                type="TemplateActivityError",
+                non_retryable=not error.retryable,
+            ) from None
+        if any(out.iterdir()):
+            await d.blobs.publish(out_key, scope=BlobScope(slug=call.slug))
+        return value

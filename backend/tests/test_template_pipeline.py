@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
 from temporalio.worker import Worker
 
 from scadbuddy.render.projection import workflow_id_for
@@ -196,3 +199,63 @@ async def test_a_waiter_trusts_a_piece_for_its_whole_retried_budget(
     # Three attempts each, 2 s then 4 s of backoff between them.
     retried = sum((3 * stage + timedelta(seconds=6) for stage in stages), timedelta())
     assert pipelines._waiter_recheck() == retried + pipelines.SHORT
+
+
+async def test_ctx_activity_passes_parts_and_returns_json(tmp_path: Path) -> None:
+    source = tmp_path / "activities.py"
+    source.write_text("def count(parts, n):\n    return {'n': len(parts) * n}\n")
+    world = FakeWorld(
+        """\
+async def run(ctx, inputs):
+    a = await ctx.render("model.scad", w=1)
+    got = await ctx.activity("count", [a, a], n=3)
+    await ctx.output(plates=await ctx.pack([a]), name=str(got["n"]))
+""",
+        activities_py=source,
+    )
+    async with temporal_client() as client:
+        await run_job(world, a_job(), client=client)
+    assert world.outputs[0].name == "6"
+    assert world.calls[0].args[0][0]["kind"] == "part"
+
+
+#: Bounded CPU work that never yields: about a minute in CPython, 30x the SDK's 2 s
+#: deadlock detector, so every workflow task fails and only the execution timeout
+#: ends the run. Bounded, so no thread spins for the rest of the session. Should a
+#: machine ever finish it early, the pipeline raises: the job fails, never `done`.
+NEVER_YIELDS = (
+    "async def run(ctx, inputs):\n"
+    "    total = sum(i * i for i in range(10**9))\n"
+    "    raise RuntimeError(f'finished early: {total}')\n"
+)
+
+
+async def test_a_pipeline_that_never_yields_times_out() -> None:
+    world, job = FakeWorld(NEVER_YIELDS), a_job()
+    timed_out = False
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            try:
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run,
+                        job,
+                        id=workflow_id_for(job.id),
+                        task_queue=queue,
+                        execution_timeout=timedelta(seconds=8),
+                    ),
+                    timeout=60,
+                )
+            except WorkflowFailureError as error:
+                timed_out = isinstance(error.cause, WorkflowTimeoutError)
+    settled = [p.state for p in world.projections if p.state in ("done", "failed")]
+    # Either the timeout ended it (the expected path) or the pipeline failed the job
+    # itself; never `done`.
+    assert "done" not in settled
+    assert timed_out or settled == ["failed"]

@@ -324,6 +324,17 @@ class JobProjection:
             ).fetchall()
         return [_job(row) for row in rows]
 
+    def stale_running(self, older_than: float) -> list[Job]:
+        """Workflow-owned rows still `running` ``older_than`` seconds after they started:
+        what `RenderService.settle_timed_out` checks against Temporal."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE state = 'running' AND workflow_id IS NOT NULL"
+                " AND started_at < now() - make_interval(secs => %s) ORDER BY started_at",
+                (older_than,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
     def read(self, job_id: str) -> Job:
         with self._pool.connection() as conn:
             row = conn.execute("SELECT * FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
