@@ -36,7 +36,7 @@ export type FeedItem =
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
-  /** An automatic memory recall or retain (#818): a quiet status line, never the memories. */
+  /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
   | {
       kind: 'memory'
       id: string
@@ -45,6 +45,8 @@ export type FeedItem =
       outcome: 'ok' | 'timeout' | 'error'
       count?: number
       detail?: string
+      input?: string
+      memories?: string[]
     }
 
 export interface SessionState {
@@ -307,6 +309,8 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
           outcome: event.outcome,
           ...(event.count === undefined ? {} : { count: event.count }),
           ...(event.detail === undefined ? {} : { detail: event.detail }),
+          ...(event.input === undefined ? {} : { input: event.input }),
+          ...(event.memories === undefined ? {} : { memories: event.memories }),
         }),
       )
 

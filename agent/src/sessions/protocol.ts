@@ -63,7 +63,9 @@ export type ServerEvent = V &
      * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A
      * retain finishes after its turn, so this can follow the turn's last
      * status. `count` is a recall's; `detail` is why one failed, redacted.
-     * Never the query or a memory.
+     * `input` is what was sent (a recall's query, the start of a retain's
+     * content) and `memories` what a recall injected, both redacted and capped
+     * (MEMORY_TEXT_MAX); the panel shows them collapsed.
      */
     | {
         type: 'memory'
@@ -74,6 +76,8 @@ export type ServerEvent = V &
         outcome: 'ok' | 'timeout' | 'error'
         count?: number
         detail?: string
+        input?: string
+        memories?: string[]
       }
   )
 

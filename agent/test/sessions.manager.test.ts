@@ -497,9 +497,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
         const events = (await m.events.read(session.id)).map((e) => e.event)
         const memory = events.filter((e) => e.type === 'memory')
+        // The panel event carries what was sent and what came back (shown in Advanced);
+        // the audit rows above never do.
         expect(memory).toEqual([
-          { v: 1, type: 'memory', sessionId: session.id, turnId: recall!.turn_id, action: 'recall', bank: 'bank1', outcome: 'ok', count: 2 },
-          { v: 1, type: 'memory', sessionId: session.id, turnId: recall!.turn_id, action: 'retain', bank: 'bank1', outcome: 'ok' },
+          {
+            v: 1,
+            type: 'memory',
+            sessionId: session.id,
+            turnId: recall!.turn_id,
+            action: 'recall',
+            bank: 'bank1',
+            outcome: 'ok',
+            count: 2,
+            input: 'Make a box',
+            memories: [expect.stringMatching(/^1\. /), expect.stringMatching(/^2\. /)],
+          },
+          {
+            v: 1,
+            type: 'memory',
+            sessionId: session.id,
+            turnId: recall!.turn_id,
+            action: 'retain',
+            bank: 'bank1',
+            outcome: 'ok',
+            input: expect.stringContaining('40 mm'),
+          },
         ])
         // Both arrived after the turn's last status: the log keeps them in that order for a replay.
         const lastStatus = events.findLastIndex((e) => e.type === 'session.status')

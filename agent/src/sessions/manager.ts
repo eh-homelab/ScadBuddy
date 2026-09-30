@@ -192,6 +192,11 @@ export const MAX_NEW_SESSIONS = 10
 export const NEW_SESSION_WINDOW_MS = 60_000
 
 /** A refused session operation; `status` is the HTTP status a route would answer with. */
+
+/** The most of one memory, or of a memory event's input, a panel event carries. */
+export const MEMORY_TEXT_MAX = 4000
+const capText = (text: string) => (text.length > MEMORY_TEXT_MAX ? `${text.slice(0, MEMORY_TEXT_MAX)}… (${text.length} characters)` : text)
+
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
@@ -1145,6 +1150,8 @@ export class SessionManager {
             outcome: a.outcome,
             ...(a.count === undefined ? {} : { count: a.count }),
             ...detail,
+            ...(a.input === undefined ? {} : { input: capText(a.input) }),
+            ...(a.memories === undefined ? {} : { memories: a.memories.map(capText) }),
           }),
           secrets,
         ),
