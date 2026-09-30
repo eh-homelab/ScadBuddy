@@ -1073,9 +1073,10 @@ def test_a_single_nozzle_printers_other_size_is_not_refused(client: TestClient, 
 
 
 HF_LEFT = (
-    "The left nozzle is High Flow and this print is sliced for Standard flow, so if it "
-    'prints on the left, the printer pauses at the first layer ("the left nozzle is not '
-    'matched with slicing file"). Fit a standard nozzle there before it starts.'
+    "The left nozzle is High Flow and this print is sliced for Standard flow (High Flow "
+    "slicing isn't supported yet, #484), so if it prints on the left, the printer pauses "
+    'at the first layer ("the left nozzle is not matched with slicing file"). Fit a '
+    "standard nozzle there before it starts."
 )
 
 
@@ -1202,8 +1203,8 @@ def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response
 def test_the_check_carries_the_high_flow_warning(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#723, #797: a mounted High Flow nozzle of the size with Standard flow chosen is
-    said before Print, as a warning that holds nothing."""
+    """#723, #797: a mounted High Flow nozzle of the chosen size is said before Print,
+    as a warning that holds nothing."""
     output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
@@ -1234,10 +1235,11 @@ def test_the_check_says_nothing_of_standard_mounted_nozzles(
 
 
 @respx.mock
-def test_the_check_says_nothing_of_a_high_flow_nozzle_when_high_flow_is_chosen(
+def test_the_check_carries_the_high_flow_warning_when_high_flow_is_chosen(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#797: the mounted-nozzle warning is for a Standard choice only."""
+    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
+    of a mounted High Flow nozzle of the chosen size."""
     output_id = two_colour_output(client, model, paths)
     run_routes()
     _status(**BOTH_04_LEFT_HF)
@@ -1245,7 +1247,7 @@ def test_the_check_says_nothing_of_a_high_flow_nozzle_when_high_flow_is_chosen(
     check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
 
     assert check.status_code == 200, check.text
-    assert "hf-mounted" not in {warning["kind"] for warning in check.json()["warnings"]}
+    assert "hf-mounted" in {warning["kind"] for warning in check.json()["warnings"]}
 
 
 @respx.mock

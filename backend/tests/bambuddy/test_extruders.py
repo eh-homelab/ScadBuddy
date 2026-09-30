@@ -159,6 +159,15 @@ def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about() -> None:
     assert warning.message.startswith("The left nozzle is High Flow")
 
 
+def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_when_high_flow_is_chosen() -> None:
+    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
+    of a mounted High Flow nozzle of the chosen size."""
+    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
+    [warning] = high_flow_warnings(status, [NozzleChoice(size="0.4", flow="high_flow")])
+    assert warning.kind == "hf-mounted"
+    assert warning.message.startswith("The left nozzle is High Flow")
+
+
 def test_index_0_is_the_right_nozzle() -> None:
     """``PrinterStatus.nozzles[0]`` is the right (main) extruder."""
     [warning] = high_flow_warnings(_nozzles(("HH01", "0.4"), ("HS01", "0.4")), STANDARD_04)
@@ -172,10 +181,3 @@ def test_no_high_flow_warning_for_standard_nozzles_another_size_or_no_status() -
         == []
     )
     assert high_flow_warnings(None, STANDARD_04) == []
-
-
-def test_no_mounted_high_flow_warning_when_high_flow_is_chosen() -> None:
-    """#797: the warning is for a Standard choice; a High Flow choice has the resolver's
-    own ``hf-unsupported`` note instead."""
-    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
-    assert high_flow_warnings(status, [NozzleChoice(size="0.4", flow="high_flow")]) == []

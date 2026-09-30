@@ -264,7 +264,8 @@ async def check_print(
     the catalogue refuses — in the run's own words. It no longer refuses by the mounted
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
     slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
-    the size when Standard flow is chosen (#723, #797). What needs the uploaded file is
+    the size, whatever flow is chosen, since the slice is always Standard flow (#723,
+    #797, #484). What needs the uploaded file is
     still found by the run. Only the run's own refusals (:class:`RunRefusalError`) become
     ``errors``: a failed read of Bambuddy fails the check, as it would fail the run. With
     no printer chosen or configured there is nothing to judge, and the run says why."""

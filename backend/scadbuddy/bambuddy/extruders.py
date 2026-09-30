@@ -14,9 +14,10 @@ on one extruder; the run writes the same map
 was measured not to follow on 2026-09-28 (#745).
 
 One advisory stays, by the owner's ruling on #723 (queue item 149 paused on it) and #797:
-a mounted High Flow nozzle of the sliced size, with Standard flow chosen, is warned about
-(:func:`high_flow_warnings`), never refused, since a print may be set up before its
-nozzle is fitted.
+a mounted High Flow nozzle of the chosen size is warned about (:func:`high_flow_warnings`),
+whatever flow is chosen, since the slice is always Standard flow until Bambuddy supports
+High Flow presets (#484), never refused, since a print may be set up before its nozzle is
+fitted.
 
 What is left besides is a label: the side each loaded spool feeds, so the picker can show it as
 the printer and Bambuddy do. With the Filament Track Switch (``fila_switch.installed``)
@@ -119,15 +120,16 @@ def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
 def high_flow_warnings(
     status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
 ) -> list[FilamentWarning]:
-    """A warning for each mounted High Flow nozzle of the chosen size when Standard flow
-    is chosen (#723, #797), never a refusal.
+    """A warning for each mounted High Flow nozzle of the chosen size, whatever flow is
+    chosen (#723, #797), never a refusal. Only ``nozzles[0].size`` is read here: the
+    slice is always Standard flow (#484), so it pauses on a mounted High Flow nozzle
+    regardless of the flow the choices ask for.
 
     The printer paused a print at the first layer on a side whose nozzle type the slice
     didn't match (queue item 149). A print may be set up before its nozzle is fitted, so
     the owner chose a warning, and the dialog shows it in Simple and Advanced mode alike.
-    A High Flow choice has the resolver's own ``hf-unsupported`` note instead, and an
-    unreadable status knows no nozzle, so neither warns here."""
-    if not nozzles or any(nozzle.flow != "standard" for nozzle in nozzles):
+    An unreadable status knows no nozzle, so it warns nothing."""
+    if not nozzles:
         return []
     size = nozzles[0].size
     return [
@@ -135,10 +137,10 @@ def high_flow_warnings(
             kind="hf-mounted",
             message=(
                 f"The {_side_word(extruder)} nozzle is High Flow and this print is sliced "
-                f"for Standard flow, so if it prints on the {_side_word(extruder)}, the "
-                f'printer pauses at the first layer ("the {_side_word(extruder)} nozzle is '
-                'not matched with slicing file"). Fit a standard nozzle there before it '
-                "starts."
+                "for Standard flow (High Flow slicing isn't supported yet, #484), so if it "
+                f"prints on the {_side_word(extruder)}, the printer pauses at the first "
+                f'layer ("the {_side_word(extruder)} nozzle is not matched with slicing '
+                'file"). Fit a standard nozzle there before it starts.'
             ),
         )
         for extruder in (RIGHT, LEFT)
