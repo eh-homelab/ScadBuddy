@@ -140,14 +140,16 @@ print again until they have, since another print would be a second one.
   (spool-first spec §4.5). A slot error needs the uploaded file, so it arrives
   as the run's `failed` `error` with that 422, not as the POST's answer.
 - **Warnings** come back in the result and never block: spool not loaded, nozzle
-  not installed, High Flow slicing as Standard, a Generic filament preset
-  fallback, or a plate that differs from the last print (spool-first spec §4.5).
+  not installed, High Flow slicing as Standard, a mounted High Flow nozzle of
+  the chosen size whatever flow is chosen (`hf-mounted`, #797), a Generic
+  filament preset fallback, or a plate that differs from the last print
+  (spool-first spec §4.3, §4.5).
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,
 stay Bambuddy's and the printer's decisions (spool-first spec §6). The run does
 not check the chosen size against the mounted nozzles, so do not warn that a
-multi-colour print needs the size on both sides: a two-colour print sliced for
+multi-color print needs the size on both sides: a two-colour print sliced for
 0.2 mm printed through the one 0.2 mm nozzle (spool-first spec §4.3, #768).
 
 The simpler **send** path, `POST /api/v1/outputs/{output_id}/send` with
