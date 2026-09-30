@@ -34,10 +34,10 @@ def _red_spool() -> list[dict[str, Any]]:
     return [{**row, "rgba": "FF0000FF"} for row in spools if row["id"] == 4]
 
 
-def _bambuddy(*, status: bool = True) -> None:
+def _bambuddy(*, status: bool = True, printer: dict[str, Any] | None = None) -> None:
     printers_route()
     respx.get(f"{API}/printers/1").mock(
-        return_value=httpx.Response(200, json=recording("printer.json"))
+        return_value=httpx.Response(200, json=printer or recording("printer.json"))
     )
     if status:
         respx.get(f"{API}/printers/1/status").mock(
@@ -88,6 +88,19 @@ def test_a_download_names_the_default_printers_presets(client: TestClient, model
     assert settings["nozzle_diameter"] == ["0.2", "0.2"]
     assert settings["printer_model"] == "Bambu Lab H2C"
     assert settings["printable_height"]
+
+
+@respx.mock
+def test_an_h2c_that_reports_no_nozzle_count_gets_both_extruders(
+    client: TestClient, model: str
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _bambuddy(printer={**recording("printer.json"), "nozzle_count": None})
+
+    body = _project_settings(client.get(f"/api/v1/outputs/{output_id}/model.3mf").content)
+
+    assert body["nozzle_diameter"] == ["0.2", "0.2"]
 
 
 @respx.mock

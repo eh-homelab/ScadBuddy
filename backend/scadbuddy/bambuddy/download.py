@@ -216,8 +216,9 @@ async def _presets(
         printer_settings_id=names[(resolved.printer_preset.source, resolved.printer_preset.id)],
         print_settings_id=names[(resolved.process_preset.source, resolved.process_preset.id)],
         filament_settings_id=[names[(ref.source, ref.id)] for ref in resolved.filament_presets],
-        # Bambu's printer preset states its size on every extruder.
-        nozzle_diameter=[size] * (printer.nozzle_count or 1),
+        # Bambu's printer preset states its size on both of the H2C's extruders, which
+        # Bambuddy does not always count (``nozzle_count`` can be missing).
+        nozzle_diameter=[size, size],
         printer_model=model,
     )
 
