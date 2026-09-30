@@ -823,8 +823,8 @@ export const api = {
   },
 
   /**
-   * #755 — the run's nozzle verdict (`plan_extruders`) for the body the run would take:
-   * `errors` are what it would refuse as a 422, `warnings` its advisories. Reads only.
+   * #755 — the check before Print for the body the run would take: `errors` are what
+   * it would refuse as a 422, `warnings` its advisories. Reads only.
    */
   checkPrint: (outputId: string, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
