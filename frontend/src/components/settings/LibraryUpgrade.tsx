@@ -47,6 +47,9 @@ export function LibraryUpgrade() {
   const [library, setLibrary] = useState('')
   const [ref, setRef] = useState('')
   const [busy, setBusy] = useState(false)
+  // A running move re-pins every row to the ref it started with, so the field is held
+  // until it ends. A check leaves it open: its result is marked stale on a change.
+  const [moving, setMoving] = useState(false)
   const selectId = useId()
   const refId = useId()
 
@@ -106,7 +109,7 @@ export function LibraryUpgrade() {
             value={ref}
             placeholder="A tag or branch"
             onChange={(event) => setRef(event.target.value)}
-            disabled={!library}
+            disabled={!library || moving}
             className="sb-field sb-num mt-1.5 w-40"
           />
         </div>
@@ -118,7 +121,14 @@ export function LibraryUpgrade() {
       )}
       {/* Keyed by library: another library's checks and ticks never carry over. */}
       {library && (
-        <LibraryUsers key={library} library={library} candidate={ref.trim()} models={bySlug} onBusy={setBusy} />
+        <LibraryUsers
+          key={library}
+          library={library}
+          candidate={ref.trim()}
+          models={bySlug}
+          onBusy={setBusy}
+          onMoving={setMoving}
+        />
       )}
     </div>
   )
@@ -129,11 +139,13 @@ function LibraryUsers({
   candidate,
   models,
   onBusy,
+  onMoving,
 }: {
   library: string
   candidate: string
   models: ReadonlyMap<string, ModelSummary>
   onBusy: (busy: boolean) => void
+  onMoving: (moving: boolean) => void
 }) {
   const users = useAsync(() => api.listLibraryUsers(library), [library], ['libraries'])
   const [checks, setChecks] = useState<Record<string, CheckState>>({})
@@ -149,13 +161,18 @@ function LibraryUsers({
     onBusy(busy)
   }, [busy, onBusy])
 
+  useEffect(() => {
+    onMoving(moving)
+  }, [moving, onMoving])
+
   // Leaving (another library, or the page) tells the server to stop: the check permit is app-wide.
   useEffect(
     () => () => {
       inflight.current?.abort()
       onBusy(false)
+      onMoving(false)
     },
-    [onBusy],
+    [onBusy, onMoving],
   )
 
   async function check(slug: string) {
