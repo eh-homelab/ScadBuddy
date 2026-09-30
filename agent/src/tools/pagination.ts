@@ -31,29 +31,61 @@ export const pageInput = {
     .describe('The previous page\'s next_cursor, for the page after it'),
 }
 
-export type PageArgs = { limit?: number | undefined; cursor?: string | undefined }
+/**
+ * The paging arguments, plus any others the listing takes (a `slug`): those scope
+ * the cursor, so one issued for one model's list is refused on another's.
+ */
+export type PageArgs = { limit?: number | undefined; cursor?: string | undefined; [scope: string]: unknown }
 
 export type Page<T> = { items: T[]; next_cursor: string | null; total: number | null }
 
 /** Appended to a list tool's description, so the model knows to follow next_cursor. */
 export const PAGED = ` Pages: ${DEFAULT_PAGE_SIZE} items by default (\`limit\` up to ${MAX_PAGE_SIZE}); pass \`next_cursor\` back as \`cursor\` until it is null. \`total\` counts every item, or is null when unknown.`
 
-// The cursor is JSON `[key, position]`: the key is what makes it keyset; the
+// The cursor is JSON `[key, position, scope]`: the key is what makes it keyset; the
 // position is only a hint, so a cursor can be checked in O(1) when nothing moved,
 // and so a tool whose backend takes a `limit` can fetch no further than the page
-// it needs (cursorPosition, list_versions).
-const encode = (key: string, position: number) => Buffer.from(JSON.stringify([key, position]), 'utf8').toString('base64url')
+// it needs (cursorPosition, list_versions). The scope is the tool and its other
+// arguments: every model's source files start with `model.scad`, so without it a
+// cursor from one model's list would resume another's, silently (#841 review).
+const encode = (key: string, position: number, scope: string) =>
+  Buffer.from(JSON.stringify([key, position, scope]), 'utf8').toString('base64url')
 
-function decode(cursor: string, tool: string): { key: string; position: number } {
+/** The tool and its non-paging arguments, in a stable order. */
+function scopeOf(tool: string, { limit: _limit, cursor: _cursor, ...rest }: PageArgs): string {
+  const entries = Object.entries(rest)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  return JSON.stringify([tool, entries])
+}
+
+function decode(cursor: string, tool: string): { key: string; position: number; scope: string } {
   try {
     const value: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-    if (Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' && Number.isInteger(value[1]) && value[1] >= 0) {
-      return { key: value[0], position: value[1] }
+    if (
+      Array.isArray(value) &&
+      value.length === 3 &&
+      typeof value[0] === 'string' &&
+      Number.isInteger(value[1]) &&
+      value[1] >= 0 &&
+      typeof value[2] === 'string'
+    ) {
+      return { key: value[0], position: value[1], scope: value[2] }
     }
   } catch {
     // Reported below.
   }
   throw new ToolError(`${tool}: the cursor is not one this tool returned; list again without \`cursor\``, 400)
+}
+
+/**
+ * A cursor whose item is no longer in the list. Its own class so a tool that read
+ * only part of the collection (list_versions) can read further before giving up.
+ */
+export class StaleCursorError extends ToolError {
+  constructor(tool: string) {
+    super(`${tool}: the cursor is stale (the item it points after is gone); list again without \`cursor\``, 400)
+  }
 }
 
 /** Where a cursor's item sat when it was issued: how far into the list the next page starts, at least. */
@@ -81,22 +113,25 @@ export type PageOptions = {
  */
 export function page<T>(
   items: readonly T[],
-  { limit, cursor }: PageArgs,
+  args: PageArgs,
   key: (item: T) => string,
   tool: string,
   { complete = true }: PageOptions = {},
 ): Page<T> {
+  const { limit, cursor } = args
+  const scope = scopeOf(tool, args)
   let start = 0
   if (cursor !== undefined) {
     const after = decode(cursor, tool)
-    const hinted = items[after.position]
-    const at = hinted !== undefined && key(hinted) === after.key ? after.position : items.findIndex((item) => key(item) === after.key)
-    if (at < 0) {
+    if (after.scope !== scope) {
       throw new ToolError(
-        `${tool}: the cursor is stale (the item it points after is gone); list again without \`cursor\``,
+        `${tool}: the cursor belongs to another listing (another tool, or other arguments than this call's); list again without \`cursor\``,
         400,
       )
     }
+    const hinted = items[after.position]
+    const at = hinted !== undefined && key(hinted) === after.key ? after.position : items.findIndex((item) => key(item) === after.key)
+    if (at < 0) throw new StaleCursorError(tool)
     start = at + 1
   }
   const size = limit ?? DEFAULT_PAGE_SIZE
@@ -105,7 +140,7 @@ export function page<T>(
   const more = start + size < items.length
   return {
     items: slice,
-    next_cursor: more && last !== undefined ? encode(key(last), start + slice.length - 1) : null,
+    next_cursor: more && last !== undefined ? encode(key(last), start + slice.length - 1, scope) : null,
     total: complete ? items.length : null,
   }
 }

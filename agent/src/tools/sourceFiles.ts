@@ -44,7 +44,7 @@ export const sourceFileTools: Tool[] = [
       json(
         page(
           await ok(backend.GET('/api/v1/models/{slug}/files', { params: { path: { slug } } }), `list files of ${slug}`),
-          args,
+          { slug, ...args },
           (f) => f.name,
           'list_source_files',
         ),

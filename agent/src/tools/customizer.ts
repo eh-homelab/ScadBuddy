@@ -296,7 +296,7 @@ export const customizerTools: Tool[] = [
       json(
         page(
           await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`),
-          args,
+          { slug, ...args },
           (p) => p.id,
           'list_presets',
         ),

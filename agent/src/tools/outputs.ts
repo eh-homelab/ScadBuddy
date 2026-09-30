@@ -19,7 +19,7 @@ export const outputTools: Tool[] = [
       json(
         page(
           await ok(backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug } } }), `list outputs of ${slug}`),
-          args,
+          { slug, ...args },
           (o) => o.id,
           'list_outputs',
         ),

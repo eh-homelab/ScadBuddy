@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
-import { cursorPosition, DEFAULT_PAGE_SIZE, page, PAGED, pageInput } from './pagination.js'
+import { cursorPosition, DEFAULT_PAGE_SIZE, page, PAGED, pageInput, StaleCursorError } from './pagination.js'
 
 // History (issue #251): versions, diff, source at a commit, restore, and a
 // duplicate's upstream status/merge/dismiss/detach. Every write here is itself
@@ -27,14 +27,21 @@ export const historyTools: Tool[] = [
       // The backend takes a limit, not a cursor: read only as far as this page, plus a
       // page of slack for revisions made since the cursor was issued (they push its
       // item down) and one more to know whether there is a next; not the whole window.
+      // More revisions than the slack push the item past that read, which is not
+      // staleness: read the whole window before calling the cursor stale (#841 review).
       const size = args.limit ?? DEFAULT_PAGE_SIZE
-      const wanted = cursorPosition(args.cursor, 'list_versions') + 2 * size + 1
-      const limit = Math.min(HISTORY_WINDOW, wanted)
-      const versions = await ok(
-        backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }),
-        `list versions of ${slug}`,
-      )
-      return json(page(versions, args, (v) => v.commit, 'list_versions', { complete: versions.length < limit }))
+      const read = (limit: number) =>
+        ok(backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }), `list versions of ${slug}`)
+      const listed = (versions: { commit: string }[], limit: number) =>
+        page(versions, { slug, ...args }, (v) => v.commit, 'list_versions', { complete: versions.length < limit })
+      const limit = Math.min(HISTORY_WINDOW, cursorPosition(args.cursor, 'list_versions') + 2 * size + 1)
+      const versions = await read(limit)
+      try {
+        return json(listed(versions, limit))
+      } catch (err) {
+        if (!(err instanceof StaleCursorError) || versions.length < limit || limit === HISTORY_WINDOW) throw err
+        return json(listed(await read(HISTORY_WINDOW), HISTORY_WINDOW))
+      }
     },
   }),
 

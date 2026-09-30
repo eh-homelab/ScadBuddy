@@ -75,6 +75,15 @@ describe('page', () => {
     expect(() => page(rows(3), { cursor: foreign }, byId, 'list_test')).toThrow(/not one this tool returned/)
   })
 
+  it("refuses a cursor from another scope, even when that list starts with the same key (every model's model.scad)", () => {
+    const files = [{ id: 'model.scad' }, { id: 'lib.scad' }, { id: 'parts.scad' }]
+    const first = page(files, { slug: 'a', limit: 1 }, byId, 'list_source_files')
+    expect(() => page(files, { slug: 'b', cursor: first.next_cursor! }, byId, 'list_source_files')).toThrow(/another listing/)
+    expect(() => page(files, { slug: 'a', cursor: first.next_cursor! }, byId, 'list_presets')).toThrow(/another listing/)
+    // The page size is not scope: a cursor serves the same listing at any limit.
+    expect(page(files, { slug: 'a', limit: 2, cursor: first.next_cursor! }, byId, 'list_source_files').items).toEqual(files.slice(1))
+  })
+
   it('reports a null total for a list that may be only the start of the collection', () => {
     expect(page(rows(5), {}, byId, 'list_test', { complete: false }).total).toBeNull()
   })

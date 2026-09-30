@@ -1214,4 +1214,42 @@ describe('list_versions paging (#837)', () => {
     expect(whole.total).toBe(120)
     expect(whole.next_cursor).toEqual(expect.any(String))
   })
+
+  it('reads the whole window, rather than calling the cursor stale, when new revisions push its item past the read', async () => {
+    let served = history
+    const limits: number[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        limits.push(limit)
+        return HttpResponse.json(served.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      next_cursor: string
+    }
+    // 40 revisions land ahead of the cursor's item: more than the read's slack.
+    const fresh = Array.from({ length: 40 }, (_, i) => ({ ...history[0]!, commit: `n${String(i).padStart(3, '0')}` }))
+    served = [...fresh, ...history]
+    const second = firstText(
+      await runTool(tool('list_versions'), { slug: 'box', limit: 10, cursor: first.next_cursor }, ctx()),
+    ) as { items: { commit: string }[] }
+    expect(second.items.map((v) => v.commit)).toEqual(history.slice(10, 20).map((v) => v.commit))
+    expect(limits).toEqual([21, 31, 500])
+  })
+
+  it("refuses a cursor issued for another model's history", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/:slug/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        return HttpResponse.json(history.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      next_cursor: string
+    }
+    const other = await runTool(tool('list_versions'), { slug: 'lid', limit: 10, cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
 })
