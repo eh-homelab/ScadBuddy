@@ -16,6 +16,7 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
     FetcherDep,
+    FontsDep,
     HistoryDep,
     JobIdPath,
     PathsDep,
@@ -23,7 +24,7 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
-from scadbuddy.api.params import require_valid_params, schema_of
+from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
@@ -207,6 +208,7 @@ async def render_model(
     queue: QueueDep,
     assets: AssetsDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
@@ -220,6 +222,8 @@ async def render_model(
         fetcher=fetcher,
     )
     require_valid_params(schema, body.params)
+    # A family that is not installed is a 422 here, not a render in the default font.
+    await require_installed_fonts(schema, body.params, fonts)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a

@@ -274,3 +274,23 @@ def test_a_remembered_printer_that_is_gone_falls_through(client: TestClient) -> 
 
     assert choices.status_code == 200, choices.text
     assert choices.json()["printer_id"] == 1
+
+
+@respx.mock
+def test_the_check_gives_a_library_files_nozzle_refusal(client: TestClient) -> None:
+    """#755 on a library file: the check answers what the run would refuse."""
+    configure(client)
+    library_file(89)
+    run_routes()
+    sliced = slice_routes()
+    request = {
+        **body(),
+        "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]},
+    }
+
+    check = client.post("/api/v1/print/library/89/check", json=request)
+    run = client.post("/api/v1/print/library/89/run", json=request)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == [run.json()["detail"]]
+    assert not sliced.called

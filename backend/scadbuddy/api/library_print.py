@@ -21,8 +21,10 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.print_run import (
+    PrintCheck,
     PrintRunRequest,
     PrintRunResult,
+    check_for_library,
     filament_options_for_library,
     run_for_library,
 )
@@ -157,3 +159,17 @@ async def post_library_run(
     settings = store.load()
     async with client_for(settings) as client:
         return await run_for_library(client, settings, file_id, body)
+
+
+@router.post(
+    "/{file_id}/check",
+    response_model=PrintCheck,
+    summary="What the run would refuse for the dialog's choices, before Print",
+)
+async def post_library_check(
+    file_id: FileIdPath, body: PrintRunRequest, store: SettingsStoreDep
+) -> PrintCheck:
+    """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760)."""
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await check_for_library(client, settings, file_id, body)

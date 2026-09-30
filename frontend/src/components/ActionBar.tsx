@@ -32,8 +32,10 @@ interface Props {
   job: Job | undefined
   rendering: boolean
   /**
-   * #254 — whether `job` is the render of the values on screen. Only an agent's
-   * `generate` reads it: a person cannot press Generate in the frame where it is not.
+   * #254 — whether `job` is the render of the values on screen. Also gates the
+   * Generate button (#754): between a param edit settling and `rendering` flipping
+   * true for the new render, `job` and `rendering` still describe the PREVIOUS,
+   * already-`done` job — this is the only prop that already knows it is stale.
    */
   upToDate?: boolean
   output: Output | undefined
@@ -122,7 +124,7 @@ export function ActionBar({
     }
   }
 
-  const ready = job?.status === 'done' && !rendering
+  const ready = job?.status === 'done' && !rendering && upToDate
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
@@ -153,7 +155,7 @@ export function ActionBar({
     }
   }
 
-  const live = useLatest({ ready: ready && upToDate, generating, output, sendOpen, printOpen })
+  const live = useLatest({ ready, generating, output, sendOpen, printOpen })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
   useAgentHandlers('actions', {

@@ -56,6 +56,8 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/choices",
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
+    "/api/v1/print/outputs/{output_id}/check",
+    "/api/v1/print/runs/{run_id}",
     "/api/v1/analyzers",
     "/api/v1/analyzers/run",
     "/api/v1/analyzers/fixes/preview",
@@ -88,6 +90,7 @@ EXPECTED_PATHS = {
     "/api/v1/libraries/{name}",
     "/api/v1/libraries/{name}/users",
     "/api/v1/models/{slug}/libraries/{name}/check",
+    "/api/v1/models/{slug}/dependencies",
     "/api/v1/models/{slug}/diagnostics",
     "/api/v1/jobs/{job_id}/views/{view}.png",
     "/api/v1/jobs/{job_id}/colours.png",
@@ -105,6 +108,7 @@ EXPECTED_PATHS = {
     "/api/v1/print/library/{file_id}/choices",
     "/api/v1/print/library/{file_id}/filaments",
     "/api/v1/print/library/{file_id}/run",
+    "/api/v1/print/library/{file_id}/check",
 }
 
 

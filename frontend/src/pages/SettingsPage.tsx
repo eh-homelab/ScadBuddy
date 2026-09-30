@@ -19,6 +19,7 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
+import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
@@ -869,6 +870,14 @@ export function SettingsPage() {
           {saved('rendering', runtimeRows('rendering'))}
 
           {saved('fonts', runtimeRows('fonts'))}
+
+          <Section
+            id="libraries"
+            title={sectionTitle('libraries')}
+            description="Move a library to another tag or branch across the models that pin it. Check each model against the candidate first; each ticked model is then re-pinned on its own, as one revision of that model."
+          >
+            <LibraryUpgrade />
+          </Section>
 
           {saved(
             'preview',

@@ -59,6 +59,13 @@ function clip(text: string): string {
 }
 
 function valueOf(element: Element): string | boolean | undefined {
+  // What a user-only control holds (the pairing code, PairingPrompt.tsx) is never
+  // read back either: the agent may not fill it, and reading it would hand one agent
+  // the code the user is typing to pair another (#746).
+  if (isUserOnly(element) && !(element instanceof HTMLInputElement && (element.type === 'checkbox' || element.type === 'radio'))) {
+    const typed = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+    if (typed) return element.value ? '(typed, hidden)' : ''
+  }
   if (element instanceof HTMLInputElement) {
     if (element.type === 'checkbox' || element.type === 'radio') return element.checked
     // A password is never read back, typed or stored.
