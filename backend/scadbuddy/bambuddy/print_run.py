@@ -317,8 +317,8 @@ async def check_print(
     """What the run would refuse for ``request``, with nothing uploaded, sliced or queued.
 
     It is :func:`prepare_run` itself (#760), so the check makes every refusal the run
-    makes before it answers 202 -- no plate, a printer the resolver cannot serve, choices
-    the catalogue refuses, nozzles that do not fit -- in the run's own words. What needs
+    makes before it answers 202 — no plate, a printer the resolver cannot serve, choices
+    the catalogue refuses, nozzles that do not fit — in the run's own words. What needs
     the uploaded file is still found by the run. Only the run's own refusals
     (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the check,
     as it would fail the run. With no printer chosen or configured there is nothing to
