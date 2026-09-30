@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -101,6 +102,12 @@ class Settings(BaseSettings):
     # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    # SCADBUDDY_BAMBUDDY_WEB_URLS: comma-separated URLs browsers reach Bambuddy at
+    # (#775), when `bambuddy_url` is one only the server can (an in-cluster Service).
+    # The first is where links point; the others are other hostnames of the same
+    # Bambuddy, which a link follows when ScadBuddy is framed by one of them.
+    # Unset, links use `bambuddy_url`.
+    bambuddy_web_urls: str | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -112,6 +119,16 @@ class Settings(BaseSettings):
     # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
     # pages may reach the server, so it belongs to the deployment.
     allowed_origins: str = ""
+
+    @field_validator("bambuddy_web_urls")
+    @classmethod
+    def _web_urls_are_http(cls, value: str | None) -> str | None:
+        for url in split_urls(value):
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                raise ValueError(f"SCADBUDDY_BAMBUDDY_WEB_URLS: {url!r} is not an http(s) URL")
+        return value
+
     # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
@@ -324,6 +341,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # Read from the store on every use.
         "bambuddy_url": "live",
         "bambuddy_api_key": "live",
+        "bambuddy_web_urls": "live",
         "public_url": "live",
         "default_plate": "live",
         # The upload gate asks for the value in effect on every request.
@@ -365,6 +383,11 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "log_level": "live",
     }
 )
+
+
+def split_urls(value: str | None) -> list[str]:
+    """A comma-separated URL list, blanks dropped, each without its trailing slash."""
+    return [url.strip().rstrip("/") for url in (value or "").split(",") if url.strip()]
 
 
 def env_var(name: str) -> str:

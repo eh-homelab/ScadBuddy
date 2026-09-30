@@ -211,6 +211,18 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(await m.list(browser)).toHaveLength(2)
   })
 
+  it('counts a fork as a new session (PR #715 review)', async () => {
+    m.abortAll()
+    const { runner } = scriptedRunner(() => next)
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, newSessions: { max: 2, windowMs: 60_000 } })
+    const { session } = await m.start(browser, { origin: 'chat' })
+    // The scripted runner writes no SDK transcript; the fork needs one.
+    await m.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+    await m.fork(session.id, browser)
+    await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'rate_limited' })
+    expect(await m.list(browser)).toHaveLength(2)
+  })
+
   it('refuses writes without the UI origin, reads from another site, and unknown sessions', async () => {
     const bare = await app.request('/api/v1/ai/sessions', { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } })
     expect(bare.status).toBe(403)

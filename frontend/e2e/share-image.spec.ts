@@ -32,6 +32,40 @@ test.describe('rendered image', () => {
     expect(size.height).toBe(Math.floor(view!.height * 3))
     await test.info().attach('render.png', { body: bytes, contentType: 'image/png' })
   })
+
+  test('frames the image in the dialog without moving the viewer (#722)', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    const canvas = page.getByTestId('preview-canvas').locator('canvas')
+    const view = (await canvas.boundingBox())!
+    const before = await canvas.screenshot()
+
+    await page.getByTestId('generate-menu').click()
+    await page.getByTestId('generate-image').click()
+    const dialog = page.getByRole('dialog', { name: 'Rendered image' })
+    await expect(dialog.getByTestId('image-preview')).toBeVisible()
+    const first = await dialog.getByTestId('image-preview').getAttribute('src')
+
+    await dialog.getByLabel('Square').check()
+    const surface = dialog.getByTestId('image-framing')
+    const box = (await surface.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 80, box.y + box.height / 2 + 10, { steps: 5 })
+    await page.mouse.up()
+    await page.mouse.wheel(0, -300)
+    await expect(dialog.getByTestId('image-preview')).not.toHaveAttribute('src', first!)
+
+    const saved = page.waitForEvent('download')
+    await dialog.getByTestId('image-save').click()
+    const size = pngSize(await readFile((await (await saved).path())!))
+    const edge = Math.floor(Math.max(view.width, view.height) * 2)
+    expect(size).toEqual({ width: edge, height: edge })
+
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+    // The viewer's own camera is where it was.
+    expect((await canvas.screenshot()).equals(before)).toBe(true)
+  })
 })
 
 test.describe('rendered image in the media', () => {

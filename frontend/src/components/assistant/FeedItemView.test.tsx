@@ -32,3 +32,36 @@ describe('the approval card', () => {
     }
   })
 })
+
+describe('the memory line', () => {
+  const memory = (item: Partial<Extract<FeedItem, { kind: 'memory' }>>) =>
+    render(
+      <FeedItemView
+        item={{ kind: 'memory', id: 'memory-0', action: 'recall', bank: 'scadbuddy', outcome: 'ok', ...item }}
+        onDecide={vi.fn()}
+      />,
+    )
+
+  it('says what memory did, and expands to the bank and count only', () => {
+    const cases: [Parameters<typeof memory>[0], string][] = [
+      [{ count: 3 }, 'Recalled 3 memories'],
+      [{ count: 1 }, 'Recalled 1 memory'],
+      [{ count: 0 }, 'No memories recalled'],
+      [{ outcome: 'timeout', detail: 'timed out after 3000 ms' }, 'Memory recall timed out'],
+      [{ outcome: 'error', detail: 'HTTP 500' }, 'Memory recall failed'],
+      [{ action: 'retain' }, 'Saved to memory'],
+      [{ action: 'retain', outcome: 'timeout' }, 'Saving to memory timed out'],
+      [{ action: 'retain', outcome: 'error', detail: 'HTTP 503' }, 'Could not save to memory'],
+    ]
+    for (const [item, headline] of cases) {
+      const { unmount } = memory(item)
+      const line = screen.getByTestId('agent-memory')
+      expect(line.querySelector('summary')).toHaveTextContent(headline)
+      expect(line).toHaveTextContent('Bank scadbuddy')
+      if (item.detail) expect(line).toHaveTextContent(item.detail)
+      unmount()
+    }
+    memory({ count: 3 })
+    expect(screen.getByTestId('agent-memory')).toHaveTextContent('Bank scadbuddy · 3 found')
+  })
+})

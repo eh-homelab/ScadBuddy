@@ -17,10 +17,13 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/upstream/dismiss",
     "/api/v1/models/{slug}/upstream/detach",
     "/api/v1/models/{slug}/source",
+    "/api/v1/models/{slug}/source/patch",
+    "/api/v1/lsp/diagnostics",
     "/api/v1/models/{slug}/schema",
     "/api/v1/models/{slug}/thumbnail",
     "/api/v1/models/{slug}/media",
     "/api/v1/models/{slug}/media/order",
+    "/api/v1/models/{slug}/media/cover",
     "/api/v1/models/{slug}/media/{item_id}",
     "/api/v1/models/{slug}/media/{item_id}/poster",
     "/api/v1/models/{slug}/readme",
@@ -55,6 +58,8 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/choices",
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
+    "/api/v1/print/outputs/{output_id}/check",
+    "/api/v1/print/runs/{run_id}",
     "/api/v1/analyzers",
     "/api/v1/analyzers/run",
     "/api/v1/analyzers/fixes/preview",
@@ -81,12 +86,16 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/assets/{asset_id}/content",
     "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
+    "/api/v1/models/{slug}/libraries/{name}/files/{path}",
+    "/api/v1/models/{slug}/files/{path}",
     "/api/v1/libraries/installed",
     "/api/v1/libraries/{name}",
     "/api/v1/libraries/{name}/users",
     "/api/v1/models/{slug}/libraries/{name}/check",
+    "/api/v1/models/{slug}/dependencies",
     "/api/v1/models/{slug}/diagnostics",
     "/api/v1/jobs/{job_id}/views/{view}.png",
+    "/api/v1/jobs/{job_id}/colours.png",
     "/api/v1/outputs/{output_id}/views/{view}.png",
     "/api/v1/prints",
     "/api/v1/prints/{archive_id}",
@@ -98,6 +107,14 @@ EXPECTED_PATHS = {
     "/api/v1/prints/{archive_id}/files/source",
     "/api/v1/prints/{archive_id}/reprint",
     "/api/v1/prints/{archive_id}/timelapse/pull",
+    "/api/v1/print/library",
+    "/api/v1/print/library/{file_id}/plates",
+    "/api/v1/print/library/{file_id}/thumbnail",
+    "/api/v1/print/library/{file_id}/plates/{index}/thumbnail",
+    "/api/v1/print/library/{file_id}/choices",
+    "/api/v1/print/library/{file_id}/filaments",
+    "/api/v1/print/library/{file_id}/run",
+    "/api/v1/print/library/{file_id}/check",
 }
 
 
@@ -150,6 +167,13 @@ def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
     for case in ("merge_base", "`current`", "`gone`", "kept changing", "retry"):
         assert case in conflict, case
         assert case in merge["description"], case
+
+
+def test_the_download_documents_only_a_3mf(tmp_path: Path) -> None:
+    """#769: it answers a FileResponse or a rewritten one, and either is a 3MF."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+    download = paths["/api/v1/outputs/{output_id}/model.3mf"]["get"]
+    assert set(download["responses"]["200"]["content"]) == {"model/3mf"}
 
 
 def test_the_view_routes_document_a_png(tmp_path: Path) -> None:

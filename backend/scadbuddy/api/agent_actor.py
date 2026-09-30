@@ -79,10 +79,13 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # agent-allowed-writes:begin
 AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "POST /api/v1/models/check",
+    "POST /api/v1/lsp/diagnostics",
+    "POST /api/v1/models/{slug}/dependencies",
     "POST /api/v1/models",
     "POST /api/v1/models/{slug}/duplicate",
     "PATCH /api/v1/models/{slug}",
     "PUT /api/v1/models/{slug}/source",
+    "POST /api/v1/models/{slug}/source/patch",
     "PUT /api/v1/models/{slug}/readme",
     "DELETE /api/v1/models/{slug}/readme",
     "PUT /api/v1/models/{slug}/thumbnail",

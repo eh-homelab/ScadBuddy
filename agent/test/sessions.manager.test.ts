@@ -15,6 +15,11 @@ import {
   titleFrom,
   type TurnOutcome,
 } from '../src/sessions/manager.js'
+import type { PluginsForRun } from '../src/plugins/forwarder.js'
+import type { CheckedPlugin } from '../src/plugins/registry.js'
+import { AuditLog } from '../src/audit/log.js'
+import { drainRetains } from '../src/memory/hindsight.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
@@ -92,6 +97,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(plan).not.toContain('Seq Scan')
       expect(plan).toContain('ai_sessions_owner')
       expect(plan).toContain('ai_sessions_creator')
+      expect(plan).toContain('ai_sessions_pending_owner')
     })
 
     it('starts a session with limits from ai_settings, and defaults without them', async () => {
@@ -329,6 +335,124 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
     })
 
+    it('gives a turn memory hooks only when it loaded an enabled hindsight plugin, recalling the user’s words', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/b/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        // What forwardForRun gives the manager: the plugin is there only when
+        // it is enabled and its endpoint passed the egress check this turn.
+        let loaded: CheckedPlugin | undefined = hindsight
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), release: () => {} })
+        const context = '<page_context>\n{"route":"/"}\n</page_context>'
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box', context })
+        await turn!.done
+        const hooks = runs[0]!.memoryHooks
+        expect(Object.keys(hooks ?? {}).sort()).toEqual(['Stop', 'UserPromptSubmit'])
+        await hooks!.UserPromptSubmit![0]!.hooks[0]!(
+          { session_id: session.id, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[0]!.prompt as string },
+          undefined,
+          { signal: new AbortController().signal },
+        )
+        expect(runs[0]!.prompt).toBe(`Make a box\n\n${context}`)
+        expect(fake.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['Make a box'])
+
+        loaded = undefined
+        await (await m.send(session.id, agentA, 'again')).done
+        expect(runs[1]!.memoryHooks).toBeUndefined()
+
+        loaded = hindsight
+        const off = manager({ sql: db.sql, paths, run: runner, remotePlugins, memory: false })
+        await (await off.send(session.id, agentA, 'once more')).done
+        expect(runs[2]!.memoryHooks).toBeUndefined()
+      } finally {
+        await fake.close()
+      }
+    })
+
+    it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        fake.memories = ['The user prints in PETG.', 'Boxes get 2 mm walls.']
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/bank1/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+        const failures: unknown[] = []
+        const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+        await turn!.done
+        // The hooks run as Claude Code would call them; this is after the turn ended,
+        // the case of a retain that finishes late.
+        const hooks = runs[0]!.memoryHooks!
+        const signal = new AbortController().signal
+        const base = { session_id: session.id, transcript_path: '/nonexistent', cwd: '/' }
+        for (const matcher of hooks.UserPromptSubmit!) {
+          await matcher.hooks[0]!({ ...base, hook_event_name: 'UserPromptSubmit', prompt: 'Make a box' }, undefined, { signal })
+        }
+        await hooks.Stop![0]!.hooks[0]!(
+          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'A box, 40 mm wide.' },
+          undefined,
+          { signal },
+        )
+        await drainRetains()
+        await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(2)
+        const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
+        const recall = entries.find((e) => e.action === 'recall')
+        const retain = entries.find((e) => e.action === 'retain')
+        expect(recall).toMatchObject({
+          surface: 'harness',
+          actor: agentA,
+          session_id: session.id,
+          turn_id: expect.any(String),
+          outcome: 'ok',
+          input_summary: '{"bank":"bank1","results":2}',
+          duration_ms: expect.any(Number),
+        })
+        expect(retain).toMatchObject({
+          outcome: 'ok',
+          turn_id: recall!.turn_id,
+          input_summary: `{"bank":"bank1","document_id":"conversation:${session.id}"}`,
+        })
+        expect(JSON.stringify(entries)).not.toMatch(/PETG|Make a box|40 mm/)
+        expect(failures).toEqual([])
+
+        const events = (await m.events.read(session.id)).map((e) => e.event)
+        const memory = events.filter((e) => e.type === 'memory')
+        expect(memory).toEqual([
+          { v: 1, type: 'memory', sessionId: session.id, turnId: recall!.turn_id, action: 'recall', bank: 'bank1', outcome: 'ok', count: 2 },
+          { v: 1, type: 'memory', sessionId: session.id, turnId: recall!.turn_id, action: 'retain', bank: 'bank1', outcome: 'ok' },
+        ])
+        // Both arrived after the turn's last status: the log keeps them in that order for a replay.
+        const lastStatus = events.findLastIndex((e) => e.type === 'session.status')
+        expect(events.findIndex((e) => e.type === 'memory')).toBeGreaterThan(lastStatus)
+
+        // A failed retain is recorded as an error with its reason.
+        fake.respond = (r) => (r.path.endsWith('/memories') ? { status: 503, text: 'overloaded' } : undefined)
+        await hooks.Stop![0]!.hooks[0]!(
+          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'Again.' },
+          undefined,
+          { signal },
+        )
+        await drainRetains()
+        const failed = (await audit.list({ sessionId: session.id, kind: 'memory', outcome: 'error' })).entries
+        expect(failed).toMatchObject([{ action: 'retain', detail: expect.stringMatching(/HTTP 503/) }])
+      } finally {
+        await fake.close()
+      }
+    })
+
     it('refuses sends once the session budget is spent, and passes what is left to the SDK', async () => {
       const paths = await tempPaths()
       const settings = new SettingsStore(db.sql)
@@ -418,7 +542,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
       })
 
-      it('moves ownership only explicitly: owner to anyone, browser takes over, nobody else', async () => {
+      it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {
         const paths = await tempPaths()
         const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
         const m = manager({ sql: db.sql, paths, run: runner })
@@ -434,8 +558,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // The creator still sees it after handing it off.
         expect((await m.list(agentA)).map((s) => s.id)).toEqual([session.id])
 
-        // The owner hands it to another agent, which can then send.
-        await m.handoff(session.id, browser, agentB)
+        // The owner offers it to another agent, which must accept before it can send.
+        expect((await m.handoff(session.id, browser, agentB)).owner).toEqual(browser)
+        await expect(m.send(session.id, agentB, 'not yet')).rejects.toMatchObject({ code: 'forbidden' })
+        await m.handoff(session.id, agentB, agentB)
         expect(await (await m.send(session.id, agentB, 'agent b here')).done).toMatchObject({ kind: 'result' })
         await expect(m.send(session.id, browser, 'x')).rejects.toMatchObject({ code: 'forbidden' })
 

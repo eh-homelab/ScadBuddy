@@ -140,7 +140,7 @@ describe('scrubForLog', () => {
 describe('the agent’s protocol mirror', () => {
   const sample: ServerEvent[] = [
     event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle' }] }),
-    event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, title: '' }),
+    event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, title: '', budgetUsd: 1 }),
     event({ type: 'session.owner', sessionId: S, owner: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'user.turn', sessionId: S, turnId: 't', text: 'hi', author: { kind: 'flow', id: 'analyzer', label: 'Analyzer' } }),
     event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm:0', delta: 'x' }),
@@ -151,8 +151,11 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false }),
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
-    event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3 }),
+    event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3, budgetUsd: 1 }),
+    event({ type: 'session.budget', sessionId: S, costUsd: 1.02, budgetUsd: 2 }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
+    event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
+    event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]
 
   it('produces events the panel’s own schema accepts', async () => {

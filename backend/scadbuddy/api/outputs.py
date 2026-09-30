@@ -26,6 +26,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -47,7 +48,6 @@ from scadbuddy.library.outputs import (
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
-    download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
@@ -268,16 +268,19 @@ async def delete_output(
 
 @router.get(
     "/outputs/{output_id}/model.3mf",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep
+) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+    # For the default printer, on its real presets (#769).
+    return await download_3mf(path, meta, store.load())
 
 
 @router.get(

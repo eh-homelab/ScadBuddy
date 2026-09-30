@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
+import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
@@ -267,17 +268,24 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices }),
     )
   }
-  function capturedRun(into: { body?: unknown }) {
-    return http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
-      into.body = await request.json()
-      return HttpResponse.json({ library_file_id: 5, copies: 1, bambuddy_url: 'http://b', queue_item_ids: [9] })
-    })
+  const RUN = 'fedcba9876543210fedcba9876543210'
+  const RESULT = { library_file_id: 5, copies: 1, bambuddy_url: 'http://b', queue_item_ids: [9] }
+  const running = { id: RUN, output_id: OUT, status: 'running', created_at: '2026-09-28T00:00:00Z' }
+  // #470: the POST answers 202 with a running run, which the tool follows to its end.
+  function capturedRun(into: { body?: unknown }, ended: Record<string, unknown> = { status: 'succeeded', result: RESULT }) {
+    return [
+      http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+        into.body = await request.json()
+        return HttpResponse.json(running, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.json({ ...running, ...ended })),
+    ]
   }
 
   it('with every choice given, runs without reading the dialog', async () => {
     const run: { body?: unknown } = {}
     // No choices handler: reading it would be an unhandled request.
-    server.use(capturedRun(run))
+    server.use(...capturedRun(run))
     const result = await tool('print_output').execute(
       {
         output_id: OUT,
@@ -292,6 +300,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       ctx(),
     )
     expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded', result: RESULT })
     expect(run.body).toEqual({
       printer_id: 2,
       copies: 2,
@@ -306,14 +315,105 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         filament_overrides: { '1': { source: 'cloud', id: 'GFSA04' } },
       },
       options: {},
+      request_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
     })
     // Omitted, so the backend files it under the remembered project; null would be "No project".
     expect(run.body).not.toHaveProperty('project_id')
   })
 
+  it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
+    const first: { body?: { request_id?: string } } = {}
+    const second: { body?: { request_id?: string } } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    server.use(...capturedRun(first))
+    await tool('print_output').execute(args, ctx())
+    server.use(...capturedRun(second))
+    await tool('print_output').execute(args, ctx())
+    expect(first.body?.request_id).toBeTruthy()
+    expect(second.body?.request_id).toBeTruthy()
+    expect(second.body?.request_id).not.toBe(first.body?.request_id)
+  })
+
+  describe('a POST or poll that ScadBuddy never answered (#470)', () => {
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    function posts(answers: Array<() => Response>) {
+      const ids: string[] = []
+      const handler = http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+        ids.push(((await request.json()) as { request_id: string }).request_id)
+        const answer = answers[Math.min(ids.length, answers.length) - 1]!
+        return answer()
+      })
+      return { ids, handler }
+    }
+    const done = http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.json({ ...running, status: 'succeeded', result: RESULT }))
+
+    it('re-sends a dropped POST with the same request_id and follows the run it started', async () => {
+      const { ids, handler } = posts([() => HttpResponse.error(), () => HttpResponse.json(running, { status: 202 })])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded' })
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it.each([502, 503, 504, 524])("re-sends after a proxy's own %i page, with the same request_id", async (code) => {
+      const { ids, handler } = posts([
+        () => new HttpResponse('<html>upstream timed out</html>', { status: code, headers: { 'content-type': 'text/html' } }),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it("never re-sends a problem the backend wrote, even a 503", async () => {
+      const { ids, handler } = posts([
+        () => HttpResponse.json({ title: 'Service Unavailable', detail: 'Bambuddy is not reachable.' }, { status: 503 }),
+      ])
+      server.use(handler)
+      const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('Bambuddy is not reachable.')
+      expect(ids).toHaveLength(1)
+    })
+
+    it('gives up after the re-sends and says the print may have started', async () => {
+      const { ids, handler } = posts([() => HttpResponse.error()])
+      server.use(handler)
+      const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain("may still have started: check Bambuddy's queue")
+      expect(ids).toHaveLength(RUN_REATTEMPTS + 1)
+      expect(new Set(ids).size).toBe(1)
+    })
+
+    it('re-reads an unanswered poll, and a poll that stays unanswered names the run', async () => {
+      const { ids, handler } = posts([() => HttpResponse.json(running, { status: 202 })])
+      let reads = 0
+      server.use(
+        handler,
+        http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () =>
+          ++reads === 1 ? HttpResponse.error() : HttpResponse.json({ ...running, status: 'succeeded', result: RESULT }),
+        ),
+      )
+      expect(firstText(await tool('print_output').execute(args, ctx()))).toMatchObject({ status: 'succeeded' })
+      expect(reads).toBe(2)
+
+      server.use(http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.error()))
+      const lost = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(lost.isError).toBe(true)
+      expect(firstText(lost)).toContain(`print run ${RUN} was started`)
+      expect(firstText(lost)).toContain('get_print_run')
+      expect(ids).toHaveLength(2)
+    })
+  })
+
   it('passes a chosen project through', async () => {
     const run: { body?: unknown } = {}
-    server.use(choicesView(), capturedRun(run))
+    server.use(choicesView(), ...capturedRun(run))
     const result = await tool('print_output').execute({ output_id: OUT, project_id: 7 }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run.body).toMatchObject({ project_id: 7 })
@@ -321,7 +421,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
 
   it('sends an explicit null as "No project", which wins over the remembered one', async () => {
     const run: { body?: unknown } = {}
-    server.use(choicesView(), capturedRun(run))
+    server.use(choicesView(), ...capturedRun(run))
     const result = await tool('print_output').execute({ output_id: OUT, project_id: null }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run.body).toHaveProperty('project_id', null)
@@ -333,7 +433,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
     const run: { body?: unknown } = {}
-    server.use(choicesView(), capturedRun(run))
+    server.use(choicesView(), ...capturedRun(run))
     const result = await tool('print_output').execute({ output_id: OUT }, ctx())
     expect(result.isError).toBeFalsy()
     expect(run.body).toMatchObject({
@@ -364,7 +464,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
           { slot_id: 2, spool_id: 99 },
         ],
       }),
-      capturedRun(run),
+      ...capturedRun(run),
     )
     await tool('print_output').execute({ output_id: OUT }, ctx())
     expect(run.body).toMatchObject({
@@ -387,12 +487,46 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         asked = new URL(request.url).searchParams
         return HttpResponse.json({ ...FILAMENTS, slots: [{ slot_id: 3 }], suggested: [{ slot_id: 3, spool_id: 12 }] })
       }),
-      capturedRun(run),
+      ...capturedRun(run),
     )
     await tool('print_output').execute({ output_id: OUT, all_plates: true }, ctx())
     expect(asked?.get('all_plates')).toBe('true')
     expect(asked?.get('printer_id')).toBe('1')
     expect(run.body).toMatchObject({ all_plates: true, filament_plan: { slots: [{ slot_id: 3, spool_id: 12 }] } })
+  })
+
+  const CHOSEN = {
+    output_id: OUT,
+    printer_id: 1,
+    filament_plan: { slots: [] },
+    nozzles: [{ size: '0.4' }],
+    tier: 'standard',
+    bed_type: 'Cool Plate',
+  }
+
+  it("is an error in the backend's words when the run fails after the 202", async () => {
+    const failed = { status: 422, title: 'Unprocessable Content', detail: 'Slot 2 has no spool chosen.' }
+    server.use(...capturedRun({}, { status: 'failed', error: failed }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('(HTTP 422): Slot 2 has no spool chosen.')
+    expect(firstText(result)).not.toContain("Bambuddy's queue")
+  })
+
+  it('says a run that failed after it tried to queue may be on the queue anyway', async () => {
+    const failed = { status: 504, title: 'Gateway Timeout', detail: 'Bambuddy did not answer in time.' }
+    server.use(...capturedRun({}, { status: 'failed', error: failed, may_have_queued: true }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain("may still have been queued: check Bambuddy's queue")
+  })
+
+  it('hands back a run still slicing when the wait runs out', async () => {
+    server.use(...capturedRun({}, { status: 'running' }))
+    const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx({ renderWaitMs: 20 }))
+    expect(firstText(result)).toMatchObject({ id: RUN, status: 'running', note: expect.stringContaining('get_print_run') })
+    const read = await runTool(tool('get_print_run'), { run_id: RUN }, ctx())
+    expect(firstText(read)).toMatchObject({ id: RUN, status: 'running' })
   })
 
   it("passes the resolver's refusal through", async () => {
@@ -970,5 +1104,68 @@ describe('project tools (#317)', () => {
     await expect(
       tool('file_output_in_project_folder').execute({ output_id: OUT, project_id: 7 }, ctx()),
     ).rejects.toThrow(/HTTP 404/)
+  })
+})
+
+describe('dependencies: include resolution and fonts (#253)', () => {
+  const REPORT = {
+    includes: [
+      {
+        file: 'model.scad',
+        line: 1,
+        kind: 'use',
+        target: 'BOSL2/std.scad',
+        status: 'unresolved',
+        reason: 'no BOSL2/std.scad beside the file that names it, and the model pins no libraries',
+        suggestion: { name: 'BOSL2', source: 'catalogue', url: 'https://github.com/BelfrySCAD/BOSL2.git', ref: 'v2.0.761' },
+      },
+    ],
+    unresolved: 1,
+    fonts: [],
+    fonts_checked: true,
+    missing_checkouts: [],
+    truncated: false,
+  }
+
+  it('check_dependencies is a read tool that sends the unsaved source, or none', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/dependencies`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(REPORT)
+      }),
+    )
+    const check = tool('check_dependencies')
+    expect(check.risk).toBe('read')
+    expect(firstText(await runTool(check, { slug: 'box', source: 'use <BOSL2/std.scad>\n' }, ctx()))).toEqual(REPORT)
+    await runTool(check, { slug: 'box' }, ctx())
+    expect(bodies).toEqual([{ source: 'use <BOSL2/std.scad>\n' }, { source: null }])
+  })
+
+  it("passes the backend's refusal of a missing font family through as an error", async () => {
+    const detail =
+      "parameter 'font' names font family 'Pacifico', which is not installed. OpenSCAD would silently draw it " +
+      'in the default font instead; install the family (POST /fonts/install) or name one GET /fonts lists'
+    server.use(
+      http.post(`${BACKEND}/api/v1/fonts/install`, () =>
+        HttpResponse.json(
+          { detail: "'Pacifico' was downloaded, but fontconfig does not resolve that family afterwards" },
+          { status: 500 },
+        ),
+      ),
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () =>
+        HttpResponse.json({ groups: [], parameters: [{ name: 'font', type: 'font', initial: 'DejaVu Sans' }] }),
+      ),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () =>
+        HttpResponse.json({ detail, parameters: ['font'], families: ['Pacifico'] }, { status: 422 }),
+      ),
+    )
+    const install = await runTool(tool('install_font'), { family: 'Pacifico' }, ctx())
+    expect(install.isError).toBe(true)
+    expect(JSON.stringify(install.content)).toContain('does not resolve')
+
+    const render = await runTool(tool('render_model'), { slug: 'box', params: { font: 'Pacifico' } }, ctx())
+    expect(render.isError).toBe(true)
+    expect(JSON.stringify(render.content)).toContain('default font instead')
   })
 })

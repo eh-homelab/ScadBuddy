@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelPatch, ModelSummary, Settings } from '../api/types'
+import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
+import { DEFAULT_NOZZLES } from '../lib/printChoices'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -19,6 +20,7 @@ import {
   MAX_PRESET_NAME,
   MAX_PRESETS,
   resetMockState,
+  setMockMedia,
   setMockPresets,
   setMockUploadLimit,
 } from './handlers'
@@ -829,13 +831,32 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(body.detail).toBe('the upload is not a PNG, JPEG or WebP image, or an MP4 or WebM video')
   })
 
-  it('refuses every write to a built-in with a 403', async () => {
-    // Refused before the item is looked up, as `require_mine` does.
-    const id = 'a1b2c3d4e5f6'
-    expect((await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])).status).toBe(403)
-    await expect(api.patchMedia(BUILTIN_SLUG, id, 'x')).rejects.toMatchObject({ status: 403 })
-    await expect(api.reorderMedia(BUILTIN_SLUG, [id])).rejects.toMatchObject({ status: 403 })
-    await expect(api.deleteMedia(BUILTIN_SLUG, id)).rejects.toMatchObject({ status: 403 })
+  it("adds to a built-in after what it ships, which stays read-only (#722)", async () => {
+    const shipped = (await api.getModel(GALLERY_SLUG)).media![0]!
+    setMockMedia(BUILTIN_SLUG, [{ ...shipped, id: 'front', readonly: true }])
+    const versions = (await api.listVersions(BUILTIN_SLUG)).length
+
+    const { status, body } = await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])
+
+    expect(status).toBe(200)
+    const [front, added] = body.media ?? []
+    expect(front).toMatchObject({ id: 'front', readonly: true })
+    expect(added).toMatchObject({ readonly: false, kind: 'image' })
+    // Kept outside the built-in's history: no revision.
+    expect((await api.listVersions(BUILTIN_SLUG)).length).toBe(versions)
+    await expect(api.patchMedia(BUILTIN_SLUG, 'front', 'x')).rejects.toMatchObject({ status: 403 })
+    await expect(api.deleteMedia(BUILTIN_SLUG, 'front')).rejects.toMatchObject({ status: 403 })
+    await expect(api.patchMedia(BUILTIN_SLUG, added!.id, 'Mine')).resolves.toMatchObject({
+      media: [front, { id: added!.id, caption: 'Mine' }],
+    })
+
+    const covered = await api.setMediaCover(BUILTIN_SLUG, added!.id)
+    expect(covered.media_cover).toBe(added!.id)
+    expect(covered.media?.map((item) => item.id)).toEqual([added!.id, 'front'])
+    const reset = await api.setMediaCover(BUILTIN_SLUG, null)
+    expect(reset.media?.map((item) => item.id)).toEqual(['front', added!.id])
+    const gone = await api.deleteMedia(BUILTIN_SLUG, added!.id)
+    expect(gone.media?.map((item) => item.id)).toEqual(['front'])
   })
 
   it('refuses an order that is not a permutation with a 422', async () => {
@@ -1141,5 +1162,55 @@ describe('mock API: analyzer decisions', () => {
       detail: 'advanced',
     })
     expect(report.diagnostics.map((row) => row.status)).not.toContain('suppressed')
+  })
+})
+
+describe('library print', () => {
+  beforeEach(() => resetMockState())
+
+  const runBody: PrintRunRequest = {
+    printer_id: 1,
+    filament_plan: { slots: [], force_colour_match: false },
+    choices: {
+      nozzles: DEFAULT_NOZZLES,
+      tier: 'standard',
+      process_name: null,
+      bed_type: 'Textured PEI Plate',
+      filament_overrides: {},
+    },
+    plate_id: 1,
+    all_plates: false,
+  }
+
+  it('lists the root 3MFs, and every file under all', async () => {
+    const plain = await api.listLibrary({ folderId: null, all: false })
+    const every = await api.listLibrary({ folderId: null, all: true })
+    expect(plain.files?.map((file) => file.id)).toEqual([89])
+    expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
+    expect(plain.hidden).toBe(1)
+  })
+
+  it('remembers the choices per file', async () => {
+    await api.putLibraryChoices(89, {
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+    })
+    expect((await api.getLibraryChoices(89)).model_choices?.nozzles?.[0]?.size).toBe('0.2')
+    expect((await api.getLibraryChoices(67)).model_choices?.nozzles ?? []).toEqual([])
+  })
+
+  it('forgets the choices with every other remembered choice', async () => {
+    await api.putLibraryChoices(89, { printer_id: 1, filament_plan: [] })
+    await api.forgetAllRemembered()
+    expect((await api.getLibraryChoices(89)).model_choices?.printer_id ?? null).toBeNull()
+  })
+
+  it('refuses a sliced file and a missing one', async () => {
+    await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
+    await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
   })
 })

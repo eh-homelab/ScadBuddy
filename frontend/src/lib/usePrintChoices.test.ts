@@ -37,12 +37,12 @@ describe('usePrintChoices', () => {
   })
 
   it('reads nothing while closed', () => {
-    renderHook(() => usePrintChoices(false, OUTPUT_A))
+    renderHook(() => usePrintChoices(false, { kind: 'output', output: { id: OUTPUT_A, slug: 'm' } }))
     expect(read).not.toHaveBeenCalled()
   })
 
   it('seeds the last choices once, and a read for another printer keeps the edits', async () => {
-    const { result } = renderHook(() => usePrintChoices(true, OUTPUT_A))
+    const { result } = renderHook(() => usePrintChoices(true, { kind: 'output', output: { id: OUTPUT_A, slug: 'm' } }))
     await waitFor(() => expect(result.current.choices).not.toBeNull())
     expect(result.current.selection.nozzles[0]?.size).toBe('0.2')
     expect(result.current.selection.processName).toBe(remembered.model_choices?.process_name)
@@ -57,7 +57,7 @@ describe('usePrintChoices', () => {
 
   it('reload re-reads for the printer in view and clears a failed read', async () => {
     read.mockRejectedValueOnce(new ApiError(503, 'Bambuddy is down.'))
-    const { result } = renderHook(() => usePrintChoices(true, OUTPUT_A))
+    const { result } = renderHook(() => usePrintChoices(true, { kind: 'output', output: { id: OUTPUT_A, slug: 'm' } }))
     await waitFor(() => expect(result.current.loadError).toBe('Bambuddy is down.'))
     expect(result.current.choices).toBeNull()
 
@@ -69,7 +69,7 @@ describe('usePrintChoices', () => {
   })
 
   it('a new output resets the plate and seeds again', async () => {
-    const { result, rerender } = renderHook(({ id }) => usePrintChoices(true, id), {
+    const { result, rerender } = renderHook(({ id }) => usePrintChoices(true, { kind: 'output', output: { id, slug: 'm' } }), {
       initialProps: { id: OUTPUT_A },
     })
     await waitFor(() => expect(result.current.choices).not.toBeNull())
@@ -83,7 +83,7 @@ describe('usePrintChoices', () => {
   })
 
   it('reset puts the choices back as a fresh open finds them', async () => {
-    const { result } = renderHook(() => usePrintChoices(true, OUTPUT_A))
+    const { result } = renderHook(() => usePrintChoices(true, { kind: 'output', output: { id: OUTPUT_A, slug: 'm' } }))
     await waitFor(() => expect(result.current.advanced).toBe(true))
     act(() => result.current.reset())
     expect(result.current.selection.nozzles).toEqual(DEFAULT_NOZZLES)

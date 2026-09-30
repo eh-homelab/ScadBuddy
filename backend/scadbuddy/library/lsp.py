@@ -12,8 +12,20 @@ string under that directory is rewritten back on the way out. The client's root 
 whatever ``rootUri`` its ``initialize`` names, so the bridge carries no copy of the
 frontend's URI scheme. Until that arrives, and for a client that names none, the root
 is ``DEFAULT_CLIENT_ROOT``, so no message ever shows the browser a path on this
-machine. Anything outside the directory — a library on ``OPENSCADPATH`` — passes
-through as the server named it.
+machine.
+
+The libraries the model pins (#93) are on the server's ``OPENSCADPATH``, and each one
+is given a client URI of its own the same way: ``LIBRARY_CLIENT_ROOT`` +
+``<name>@<commit>/`` stands for the library's directory in the checkout the model pins,
+so a definition in BOSL2 reaches the editor as
+``file:///libraries/BOSL2@<commit>/shapes3d.scad`` (#185), which the editor reads back
+through ``GET /models/{slug}/libraries/{name}/files/{path}?commit=<commit>``. The
+commit is in the URI because a checkout never changes under its commit, so a file the
+editor already holds under that URI is still the right one, and one from before a
+re-pin never stands in for the new pin's (a library name alone does not say which
+checkout; two models can pin one at two commits). Anything outside the
+model's directory and those libraries (openscad-lsp's own default library locations)
+passes through as the server named it.
 
 A server that stops answering (alive, but wedged) would hold its session's permit for
 as long as the editor stays open, so a request left unanswered for
@@ -39,7 +51,7 @@ import json
 import logging
 import signal
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,6 +67,8 @@ _CONTENT_LENGTH = b"content-length"
 #: The client root the server's paths are shown under before, or without, one named
 #: by the client's ``initialize``.
 DEFAULT_CLIENT_ROOT = "file:///workspace/"
+#: Where the model's pinned libraries are shown: ``<this><name>/...``.
+LIBRARY_CLIENT_ROOT = "file:///libraries/"
 #: Seconds a client's request may go unanswered before the server is taken as wedged.
 #: The watchdog checks every tenth of it, so detection takes up to 1.1x this. Only
 #: requests openscad-lsp answers may be sent (see the module docstring).
@@ -66,6 +80,22 @@ KILL_WAIT = 5.0
 #: Killed servers that outlived ``KILL_WAIT``, each with the task still waiting on it;
 #: the task drops its server out once asyncio reaps it.
 _unreaped: dict[asyncio.subprocess.Process, asyncio.Task[int]] = {}
+
+
+def reap_later(process: asyncio.subprocess.Process) -> None:
+    """A killed server that outlived ``KILL_WAIT``: waited on in the background,
+    counted in ``_unreaped`` and logged, rather than forgotten (also
+    ``lsp_diagnostics``, #750 review)."""
+    reaper = asyncio.ensure_future(process.wait())
+    reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
+    _unreaped[process] = reaper
+    logger.warning(
+        "killed openscad-lsp (pid %d) was not reaped within %gs; "
+        "%d killed server(s) not yet reaped",
+        process.pid,
+        KILL_WAIT,
+        len(_unreaped),
+    )
 
 
 def frame(body: bytes) -> bytes:
@@ -90,38 +120,64 @@ async def read_message(reader: asyncio.StreamReader) -> bytes | None:
 
 @dataclass(frozen=True)
 class _Roots:
-    client: str
-    server: str
+    """(client, server) directory URIs, each ending in a slash; the first root a
+    string is under wins. The libraries come first: on disk they are apart from the
+    model's directory, and on the client their roots are the more specific, so a
+    client root as broad as ``file:///`` still leaves them alone."""
+
+    pairs: tuple[tuple[str, str], ...]
 
     def inbound(self, value: Any) -> Any:
-        return _rewrite(value, self.client, self.server)
+        return _rewrite(value, self.pairs)
 
     def outbound(self, value: Any) -> Any:
-        return _rewrite(value, self.server, self.client)
+        return _rewrite(value, tuple((server, client) for client, server in self.pairs))
 
 
-def _rewrite(value: Any, old: str, new: str) -> Any:
-    """Every string under ``old`` moved under ``new``; ``old`` ends in a slash, so a
-    sibling directory that merely shares a prefix is left alone."""
+def _rewrite(value: Any, pairs: Sequence[tuple[str, str]]) -> Any:
+    """Every string under one of the ``old`` roots moved under its ``new``; each
+    ``old`` ends in a slash, so a sibling directory that merely shares a prefix is
+    left alone."""
     if isinstance(value, str):
-        if value.startswith(old):
-            return new + value[len(old) :]
-        if value == old.rstrip("/"):
-            return new.rstrip("/")
+        for old, new in pairs:
+            if value.startswith(old):
+                return new + value[len(old) :]
+            if value == old.rstrip("/"):
+                return new.rstrip("/")
         return value
     if isinstance(value, list):
-        return [_rewrite(item, old, new) for item in value]
+        return [_rewrite(item, pairs) for item in value]
     if isinstance(value, dict):
-        return {key: _rewrite(item, old, new) for key, item in value.items()}
+        return {key: _rewrite(item, pairs) for key, item in value.items()}
     return value
+
+
+def library_roots(libraries: Mapping[str, Path]) -> tuple[tuple[str, str], ...]:
+    """(client, server) for each library: ``name`` -> the directory ``use
+    <name/...>`` resolves into, ``<libraries>/<name>/<commit>/<name>``, shown as
+    ``LIBRARY_CLIENT_ROOT`` + ``<name>@<commit>/``."""
+    return tuple(
+        (f"{LIBRARY_CLIENT_ROOT}{name}@{directory.parent.name}/", directory.as_uri() + "/")
+        for name, directory in sorted(libraries.items())
+    )
 
 
 def _directory_uri(uri: str) -> str:
     return uri if uri.endswith("/") else uri + "/"
 
 
-async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str, str]) -> None:
+async def serve(
+    websocket: WebSocket,
+    binary: str,
+    root: Path,
+    env: Mapping[str, str],
+    libraries: Mapping[str, Path] | None = None,
+) -> None:
     """Run one openscad-lsp in ``root`` for an accepted socket, until either side ends.
+
+    ``libraries`` names each library on ``env``'s ``OPENSCADPATH`` and the directory
+    its files are in (``<libraries>/<name>/<commit>/<name>``), for the client URIs they
+    are shown under.
 
     The server lives exactly as long as the socket: closing the editor kills it, and a
     server that exits, or leaves a request unanswered for ``REQUEST_TIMEOUT``, closes
@@ -139,7 +195,8 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
     assert process.stdin is not None and process.stdout is not None
     stdin, stdout = process.stdin, process.stdout
     server_root = root.as_uri() + "/"
-    roots = _Roots(DEFAULT_CLIENT_ROOT, server_root)
+    libraries_at = library_roots(libraries or {})
+    roots = _Roots((*libraries_at, (DEFAULT_CLIENT_ROOT, server_root)))
     initialized = False
     # The client's requests the server has yet to answer, by id: when each was sent,
     # oldest first. A list, so a client that reuses an id still has each one watched;
@@ -168,10 +225,10 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 params = message.setdefault("params", {})
                 client_root = params.get("rootUri")
                 if client_root:
-                    roots = _Roots(_directory_uri(client_root), server_root)
+                    roots = _Roots((*libraries_at, (_directory_uri(client_root), server_root)))
                 else:
                     # Rewritten to the server root below, like any client path.
-                    params["rootUri"] = roots.client
+                    params["rootUri"] = DEFAULT_CLIENT_ROOT
             message = roots.inbound(message)
             request_id = message.get("id")
             if "method" in message and isinstance(request_id, int | str):
@@ -246,16 +303,7 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             if waiting.cancelled_caught:
                 # Stuck in the kernel: holding the permit for it would be the wedge
                 # all over again, so it is let go and counted instead.
-                reaper = asyncio.ensure_future(process.wait())
-                reaper.add_done_callback(lambda _: _unreaped.pop(process, None))
-                _unreaped[process] = reaper
-                logger.warning(
-                    "killed openscad-lsp (pid %d) was not reaped within %gs; "
-                    "%d killed server(s) not yet reaped",
-                    process.pid,
-                    KILL_WAIT,
-                    len(_unreaped),
-                )
+                reap_later(process)
             # Anything but our own kill means it went on its own: say so, or a server
             # that crashes on every session is invisible.
             if process.returncode not in (None, 0, -signal.SIGKILL):

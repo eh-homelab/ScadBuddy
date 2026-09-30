@@ -1,7 +1,9 @@
 # The build context is the repo root (the Dockerfile's Node stage needs
 # frontend/, the runtime stage needs backend/ and models/, the agent stages
-# need agent/). Everything that is not one of those four is noise that
-# invalidates layers.
+# need agent/, and agent-build also copies
+# plugins/scadbuddy/skills/authoring/SKILL.md, which get_authoring_guide
+# serves, #252). Everything that is not one of those is noise that
+# invalidates layers; do not exclude plugins/ without that file.
 
 .git
 .gitignore

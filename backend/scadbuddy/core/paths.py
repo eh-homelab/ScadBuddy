@@ -91,6 +91,18 @@ class DataPaths:
     def builtins(self) -> Path:
         return self.models / BUILTIN_DIR
 
+    @property
+    def builtin_media(self) -> Path:
+        """The images and videos people add to built-in templates (#722), one
+        directory per built-in slug. Not under ``models/``: the ``_builtin`` mirror
+        is the image's and is re-synced from it, and nothing added here may move a
+        built-in's revision. Their order and captions are `template_media` rows."""
+        return self.root / "builtin-media"
+
+    def builtin_media_dir(self, model_id: str) -> Path:
+        """Where the media added to the built-in ``model_id`` is kept."""
+        return self.builtin_media / model_id.removeprefix(BUILTIN_PREFIX)
+
     def model_dir(self, slug: str) -> Path:
         return self.models / model_path(slug)
 

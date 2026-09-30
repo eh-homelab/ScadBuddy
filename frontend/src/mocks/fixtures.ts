@@ -195,7 +195,7 @@ export const MEDIA_PNG_BASE64 =
 export const MEDIA_MP4_BASE64 = 'AAAAGGZ0eXBpc29tAAACAGlzb21pc28y'
 
 function image(id: string, caption = ''): MediaView {
-  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, content_type: 'image/png', size: 67 }
+  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, readonly: false, content_type: 'image/png', size: 67 }
 }
 
 /** #274 — the template of mine with a gallery: three images and a video. */
@@ -216,6 +216,7 @@ export const media: Record<string, MediaView[]> = {
       caption: '',
       poster: null,
       missing: false,
+      readonly: false,
       content_type: 'image/png',
       size: 67,
     },
@@ -233,6 +234,7 @@ export const media: Record<string, MediaView[]> = {
       caption: 'Printing on an H2C',
       poster: 'd4e5f6a1b2c3-poster.png',
       missing: false,
+      readonly: false,
       content_type: 'video/mp4',
       size: 24,
     },
@@ -630,6 +632,7 @@ export const outputs: Output[] = [
  */
 export const settingsDefaults = {
   bambuddy_url: null,
+  bambuddy_web_urls: null,
   public_url: null,
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,

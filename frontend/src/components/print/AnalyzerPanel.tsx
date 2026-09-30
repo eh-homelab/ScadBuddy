@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
@@ -211,13 +211,16 @@ interface Props {
   request: AnalysisRequest | null
   /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
   allPlates?: boolean
+  /** #755, #760 — the run's own refusals, listed first: the one check that holds Print. */
+  children?: ReactNode
 }
 
 /**
  * #284 — the print analyzers (#461) over what the dialog would send, listed in the
- * dialog. Advisory throughout: no finding disables Print (`lib/analyzers.ts`).
+ * dialog. Advisory throughout: no finding disables Print (`lib/analyzers.ts`). The
+ * nozzle verdict passed as `children` is not an analyzer finding, and its errors do.
  */
-export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
+export function AnalyzerPanel({ outputId, request, allPlates = false, children }: Props) {
   const { report, error, checking, reload } = useAnalysis(outputId, request)
   const { shown, setAside } = partition(report?.diagnostics ?? [])
   const skipped = report?.skipped ?? []
@@ -242,6 +245,8 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
         )}
         {checking && <Spinner />}
       </div>
+
+      {children}
 
       {error && (
         <p role="alert" className="mt-1.5 text-[12px] text-warn">

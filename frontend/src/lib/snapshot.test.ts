@@ -73,6 +73,61 @@ describe('captureSnapshot', () => {
     })
     expect(drawn[0]).toMatchObject({ plate: true, bbox: false, background: root.background, alpha: 1 })
   })
+
+  it("draws a framed view from a copy of the camera, at the framing's shape (#722)", async () => {
+    const { gl } = fakeRenderer(800, 500)
+    let size = { x: 800, y: 500 }
+    const sizes: { x: number; y: number }[] = []
+    Object.assign(gl, {
+      getSize: (target: THREE.Vector2) => target.set(size.x, size.y),
+      setSize: (x: number, y: number, style?: boolean) => {
+        expect(style).toBe(false)
+        size = { x, y }
+        sizes.push(size)
+      },
+    })
+    const cameras: THREE.Camera[] = []
+    ;(gl.render as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (_scene: THREE.Scene, camera: THREE.Camera) => cameras.push(camera),
+    )
+    const camera = new THREE.PerspectiveCamera(35, 1.6)
+    camera.position.set(210, 170, 230)
+
+    await captureSnapshot(gl, scene(), camera, {
+      scale: 2,
+      plate: true,
+      transparent: false,
+      view: { position: [0, 50, 300], target: [0, 20, 0], fov: 30, aspect: 1 },
+    })
+
+    // Square: the view's longer edge both ways, then the viewer's own size again.
+    expect(sizes).toEqual([
+      { x: 800, y: 800 },
+      { x: 800, y: 500 },
+    ])
+    const shot = cameras[0] as THREE.PerspectiveCamera
+    expect(shot).not.toBe(camera)
+    expect(shot.position.toArray()).toEqual([0, 50, 300])
+    expect(shot.aspect).toBe(1)
+    expect(shot.fov).toBe(30)
+    // The viewer's camera did not move, and drew the frame that put the view back.
+    expect(camera.position.toArray()).toEqual([210, 170, 230])
+    expect(cameras[1]).toBe(camera)
+  })
+
+  it("keeps the viewer's own shape for a framed view without an aspect", async () => {
+    const { gl, drawn } = fakeRenderer(800, 500)
+    const setSize = vi.fn()
+    Object.assign(gl, { getSize: vi.fn(), setSize })
+    await captureSnapshot(gl, scene(), new THREE.PerspectiveCamera(35, 1.6), {
+      scale: 2,
+      plate: true,
+      transparent: false,
+      view: { position: [0, 50, 300], target: [0, 20, 0], fov: 35 },
+    })
+    expect(setSize).not.toHaveBeenCalled()
+    expect(drawn[0]?.ratio).toBe(2)
+  })
 })
 
 describe('clampScale', () => {

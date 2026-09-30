@@ -14,18 +14,30 @@ test.describe('print dialog', () => {
     await expect(page.getByText(/^Saved /)).toBeVisible()
     await page.getByTestId('print').click()
     const dialog = page.getByRole('dialog', { name: 'Print' })
-    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toBeVisible()
+    await expect(dialog.getByTestId('filament-slot-1')).toBeVisible()
     return dialog
   }
 
-  test('picks 0.2 mm and Fine, prints and reports the queue entry', async ({ page }) => {
+  test('opens in Simple mode on the spools and Print alone, and prints (#768)', async ({ page }) => {
     const dialog = await openDialog(page)
-    // No pipelines any more: the dialog opens on the spools, nozzles, quality and plate.
+    // No pipelines any more, and no nozzle, quality, plate, options, project or copies
+    // until Advanced is on.
     await expect(dialog.getByText(/pipeline/i)).toHaveCount(0)
+    await expect(dialog.getByRole('group', { name: 'Nozzles' })).toHaveCount(0)
+    await expect(dialog.getByLabel('Copies')).toHaveCount(0)
+    await expect(dialog.getByLabel('Plate')).toHaveCount(0)
+    await expect(dialog.getByTestId('print-checks')).toBeVisible()
+
+    await dialog.getByRole('button', { name: 'Print', exact: true }).click()
+    await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
+  })
+
+  test('picks 0.2 mm and Fine in Advanced, prints and reports the queue entry', async ({ page }) => {
+    const dialog = await openDialog(page)
+    await dialog.getByRole('switch', { name: 'Advanced' }).click()
 
     await dialog.getByRole('radio', { name: /0\.2 mm/ }).check()
-    await dialog.getByRole('radio', { name: /Fine/ }).check()
-    await expect(dialog.getByRole('radio', { name: /Fine — 0\.08mm/ })).toBeChecked()
+    await dialog.getByLabel('Process').selectOption('0.08mm High Quality @BBL H2C 0.2 nozzle')
     await dialog.getByRole('button', { name: 'Print', exact: true }).click()
 
     const queued = dialog.getByTestId('queued-items')

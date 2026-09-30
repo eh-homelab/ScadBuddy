@@ -3,7 +3,10 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import type { BrowserTabs } from '../bridge/hub.js'
+import type { SessionManager } from '../sessions/manager.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
+import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
@@ -46,10 +49,16 @@ export type ToolServices = {
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
+  /** The sessions the `sessions_*` tools act on (tools/sessions.ts, #300); none without a database. */
+  sessions?: SessionManager | undefined
+  /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
+  browser?: BrowserTabs | undefined
 }
 
 export type ToolContext = ToolServices & {
   principal: Principal
+  /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
+  session?: string | undefined
   progress: Progress
   signal: AbortSignal
   /** The projection's own tools by name, so `confirm_action` can run the approved one. */
@@ -312,7 +321,11 @@ async function runJudgedByResult(
         detail: `waiting for approval (pending action ${action.id}); nothing was sent`,
       }
     }
-    const raw = await tool.execute(args, ctx)
+    // Every backend call names the agent, so each commit it makes is the agent's (#252).
+    const raw = await tool.execute(args, {
+      ...ctx,
+      backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session)),
+    })
     const by = executed()
     const result = markUntrusted(raw, by.name, by.source)
     return result.isError

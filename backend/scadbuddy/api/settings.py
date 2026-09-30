@@ -63,6 +63,8 @@ class SettingsView(BaseModel):
 
     bambuddy_url: str | None = None
     has_api_key: bool = False
+    #: As saved (comma-separated); the first is where Bambuddy links point (#775).
+    bambuddy_web_urls: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -253,6 +255,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
     return SettingsView(
         bambuddy_url=stored.bambuddy_url,
         has_api_key=bool(stored.bambuddy_api_key),
+        bambuddy_web_urls=stored.bambuddy_web_urls,
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,
         printer_id=stored.printer_id,

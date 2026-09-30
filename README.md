@@ -40,6 +40,10 @@ multi-colour rules, connecting Bambuddy and each feature.
   through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
+- **Library**: print any file already in Bambuddy's library through the same print
+  picker, printed exactly as its author left it — never replated, recolored or
+  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
@@ -89,7 +93,10 @@ for the project picker).
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`,
+  `SCADBUDDY_BAMBUDDY_WEB_URLS` (comma-separated URLs browsers reach Bambuddy at, when
+  `SCADBUDDY_BAMBUDDY_URL` is one only the server can; the first is where links point),
+  `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
   1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
   from the UI it wins; a field the UI never saved keeps following the variable,
@@ -506,6 +513,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`

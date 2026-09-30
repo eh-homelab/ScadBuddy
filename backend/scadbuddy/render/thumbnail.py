@@ -21,7 +21,9 @@ what becomes a library file's `thumbnail_path`.
 
 from __future__ import annotations
 
+import math
 import struct
+import time
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -360,3 +362,84 @@ def render_view(parts: Sequence[ColourPart], view: ViewName, size: int = PLATE_P
         parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=_part_colours(parts)
     )
     return encode_png(_downsample(image, size))
+
+
+# ── per-colour breakdown (#252) ───────────────────────────────────────────────
+
+#: A breakdown tile's edge, by default and at most.
+BREAKDOWN_TILE_SIZE = 256
+MAX_BREAKDOWN_TILE_SIZE = 512
+#: More tiles than four AMS units have slots says the model is not a print, and the
+#: image would be a mosaic nobody can read.
+MAX_BREAKDOWN_COLOURS = 16
+#: What every other colour is drawn in on a tile: a flat light grey, so the tile's
+#: own colour stands out wherever it is and the model's shape stays readable.
+GHOST_COLOUR = (215, 215, 215)
+
+
+@dataclass(frozen=True)
+class ColourBreakdown:
+    png: bytes
+    #: The tiles' colours, row by row: tile i shows where colours[i] goes.
+    colours: list[str]
+    columns: int
+
+
+def breakdown_colours(parts: Sequence[ColourPart], order: Sequence[str] = ()) -> list[str]:
+    """The distinct colours: those in ``order`` first (a job's ``colors``, extruder
+    order, spec §7), then any other in the order the parts carry them."""
+    present = [part.colour for part in parts]
+    seen = [colour for colour in dict.fromkeys(c.upper() for c in order) if colour in present]
+    for colour in present:
+        if colour not in seen:
+            seen.append(colour)
+    return seen
+
+
+def render_colour_breakdown(
+    parts: Sequence[ColourPart],
+    view: ViewName = "iso",
+    size: int = BREAKDOWN_TILE_SIZE,
+    order: Sequence[str] = (),
+    *,
+    deadline: float | None = None,
+) -> ColourBreakdown:
+    """One tile per colour, in a near-square grid: the whole model from ``view``, with
+    that colour's parts in their colour and every other part in :data:`GHOST_COLOUR`.
+    Every tile is framed on the whole model, so they line up, and hidden faces stay
+    hidden: a colour buried inside another shows as little or nothing, which is
+    itself worth seeing before a print.
+
+    ``deadline`` (a :func:`time.monotonic` value) is checked before each tile, and
+    TimeoutError raised past it: a caller's timeout cannot stop the worker thread
+    this runs in, so this stops itself within one tile of it (review of #750)."""
+    if not parts:
+        raise ValueError("a breakdown needs at least one colour part")
+    if view not in VIEW_DIRECTIONS:
+        raise ValueError(f"unknown view {view!r}")
+    if not MIN_VIEW_SIZE <= size <= MAX_BREAKDOWN_TILE_SIZE:
+        raise ValueError(f"size must be between {MIN_VIEW_SIZE} and {MAX_BREAKDOWN_TILE_SIZE}")
+    colours = breakdown_colours(parts, order)
+    if len(colours) > MAX_BREAKDOWN_COLOURS:
+        raise ValueError(
+            f"{len(colours)} colours is more than a breakdown draws ({MAX_BREAKDOWN_COLOURS})"
+        )
+    actual = _part_colours(parts)
+    columns = math.ceil(math.sqrt(len(colours)))
+    rows = math.ceil(len(colours) / columns)
+    sheet = np.zeros((rows * size, columns * size, 4), dtype=np.uint8)
+    for index, colour in enumerate(colours):
+        if deadline is not None and time.monotonic() > deadline:
+            raise TimeoutError(f"the breakdown stopped after {index} of {len(colours)} tiles")
+        tinted = [
+            rgb if part.colour == colour else GHOST_COLOUR
+            for part, rgb in zip(parts, actual, strict=True)
+        ]
+        lit = _rasterise(
+            parts, VIEW_DIRECTIONS[view], size * SUPERSAMPLE, shaded=True, colours=tinted
+        )
+        row, column = divmod(index, columns)
+        sheet[row * size : (row + 1) * size, column * size : (column + 1) * size] = _downsample(
+            lit, size
+        )
+    return ColourBreakdown(png=encode_png(sheet), colours=colours, columns=columns)
