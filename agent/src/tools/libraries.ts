@@ -3,7 +3,7 @@ import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
 // Libraries & fonts (issue #251): the library catalogue, pinning a library to a
 // model (a revision of the model's `libraries` list), installed fonts, the
@@ -227,7 +227,7 @@ export const libraryTools: Tool[] = [
         page(
           await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries'),
           args,
-          (l) => `${l.name}@${l.commit}`,
+          (l) => compositeKey(l.name, l.commit),
           'list_installed_libraries',
         ),
       ),

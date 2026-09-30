@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { allPages, DEFAULT_PAGE_SIZE, isPaged, MAX_PAGE_SIZE, page, pageInput, type Page } from '../src/tools/pagination.js'
+import {
+  allPages,
+  compositeKey,
+  cursorPosition,
+  DEFAULT_PAGE_SIZE,
+  isPaged,
+  MAX_PAGE_SIZE,
+  page,
+  pageInput,
+  type Page,
+} from '../src/tools/pagination.js'
 import { json, ToolError } from '../src/tools/registry.js'
 import { ALL_TOOLS as TOOLS } from '../src/tools/index.js'
 
@@ -60,11 +70,43 @@ describe('page', () => {
     expect(() => page(gone, { cursor: first.next_cursor! }, byId, 'list_test')).toThrow(/stale/)
   })
 
+  it('refuses a well-formed but foreign cursor as not its own', () => {
+    const foreign = Buffer.from('not json', 'utf8').toString('base64url')
+    expect(() => page(rows(3), { cursor: foreign }, byId, 'list_test')).toThrow(/not one this tool returned/)
+  })
+
+  it('reports a null total for a list that may be only the start of the collection', () => {
+    expect(page(rows(5), {}, byId, 'list_test', { complete: false }).total).toBeNull()
+  })
+
+  it('records where the cursor item sat, so a limited backend read can stop there', () => {
+    const first = page(rows(60), { limit: 10 }, byId, 'list_test')
+    expect(cursorPosition(undefined, 'list_test')).toBe(0)
+    expect(cursorPosition(first.next_cursor!, 'list_test')).toBe(10)
+    const second = page(rows(60), { limit: 10, cursor: first.next_cursor! }, byId, 'list_test')
+    expect(cursorPosition(second.next_cursor!, 'list_test')).toBe(20)
+  })
+
   it('refuses a malformed cursor and an out-of-range limit at the input schema', () => {
     const input = z.object(pageInput)
     expect(input.safeParse({ cursor: 'not a cursor!' }).success).toBe(false)
     expect(input.safeParse({ limit: MAX_PAGE_SIZE + 1 }).success).toBe(false)
     expect(input.safeParse({ limit: 0 }).success).toBe(false)
+  })
+})
+
+describe('compositeKey', () => {
+  it('cannot collide the way a delimiter-joined key can', () => {
+    expect(compositeKey('a@b', 'c')).not.toBe(compositeKey('a', 'b@c'))
+    expect(compositeKey(null, 'x')).not.toBe(compositeKey('', 'x'))
+    // Two installed checkouts that a `${name}@${commit}` key would merge stay distinct pages apart.
+    const libs = [
+      { name: 'a@b', commit: 'c' },
+      { name: 'a', commit: 'b@c' },
+      { name: 'z', commit: '1' },
+    ]
+    const key = (l: { name: string; commit: string }) => compositeKey(l.name, l.commit)
+    expect(walk(libs, key, 1).flatMap((p) => p.items)).toEqual(libs)
   })
 })
 

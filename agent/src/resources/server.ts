@@ -310,11 +310,8 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
   async function readJson(tool: Tool, args: Record<string, unknown>, principal: Principal, extra: Extra): Promise<unknown> {
     const result = await readTool(tool, args, principal, extra)
     const text = result.content.find((c) => c.type === 'text')
-    const body: unknown = text?.type === 'text' ? JSON.parse(text.text) : undefined
-    // A paged list tool (#837) answers { items, next_cursor, total }; completion wants the rows.
-    return body !== null && typeof body === 'object' && Array.isArray((body as { items?: unknown }).items)
-      ? (body as { items: unknown[] }).items
-      : body
+    // A paged tool is read to its end by readTool, which answers a plain list as the bare array.
+    return text?.type === 'text' ? JSON.parse(text.text) : undefined
   }
 
   /** Candidate values for one template variable; best effort, [] when unavailable. */

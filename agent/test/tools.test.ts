@@ -1169,3 +1169,49 @@ describe('dependencies: include resolution and fonts (#253)', () => {
     expect(JSON.stringify(render.content)).toContain('default font instead')
   })
 })
+
+describe('list_versions paging (#837)', () => {
+  const history = Array.from({ length: 120 }, (_, i) => ({
+    commit: `c${String(i).padStart(3, '0')}`,
+    short: `c${i}`,
+    message: `revision ${i}`,
+    author: 'a',
+    date: '2026-09-30T00:00:00Z',
+    current: i === 0,
+    files: [],
+    agent: null,
+  }))
+
+  it('asks the backend for no more history than the page needs, and knows when it has it all', async () => {
+    const limits: number[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/versions`, ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        limits.push(limit)
+        return HttpResponse.json(history.slice(0, limit))
+      }),
+    )
+    const first = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 10 }, ctx())) as {
+      items: { commit: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items.map((v) => v.commit)).toEqual(history.slice(0, 10).map((v) => v.commit))
+    expect(first.total).toBeNull()
+    const second = firstText(
+      await runTool(tool('list_versions'), { slug: 'box', limit: 10, cursor: first.next_cursor }, ctx()),
+    ) as { items: { commit: string }[] }
+    expect(second.items.map((v) => v.commit)).toEqual(history.slice(10, 20).map((v) => v.commit))
+    // A page and a page of slack, plus one: never the whole 500-revision window.
+    expect(limits).toEqual([21, 31])
+
+    // A history shorter than the read is known complete: its total is exact.
+    const whole = firstText(await runTool(tool('list_versions'), { slug: 'box', limit: 100 }, ctx())) as {
+      total: number | null
+      next_cursor: string | null
+    }
+    expect(limits.at(-1)).toBe(201)
+    expect(whole.total).toBe(120)
+    expect(whole.next_cursor).toEqual(expect.any(String))
+  })
+})

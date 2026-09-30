@@ -3,7 +3,7 @@ import { ok } from './call.js'
 import { binary } from './binary.js'
 import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -207,7 +207,7 @@ export const outputTools: Tool[] = [
     routes: ['GET /api/v1/plates'],
     handler: async (args, { backend }) => {
       const { default: fallback, plates } = await ok(backend.GET('/api/v1/plates'), 'list plates')
-      const { items, ...rest } = page(plates, args, (p) => `${p.model ?? ''}:${p.name}`, 'list_plates')
+      const { items, ...rest } = page(plates, args, (p) => compositeKey(p.model, p.name), 'list_plates')
       return json({ default: fallback, plates: items, ...rest })
     },
   }),

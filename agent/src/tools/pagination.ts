@@ -26,30 +26,71 @@ export const pageInput = {
     .describe(`Items per page, ${DEFAULT_PAGE_SIZE} by default`),
   cursor: z
     .string()
-    .regex(/^[A-Za-z0-9_-]{1,512}$/, 'must be a next_cursor from the same tool')
+    .regex(/^[A-Za-z0-9_-]{1,1024}$/, 'must be a next_cursor from the same tool')
     .optional()
     .describe('The previous page\'s next_cursor, for the page after it'),
 }
 
 export type PageArgs = { limit?: number | undefined; cursor?: string | undefined }
 
-export type Page<T> = { items: T[]; next_cursor: string | null; total: number }
+export type Page<T> = { items: T[]; next_cursor: string | null; total: number | null }
 
 /** Appended to a list tool's description, so the model knows to follow next_cursor. */
-export const PAGED = ` Pages: ${DEFAULT_PAGE_SIZE} items by default (\`limit\` up to ${MAX_PAGE_SIZE}); pass \`next_cursor\` back as \`cursor\` until it is null. \`total\` counts every item.`
+export const PAGED = ` Pages: ${DEFAULT_PAGE_SIZE} items by default (\`limit\` up to ${MAX_PAGE_SIZE}); pass \`next_cursor\` back as \`cursor\` until it is null. \`total\` counts every item, or is null when unknown.`
 
-const encode = (key: string) => Buffer.from(key, 'utf8').toString('base64url')
-const decode = (cursor: string) => Buffer.from(cursor, 'base64url').toString('utf8')
+// The cursor is JSON `[key, position]`: the key is what makes it keyset; the
+// position is only a hint, so a cursor can be checked in O(1) when nothing moved,
+// and so a tool whose backend takes a `limit` can fetch no further than the page
+// it needs (cursorPosition, list_versions).
+const encode = (key: string, position: number) => Buffer.from(JSON.stringify([key, position]), 'utf8').toString('base64url')
+
+function decode(cursor: string, tool: string): { key: string; position: number } {
+  try {
+    const value: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    if (Array.isArray(value) && value.length === 2 && typeof value[0] === 'string' && Number.isInteger(value[1]) && value[1] >= 0) {
+      return { key: value[0], position: value[1] }
+    }
+  } catch {
+    // Reported below.
+  }
+  throw new ToolError(`${tool}: the cursor is not one this tool returned; list again without \`cursor\``, 400)
+}
+
+/** Where a cursor's item sat when it was issued: how far into the list the next page starts, at least. */
+export const cursorPosition = (cursor: string | undefined, tool: string): number =>
+  cursor === undefined ? 0 : decode(cursor, tool).position + 1
+
+/**
+ * A cursor key built from several fields, unambiguous whatever the fields hold
+ * (a delimiter-joined string would let `a@b` + `c` collide with `a` + `b@c`).
+ */
+export const compositeKey = (...parts: readonly (string | number | null | undefined)[]): string => JSON.stringify(parts)
+
+export type PageOptions = {
+  /**
+   * False when `items` may be only the start of the collection (the backend was
+   * asked for a limited number): `total` is then null, as the true count is unknown.
+   */
+  complete?: boolean
+}
 
 /**
  * One page of `items`, in their given order. `key` must be unique within the
- * list (a slug, an id, a name): it is what the cursor records.
+ * list (a slug, an id; compositeKey for several fields): it is what the cursor
+ * records.
  */
-export function page<T>(items: readonly T[], { limit, cursor }: PageArgs, key: (item: T) => string, tool: string): Page<T> {
+export function page<T>(
+  items: readonly T[],
+  { limit, cursor }: PageArgs,
+  key: (item: T) => string,
+  tool: string,
+  { complete = true }: PageOptions = {},
+): Page<T> {
   let start = 0
   if (cursor !== undefined) {
-    const after = decode(cursor)
-    const at = items.findIndex((item) => key(item) === after)
+    const after = decode(cursor, tool)
+    const hinted = items[after.position]
+    const at = hinted !== undefined && key(hinted) === after.key ? after.position : items.findIndex((item) => key(item) === after.key)
     if (at < 0) {
       throw new ToolError(
         `${tool}: the cursor is stale (the item it points after is gone); list again without \`cursor\``,
@@ -62,7 +103,11 @@ export function page<T>(items: readonly T[], { limit, cursor }: PageArgs, key: (
   const slice = items.slice(start, start + size)
   const last = slice.at(-1)
   const more = start + size < items.length
-  return { items: slice, next_cursor: more && last !== undefined ? encode(key(last)) : null, total: items.length }
+  return {
+    items: slice,
+    next_cursor: more && last !== undefined ? encode(key(last), start + slice.length - 1) : null,
+    total: complete ? items.length : null,
+  }
 }
 
 /**

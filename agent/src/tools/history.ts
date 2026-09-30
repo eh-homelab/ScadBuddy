@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { cursorPosition, DEFAULT_PAGE_SIZE, page, PAGED, pageInput } from './pagination.js'
 
 // History (issue #251): versions, diff, source at a commit, restore, and a
 // duplicate's upstream status/merge/dismiss/detach. Every write here is itself
@@ -16,25 +16,26 @@ export const historyTools: Tool[] = [
   defineTool({
     name: 'list_versions',
     description:
-      "A model's revision history, newest first: commit id, message and time. Covers the newest " +
-      `${HISTORY_WINDOW} revisions.` + PAGED,
+      "A model's revision history, newest first: commit id, message and time. Only the newest " +
+      `${HISTORY_WINDOW} revisions can be paged to, and \`total\` is null while more may follow.` + PAGED,
     input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
       'revision messages written by model authors or upstreams',
     routes: ['GET /api/v1/models/{slug}/versions'],
-    handler: async ({ slug, ...args }, { backend }) =>
-      json(
-        page(
-          await ok(
-            backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit: HISTORY_WINDOW } } }),
-            `list versions of ${slug}`,
-          ),
-          args,
-          (v) => v.commit,
-          'list_versions',
-        ),
-      ),
+    handler: async ({ slug, ...args }, { backend }) => {
+      // The backend takes a limit, not a cursor: read only as far as this page, plus a
+      // page of slack for revisions made since the cursor was issued (they push its
+      // item down) and one more to know whether there is a next; not the whole window.
+      const size = args.limit ?? DEFAULT_PAGE_SIZE
+      const wanted = cursorPosition(args.cursor, 'list_versions') + 2 * size + 1
+      const limit = Math.min(HISTORY_WINDOW, wanted)
+      const versions = await ok(
+        backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }),
+        `list versions of ${slug}`,
+      )
+      return json(page(versions, args, (v) => v.commit, 'list_versions', { complete: versions.length < limit }))
+    },
   }),
 
   defineTool({
