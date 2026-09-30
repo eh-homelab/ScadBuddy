@@ -51,6 +51,7 @@ from scadbuddy.render.thumbnail import (
     ViewName,
     render_view,
 )
+from scadbuddy.store.content import StoreFullError
 
 router = APIRouter(tags=["jobs"])
 
@@ -235,6 +236,12 @@ async def render_model(
             str(error),
             headers={"Retry-After": str(error.retry_after)},
             retry_after=error.retry_after,
+        ) from None
+    except StoreFullError as error:
+        # `submit` pins the template's snapshot in the blob store before the job exists.
+        raise ApiError(
+            status.HTTP_507_INSUFFICIENT_STORAGE,
+            f"the blob store has no room for this template's source: {error}",
         ) from None
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 

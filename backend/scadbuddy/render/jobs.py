@@ -559,7 +559,6 @@ async def resolve_source(
                 fetcher, partial(model_search_path, paths, slug)
             ),
         )
-    assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
     if (directory / SOURCE_NAME).is_file():
         # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
@@ -567,7 +566,10 @@ async def resolve_source(
         # render that is still browsing it.
         await asyncio.to_thread(_touch, directory)
     else:
-        await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
+        # A worker on the bambuddy store has no history: a snapshot it materialized is
+        # a populated export and needs none.
+        assert history is not None  # a requested revision implies a repository
+        await asyncio.to_thread(export_revision, history, slug, requested, directory)
     # The pins that revision declares, not the live model's: an old revision
     # renders against the library versions it was written with.
     return ModelSource(
@@ -613,7 +615,7 @@ def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = 
     return removed
 
 
-def _export_atomically(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
+def export_revision(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
     """Export beside the destination, then move it into place.
 
     Renders are debounced, so two of the same revision overlap routinely, and a
