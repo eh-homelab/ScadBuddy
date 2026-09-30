@@ -9,11 +9,13 @@ import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
-import { printMediaTools } from './prints.js'
+import { printHistoryTools, printMediaTools } from './prints.js'
 import type { Tier } from '../auth/principal.js'
 import type { Tool } from './registry.js'
 import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
+import { sourceFileTools } from './sourceFiles.js'
+import { templateTools } from './templates.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
 // Not here yet: the tools in coverage.ts `PENDING_ROUTES`. The browser_*
@@ -26,12 +28,15 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...customizerTools,
   ...outputTools,
   ...historyTools,
+  ...sourceFileTools,
+  ...templateTools,
   ...authoringTools,
   ...inspectTools,
   ...guideTools,
   ...libraryTools,
   ...settingsTools,
   ...printTools,
+  ...printHistoryTools,
   ...printMediaTools,
   ...browserTools,
   ...approvalTools,

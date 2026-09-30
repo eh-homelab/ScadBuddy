@@ -141,6 +141,30 @@ export const BROWSER_TOOL_TIERS: Readonly<Record<string, RiskTier>> = {
 }
 
 /**
+ * Which browser a `browser_*` tool drives, for the session's system prompt. Both sets
+ * share bare names (`browser_snapshot`, `browser_click`), and a model that has seen
+ * one set calls the other's names on the wrong server: in production it called
+ * `mcp__scadbuddy__browser_find`, which only the headless set has.
+ */
+export function browserToolsGuide(headless: boolean): string {
+  const lines = [
+    '<browser_tools>',
+    "The mcp__scadbuddy__browser_* tools drive the user's own open ScadBuddy tab, which they watch. Use only the names " +
+      'that server lists; it has no browser_find, browser_type or browser_select_option. To find something on the ' +
+      'page, call mcp__scadbuddy__browser_snapshot; to set a field or a select, mcp__scadbuddy__browser_fill (a ' +
+      "select takes an option's value or its label as the snapshot shows it).",
+  ]
+  lines.push(
+    headless
+      ? `The ${TOOL_PREFIX}browser_* tools drive a separate headless Chromium that the user cannot see and that ` +
+          "never shows the user's tab. Use them only when the user has no tab attached or asks for the headless browser."
+      : 'There is no headless browser in this session.',
+  )
+  lines.push('</browser_tools>')
+  return lines.join('\n')
+}
+
+/**
  * The in-process tool that asks a human to allow ONE outward request from the
  * headless browser (headlessGrants.ts). Outward tier: it parks for approval.
  */

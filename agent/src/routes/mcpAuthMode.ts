@@ -1,5 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import {
   type McpAuthMode,
   type McpAuthSettings,
@@ -52,7 +54,12 @@ import { mcpAuthOf, ready, type RouteModule } from './module.js'
 /** What this route writes: credentials.ts `SettingsStore` is one. */
 export type SettingsWriter = {
   /** Writes `values` only when `check`, reading inside the same transaction, returns true. */
-  setMany(values: Record<string, unknown>, check: (current: SettingsReader) => Promise<boolean>): Promise<boolean>
+  /** `context` says who wrote them, for the audit rows (#831). */
+  setMany(
+    values: Record<string, unknown>,
+    check: (current: SettingsReader) => Promise<boolean>,
+    context: AuditContext,
+  ): Promise<boolean>
 }
 
 export type McpAuthModeRouteDeps = {
@@ -176,6 +183,7 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
         before = await mcpAuthSettings(stored, () => {})()
         return configured(before) === body.expected.mode && before.anonymousCap === body.expected.anonymous_cap
       },
+      { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) },
     )
     if (!written) return c.json({ detail: CHANGED }, 409)
     if (before && (configured(before) !== body.mode || before.anonymousCap !== body.anonymous_cap)) {

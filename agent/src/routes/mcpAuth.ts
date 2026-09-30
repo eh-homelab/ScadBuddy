@@ -1,5 +1,6 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import { UI_ACTOR } from '../audit/writes.js'
 import {
   defaultOidcConfig,
   DiscoveryError,
@@ -134,7 +135,7 @@ export function registerMcpAuthRoutes(app: Hono, deps: McpAuthRouteDeps): void {
       }
       discovery = result
     }
-    await r.put(config)
+    await r.put(config, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
     deps.provider.forget(config.issuer)
     return c.json({ ...view(config), discovery })
   })

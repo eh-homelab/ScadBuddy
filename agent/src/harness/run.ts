@@ -347,7 +347,18 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
-  if (run.sessionStore !== undefined) options.sessionStore = run.sessionStore
+  if (run.sessionStore !== undefined) {
+    options.sessionStore = run.sessionStore
+    // 'eager': every transcript frame is appended as it is written, not at the
+    // turn's end ('batched', the default: "flush at end-of-turn or when pending
+    // thresholds are exceeded", sdk.d.ts 0.3.283 SessionStoreFlush). An aborted
+    // query still flushes its batch as it ends, if the process lives that long
+    // (SessionManager.stopTurns waits for it; test/sessions.e2e.test.ts). One
+    // that dies first (a SIGKILL, an OOM, the grace period running out) would
+    // otherwise leave nothing of its turn in Postgres, not even the user's
+    // message, and the next turn would resume without it, as on 2026-09-30.
+    options.sessionStoreFlush = 'eager'
+  }
   if (run.cwd !== undefined) options.cwd = run.cwd
   if (run.includePartialMessages) options.includePartialMessages = true
   const plugins = (run.pluginPaths ?? []).map((p) => {

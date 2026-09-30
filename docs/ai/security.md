@@ -863,6 +863,34 @@ so the marking is defence in depth and the approval gate is the boundary.
   stop a model from reading text inside the image, which is why the approval gate,
   not the marking, is the boundary.
 
+## Render limits (#252)
+
+Issue [#252](https://github.com/eh-homelab/ScadBuddy/issues/252) ("Guardrails": "A
+render timeout and resource limits"). Each render is already bounded by the backend:
+the render timeout, the queue's workers and the body-size gates in
+[`backend/scadbuddy/api/limits.py`](../../backend/scadbuddy/api/limits.py). The backend
+cannot tell a person dragging a slider from an agent rendering in a loop, so the
+agent bounds its own callers before a render reaches the queue
+([`agent/src/tools/renderLimits.ts`](../../agent/src/tools/renderLimits.ts), used by
+`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts)):
+
+- per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
+  or the browser user, whose harness sessions share one count);
+- at most **2** of its renders in flight at once, counted until the backend job
+  settles (done, failed or cancelled). A render `render_model` hands back still
+  running keeps its slot while the agent polls the job in the background, for at most
+  **30 minutes**, or until the backend stops answering for it (PR #752 review). Past
+  30 minutes the slot is freed even if the job still runs, so for a job that long (a
+  raised render timeout, applied per colour) this cap is best effort, and only the
+  backend's shared render concurrency bounds it;
+- at most **30** started in any **10 minutes**.
+
+A refusal is an error result that names the limit and when to try again, and nothing is
+sent to the backend. The counts are in memory. They bound a burst, not a total, so a
+restart clears them, and there is no new state or setting. A principal with nothing in
+flight and nothing started in the window is dropped, so the counts hold only recent
+callers (anonymous MCP principals are one per session).
+
 ## Known limitations
 
 From the merged code and PR bodies:
