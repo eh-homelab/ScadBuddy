@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import os
 import re
 import shutil
+import uuid
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from pathlib import Path
+
+from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
 
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
@@ -43,3 +49,50 @@ class LocalBlobStore:
 
     def touched_at(self, key: str) -> float:
         return self._path(key).stat().st_mtime
+
+
+_OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
+_CHUNK = 1 << 20
+
+
+class LocalContentBackend:
+    """Objects under a directory, one file per sha256: tests, `verify.sh`, and the
+    stand-in for a remote backend in the worker-cache tests."""
+
+    backend = "local"
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _path(self, backend_id: str) -> Path:
+        # fullmatch: `$` would also accept an id ending in a newline.
+        if not _OBJECT.fullmatch(backend_id):
+            raise ValueError(f"not a local object id: {backend_id!r}")
+        return self.root / backend_id
+
+    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
+        backend_id = f"{kind}/{hashlib.sha256(data).hexdigest()}"
+        path = self._path(backend_id)
+
+        def write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+            staging.write_bytes(data)
+            os.replace(staging, path)
+
+        await asyncio.to_thread(write)
+        return backend_id
+
+    async def download(self, backend_id: str) -> AsyncIterator[bytes]:
+        try:
+            data = await asyncio.to_thread(self._path(backend_id).read_bytes)
+        except FileNotFoundError:
+            raise BlobMissingError(backend_id) from None
+        for start in range(0, len(data), _CHUNK):
+            yield data[start : start + _CHUNK]
+
+    async def exists(self, backend_id: str) -> bool:
+        return await asyncio.to_thread(self._path(backend_id).is_file)
+
+    async def remove(self, backend_id: str) -> None:
+        await asyncio.to_thread(self._path(backend_id).unlink, missing_ok=True)

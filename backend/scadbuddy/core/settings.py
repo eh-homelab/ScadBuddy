@@ -30,9 +30,13 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_MAX,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
+    DEFAULT_STORE_MAX_COUNT,
+    DEFAULT_STORE_MAX_TOTAL_BYTES,
     DEFAULT_TEMPORAL_NAMESPACE,
     DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
+    DEFAULT_WORKER_CACHE_MAX_BYTES,
     Config,
+    StoreBackend,
 )
 
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
@@ -88,6 +92,16 @@ class Settings(BaseSettings):
     # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    # SCADBUDDY_BAMBUDDY_RENDER_API_KEY / SCADBUDDY_STORE_BACKEND seed the stored values
+    # (`library.settings_store`, ENV_SEEDED), like `bambuddy_api_key`: a value saved in
+    # Settings wins. Render workers read them from there (spec §9).
+    bambuddy_render_api_key: str | None = None
+    store_backend: StoreBackend = "local"
+    # SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT: the store's caps (spec §6.2); a put
+    # past either is refused unless the content is already stored. 0 is no limit.
+    store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
+    store_max_count: int = DEFAULT_STORE_MAX_COUNT
+    worker_cache_max_bytes: int = DEFAULT_WORKER_CACHE_MAX_BYTES
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -200,6 +214,9 @@ class Settings(BaseSettings):
             temporal_address=self.temporal_address,
             temporal_namespace=self.temporal_namespace,
             temporal_task_queue_render=self.temporal_task_queue_render,
+            store_max_total_bytes=self.store_max_total_bytes,
+            store_max_count=self.store_max_count,
+            worker_cache_max_bytes=self.worker_cache_max_bytes,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
