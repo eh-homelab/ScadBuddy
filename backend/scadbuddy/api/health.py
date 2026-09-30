@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import StateDep
+from scadbuddy.store.factory import StoreHealth, store_health
 
 router = APIRouter(tags=["health"])
 
@@ -30,10 +31,12 @@ class Health(BaseModel):
     revision: str
     version: str
     temporal: TemporalHealth
+    #: The blob store this process runs on, against the one stored in Settings (#426).
+    store: StoreHealth
 
 
 @router.get("/healthz", response_model=Health, summary="Liveness")
-def healthz(state: StateDep) -> Health:
+async def healthz(state: StateDep) -> Health:
     writable = state.paths.root.is_dir() and os.access(state.paths.root, os.W_OK)
     healthy = writable and state.openscad_version is not None
     settings = state.settings
@@ -43,6 +46,7 @@ def healthz(state: StateDep) -> Health:
         data_dir_writable=writable,
         revision=settings.revision,
         version=settings.version,
+        store=await store_health(state.store),
         temporal=TemporalHealth(
             address=settings.temporal_address,
             namespace=settings.temporal_namespace,

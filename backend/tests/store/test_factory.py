@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from scadbuddy.core.config import Config
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.fonts import FontService
+from scadbuddy.library.settings_store import (
+    RenderStoreSettings,
+    StoreNotReadyError,
+    load_render_store_settings,
+)
+from scadbuddy.store import factory
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
+from scadbuddy.store.index import Pool
+from scadbuddy.store.local import LocalBlobStore
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
+
+pytestmark = pytest.mark.requires_postgres
+
+
+READY = RenderStoreSettings(
+    store_backend="bambuddy", bambuddy_url="http://bambuddy.test", library_folder_id=7
+)
+
+
+def _build(  # type: ignore[no-untyped-def]
+    tmp_path: Path, pool: Pool, backend: str, current: RenderStoreSettings = READY
+):
+    config = Config(data_dir=tmp_path)
+    source = RenderSettingsSource(
+        pool,
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
+    )
+    return config, build_store(
+        backend=backend,  # type: ignore[arg-type]
+        current=current,
+        config=config,
+        paths=DataPaths(tmp_path),
+        pool=pool,
+        source=source,
+        history=None,
+        fonts=FontService(tmp_path),
+        metrics=None,
+    )
+
+
+async def test_local_is_phase_one_exactly(tmp_path: Path, pool: Pool) -> None:
+    config, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    assert isinstance(bundle.blobs, LocalBlobStore) and bundle.content is None
+    assert bundle.snapshots is None and bundle.remote_assets is None and bundle.fonts is None
+    (bundle.blobs.dir_for("k") / "m").write_bytes(b"12345")
+    usage = store_usage(bundle, config)
+    assert (usage.backend, usage.count, usage.bytes) == ("local", 1, 5)
+    health = await store_health(bundle)
+    assert health.backend == "local" and health.multi_worker is False
+    await bundle.aclose()
+
+
+async def test_the_local_walk_is_reused_within_max_age_for_the_scraper(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/metrics` passes a max age, so a scrape does not walk the whole local store."""
+    config, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    now = [1000.0]
+    monkeypatch.setattr(factory, "monotonic", lambda: now[0])
+    (bundle.blobs.dir_for("a") / "m").write_bytes(b"12345")
+    assert store_usage(bundle, config, max_age=60).count == 1
+    (bundle.blobs.dir_for("b") / "m").write_bytes(b"1")
+    now[0] += 59
+    assert store_usage(bundle, config, max_age=60).count == 1  # the last walk
+    assert store_usage(bundle, config).count == 2  # no max age: walked now
+    now[0] += 61
+    assert store_usage(bundle, config, max_age=60).bytes == 6
+    await bundle.aclose()
+
+
+async def test_a_piece_the_sweep_removes_mid_walk_counts_for_nothing(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#672 gate: the local sweep deletes pieces while `/store/usage` walks them."""
+    config, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    (bundle.blobs.dir_for("kept") / "m").write_bytes(b"12345")
+    swept = bundle.blobs.dir_for("swept")
+    (swept / "m").write_bytes(b"1")
+    is_file = Path.is_file
+
+    def racing(self: Path) -> bool:
+        found = is_file(self)
+        if found and self == swept / "m":
+            self.unlink()  # found, then gone before its stat
+        return found
+
+    monkeypatch.setattr(Path, "is_file", racing)
+    usage = store_usage(bundle, config)
+    assert (usage.count, usage.bytes) == (2, 5)
+    await bundle.aclose()
+
+
+async def test_bambuddy_puts_a_cache_in_front_of_the_remote(tmp_path: Path, pool: Pool) -> None:
+    config, bundle = _build(tmp_path, pool, "bambuddy")
+    assert isinstance(bundle.blobs, CachedBlobStore)
+    assert bundle.blobs.local.root == DataPaths(tmp_path).blobs
+    # The worker cache: nothing younger than an activity's budget is evicted.
+    assert bundle.blobs.min_age == config.activity_timeout
+    assert bundle.blobs.max_bytes == config.worker_cache_max_bytes
+    assert bundle.content is not None and bundle.content.name == "bambuddy"
+    assert (await store_health(bundle)).multi_worker is True
+    await bundle.aclose()
+
+
+@pytest.mark.parametrize(
+    ("url", "folder"), [(None, 7), ("http://bambuddy.test", None), (None, None)]
+)
+def test_an_unready_bambuddy_backend_is_refused(
+    tmp_path: Path, pool: Pool, url: str | None, folder: int | None
+) -> None:
+    current = READY.model_copy(update={"bambuddy_url": url, "library_folder_id": folder})
+    with pytest.raises(StoreNotReadyError) as refused:
+        _build(tmp_path, pool, "bambuddy", current)
+    assert RECOVER_LOCAL_SQL in str(refused.value)
+
+
+def test_an_env_seeded_bambuddy_backend_without_a_url_or_inbox_is_refused(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """SCADBUDDY_STORE_BACKEND=bambuddy with nothing stored: the seed is refused too."""
+    seeded = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        store_backend="bambuddy",
+    )
+    current = load_render_store_settings(pool, seeded)
+    assert current.store_backend == "bambuddy"
+    with pytest.raises(StoreNotReadyError) as refused:
+        _build(tmp_path, pool, "bambuddy", current)
+    assert RECOVER_LOCAL_SQL in str(refused.value)
+
+
+def test_the_named_recovery_puts_a_stored_bambuddy_back_on_the_local_store(
+    tmp_path: Path, pool: Pool
+) -> None:
+    defaults = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO settings (name, value) VALUES ('store_backend', '\"bambuddy\"')")
+    assert load_render_store_settings(pool, defaults).store_backend == "bambuddy"
+    with pool.connection() as conn:
+        conn.execute(RECOVER_LOCAL_SQL)
+    assert load_render_store_settings(pool, defaults).store_backend == "local"

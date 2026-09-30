@@ -147,6 +147,18 @@ class AssetRejectedError(ValueError):
     """The upload is not an SVG or PNG this store will keep."""
 
 
+class AssetUnavailableError(ValueError):
+    """A file parameter names a value that is neither an upload in this store nor one of
+    the template's samples."""
+
+    def __init__(self, parameter: str, value: str) -> None:
+        super().__init__(
+            f"parameter {parameter!r} is not an uploaded or sample file: {value[:80]!r}"
+        )
+        self.parameter = parameter
+        self.asset_id = value
+
+
 class AssetNotFoundError(KeyError):
     pass
 
@@ -787,9 +799,7 @@ def file_assets(
             # (a job, a preset), so it is marked used before a sweep can take it.
             meta = store.use(value)
         except AssetNotFoundError:
-            raise ValueError(
-                f"parameter {parameter.name!r} is not an uploaded or sample file: {value[:80]!r}"
-            ) from None
+            raise AssetUnavailableError(parameter.name, value) from None
         if meta.kind not in parameter.accept:
             raise ValueError(
                 f"parameter {parameter.name!r} accepts {', '.join(parameter.accept)}, "

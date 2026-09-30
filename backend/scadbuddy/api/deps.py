@@ -48,8 +48,8 @@ from scadbuddy.render.previews import (
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
-from scadbuddy.store import BlobRefs
-from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.factory import StoreBundle
 from scadbuddy.workflows.client import connect_lazily
 
 logger = logging.getLogger(__name__)
@@ -93,9 +93,8 @@ class AppState:
     assets: AssetStore
     #: Submits renders to Temporal and reads them back from the projection (#546).
     render: RenderService
-    #: The `render_jobs` projection, the blob store and its references.
+    #: The `render_jobs` projection and the blob references.
     projection: JobProjection
-    blobs: LocalBlobStore
     refs: BlobRefs
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
@@ -163,6 +162,10 @@ class AppState:
     def components(self, value: Components) -> None:
         self._components = value
 
+    #: The blob store (#426), built in the lifespan once the settings pool is open;
+    #: nothing reads it earlier. `blobs` is its piece store, set with it.
+    store: StoreBundle = field(init=False)
+    blobs: BlobStore = field(init=False)
     #: The in-process worker's client (SCADBUDDY_TEMPORAL_WORKER_INPROCESS), which the
     #: lifespan connects eagerly: a worker cannot run on the API's lazy one.
     temporal: Client | None = field(default=None)
@@ -321,7 +324,6 @@ def _build_core(settings: Settings) -> AppState:
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
         projection=projection,
-        blobs=LocalBlobStore(paths.blobs),
         refs=BlobRefs(pool),
     )
 

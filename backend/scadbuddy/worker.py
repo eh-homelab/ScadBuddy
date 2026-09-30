@@ -29,12 +29,16 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
-from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, make_current, render_worker
 
@@ -54,7 +58,7 @@ MAKE_CURRENT_EVERY = 5.0
 MAKE_CURRENT_DEADLINE = 60.0
 
 
-def build_worker_deps(settings: Settings) -> WorkerDeps:
+def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -79,21 +83,45 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
-    return WorkerDeps(
+    try:
+        source = RenderSettingsSource(projection.pool, settings)
+        current = load_render_store_settings(projection.pool, settings)
+        backend = current.store_backend
+        store = build_store(
+            backend=backend,
+            current=current,
+            config=config,
+            paths=paths,
+            pool=projection.pool,
+            source=source,
+            # On bambuddy a worker has no git: the API makes the snapshots it renders from.
+            history=None,
+            fonts=FontService(settings.data_dir),
+            metrics=metrics,
+        )
+    except BaseException:
+        # A refused start (an unready store) closes what it opened before propagating.
+        projection.close()
+        raise
+    deps = WorkerDeps(
         config=config,
         paths=paths,
         assets=assets,
-        blobs=LocalBlobStore(paths.blobs),
+        blobs=store.blobs,
         refs=BlobRefs(projection.pool),
         projection=projection,
-        history=history,
+        history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
         thumbnail_executor=ThreadPoolExecutor(
             max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=metrics,
+        snapshots=store.snapshots,
+        fonts_mirror=store.fonts,
+        remote_assets=store.remote_assets,
     )
+    return deps, store
 
 
 def worker_deps_from_state(state: AppState) -> WorkerDeps:
@@ -104,7 +132,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         config=state.config,
         paths=state.paths,
         assets=state.assets,
-        blobs=state.blobs,
+        blobs=state.store.blobs,
         refs=state.refs,
         projection=state.projection,
         history=state.history,
@@ -114,6 +142,9 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
             max_workers=state.config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=state.metrics,
+        snapshots=state.store.snapshots,
+        fonts_mirror=state.store.fonts,
+        remote_assets=state.store.remote_assets,
     )
 
 
@@ -236,23 +267,73 @@ class _HealthServer(uvicorn.Server):
         yield
 
 
-def _health_server(settings: Settings, metrics: Metrics, port: int) -> _HealthServer:
+async def _refresh_store_metrics(metrics: Metrics, store: StoreBundle) -> None:
+    """The store gauges this process owns: its piece cache and the key it holds. The
+    store's usage is the API's to export (one database, one set of numbers)."""
+    health = await store_health(store)
+    metrics.store_render_key_fallback.set(1 if health.render_key_fallback else 0)
+    if isinstance(store.blobs, CachedBlobStore):
+        metrics.worker_cache_bytes.set(await asyncio.to_thread(store.blobs.cached_bytes))
+
+
+def _health_app(settings: Settings, metrics: Metrics, store: StoreBundle) -> Starlette:
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse(
             {
                 "ok": True,
                 "build_id": settings.revision,
                 "task_queue": settings.temporal_task_queue_render,
+                "store": (await store_health(store)).model_dump(),
             }
         )
 
     async def exposition(_: Request) -> Response:
+        try:
+            await _refresh_store_metrics(metrics, store)
+        except Exception:
+            # Like the API's: keep the last values, never fail the scrape.
+            logger.exception("could not read the store's gauges")
         return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
-    app = Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+    return Starlette(routes=[Route("/healthz", healthz), Route("/metrics", exposition)])
+
+
+def _health_server(
+    settings: Settings, metrics: Metrics, store: StoreBundle, port: int
+) -> _HealthServer:
+    app = _health_app(settings, metrics, store)
     return _HealthServer(
         uvicorn.Config(app, host="0.0.0.0", port=port, log_config=None, access_log=False)
     )
+
+
+#: How often a worker evicts its piece cache when the upload sweep is off (seconds).
+WORKER_CACHE_EVICT_INTERVAL = 300.0
+
+
+async def _evict_periodically(blobs: CachedBlobStore, interval: float) -> None:
+    """The worker's sweep: its piece cache, least recently used first, down to
+    SCADBUDDY_WORKER_CACHE_MAX_BYTES. Best effort; the next pass retries."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            evicted = await asyncio.to_thread(blobs.evict)
+        except Exception:
+            logger.exception("could not evict the piece cache")
+            continue
+        if evicted:
+            logger.info("evicted cached pieces", extra={"count": len(evicted)})
+
+
+def _start_eviction(blobs: object, sweep_interval: float) -> asyncio.Task[None] | None:
+    """Evict the piece cache on a timer whenever the worker's blobs are one: every
+    SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
+    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops it."""
+    if not isinstance(blobs, CachedBlobStore):
+        return None
+    interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
+    logger.info("evicting the piece cache every %.0f s", interval)
+    return asyncio.create_task(_evict_periodically(blobs, interval))
 
 
 async def run_worker(
@@ -263,13 +344,16 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps = build_worker_deps(settings)
+    deps, store = build_worker_deps(settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
+    evicting = _start_eviction(store.blobs, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)
         server = (
-            _health_server(settings, deps.metrics, health_port) if health_port is not None else None
+            _health_server(settings, deps.metrics, store, health_port)
+            if health_port is not None
+            else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
@@ -279,6 +363,11 @@ async def run_worker(
                 server.should_exit = True
                 await serving
     finally:
+        if evicting is not None:
+            evicting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await evicting
+        await store.aclose()
         deps.projection.close()
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 

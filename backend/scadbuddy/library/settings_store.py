@@ -102,6 +102,12 @@ def _nullable(name: str) -> bool:
 NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 
 
+#: The settings `StoreNotReadyError` is decided from.
+STORE_READINESS = frozenset({"store_backend", "bambuddy_url", "library_folder_id"})
+#: `pg_advisory_xact_lock` key (hashed) under which a save checks and writes them.
+STORE_READINESS_LOCK = "scadbuddy:settings:store-readiness"
+
+
 class StoreNotReadyError(ValueError):
     """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs."""
 
@@ -429,16 +435,9 @@ class SettingsStore:
         for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
-        if changes.get("store_backend") == "bambuddy":
-            current = self.load()
-            url = changes.get("bambuddy_url", current.bambuddy_url)
-            inbox = changes.get("library_folder_id", current.library_folder_id)
-            if not url or inbox is None:
-                raise StoreNotReadyError(
-                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
-                    " saved first"
-                )
         with self._pool.connection() as conn, conn.transaction():
+            if (changes.keys() | set(reset)) & STORE_READINESS:
+                self._check_store_ready(conn, changes, reset)
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
             for name in reset:
                 # Back to following the environment, then the default.
@@ -453,6 +452,46 @@ class SettingsStore:
                     # Back to the default.
                     conn.execute("DELETE FROM settings WHERE name = %s", (name,))
         return self._written("connection")
+
+    def _check_store_ready(
+        self, conn: Connection[DictRow], changes: dict[str, Any], reset: list[str]
+    ) -> None:
+        """The merged result, not the patch: clearing the URL or the inbox while on the
+        Bambuddy store would leave a store the next start refuses (`build_store`). A
+        reset name is part of it: its row goes, and the value is the deployment's.
+
+        Read under `STORE_READINESS_LOCK`, in the write's own transaction: two saves each
+        safe alone (one clears the URL, one switches to Bambuddy) serialize, and the
+        second sees the first. A row lock would not do: a value that follows the
+        environment has no row to lock."""
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
+        )
+        rows = conn.execute(
+            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(STORE_READINESS),)
+        ).fetchall()
+        stored = {row["name"]: row["value"] for row in rows}
+
+        def merged(name: str) -> Any:
+            if name in changes:
+                return changes[name]
+            if name in reset or name not in stored:
+                # The deployment's own value: the environment's, else the default.
+                return getattr(self.defaults, name)
+            try:
+                return check_value(name, stored[name])
+            except ValueError:
+                # As `snapshot` reads it: a refused row follows the environment.
+                return getattr(self.defaults, name)
+
+        backend = merged("store_backend") or "local"
+        if backend == "bambuddy" and (
+            not merged("bambuddy_url") or merged("library_folder_id") is None
+        ):
+            raise StoreNotReadyError(
+                "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
+                " saved first"
+            )
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""

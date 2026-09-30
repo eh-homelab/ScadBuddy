@@ -285,6 +285,16 @@ export const customizerTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_store_usage',
+    description:
+      'What the blob store holds (pieces, snapshots, uploads, fonts) against its limits, and which backend it is',
+    input: z.object({}),
+    risk: 'read',
+    routes: ['GET /api/v1/store/usage'],
+    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/store/usage'), 'get store usage')),
+  }),
+
+  defineTool({
     name: 'list_presets',
     description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
     input: z.object({ slug, ...pageInput }),

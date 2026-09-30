@@ -300,6 +300,8 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = store.snapshot()
     apply_runtime(state, snapshot.runtime)
+    # This process sees its own write at once; workers within the source's TTL.
+    state.store.source.invalidate()
     return _view(snapshot, state)
 
 

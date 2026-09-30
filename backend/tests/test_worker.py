@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, NoReturn, cast
 
 import httpx
 import psycopg
@@ -30,12 +32,19 @@ from temporalio.worker import (
 
 from scadbuddy import worker as worker_module
 from scadbuddy.core.config import Config
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
 from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import ContentStore
+from scadbuddy.store.factory import StoreBundle
+from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
     _poll,
     _wait_drained,
@@ -113,7 +122,17 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
                     health = await _healthy(http, worker)
-                    assert health == {"ok": True, "build_id": build_id, "task_queue": queue}
+                    assert health == {
+                        "ok": True,
+                        "build_id": build_id,
+                        "task_queue": queue,
+                        "store": {
+                            "backend": "local",
+                            "configured_backend": "local",
+                            "render_key_fallback": False,
+                            "multi_worker": False,
+                        },
+                    }
 
                     projection.submit(job, render_key(model, params, revision))
                     await asyncio.wait_for(
@@ -156,6 +175,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
     assert f'revision="{build_id}"' in metrics
+    # Refreshed per scrape from this process's store (the local one: no cache to size).
+    assert samples["scadbuddy_store_render_key_fallback"] == 0
+    assert samples["scadbuddy_worker_cache_bytes"] == 0
 
 
 # ── the drain after stop ───────────────────────────────────────────────────────
@@ -503,3 +525,114 @@ async def test_stopping_the_worker_cancels_the_retry(
             # The retry would run for a minute; stop cancels it.
             await asyncio.wait_for(polling, 10)
     assert attempts == 1
+
+
+class _Cache:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def evict(self) -> list[str]:
+        self.calls += 1
+        if self.calls == 1:
+            raise OSError("a transient disk error")
+        return ["k"]
+
+
+async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_failure() -> None:
+    cache = _Cache()
+    evicting = asyncio.create_task(
+        worker_module._evict_periodically(cache, 0.01)  # type: ignore[arg-type]
+    )
+    try:
+        async with asyncio.timeout(5):
+            while cache.calls < 3:
+                await asyncio.sleep(0.01)
+    finally:
+        evicting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await evicting
+    assert cache.calls >= 3
+
+
+@pytest.mark.parametrize(("sweep", "interval"), [(0.0, 300.0), (60.0, 60.0)])
+async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sweep: float, interval: float
+) -> None:
+    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's cache
+    eviction, which then runs every WORKER_CACHE_EVICT_INTERVAL."""
+    intervals: list[float] = []
+
+    async def evict(_blobs: object, every: float) -> None:
+        intervals.append(every)
+
+    monkeypatch.setattr(worker_module, "_evict_periodically", evict)
+    cache = CachedBlobStore.__new__(CachedBlobStore)
+    task = worker_module._start_eviction(cache, sweep)
+    assert task is not None
+    await task
+    assert intervals == [interval]
+    assert worker_module._start_eviction(LocalBlobStore(tmp_path), sweep) is None
+    assert intervals == [interval]
+
+
+class _Source:
+    async def current(self) -> RenderStoreSettings:
+        return RenderStoreSettings(
+            store_backend="bambuddy",
+            bambuddy_url="http://bambuddy.test",
+            api_key="full",
+            key_is_fallback=True,
+            library_folder_id=7,
+        )
+
+
+async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_key(
+    tmp_path: Path,
+) -> None:
+    local = LocalBlobStore(tmp_path / "blobs")
+    cache = CachedBlobStore(
+        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+    )
+    (local.dir_for("k") / "m").write_bytes(b"12345")
+    store = StoreBundle(
+        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
+    )
+    app = worker_module._health_app(
+        Settings(
+            data_dir=tmp_path,
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        ),
+        Metrics(),
+        store,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
+        metrics = (await http.get("/metrics")).text
+    samples = {
+        line.rsplit(" ", 1)[0]: float(line.rsplit(" ", 1)[1])
+        for line in metrics.splitlines()
+        if line and not line.startswith("#")
+    }
+    assert samples["scadbuddy_worker_cache_bytes"] == 5
+    assert samples["scadbuddy_store_render_key_fallback"] == 1
+
+
+def test_a_refused_store_closes_the_projection_the_worker_opened(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[JobProjection] = []
+
+    class Recording(JobProjection):
+        def open(self) -> None:
+            super().open()
+            opened.append(self)
+
+    def refuse(**_: object) -> NoReturn:
+        raise StoreNotReadyError("refused")
+
+    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    monkeypatch.setattr(worker_module, "build_store", refuse)
+    with pytest.raises(StoreNotReadyError):
+        worker_module.build_worker_deps(settings)
+    assert len(opened) == 1 and opened[0].pool.closed

@@ -21,6 +21,7 @@ from scadbuddy.api.deps import (
     RenderDep,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
@@ -53,6 +54,7 @@ from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
+from scadbuddy.store.cache import materialize_result
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +134,7 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
     status_code=status.HTTP_201_CREATED,
     summary="Persist a finished render",
 )
-def create_output(
+async def create_output(
     slug: SlugPath,
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
@@ -140,9 +142,10 @@ def create_output(
     render: RenderDep,
     store: SettingsStoreDep,
     events: EventsDep,
+    state: StateDep,
 ) -> OutputDetail:
-    require_model(catalogue, slug)
-    job = require_job(render, body.job_id)
+    await asyncio.to_thread(require_model, catalogue, slug)
+    job = await asyncio.to_thread(require_job, render, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
@@ -151,7 +154,20 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
+    # The copy reads the job's files, which on the bambuddy backend come through the cache.
+    await materialize_result(state.store.blobs, job.result)
+    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
+    # fetched, and the copy would fail with a server path in its message: say so instead.
+    files = (job.result.model_3mf, job.result.preview_glb)
+    if not all((outputs.paths.root / name).is_file() for name in files):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
+    public_url = (await asyncio.to_thread(store.load)).public_url
+    try:
+        meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
+    except OSError:
+        # Evicted or swept after the check above, or unreadable: the same answer, not
+        # the copy's path.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone") from None
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])

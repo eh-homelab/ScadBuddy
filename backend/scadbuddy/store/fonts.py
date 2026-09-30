@@ -32,6 +32,12 @@ def _family_dir_name(value: str) -> str:
     return licence_slug(value.split(":", 1)[0].strip())
 
 
+def model_dir(scad: Path, file: str) -> Path:
+    """The template's directory from a piece's source path: `file` is relative to it,
+    so a piece in `parts/roof.scad` still scans the template's root files."""
+    return scad.parents[len(Path(file).parts) - 1]
+
+
 def wanted_families(source: Path, params: Mapping[str, object]) -> set[str]:
     """The family directories a template could name: every string literal in its
     `.scad` files (a `// font` parameter's default, a `text(font=...)`) and every

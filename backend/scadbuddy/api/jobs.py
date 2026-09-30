@@ -22,6 +22,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     RenderDep,
     SlugPath,
+    StateDep,
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
@@ -57,6 +58,7 @@ from scadbuddy.render.thumbnail import (
     render_colour_breakdown,
     render_view,
 )
+from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 
 router = APIRouter(tags=["jobs"])
@@ -267,12 +269,15 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
 )
-def get_job_preview(job_id: JobIdPath, render: RenderDep, paths: PathsDep) -> FileResponse:
-    job = require_job(render, job_id)
+async def get_job_preview(
+    job_id: JobIdPath, render: RenderDep, paths: PathsDep, state: StateDep
+) -> FileResponse:
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     preview = paths.root / job.result.preview_glb
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
@@ -353,13 +358,15 @@ async def get_job_view(
     render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
+    state: StateDep,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    job = require_job(render, job_id)
+    job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
     )
@@ -412,6 +419,7 @@ async def get_job_colours(
     render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
+    state: StateDep,
     view: ViewName = "iso",
     size: Annotated[
         int,
@@ -423,6 +431,7 @@ async def get_job_colours(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     glb = paths.root / job.result.preview_glb
     if not glb.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
