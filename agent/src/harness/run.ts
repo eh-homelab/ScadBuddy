@@ -12,11 +12,12 @@ import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
   assertHeadlessPlugin,
-  browserInputProblem,
+  browserInputGuard,
   browserTierOf,
   disallowedBrowserTools,
   type HeadlessBrowserOptions,
   materializeHeadlessBrowser,
+  originToApprove,
 } from './headlessBrowser.js'
 import {
   type ApprovalGate,
@@ -66,7 +67,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - the headless browser (#349, headlessBrowser.ts) when the session has it
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
-//     tier map, its disallowed tools and its origin/file-name guard;
+//     tier map, its disallowed tools and its origin/file-name guard, and the
+//     approval gate wrapped so that a human's approval of an off-origin
+//     navigation also approves that origin for the session (browserOrigins.ts);
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -222,13 +225,32 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
+  let gate = run.approvalGate
   let browserPlugin: string | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
+    const remember = run.headlessBrowser.rememberOrigin
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
     tierOf = (name) => browserTierOf(name) ?? ownTiers(name)
-    guard = (name, input) => browserInputProblem(name, input, browser.allowedOrigin)
+    guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
+    const inner = gate
+    if (inner) {
+      // The approval of the first navigation to an origin approves the origin
+      // for the session: recorded durably first (a failure denies the call),
+      // then in the set the guard and the request guard read, before the
+      // navigation runs.
+      gate = async (request) => {
+        const verdict = await inner(request)
+        if (!verdict.approved) return verdict
+        const origin = originToApprove(request.toolName, verdict.input, browser.origins, browser.approved)
+        if (origin !== undefined) {
+          await remember?.(origin, verdict.approvalId)
+          browser.approve(origin)
+        }
+        return verdict
+      }
+    }
   }
   const options: Options = {
     ...base,
@@ -241,8 +263,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate, guard),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate, guard)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, gate, guard),
+    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, gate, guard)] },
     permissionMode: 'default',
   }
   if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
