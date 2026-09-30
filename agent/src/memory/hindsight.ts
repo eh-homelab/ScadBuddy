@@ -435,13 +435,24 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   }
 
   if (cfg.autoRetain) {
+    // The turn's prompt, for a first turn whose transcript file is not written yet.
+    const prompts = new Map<string, string>()
+    const remember: HookCallback = async (input): Promise<HookJSONOutput> => {
+      if (input.hook_event_name === 'UserPromptSubmit') prompts.set(input.session_id, input.prompt)
+      return {}
+    }
+    hooks.UserPromptSubmit = [...(hooks.UserPromptSubmit ?? []), { hooks: [remember] }]
     const readEntries = async (transcriptPath: string, sessionId: string): Promise<TranscriptLine[]> => {
       try {
         return entriesOf(await readFile(transcriptPath, 'utf8'))
       } catch (err) {
         const stored = await options.sessionStore?.load({ projectKey: '', sessionId })
-        if (!stored) throw err
-        return stored as (SessionStoreEntry & TranscriptLine)[]
+        if (stored) return stored as (SessionStoreEntry & TranscriptLine)[]
+        // On a session's first turn the file does not exist yet when Stop fires
+        // (measured, test/run.test.ts): retain what `last_assistant_message` has;
+        // the next turn's upsert of the same document carries the whole session.
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+        throw err
       }
     }
     const retain: HookCallback = async (input): Promise<HookJSONOutput> => {
@@ -464,6 +475,9 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
           return
         }
         const turns = transcriptTurns(entries)
+        const prompt = clean(prompts.get(sessionId) ?? '')
+        prompts.delete(sessionId)
+        if (turns.length === 0 && prompt) turns.push({ role: 'user', content: prompt })
         const reply = clean(last)
         const tail = turns.at(-1)
         if (reply && !(tail?.role === 'assistant' && tail.content === reply)) turns.push({ role: 'assistant', content: reply })

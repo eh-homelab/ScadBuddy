@@ -658,3 +658,33 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
 [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+
+## 11. Automatic Hindsight memory
+
+When a session's turn loads an enabled remote MCP plugin named `hindsight` (#297,
+`ai_plugins`), the agent recalls and retains memory itself instead of leaving it to the
+model. In production the model called `recall` once and `retain` never across four
+sessions. The code is [`agent/src/memory/hindsight.ts`](../../agent/src/memory/hindsight.ts),
+a port of `create_memory_hooks` in Hindsight's Claude Agent SDK integration
+([`hooks.py` @ eb021da3](https://github.com/vectorize-io/hindsight/blob/eb021da3b2501911e4b57c82b3de1123572a200e/hindsight-integrations/claude-agent-sdk/hindsight_claude_agent_sdk/hooks.py)),
+registered as in-process SDK hooks by `harness/run.ts`. There is no setting: the API
+base and bank come from the plugin's URL (`…/mcp/<bank>/` gives
+`/v1/default/banks/<bank>/…`), and requests carry the plugin's stored header to the
+address the plugin check pinned, with no redirects (`agent/src/http/pinned.ts`, shared
+with the forwarder).
+
+- **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
+  are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
+  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
+  logged.
+- **Retain** (`Stop`): the session's user and assistant text (tool results left out,
+  secrets redacted) is upserted as one document, `conversation:<session_id>`, so every
+  turn replaces the same document. It runs in the background and never fails or delays
+  the turn; a failure is logged. On a session's first turn the transcript file does not
+  exist yet when Stop fires, so that turn retains the prompt and the final reply, and
+  the next turn's upsert carries the whole session.
+- **Tool results** (`PostToolUse`): off unless `retainOnTools` names tools.
+
+Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). One is
+ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
+upstream's behaviour of retaining only the last result with no document id.

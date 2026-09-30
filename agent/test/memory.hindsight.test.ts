@@ -160,8 +160,9 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(recall!.headers.authorization).toBe(`Bearer ${TOKEN}`)
     expect(recall!.headers.host).toBe(`hindsight.invalid:${fake.port}`)
 
-    const context = (out.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext ?? ''
-    expect(out.hookSpecificOutput).toMatchObject({ hookEventName: 'UserPromptSubmit' })
+    const specific = (out as { hookSpecificOutput?: { additionalContext?: string } }).hookSpecificOutput
+    const context = specific?.additionalContext ?? ''
+    expect(specific).toMatchObject({ hookEventName: 'UserPromptSubmit' })
     expect(context.startsWith('<hindsight_memories>\n\nRelevant memories from previous sessions:\n')).toBe(true)
     expect(context.endsWith('</hindsight_memories>')).toBe(true)
     const envelope = context.slice(context.indexOf('{'), context.lastIndexOf('}') + 1)
@@ -274,7 +275,8 @@ describe('memory hooks against a fake Hindsight', () => {
 
   it('logs an unreadable transcript, and reads the session store instead when there is one', async () => {
     const h = hooks()
-    await call(h.hooks.Stop?.[0]?.hooks[0], stop(path.join(dir, 'missing.jsonl')))
+    // A directory, not a file: unreadable (EISDIR). A missing file is a first turn, below.
+    await call(h.hooks.Stop?.[0]?.hooks[0], stop(dir))
     await h.settled()
     expect(logs.join('')).toMatch(/cannot read its transcript/)
     expect(fake.retains()).toHaveLength(0)
