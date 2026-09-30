@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
-import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG } from '../mocks/fixtures'
+import { keychainSchema, models, UI_BROKEN_SLUG, UI_DEMO_SLUG, UI_DEMO_VERSION } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { setUiModuleLoader } from '../template-ui/loadModule'
 import type { Host, Mount } from '../template-ui/types'
@@ -13,14 +13,24 @@ import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom: the viewer is a stand-in that renders the page's own
 // buttons, which it lays over the scene (as CustomizePage.test.tsx does).
-vi.mock('../components/Preview', () => ({
-  Preview: ({ leading, controls }: { leading?: ReactNode; controls?: ReactNode }) => (
-    <div data-testid="preview">
-      {leading}
-      {controls}
-    </div>
-  ),
-}))
+// It counts its mounts, so a test can tell a moved viewer from one that stayed put.
+const previews = vi.hoisted(() => ({ mounts: 0 }))
+vi.mock('../components/Preview', async () => {
+  const { useEffect } = await import('react')
+  return {
+    Preview: ({ leading, controls }: { leading?: ReactNode; controls?: ReactNode }) => {
+      useEffect(() => {
+        previews.mounts += 1
+      }, [])
+      return (
+        <div data-testid="preview">
+          {leading}
+          {controls}
+        </div>
+      )
+    },
+  }
+})
 
 /** The record `GET /models/{slug}` answers for ``slug``, changed by ``patch``. */
 function withRecord(slug: string, patch: Partial<ModelSummary>) {
@@ -92,6 +102,29 @@ describe('CustomizePage with a template UI', () => {
     open(UI_DEMO_SLUG)
     await waitFor(() => expect(seen).toEqual(keychainSchema), { timeout: 3000 })
     expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
+  })
+
+  it('loads the module from the revision the record is at', async () => {
+    const urls: string[] = []
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return { mount: demo }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toContain('custom'))
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/versions/${UI_DEMO_VERSION}/ui/index.js`])
+  })
+
+  it('loads the live module when the record has no revision', async () => {
+    withRecord(UI_DEMO_SLUG, { version: null })
+    const urls: string[] = []
+    setUiModuleLoader(async (url) => {
+      urls.push(url)
+      return { mount: demo }
+    })
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(shadowText()).toContain('custom'))
+    expect(urls).toEqual([`/api/v1/models/${UI_DEMO_SLUG}/ui/index.js`])
   })
 
   it('keeps a UI-state set made just before a parameter edit', async () => {
@@ -184,7 +217,7 @@ describe('CustomizePage with a template UI', () => {
 
   it('tries the interface again on another revision after one failed', async () => {
     setUiModuleLoader(async (url) => {
-      if (url.includes('/versions/')) return { mount: () => { throw new Error('old revision broke') } }
+      if (url.includes(`/versions/${'a'.repeat(40)}/`)) return { mount: () => { throw new Error('old revision broke') } }
       return { mount: demo }
     })
     const { user } = renderPage(<CustomizePage />, {
@@ -230,6 +263,42 @@ describe('the page slot', () => {
     // The page slot has no parameters flyout to open.
     expect(shadow().querySelector('button[aria-label="Parameters"]')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Parameters' })).toBeNull()
+  })
+
+  it("mounts a page-slot template's preview once when the schema lands before the record", async () => {
+    const model = models.find((m) => m.slug === UI_DEMO_SLUG)
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let schemaServed = false
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () => {
+        schemaServed = true
+        return HttpResponse.json(keychainSchema)
+      }),
+      http.get('/api/v1/models/:slug', async () => {
+        await held
+        return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
+      }),
+    )
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-preview></sb-preview>'
+      },
+    }))
+    // The viewer is lazy: load it first, so "no preview yet" is the page's choice.
+    await import('../components/Preview')
+    previews.mounts = 0
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(schemaServed).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(screen.queryByText('Loading the viewer')).toBeNull()
+    expect(screen.queryByTestId('preview')).toBeNull()
+    expect(previews.mounts).toBe(0)
+    release()
+    await waitFor(() => expect(shadow().querySelector('[data-testid="preview"]')).not.toBeNull(), { timeout: 5000 })
+    expect(previews.mounts).toBe(1)
   })
 
   it("reports the template Generate's error, and takes one click at a time", async () => {

@@ -200,6 +200,8 @@ export const GALLERY_SLUG = 'creme-coaster'
 /** #425 — templates with their own interface: one that mounts, one that throws. */
 export const UI_DEMO_SLUG = 'ui-demo'
 export const UI_BROKEN_SLUG = 'ui-broken'
+/** The commit `ui-demo`'s record is at: its UI loads pinned, from `/versions/{commit}/ui/`. */
+export const UI_DEMO_VERSION = commit('f0e1d2c3b4a5')
 
 /**
  * #274 — each template's media, in order (the first is the cover). The keychain has
@@ -308,6 +310,7 @@ export const models: ModelSummary[] = [
     upstream: null,
     has_readme: false,
     origin: 'mine',
+    version: UI_DEMO_VERSION,
     ui: { module: 'ui/index.js', slot: 'panel', api: 1 },
   },
   {

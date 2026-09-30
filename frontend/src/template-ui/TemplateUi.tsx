@@ -14,7 +14,7 @@ import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaratio
 interface Props {
   slug: string
   ui: UiDeclaration
-  /** The revision to load the module from; undefined for the live template. */
+  /** The revision to load the module from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
   version: string | undefined
   deps: HostDeps
   inputs: JsonObject

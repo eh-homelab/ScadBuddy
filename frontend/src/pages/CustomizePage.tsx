@@ -863,7 +863,7 @@ export function CustomizePage() {
         )}
       </div>
 
-      {customUi?.slot === 'page' ? (
+      {!choosing && customUi?.slot === 'page' ? (
         <div
           ref={workspace}
           data-testid="workspace"
@@ -942,7 +942,9 @@ export function CustomizePage() {
         <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto]">
           {/* #280 — the template's media beside the preview; nothing at all without any. */}
           <PreviewGallery slug={slug} media={modelState.data?.media} label={displayName} hidden={full}>
-            {previewElement}
+            {/* Not before the layout is chosen: a page-slot template's preview moves into
+                its own page, which would mount the viewer a second time. */}
+            {choosing ? null : previewElement}
           </PreviewGallery>
           {misfit.length > 0 && (
             <p

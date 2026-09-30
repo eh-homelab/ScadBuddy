@@ -11,6 +11,7 @@ export class HostInputError extends Error {
 
 export interface HostDeps {
   slug: string
+  /** The revision the module's files come from: the commit the record is at, pinned or live; undefined only when history is unavailable. */
   version: string | undefined
   getSchema(): CustomizerSchema
   getInputs(): JsonObject
