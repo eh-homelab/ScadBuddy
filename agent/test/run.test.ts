@@ -95,11 +95,14 @@ describe('buildHarnessOptions', () => {
       includePartialMessages: true,
     })
     expect(options.sessionStore).toBe(store)
+    // Every frame is mirrored as it is written, so a turn cut off by a restart keeps what it had.
+    expect(options.sessionStoreFlush).toBe('eager')
     expect(options.resume).toBeUndefined()
     // Without them, the service-wide scratch dir and no mirror, as before.
     const plain = buildHarnessOptions(base)
     expect(plain.cwd).toBe('/var/lib/scadbuddy-agent/work')
     expect(plain.sessionStore).toBeUndefined()
+    expect(plain.sessionStoreFlush).toBeUndefined()
     expect(plain.includePartialMessages).toBeUndefined()
   })
 

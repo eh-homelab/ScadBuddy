@@ -45,6 +45,14 @@ import type { ToolServices } from './tools/registry.js'
 const PORT = 8081
 /** How often approvals nobody is waiting on are expired (approvals/service.ts). */
 const APPROVAL_SWEEP_MS = 30_000
+/** How often sessions whose turn died with its lease are ended (SessionManager.reapExpired). */
+const SESSION_REAP_MS = 30_000
+// The shutdown's budget for running turns, inside the pod's 30 s
+// terminationGracePeriodSeconds (clusters, strategy Recreate): TURN_DRAIN_MS
+// for them to finish, TURN_ABORT_WAIT_MS for the rest to record that they were
+// stopped, then shutdown()'s own 10 s.
+const TURN_DRAIN_MS = 12_000
+const TURN_ABORT_WAIT_MS = 5_000
 /** How often audit rows past their retention are deleted (audit/log.ts). */
 const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
 
@@ -257,6 +265,12 @@ const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
 })
+// Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
+// or a restart that closed the pool under it) say so and stop claiming to run.
+const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('session lease reaper failed:', (err as Error).message),
+})
 // Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
 const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
@@ -323,49 +337,55 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websoc
 // Drain the listener first (bounded, see shutdown.ts), then close the pool,
 // then exit: non-zero when the drain timed out and requests were cut.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.once(signal, () => {
-    stopSweeper?.()
-    stopRetention?.()
-    stopSessionWake?.()
-    stopHeartbeat()
-    tabs.close()
-    // 1001 "going away": the panel reconnects to another replica or after the restart.
-    for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
-    // A peer that never answers the close frame would hold server.close() for
-    // ws's 30 s close timeout, past the 10 s deadline.
-    setTimeout(() => {
-      for (const socket of wss.clients) socket.terminate()
-    }, 2_000).unref()
-    // Running turns stop; their pending approvals stay pending (approvals/service.ts).
-    sessions?.abortAll()
-    void shutdown({
-      // End the /mcp sessions and the session event streams first: their
-      // standing SSE responses would otherwise hold server.close() until the deadline.
-      closeSessions: async () => {
-        // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
-        await drainRetains()
-        await app.close()
-        resources.close()
-        await events?.close()
-      },
-      closeServer: async () => {
-        await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
-        await pluginForwarder.close()
-      },
-      // The session-event publisher closes only now, after the drain: turns
-      // aborted above append their final session.status/session.done while they
-      // wind down, and closing it first would swallow that NOTIFY, so another
-      // replica's followers would never wake (#715 review; busEvents.ts).
-      closeDatabase: database
-        ? async () => {
-            sessionEvents?.close()
-            await database.close()
-          }
-        : undefined,
-      timeoutMs: 10_000,
-    }).then((result) => {
-      if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
-      process.exit(result === 'clean' ? 0 : 1)
-    })
+  process.once(signal, () => void stop())
+}
+
+async function stop(): Promise<void> {
+  stopSweeper?.()
+  stopReaper?.()
+  stopRetention?.()
+  // Running turns first, while the panel's socket, the paired tab and the pool
+  // are all still up: no new turn starts, running ones may finish, the rest are
+  // aborted and record that they were (SessionManager.stopTurns). Aborted
+  // turns' pending approvals stay pending (approvals/service.ts).
+  await sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
+  stopSessionWake?.()
+  stopHeartbeat()
+  tabs.close()
+  // 1001 "going away": the panel reconnects to another replica or after the restart.
+  for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
+  // A peer that never answers the close frame would hold server.close() for
+  // ws's 30 s close timeout, past the 10 s deadline.
+  setTimeout(() => {
+    for (const socket of wss.clients) socket.terminate()
+  }, 2_000).unref()
+  const result = await shutdown({
+    // End the /mcp sessions and the session event streams first: their
+    // standing SSE responses would otherwise hold server.close() until the deadline.
+    closeSessions: async () => {
+      // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
+      await drainRetains()
+      await app.close()
+      resources.close()
+      await events?.close()
+    },
+    closeServer: async () => {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+      await pluginForwarder.close()
+    },
+    // The session-event publisher closes only now, after the drain: turns
+    // stopped above append their final session.status/session.done while they
+    // wind down (stopTurns waits for that, but only for so long), and closing
+    // it first would swallow that NOTIFY, so another replica's followers would
+    // never wake (#715 review; busEvents.ts).
+    closeDatabase: database
+      ? async () => {
+          sessionEvents?.close()
+          await database.close()
+        }
+      : undefined,
+    timeoutMs: 10_000,
   })
+  if (result === 'timed out') console.error('shutdown: requests still in flight after 10s; exiting')
+  process.exit(result === 'clean' ? 0 : 1)
 }
