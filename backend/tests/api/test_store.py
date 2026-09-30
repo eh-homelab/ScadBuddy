@@ -52,7 +52,7 @@ def test_a_start_that_fails_after_the_store_is_built_closes_it(
     """Between the store's construction and the shutdown `try`, a failure (here the
     render service's start) still releases the store and the settings pool."""
     closed: list[str] = []
-    build = main.build_store
+    build = main.build_store  # type: ignore[attr-defined]
 
     def built(**kwargs: Any) -> StoreBundle:
         bundle = build(**kwargs)
