@@ -58,7 +58,10 @@ describe('EditSourcePage', () => {
     await user.clear(editor)
     await user.click(editor)
     await user.paste('cube([10, 10, 10]);\n')
-    await user.click(screen.getByRole('button', { name: 'Save source' }))
+    // Save is disabled while the opening source's parse check is in flight.
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
 
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
     expect(replace).toHaveBeenCalledWith('name-keychain', 'cube([10, 10, 10]);\n', false)
@@ -72,7 +75,9 @@ describe('EditSourcePage', () => {
     await user.clear(editor)
     await user.click(editor)
     await user.paste(BROKEN_SOURCE)
-    await user.click(screen.getByRole('button', { name: 'Save source' }))
+    const save = screen.getByRole('button', { name: 'Save source' })
+    await waitFor(() => expect(save).toBeEnabled())
+    await user.click(save)
 
     expect(await screen.findByTestId('check-report')).toHaveTextContent('Line 2')
     expect(screen.queryByRole('heading', { name: 'Customizer' })).not.toBeInTheDocument()

@@ -32,12 +32,53 @@ function Harness({
 
 function open(options: FilamentOptions = fixtures.filamentOptions, copies = 1) {
   const onChange = vi.fn()
-  return { onChange, ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />) }
+  return {
+    onChange,
+    ...renderPage(<Harness options={options} copies={copies} onChange={onChange} />),
+  }
 }
 
 const slot = (id: number) => screen.getByTestId(`filament-slot-${id}`)
 
+/** The fixture is printer 1, which has the Filament Track Switch fitted. */
+const switched: FilamentOptions = fixtures.filamentOptions
+/** The same printer as if each AMS were wired to one side. */
+const wired: FilamentOptions = { ...fixtures.filamentOptions, track_switch: false }
+
 describe('FilamentPicker', () => {
+  // #469 — the fixture printer has the 0.2 on the right (extruder 0) and the 0.4 on the
+  // left (1); spools 9 and 21 are on the right, the HT's spool 22 on the left.
+  it('badges each loaded spool with the side it feeds, and the chosen one in the heading', () => {
+    open(wired)
+
+    expect(within(slot(1)).getByTestId('side-9')).toHaveTextContent('R')
+    expect(within(slot(1)).getByTestId('side-22')).toHaveTextContent('L')
+    expect(within(slot(1)).queryByTestId('side-27')).toBeNull()
+    expect(within(slot(1)).getByTestId('slot-side-1')).toHaveTextContent('R')
+  })
+
+  it('rules out no spool for the nozzle mounted on its side (#768)', () => {
+    open(wired)
+
+    for (const id of [9, 22, 27]) expect(within(slot(2)).getByTestId(`spool-${id}`)).toBeEnabled()
+    expect(screen.queryByText(/nozzle is fitted/)).toBeNull()
+    expect(screen.queryByText(/Neither nozzle/)).toBeNull()
+    expect(screen.queryByText(/spreads a multi-color print/)).toBeNull()
+    // Nor does it list the mounted nozzles: nothing is judged by them.
+    expect(screen.queryByText(/mounted\./)).toBeNull()
+  })
+
+  it('with the track switch, a side is only where the spool rests', () => {
+    open(switched)
+
+    expect(within(slot(2)).getByTestId('side-9')).toHaveTextContent('rests on R')
+    expect(within(slot(2)).getByTestId('side-9')).toHaveAttribute(
+      'title',
+      'Rests on the right inlet; the Filament Track Switch can feed it to either nozzle.',
+    )
+    expect(within(slot(2)).getByTestId('spool-9')).toBeEnabled()
+  })
+
   it('heads each slot with its colour, number, material and the grams it needs', () => {
     open(fixtures.filamentOptions, 3)
 

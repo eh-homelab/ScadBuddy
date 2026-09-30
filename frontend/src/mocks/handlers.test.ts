@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelPatch, ModelSummary } from '../api/types'
+import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
+import { DEFAULT_NOZZLES } from '../lib/printChoices'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -9,6 +10,7 @@ import {
   MAZE_SLUG,
   MEDIA_MP4_BASE64,
   keychainSource,
+  outputs,
   versionIds,
 } from './fixtures'
 import {
@@ -19,6 +21,7 @@ import {
   MAX_PRESET_NAME,
   MAX_PRESETS,
   resetMockState,
+  setMockMedia,
   setMockPresets,
   setMockUploadLimit,
 } from './handlers'
@@ -622,6 +625,74 @@ describe('mock API: delete a template duplicates track (#223)', () => {
   })
 })
 
+describe('mock API: a preset\'s description and tags (#327)', () => {
+  beforeEach(() => resetMockState())
+
+  it('cleans tags and trims the description as the server does', async () => {
+    const created = await api.createPreset('name-keychain', {
+      name: 'Bag tag',
+      params: {},
+      description: '  For bags. ',
+      tags: [' big ', 'Big', '', 'kids  size'],
+    })
+    expect(created.description).toBe('For bags.')
+    expect(created.tags).toEqual(['big', 'kids size'])
+  })
+
+  it('refuses details past their bounds as a body shape (422), before the route', async () => {
+    const refused = (body: object) =>
+      expect(
+        api.createPreset('no-such-model', { name: 'X', params: {}, ...body }),
+      ).rejects.toMatchObject({
+        status: 422,
+        detail: 'the request did not match the expected shape',
+      })
+    await refused({ description: 'd'.repeat(MAX_PRESET_DESCRIPTION + 1) })
+    await refused({ tags: Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`) })
+    await refused({ tags: ['t'.repeat(MAX_PRESET_TAG + 1)] })
+    // A comma would split the tag in two in the Edit details dialog.
+    await refused({ tags: ['M3, M4'] })
+    // Lengths are code points, as Python counts them, and case folds as `casefold`.
+    const wide = await api.createPreset('name-keychain', {
+      name: 'Emoji',
+      params: {},
+      description: '\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION),
+      tags: ['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße', 'STRASSE'],
+    })
+    expect(wide.description).toBe('\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION))
+    expect(wide.tags).toEqual(['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße'])
+    // Repeats are dropped before the bound: this many copies of one tag is one tag.
+    const created = await api.createPreset('name-keychain', {
+      name: 'Many',
+      params: {},
+      tags: Array.from({ length: MAX_PRESET_TAGS * 2 }, () => 'same'),
+    })
+    expect(created.tags).toEqual(['same'])
+  })
+
+  it('edits and clears a saved preset\'s details, keeping what is left out', async () => {
+    const saved = await api.createPreset('name-keychain', { name: 'P', params: {}, tags: ['a'] })
+    const edited = await api.updatePreset('name-keychain', saved.id, { description: 'D' })
+    expect([edited.description, edited.tags]).toEqual(['D', ['a']])
+    const cleared = await api.updatePreset('name-keychain', saved.id, { description: '', tags: [] })
+    expect([cleared.description, cleared.tags]).toEqual(['', []])
+  })
+
+  it('copies the description and tags to a duplicate', async () => {
+    const copy = await api.duplicatePreset('name-keychain', 'template-tiny', { name: 'Tiny 2' })
+    expect(copy.description).toContain('zip pull')
+    expect(copy.tags).toEqual(['small', 'zip pull'])
+  })
+
+  it('keeps a template\'s own details from its metadata', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [{ id: 'wide', name: 'Wide', description: ' Wide. ', tags: ['w', 'W', ' x '] }],
+    })
+    const [wide] = await api.listPresets('name-keychain')
+    expect([wide?.description, wide?.tags]).toEqual(['Wide.', ['w', 'x']])
+  })
+})
+
 describe('mock API: presets keep the server limits', () => {
   beforeEach(() => resetMockState())
 
@@ -645,6 +716,8 @@ describe('mock API: presets keep the server limits', () => {
       name: `Preset ${index}`,
       origin: 'mine' as const,
       params: {},
+      description: '',
+      tags: [],
     }))
     setMockPresets('name-keychain', existing)
     const refused = api.createPreset('name-keychain', { name: 'One too many', params: {} })
@@ -760,13 +833,32 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(body.detail).toBe('the upload is not a PNG, JPEG or WebP image, or an MP4 or WebM video')
   })
 
-  it('refuses every write to a built-in with a 403', async () => {
-    // Refused before the item is looked up, as `require_mine` does.
-    const id = 'a1b2c3d4e5f6'
-    expect((await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])).status).toBe(403)
-    await expect(api.patchMedia(BUILTIN_SLUG, id, 'x')).rejects.toMatchObject({ status: 403 })
-    await expect(api.reorderMedia(BUILTIN_SLUG, [id])).rejects.toMatchObject({ status: 403 })
-    await expect(api.deleteMedia(BUILTIN_SLUG, id)).rejects.toMatchObject({ status: 403 })
+  it("adds to a built-in after what it ships, which stays read-only (#722)", async () => {
+    const shipped = (await api.getModel(GALLERY_SLUG)).media![0]!
+    setMockMedia(BUILTIN_SLUG, [{ ...shipped, id: 'front', readonly: true }])
+    const versions = (await api.listVersions(BUILTIN_SLUG)).length
+
+    const { status, body } = await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])
+
+    expect(status).toBe(200)
+    const [front, added] = body.media ?? []
+    expect(front).toMatchObject({ id: 'front', readonly: true })
+    expect(added).toMatchObject({ readonly: false, kind: 'image' })
+    // Kept outside the built-in's history: no revision.
+    expect((await api.listVersions(BUILTIN_SLUG)).length).toBe(versions)
+    await expect(api.patchMedia(BUILTIN_SLUG, 'front', 'x')).rejects.toMatchObject({ status: 403 })
+    await expect(api.deleteMedia(BUILTIN_SLUG, 'front')).rejects.toMatchObject({ status: 403 })
+    await expect(api.patchMedia(BUILTIN_SLUG, added!.id, 'Mine')).resolves.toMatchObject({
+      media: [front, { id: added!.id, caption: 'Mine' }],
+    })
+
+    const covered = await api.setMediaCover(BUILTIN_SLUG, added!.id)
+    expect(covered.media_cover).toBe(added!.id)
+    expect(covered.media?.map((item) => item.id)).toEqual([added!.id, 'front'])
+    const reset = await api.setMediaCover(BUILTIN_SLUG, null)
+    expect(reset.media?.map((item) => item.id)).toEqual(['front', added!.id])
+    const gone = await api.deleteMedia(BUILTIN_SLUG, added!.id)
+    expect(gone.media?.map((item) => item.id)).toEqual(['front'])
   })
 
   it('refuses an order that is not a permutation with a 422', async () => {
@@ -798,14 +890,17 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(removed.thumbnail_source).not.toBe('model')
   })
 
-  it('reports the upload limit read-only: a settings PUT does not change it', async () => {
-    const limit = (await api.getSettings()).media_upload_max_bytes
+  it('stores an upload limit a settings PUT sets, as a value set here (#322)', async () => {
     const saved = await fetch('/api/v1/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ media_upload_max_bytes: 1024 }),
-    }).then((response) => response.json() as Promise<{ media_upload_max_bytes: number }>)
-    expect(saved.media_upload_max_bytes).toBe(limit)
+    }).then((response) => response.json() as Promise<Settings>)
+    expect(saved.media_upload_max_bytes).toBe(1024)
+    expect(saved.sources?.media_upload_max_bytes).toBe('stored')
+    const reset = await api.putSettings({ reset: ['media_upload_max_bytes'] })
+    expect(reset.media_upload_max_bytes).toBe(1024 * 1024 * 1024)
+    expect(reset.sources?.media_upload_max_bytes).toBe('default')
   })
 
   it('refuses an upload over the limit with a 413 naming it', async () => {
@@ -942,6 +1037,185 @@ describe('mock API: metadata PATCH on a model that is not there', () => {
   })
 })
 
+
+/** #308 — the prints API mock that #310's history and #311's detail are built on. */
+describe('the prints mock', () => {
+  beforeEach(() => resetMockState())
+
+  async function ids(query = ''): Promise<{ ids: number[]; next: string | null }> {
+    const body = (await (await fetch(`/api/v1/prints${query}`)).json()) as {
+      items: { archive_id: number }[]
+      next_cursor: string | null
+    }
+    return { ids: body.items.map((item) => item.archive_id), next: body.next_cursor }
+  }
+
+  it('lists succeeded, failed, in-progress and deleted prints, newest archive first', async () => {
+    expect(await ids()).toEqual({ ids: [38, 37, 36, 35], next: null })
+  })
+
+  it("names each print's printer, and none for a deleted archive", async () => {
+    const body = (await (await fetch('/api/v1/prints')).json()) as {
+      items: { archive_id: number; printer_name: string | null }[]
+    }
+    expect(Object.fromEntries(body.items.map((item) => [item.archive_id, item.printer_name]))).toEqual({
+      38: null,
+      37: '3DP-H2C-042',
+      36: '3DP-31B-598',
+      35: '3DP-31B-598',
+    })
+    const detail = (await (await fetch('/api/v1/prints/37')).json()) as {
+      printer_name: string
+      outcome: { printer_name: string }
+    }
+    expect(detail.outcome.printer_name).toBe(detail.printer_name)
+  })
+
+  it('filters and pages as the backend does', async () => {
+    expect((await ids('?status=failed')).ids).toEqual([36])
+    expect((await ids('?printer_id=2')).ids).toEqual([37])
+    expect((await ids('?from=2026-09-27')).ids).toEqual([37, 35])
+    expect((await ids('?q=nova')).ids).toEqual([37])
+    const first = await ids('?limit=2')
+    expect(first).toEqual({ ids: [38, 37], next: '37' })
+    expect(await ids(`?limit=2&cursor=${first.next}`)).toEqual({ ids: [36, 35], next: null })
+  })
+
+  it("matches q against Bambuddy's print name too, as the backend does", async () => {
+    expect((await ids('?q=gift')).ids).toEqual([36])
+  })
+
+  it('dates a deleted print by when ScadBuddy first saw it, as the backend does', async () => {
+    expect((await ids('?from=2026-09-25&to=2026-09-25')).ids).toEqual([38])
+  })
+
+  it('serves a detail with and without a timelapse, and 404s an unlinked archive', async () => {
+    const done = (await (await fetch('/api/v1/prints/35')).json()) as {
+      media: { timelapse: unknown; finish_photo: { name: string } | null }
+    }
+    const failed = (await (await fetch('/api/v1/prints/36')).json()) as {
+      media: { timelapse: unknown }
+      outcome: { failure_reason: string }
+    }
+    expect(done.media.timelapse).not.toBeNull()
+    expect(done.media.finish_photo?.name).toMatch(/^finish_/)
+    expect(failed.media.timelapse).toBeNull()
+    expect(failed.outcome.failure_reason).toBe('Spaghetti detected')
+    expect((await fetch('/api/v1/prints/99')).status).toBe(404)
+  })
+})
+
+/** #311 — the print detail page's writes and the Range-capable timelapse. */
+describe('the print detail mock', () => {
+  beforeEach(() => resetMockState())
+
+  it('queues a print again, but not one deleted in Bambuddy', async () => {
+    const again = await fetch('/api/v1/prints/35/reprint', { method: 'POST' })
+    expect(again.status).toBe(201)
+    expect(((await again.json()) as { queue_item_id: number }).queue_item_id).toBe(200)
+    expect((await fetch('/api/v1/prints/38/reprint', { method: 'POST' })).status).toBe(409)
+  })
+
+  it('pulls only a timelapse the printer has, and the print then has it', async () => {
+    const pull = (filename: string) =>
+      fetch('/api/v1/prints/36/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename }) })
+    expect((await pull('nope.mp4')).status).toBe(404)
+    expect((await pull('video_2026-09-26_20-01-00.mp4')).status).toBe(204)
+    const detail = (await (await fetch('/api/v1/prints/36')).json()) as { media: { timelapse: { url: string } } }
+    expect(detail.media.timelapse.url).toBe('/api/v1/prints/36/timelapse')
+  })
+
+  it('refuses to pull a timelapse onto a print deleted in Bambuddy', async () => {
+    const pulled = await fetch('/api/v1/prints/38/timelapse/pull', { method: 'POST', body: JSON.stringify({ filename: 'x.mp4' }) })
+    expect(pulled.status).toBe(409)
+  })
+
+  it('answers a timelapse Range with a 206', async () => {
+    const part = await fetch('/api/v1/prints/35/timelapse', { headers: { Range: 'bytes=4-7' } })
+    expect(part.status).toBe(206)
+    expect(part.headers.get('Content-Range')).toMatch(/^bytes 4-7\/\d+$/)
+    expect((await part.arrayBuffer()).byteLength).toBe(4)
+  })
+})
+
+describe('mock API: analyzer decisions', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses a suppression without a reason as FastAPI refuses a body it cannot parse', async () => {
+    // `DecisionCreate._well_formed` is a model validator: `_validation_error` answers with
+    // one detail for every such refusal and the message under `errors`, never in `detail`.
+    const blank = {
+      diagnostic_id: 'SB1002',
+      kind: 'suppress' as const,
+      scope: { kind: 'global' as const, key: '' },
+      enforced: false,
+      confirm: false,
+    }
+    await expect(api.createDecision({ ...blank, reason: '  ' })).rejects.toMatchObject({
+      status: 422,
+      detail: 'the request did not match the expected shape',
+      problem: {
+        errors: [{ loc: ['body'], msg: expect.stringContaining('a suppression needs a reason') }],
+      },
+    })
+    const report = await api.runAnalyzers({
+      target: { output_id: outputs[0]!.id },
+      request: { plate_id: 1, all_plates: false },
+      detail: 'advanced',
+    })
+    expect(report.diagnostics.map((row) => row.status)).not.toContain('suppressed')
+  })
+})
+
+describe('library print', () => {
+  beforeEach(() => resetMockState())
+
+  const runBody: PrintRunRequest = {
+    printer_id: 1,
+    filament_plan: { slots: [], force_colour_match: false },
+    choices: {
+      nozzles: DEFAULT_NOZZLES,
+      tier: 'standard',
+      process_name: null,
+      bed_type: 'Textured PEI Plate',
+      filament_overrides: {},
+    },
+    plate_id: 1,
+    all_plates: false,
+  }
+
+  it('lists the root 3MFs, and every file under all', async () => {
+    const plain = await api.listLibrary({ folderId: null, all: false })
+    const every = await api.listLibrary({ folderId: null, all: true })
+    expect(plain.files?.map((file) => file.id)).toEqual([89])
+    expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
+    expect(plain.hidden).toBe(1)
+  })
+
+  it('remembers the choices per file', async () => {
+    await api.putLibraryChoices(89, {
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+    })
+    expect((await api.getLibraryChoices(89)).model_choices?.nozzles?.[0]?.size).toBe('0.2')
+    expect((await api.getLibraryChoices(67)).model_choices?.nozzles ?? []).toEqual([])
+  })
+
+  it('forgets the choices with every other remembered choice', async () => {
+    await api.putLibraryChoices(89, { printer_id: 1, filament_plan: [] })
+    await api.forgetAllRemembered()
+    expect((await api.getLibraryChoices(89)).model_choices?.printer_id ?? null).toBeNull()
+  })
+
+  it('refuses a sliced file and a missing one', async () => {
+    await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
+    await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
+  })
+})
 
 describe('mock inputs, as the backend keeps them (spec 2026-09-27 §4.3)', () => {
   beforeEach(() => resetMockState())

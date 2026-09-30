@@ -8,9 +8,11 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -18,7 +20,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
@@ -38,7 +47,13 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import (
+    InvalidLibraryEntry,
+    ModelLibrary,
+    entry_name,
+    entry_problem,
+    invalid_entries,
+)
 from scadbuddy.library.media import (
     LEGACY_ID,
     MAX_MEDIA_ITEMS,
@@ -145,7 +160,16 @@ class ModelNotFoundError(KeyError):
 
 
 class SidecarNotFoundError(KeyError):
-    """The model exists, but the thumbnail or README being removed does not."""
+    """The model exists, but the sidecar being removed does not: the thumbnail, the
+    README, a named sidecar file, or a sibling `.scad` file (`write_file`, #252)."""
+
+
+class TooManySourceFilesError(ValueError):
+    """A new ``.scad`` file for a model that already holds the most it may (#252)."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(count)
+        self.count = count
 
 
 class MediaNotFoundError(KeyError):
@@ -165,8 +189,24 @@ class TooManyMediaError(ValueError):
     """The template already holds :data:`MAX_MEDIA_ITEMS` items."""
 
 
+class MediaReadOnlyError(ValueError):
+    """A write to an item a built-in ships (#722): only what was added to it changes."""
+
+
 class ModelExistsError(ValueError):
     pass
+
+
+class StaleVersionError(RuntimeError):
+    """An edit made against a revision the model has since moved past (#252): the
+    caller read ``expected`` and the model is at ``current`` now."""
+
+    def __init__(self, slug: str, expected: str, current: str | None) -> None:
+        super().__init__(
+            f"{slug!r} is at {current[:7] if current else 'no revision'}, not {expected[:7]}"
+        )
+        self.expected = expected
+        self.current = current
 
 
 class LibraryNotDeclaredError(KeyError):
@@ -201,6 +241,49 @@ class UiDeclaration(BaseModel):
     #: The host-API major the UI was written against (§4.3, §8.1). Any positive
     #: major is a valid declaration; the page decides whether it can mount it.
     api: int = Field(ge=1)
+
+
+_BOOLEAN = ("0", "1")
+
+#: The process settings a template may declare in ``print_settings`` (#770), in the
+#: order a download lists them as edits, each with the values it takes. Each is a
+#: Bambu Studio process key, and its value the string a Bambu config stores; the
+#: enums are ``s_keys_map_SupportType`` and ``s_keys_map_BrimType`` in Bambu Studio's
+#: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
+#: number of millimetres. Only these: a template states how it prints best, not a
+#: whole profile.
+PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
+    "enable_prime_tower": _BOOLEAN,
+    "wipe_tower_no_sparse_layers": _BOOLEAN,
+    "enable_support": _BOOLEAN,
+    "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
+    "brim_width": None,
+    "brim_type": (
+        "auto_brim",
+        "brim_ears",
+        "outer_only",
+        "inner_only",
+        "outer_and_inner",
+        "no_brim",
+    ),
+}
+PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
+
+
+def _print_setting_problem(key: str, value: str) -> str | None:
+    """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
+    allowed = PRINT_SETTING_VALUES[key]
+    if allowed is not None:
+        if value in allowed:
+            return None
+        return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
+    try:
+        width = float(value)
+    except ValueError:
+        width = -1.0
+    if 0 <= width < float("inf"):
+        return None
+    return f"{key} is {value!r}; it must be a non-negative number of millimetres"
 
 
 class ModelMeta(BaseModel):
@@ -253,6 +336,28 @@ class ModelMeta(BaseModel):
             }
         return data
 
+    #: The template's default slicer settings (#770): process overrides on the print
+    #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
+    #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
+    print_settings: dict[str, StrictStr] = Field(default_factory=dict)
+
+    @field_validator("print_settings")
+    @classmethod
+    def _known_print_settings(cls, value: dict[str, str]) -> dict[str, str]:
+        """Only the allowlisted keys, each with a value it takes, in the allowlist's
+        order. An unknown key or value is refused rather than dropped: a template that
+        means a setting must not print without it."""
+        for key, setting in value.items():
+            if key not in PRINT_SETTING_VALUES:
+                raise ValueError(
+                    f"{key!r} is not a print setting a template can set; "
+                    f"the allowed keys are {', '.join(PRINT_SETTING_KEYS)}"
+                )
+            problem = _print_setting_problem(key, setting)
+            if problem is not None:
+                raise ValueError(problem)
+        return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
+
     @field_validator("media", mode="before")
     @classmethod
     def _readable_media(cls, value: Any) -> list[MediaItem]:
@@ -275,7 +380,9 @@ class ModelMeta(BaseModel):
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
-DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries", "media"})
+DEFAULTED_META_FIELDS = frozenset(
+    {"name", "description", "tags", "libraries", "media", "print_settings"}
+)
 
 
 def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
@@ -365,8 +472,16 @@ class ModelRecord(ModelMeta):
     # that is not one, or when history is unavailable.
     upstream_state: UpstreamState | None = None
     #: As stored, plus what the disk says of each file. A template with only a
-    #: ``thumbnail.png`` lists it as one image, id ``thumbnail``.
+    #: ``thumbnail.png`` lists it as one image, id ``thumbnail``. A built-in's is
+    #: what it ships (``readonly``) followed by what was added to it (#722).
     media: list[MediaView] = Field(default_factory=list)  # type: ignore[assignment]
+    #: A built-in's chosen cover (#722), listed first in ``media``; None while the
+    #: shipped order decides it, and always for a template of mine, whose cover is
+    #: simply its first item.
+    media_cover: str | None = None
+    #: The entries of ``libraries`` in model.json that are not pins, which
+    #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
+    invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
     ui_error: str | None = None
 
 
@@ -388,6 +503,9 @@ class Catalogue:
     ) -> None:
         self.paths = paths
         self.history = history
+        #: Held while `write_file` counts a model's `.scad` files and adds one, so two
+        #: new files cannot both pass the cap, git history or not (PR #752 review).
+        self._source_files_lock = threading.Lock()
         #: Where a template of mine's media list is; None with no database, when
         #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
         self.media_store = media_store
@@ -406,6 +524,9 @@ class Catalogue:
         self.presets = presets
         #: A render's colour wrapper file prefix, which a duplicate leaves out.
         self.wrapper_prefix = wrapper_prefix
+        #: Serialises a built-in's media writes (#722) when there is no history
+        #: lock to take: they commit nothing, but are read-modify-writes all the same.
+        self._overlay_lock = threading.Lock()
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -539,10 +660,11 @@ class Catalogue:
         for item in media:
             if item.missing:
                 continue
+            directory = self._dir_of(slug, item)
             if item.kind == "image":
-                return self._media_file(slug, item.id, item.file), item.content_type
+                return self._media_file(slug, item.id, item.file, directory), item.content_type
             if item.poster is not None:
-                return self.media_dir(slug) / item.poster, content_type_of(item.poster)
+                return directory / item.poster, content_type_of(item.poster)
         return None
 
     def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
@@ -607,17 +729,25 @@ class Catalogue:
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version, self._has_history)
 
+    def print_settings(self, slug: str) -> dict[str, str]:
+        """The template's ``print_settings`` as its model.json has them now (#770);
+        none for a template that is gone. One whose model.json is invalid is
+        :class:`InvalidModelMetaError`, naming the key."""
+        return self._meta(slug, self.read_raw_meta(slug)).print_settings
+
     def _record(
         self,
         slug: str,
         version_of: Callable[[str], str | None],
         history: bool,
         media_of: Callable[[str], list[MediaItem]] | None = None,
+        cover_of: Callable[[str], str | None] | None = None,
     ) -> ModelRecord:
         """``version_of`` answers a template's revision -- per call, or from the one
         walk a listing makes -- and is asked for an upstream's as well as this one's.
-        ``media_of`` answers a template of mine's media rows from the listing's one
-        query; without it they are read for this template alone."""
+        ``media_of`` answers a template's media rows, and ``cover_of`` a built-in's
+        chosen cover, from the listing's one query each; without them they are read
+        for this template alone."""
         self._require(slug)
         raw = self.read_raw_meta(slug)
         if is_builtin(slug):
@@ -644,11 +774,12 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        media = self._views(slug, self._stored_media(slug, meta, media_of))
+        media, media_cover = self._media_listing(slug, meta, media_of, cover_of)
         thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
             **meta.model_dump(exclude={"media"}),
             media=media,
+            media_cover=media_cover,
             ui_error=meta.ui_error,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
@@ -660,6 +791,7 @@ class Catalogue:
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
             upstream_state=upstream_state,
+            invalid_libraries=invalid_entries(raw.get("libraries")),
         )
 
     @property
@@ -681,14 +813,60 @@ class Catalogue:
         ``model.json`` that is not JSON counts when its text mentions the name at
         all.
         """
-        users: list[str] = []
+        return [slug for slug, _ in self._library_entries(name, commit)]
+
+    def library_pins(self, name: str) -> list[tuple[str, ModelLibrary | None]]:
+        """Each of :meth:`library_users` with the pin its live ``model.json`` records
+        for ``name`` -- ``None`` where that entry cannot be read as one (a hand edit,
+        or a ``model.json`` that is not JSON), so every model a removal would name
+        is listed here too."""
+        pins: list[tuple[str, ModelLibrary | None]] = []
+        for slug, entry in self._library_entries(name):
+            pin: ModelLibrary | None = None
+            with contextlib.suppress(ValidationError):
+                pin = ModelLibrary.model_validate(entry)
+            pins.append((slug, pin))
+        return pins
+
+    def library_pin_index(self) -> dict[str, list[tuple[str, ModelLibrary]]]:
+        """Every readable pin of every model, by library name, reading each
+        ``model.json`` once: what :meth:`library_pins` answers for one name, less the
+        entries that cannot be read as a pin. One walk answers any number of names
+        (#253, review of #740)."""
+        index: dict[str, list[tuple[str, ModelLibrary]]] = {}
+        for slug in self.slugs():
+            try:
+                raw = self.read_raw_meta(slug)
+            except InvalidModelMetaError:
+                continue
+            entries = raw.get("libraries")
+            if not isinstance(entries, list):
+                continue
+            named: set[str] = set()
+            for entry in entries:
+                # The first entry of a name, as `_library_entries` takes it.
+                name = entry_name(entry)
+                if name is None or name in named:
+                    continue
+                named.add(name)
+                try:
+                    pin = ModelLibrary.model_validate(entry)
+                except ValidationError:
+                    continue
+                index.setdefault(name, []).append((slug, pin))
+        return index
+
+    def _library_entries(self, name: str, commit: str | None = None) -> list[tuple[str, Any]]:
+        """:meth:`library_users` with the entry that made each one a user, reading
+        each ``model.json`` once: ``None`` for one that is not JSON."""
+        found: list[tuple[str, Any]] = []
         for slug in self.slugs():
             try:
                 raw = self.read_raw_meta(slug)
             except InvalidModelMetaError:
                 with contextlib.suppress(OSError):
                     if name in self.paths.model_meta(slug).read_text(errors="replace"):
-                        users.append(slug)
+                        found.append((slug, None))
                 continue
             entries = raw.get("libraries")
             if not isinstance(entries, list):
@@ -698,9 +876,9 @@ class Catalogue:
                     continue
                 pinned = entry.get("commit") if isinstance(entry, dict) else None
                 if commit is None or not isinstance(pinned, str) or pinned == commit:
-                    users.append(slug)
+                    found.append((slug, entry))
                     break
-        return users
+        return found
 
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
@@ -710,12 +888,14 @@ class Catalogue:
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
-        # And ONE media query (#274), for every template of mine on the page.
-        rows = (
-            self.media_store.items_for([slug for slug in slugs if not is_builtin(slug)])
-            if self.media_store is not None
-            else {}
-        )
+        # And ONE media query (#274), for every template on the page: a built-in's
+        # rows are what was added to it (#722). One more for the built-ins' covers.
+        rows: dict[str, list[MediaItem]] = {}
+        covers: dict[str, str] = {}
+        if self.media_store is not None:
+            rows = self.media_store.items_for(slugs)
+            builtins = [slug for slug in slugs if is_builtin(slug)]
+            covers = self.media_store.covers_for(builtins) if builtins else {}
 
         def media_of(slug: str) -> list[MediaItem]:
             return rows.get(slug, [])
@@ -723,7 +903,7 @@ class Catalogue:
         records: list[ModelRecord] = []
         for slug in slugs:
             try:
-                records.append(self._record(slug, versions.get, history, media_of))
+                records.append(self._record(slug, versions.get, history, media_of, covers.get))
             except InvalidModelMetaError as error:
                 # One broken model.json costs its own model, never the whole page;
                 # `GET /models/{slug}` says what is wrong with it.
@@ -745,7 +925,9 @@ class Catalogue:
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
-            raw = meta.model_dump(exclude={"media"})
+            # No print settings is no key, as a hand-written model.json leaves it (#770).
+            excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            raw = meta.model_dump(exclude=excluded)
             if meta.unread_ui is not None:
                 raw["ui"] = meta.unread_ui
             self.write_raw_meta(slug, raw)
@@ -774,8 +956,13 @@ class Catalogue:
         self._require(upstream_id)
         if self.exists(slug):
             raise ModelExistsError(slug)
-        # The upstream's list, copied as rows once the files are in place (#274).
-        media = self._stored_media(upstream_id)
+        # The upstream's list, copied as rows once the files are in place (#274). A
+        # built-in's as it is listed, with what was added to it (#722).
+        # A template of mine's rows are read now; a built-in's are the copies
+        # `_carry_overlay` makes once its files are staged.
+        builtin = is_builtin(upstream_id)
+        listing = self._media_listing(upstream_id)[0] if builtin else []
+        media = self._stored_media(upstream_id) if not builtin else []
         # Not `self.version`, which logs a git failure and answers None: here that
         # would record no base and copy the working tree instead of the revision.
         # A failure reading it fails the duplicate, as a failed export does.
@@ -817,6 +1004,8 @@ class Catalogue:
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
+            if builtin:
+                media = self._carry_overlay(upstream_id, listing, staged)
             meta_path = staged / MODEL_META_NAME
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
             meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
@@ -865,6 +1054,39 @@ class Catalogue:
         except OSError:
             logger.exception("could not sweep duplicate staging")
         return self.record(slug)
+
+    def _carry_overlay(
+        self, upstream_id: str, listing: list[MediaView], staged: Path
+    ) -> list[MediaItem]:
+        """A built-in's listed media (#722) as the rows of its copy at ``staged``: the
+        shipped items were exported with it, the added ones are copied in from
+        ``builtin-media/``. A shipped legacy ``thumbnail.png`` stays one while it is
+        the only item; beside added ones it becomes an item in ``media/``, since a
+        template with rows lists only them."""
+        media: list[MediaItem] = []
+        target = staged / MEDIA_DIR
+        added = self.paths.builtin_media_dir(upstream_id)
+        for view in listing:
+            item = MediaItem.model_validate(
+                view.model_dump(include={"id", "file", "kind", "caption", "poster"})
+            )
+            if view.readonly and view.id == LEGACY_ID and view.file == THUMBNAIL_NAME:
+                if len(listing) == 1:
+                    return []
+                thumbnail = staged / THUMBNAIL_NAME
+                if not thumbnail.is_file():
+                    continue
+                item_id = new_media_id()
+                item = item.model_copy(update={"id": item_id, "file": f"{item_id}.png"})
+                target.mkdir(parents=True, exist_ok=True)
+                os.replace(thumbnail, target / item.file)
+            elif not view.readonly:
+                for name in (item.file, item.poster):
+                    if name is not None and (added / name).is_file():
+                        target.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(added / name, target / name)
+            media.append(item)
+        return media
 
     def _copy_videos(self, upstream_id: str, target: Path) -> None:
         """Copy the upstream's video files into ``target`` (its ``media/``)."""
@@ -928,15 +1150,30 @@ class Catalogue:
         self._commit_change(message, change, slug)
         return self.record(slug)
 
-    def unpin_library(self, slug: str, name: str) -> ModelRecord:
+    def unpin_library(self, slug: str, name: str, *, index: int | None = None) -> ModelRecord:
         """Take ``name`` off this model's libraries. :class:`KeyError` when the
-        model does not declare it."""
+        model does not declare it.
+
+        With ``index``, only the invalid entry at that position of ``libraries``
+        (#217), which may share its name with a pin or another entry; checked in
+        the same read-modify-write, and :class:`LibraryPinChangedError` when that
+        entry is no longer an invalid one of that name."""
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if index is not None:
+                if not (
+                    0 <= index < len(entries)
+                    and entry_name(entries[index]) == name
+                    and entry_problem(entries[index]) is not None
+                ):
+                    raise LibraryPinChangedError(name)
+                raw["libraries"] = entries[:index] + entries[index + 1 :]
+                self.write_raw_meta(slug, raw)
+                return
             kept = [entry for entry in entries if entry_name(entry) != name]
             if len(kept) == len(entries):
                 raise LibraryNotDeclaredError(name)
@@ -1010,12 +1247,22 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
         return directory
 
-    def _media_file(self, slug: str, item_id: str, file: str) -> Path:
-        """Where an item's file is: ``media/<file>``, or the model's own
-        ``thumbnail.png`` for the synthesized legacy item."""
-        if item_id == LEGACY_ID and file == THUMBNAIL_NAME:
+    def _media_file(
+        self, slug: str, item_id: str, file: str, directory: Path | None = None
+    ) -> Path:
+        """Where an item's file is: ``<directory>/<file>`` (``media/`` by default), or
+        the model's own ``thumbnail.png`` for the synthesized legacy item."""
+        own = directory is None or directory == self.media_dir(slug)
+        if own and item_id == LEGACY_ID and file == THUMBNAIL_NAME:
             return self.thumbnail_path(slug)
-        return self.media_dir(slug) / file
+        return (directory or self.media_dir(slug)) / file
+
+    def _dir_of(self, slug: str, view: MediaView) -> Path:
+        """The directory a listed item's files are in: ``media/``, except for what
+        was added to a built-in (#722), which is in ``builtin-media/<slug>/``."""
+        if is_builtin(slug) and not view.readonly:
+            return self.paths.builtin_media_dir(slug)
+        return self.media_dir(slug)
 
     def _stored_media(
         self,
@@ -1035,9 +1282,11 @@ class Catalogue:
             return media_of(slug)
         return self.media_store.items(slug)
 
-    def _views(self, slug: str, items: list[MediaItem]) -> list[MediaView]:
-        """``items`` with what the disk says of each. With none stored, the model's
-        ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
+    def _views(
+        self, slug: str, items: list[MediaItem], *, readonly: bool = False
+    ) -> list[MediaView]:
+        """``items`` (in ``media/``) with what the disk says of each. With none stored,
+        the model's ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
         if not items:
             size = _file_size(self.thumbnail_path(slug))
             if size is None:
@@ -1049,13 +1298,19 @@ class Catalogue:
                     kind="image",
                     content_type=content_type_of(THUMBNAIL_NAME),
                     size=size,
+                    readonly=readonly,
                 )
             ]
+        return self._item_views(slug, items, self.media_dir(slug), readonly=readonly)
+
+    def _item_views(
+        self, slug: str, items: list[MediaItem], directory: Path, *, readonly: bool
+    ) -> list[MediaView]:
         views: list[MediaView] = []
         for item in items:
-            size = _file_size(self._media_file(slug, item.id, item.file))
+            size = _file_size(self._media_file(slug, item.id, item.file, directory))
             poster = item.poster
-            if poster is not None and _file_size(self.media_dir(slug) / poster) is None:
+            if poster is not None and _file_size(directory / poster) is None:
                 poster = None
             views.append(
                 MediaView(
@@ -1064,28 +1319,71 @@ class Catalogue:
                     missing=size is None,
                     content_type=content_type_of(item.file),
                     size=size,
+                    readonly=readonly,
                 )
             )
         return views
 
+    def _media_listing(
+        self,
+        slug: str,
+        meta: ModelMeta | None = None,
+        media_of: Callable[[str], list[MediaItem]] | None = None,
+        cover_of: Callable[[str], str | None] | None = None,
+    ) -> tuple[list[MediaView], str | None]:
+        """The template's media as listed, and a built-in's chosen cover.
+
+        A template of mine's is its rows. A built-in's (#722) is what it ships,
+        ``readonly``, followed by the rows of what was added to it (one whose id a
+        shipped item has is left out). Its chosen cover, when that names a listed
+        item other than the first, is moved to the front: the first item is the
+        cover everywhere else too."""
+        if not is_builtin(slug):
+            return self._views(slug, self._stored_media(slug, meta, media_of)), None
+        shipped = self._shipped(slug, meta)
+        rows: list[MediaItem] = []
+        cover: str | None = None
+        if self.media_store is not None:
+            rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
+            cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
+        taken = {view.id for view in shipped}
+        added = self._item_views(
+            slug,
+            [row for row in rows if row.id not in taken],
+            self.paths.builtin_media_dir(slug),
+            readonly=False,
+        )
+        listed = [*shipped, *added]
+        chosen = next((view for view in listed if view.id == cover), None)
+        if chosen is None or chosen is listed[0]:
+            return listed, None
+        return [chosen, *(view for view in listed if view is not chosen)], chosen.id
+
+    def _shipped(self, slug: str, meta: ModelMeta | None = None) -> list[MediaView]:
+        """What a built-in ships: its bundled model.json's media, or its legacy
+        ``thumbnail.png``."""
+        meta = meta or self._meta(slug, self.read_raw_meta(slug))
+        return self._views(slug, meta.media, readonly=True)
+
     def list_media(self, slug: str) -> list[MediaView]:
         """The template's images and videos, in order; the first is the cover."""
         self._require(slug)
-        return self._views(slug, self._stored_media(slug))
+        return self._media_listing(slug)[0]
 
     def media_item(self, slug: str, item_id: str) -> tuple[MediaView, Path]:
         """One item and its file, or :class:`MediaNotFoundError` -- for an unknown
         id and for an entry whose file is missing alike."""
         for item in self.list_media(slug):
             if item.id == item_id and not item.missing:
-                return item, self._media_file(slug, item.id, item.file)
+                path = self._media_file(slug, item.id, item.file, self._dir_of(slug, item))
+                return item, path
         raise MediaNotFoundError(item_id)
 
     def media_poster(self, slug: str, item_id: str) -> Path:
         """The poster of one item, or :class:`MediaNotFoundError`."""
         for item in self.list_media(slug):
             if item.id == item_id and item.poster is not None:
-                return self.media_dir(slug) / item.poster
+                return self._dir_of(slug, item) / item.poster
         raise MediaNotFoundError(item_id)
 
     def _clear_media_rows(self, slug: str) -> None:
@@ -1160,7 +1458,10 @@ class Catalogue:
         poster: StagedMedia | None = None,
     ) -> ModelRecord:
         """Move a staged upload (and its poster) into ``media/`` as the last item,
-        as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`."""
+        as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`.
+
+        On a built-in (#722) the item goes after what it ships and what was added
+        before, into ``builtin-media/<slug>/`` and with no revision."""
         self._require(slug)
         item_id = new_media_id()
         item = MediaItem(
@@ -1170,6 +1471,10 @@ class Catalogue:
             caption=caption,
             poster=f"{item_id}-poster.{poster.extension}" if poster is not None else None,
         )
+        if is_builtin(slug):
+            return self._overlay_change(
+                slug, partial(self._overlay_add, slug, item, upload, poster)
+            )
 
         def change() -> None:
             edit = self._edit_media(slug)
@@ -1190,6 +1495,19 @@ class Catalogue:
 
     def set_caption(self, slug: str, item_id: str, caption: str) -> ModelRecord:
         self._require(slug)
+        if is_builtin(slug):
+
+            def caption_added() -> None:
+                added = self._added_for_write(slug, item_id)
+                for index, item in enumerate(added):
+                    if item.id == item_id:
+                        added[index] = item.model_copy(update={"caption": caption})
+                        break
+                else:
+                    raise MediaNotFoundError(item_id)
+                self._save_overlay(slug, added, added)
+
+            return self._overlay_change(slug, caption_added)
 
         def change() -> None:
             edit = self._edit_media(slug)
@@ -1207,8 +1525,13 @@ class Catalogue:
 
     def reorder(self, slug: str, ids: list[str]) -> ModelRecord:
         """Put the items in the order of ``ids``, which must name each exactly
-        once; otherwise :class:`MediaOrderError`."""
+        once; otherwise :class:`MediaOrderError`.
+
+        A built-in's shipped items keep their place (#722): the order names what was
+        added to it, and a shipped id in it is passed over."""
         self._require(slug)
+        if is_builtin(slug):
+            return self._overlay_change(slug, partial(self._overlay_reorder, slug, ids))
 
         def change() -> None:
             edit = self._edit_media(slug)
@@ -1224,8 +1547,11 @@ class Catalogue:
 
     def remove_media(self, slug: str, item_id: str) -> ModelRecord:
         """Remove one item and its files, as one revision. An entry whose file is
-        already gone is removed all the same."""
+        already gone is removed all the same. What a built-in ships is not removed
+        (:class:`MediaReadOnlyError`); what was added to it is, with no revision."""
         self._require(slug)
+        if is_builtin(slug):
+            return self._overlay_change(slug, partial(self._overlay_remove, slug, item_id))
 
         def change() -> None:
             edit = self._edit_media(slug)
@@ -1238,6 +1564,137 @@ class Catalogue:
 
         self._commit_change(f"Remove {item_id} from {slug}", change, slug)
         return self.record(slug)
+
+    def set_cover(self, slug: str, item_id: str | None) -> ModelRecord:
+        """Make ``item_id`` the cover.
+
+        A template of mine's cover is its first item, so the item is moved to the
+        front, as one revision. A built-in's shipped items come first and stay where
+        they are (#722), so its cover is a choice of its own: any listed item, shipped
+        or added, which is then listed first; None, or the item that is first
+        anyway, goes back to the shipped order. :class:`MediaNotFoundError` for an
+        id the template does not list."""
+        self._require(slug)
+        if is_builtin(slug):
+            return self._overlay_change(slug, partial(self._overlay_cover, slug, item_id))
+        if item_id is None:
+            raise MediaOrderError(
+                "a template's cover is its first item: name the one to move there"
+            )
+        wanted_id = item_id
+
+        def change() -> None:
+            edit = self._edit_media(slug)
+            wanted = self._resolve_id(edit, wanted_id)
+            index = next((i for i, item in enumerate(edit.items) if item.id == wanted), None)
+            if index is None:
+                raise MediaNotFoundError(wanted_id)
+            if index == 0:
+                return
+            edit.items.insert(0, edit.items.pop(index))
+            self._save_media(slug, edit)
+
+        self._commit_change(f"Make {item_id} the cover of {slug}", change, slug)
+        return self.record(slug)
+
+    # ── a built-in's added media (#722) ───────────────────────────────────────
+
+    def _overlay_change(self, slug: str, change: Callable[[], None]) -> ModelRecord:
+        """Run ``change`` to a built-in's added media under the write lock, with no
+        commit: nothing it touches is in the models repository, so the built-in's
+        revision never moves."""
+        self._require_media_store()
+        with self._overlay_write_lock():
+            change()
+        self.notify_change(slug)
+        return self.record(slug)
+
+    def _overlay_write_lock(self) -> AbstractContextManager[Any]:
+        """The lock every write to a built-in's added media takes: the history's
+        cross-process one when there is a history, else this process's own."""
+        if self.history is not None and self.history.available:
+            return self.history.write_lock()
+        return self._overlay_lock
+
+    def _added_for_write(self, slug: str, item_id: str | None = None) -> list[MediaItem]:
+        """The rows of what was added to a built-in, to change; with ``item_id``,
+        :class:`MediaReadOnlyError` first when that names a shipped item."""
+        if item_id is not None and any(view.id == item_id for view in self._shipped(slug)):
+            raise MediaReadOnlyError(item_id)
+        return list(self._require_media_store().items(slug))
+
+    def _overlay_add(
+        self, slug: str, item: MediaItem, upload: StagedMedia, poster: StagedMedia | None
+    ) -> None:
+        added = self._added_for_write(slug)
+        if len(self._shipped(slug)) + len(added) >= MAX_MEDIA_ITEMS:
+            raise TooManyMediaError(slug)
+        directory = self.paths.builtin_media_dir(slug)
+        directory.mkdir(parents=True, exist_ok=True)
+        moved = [item.file]
+        os.replace(upload.path, directory / item.file)
+        if poster is not None and item.poster is not None:
+            os.replace(poster.path, directory / item.poster)
+            moved.append(item.poster)
+        self._save_overlay(slug, added, [*added, item], moved)
+
+    def _overlay_reorder(self, slug: str, ids: list[str]) -> None:
+        added = self._added_for_write(slug)
+        shipped = {view.id for view in self._shipped(slug)}
+        wanted = [item_id for item_id in ids if item_id not in shipped]
+        by_id = {item.id: item for item in added}
+        if len(wanted) != len(by_id) or set(wanted) != set(by_id):
+            raise MediaOrderError("the order must name every added media item exactly once")
+        self._save_overlay(slug, added, [by_id[item_id] for item_id in wanted])
+
+    def _overlay_remove(self, slug: str, item_id: str) -> None:
+        added = self._added_for_write(slug, item_id)
+        kept = [item for item in added if item.id != item_id]
+        if len(kept) == len(added):
+            raise MediaNotFoundError(item_id)
+        self._save_overlay(slug, added, kept)
+        store = self._require_media_store()
+        # A cover naming no item is ignored on read; this keeps none behind.
+        if store.cover(slug) == item_id:
+            store.set_cover(slug, None)
+
+    def _overlay_cover(self, slug: str, item_id: str | None) -> None:
+        store = self._require_media_store()
+        if item_id is None:
+            store.set_cover(slug, None)
+            return
+        shipped = self._shipped(slug)
+        taken = {view.id for view in shipped}
+        listed = [view.id for view in shipped] + [
+            item.id for item in store.items(slug) if item.id not in taken
+        ]
+        if item_id not in listed:
+            raise MediaNotFoundError(item_id)
+        # The item first in the shipped order is the cover without a choice.
+        store.set_cover(slug, None if listed[0] == item_id else item_id)
+
+    def _save_overlay(
+        self,
+        slug: str,
+        before: list[MediaItem],
+        after: list[MediaItem],
+        moved: Sequence[str] = (),
+    ) -> None:
+        """Write ``after`` as the built-in's added rows, then remove the files of every
+        item it no longer holds; ``moved`` (already in place) is taken back out if
+        the rows cannot be written."""
+        directory = self.paths.builtin_media_dir(slug)
+        try:
+            self._require_media_store().replace(slug, after)
+        except BaseException:
+            for moved_name in moved:
+                (directory / moved_name).unlink(missing_ok=True)
+            raise
+        kept = {name for item in after for name in (item.file, item.poster) if name}
+        for item in before:
+            for name in (item.file, item.poster):
+                if name is not None and name not in kept:
+                    (directory / name).unlink(missing_ok=True)
 
     def read_readme(self, slug: str) -> str:
         self._require(slug)
@@ -1287,8 +1744,15 @@ class Catalogue:
         *,
         message: str | None = None,
         merge_base: str | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Replace a model's ``.scad`` as one revision.
+
+        ``expected_version`` is the revision the caller based the edit on (#252's
+        ``apply_patch``): unless the model is still at it (a full id, or a prefix of
+        one), :class:`StaleVersionError` with nothing written. Checked under the
+        history's write lock, so no other write can land between the check and this
+        one. Not with ``merge_base``, whose own check is the upstream's.
 
         The hook the paste/edit path (#92) calls: everything that rewrites model
         source goes through here so it is versioned exactly once. The derived
@@ -1309,7 +1773,9 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._write_edit(slug, source, message or f"Edit {slug} source")
+            self._write_edit(
+                slug, source, message or f"Edit {slug} source", expected_version=expected_version
+            )
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -1323,31 +1789,58 @@ class Catalogue:
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
 
-    def _write_edit(self, slug: str, source: str, message: str) -> None:
+    def _write_edit(
+        self, slug: str, source: str, message: str, *, expected_version: str | None = None
+    ) -> None:
         """A plain edit: written under the history's write lock, with its commit (#370),
         so it cannot land between another write's check and its write -- a merge's
         ``still_applies``, say -- nor be overwritten by one before it is committed.
 
         Failures as :meth:`_commit`: a failed commit after the write is logged, not
         raised. When the lock itself cannot be had, the edit is written without it
-        and only its revision is lost, as it always was.
+        and only its revision is lost, as it always was -- except an edit with an
+        ``expected_version``, which is only ever written once that has been checked.
+        Such an edit is only ever written WITH its revision, too: when the commit
+        fails, the old source is put back under the same lock and the error raised,
+        since a base check against a revision that never moved would pass a second
+        edit over this one unseen (review of #741).
         """
-        if self.history is None or not self.history.available:
+        history = self.history
+        if history is None or not history.available:
+            if expected_version is not None:
+                raise GitUnavailableError("model history is unavailable, so no base can be checked")
             self._replace_source(slug, source)
             self.notify_change(slug)
             return
         started = written = False
+        previous: str | None = None
 
         def write() -> None:
-            nonlocal started, written
+            nonlocal started, written, previous
+            if expected_version is not None:
+                current = history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
+                try:
+                    previous = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    raise ModelNotFoundError(slug) from None
             started = True
             self._replace_source(slug, source)
             written = True
 
+        def undo() -> None:
+            nonlocal written
+            if written and previous is not None:
+                self._replace_source(slug, previous)
+                written = False
+
         try:
-            self.history.commit(message, slug, prepare=write)
+            history.commit(message, slug, prepare=write, rollback=undo)
         except (GitError, OSError):
             if started and not written:
+                raise
+            if expected_version is not None:
                 raise
             if not started:
                 self._replace_source(slug, source)
@@ -1368,6 +1861,69 @@ class Catalogue:
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+    # ── the other source files of a multi-file model (#252) ───────────────────
+
+    def source_files(self, slug: str) -> list[Path]:
+        """Every ``.scad`` file at the top of the model's directory, ``model.scad``
+        included, by name. What ``include``/``use`` of a sibling reads, and what a
+        render's source version hashes (``render/provenance.py``)."""
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+        return sorted(
+            (path for path in directory.glob("*.scad") if path.is_file() and not path.is_symlink()),
+            key=lambda path: path.name,
+        )
+
+    def write_file(
+        self,
+        slug: str,
+        name: str,
+        content: str | None,
+        *,
+        message: str | None = None,
+        max_files: int | None = None,
+    ) -> ModelRecord:
+        """Write ``name`` beside ``model.scad`` -- or with ``content`` None remove it --
+        as one revision. ``name`` is a bare ``.scad`` file name other than the model's
+        own source, which only :meth:`write_source` writes (a ``ValueError`` here; the
+        route answers it with a 409 before calling).
+
+        The schema derived from ``model.scad`` is dropped too: an ``include`` can
+        bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
+        removal of a file that is not there, with nothing committed.
+        :class:`TooManySourceFilesError` for a new file when the model already holds
+        ``max_files``, counted and written under a lock of the catalogue's own (and
+        the history's write lock, when there is one), so two new files at once cannot
+        both pass (PR #752 review).
+        """
+        if name == SOURCE_NAME:
+            # The route refuses it with a 409 first; this keeps any other caller off
+            # the model's source too, which only `write_source` parse-checks (#773).
+            raise ValueError(f"{SOURCE_NAME} is written by write_source, not write_file")
+        self._require(slug)
+        path = self.paths.model_dir(slug) / name
+
+        def change() -> None:
+            if content is None:
+                if not path.is_file():
+                    raise SidecarNotFoundError(name)
+                path.unlink()
+            else:
+                with self._source_files_lock:
+                    if max_files is not None and not path.is_file():
+                        count = len(self.source_files(slug))
+                        if count >= max_files:
+                            raise TooManySourceFilesError(count)
+                    try:
+                        write_atomic(path, content.encode())
+                    except FileNotFoundError:
+                        raise ModelNotFoundError(slug) from None
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+        verb = "Remove" if content is None else "Edit"
+        self._commit_change(message or f"{verb} {slug}/{name}", change, slug)
+        return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
 
@@ -1822,6 +2378,7 @@ class Catalogue:
         for stale in present:
             if stale.name not in wanted:
                 _remove_tree(stale)
+        self._drop_builtin_media(wanted)
         changed: list[str] = []
         for slug in wanted:
             try:
@@ -1838,6 +2395,33 @@ class Catalogue:
                 "synced built-in templates", extra={"changed": changed, "from": str(bundled)}
             )
         return commit
+
+    def _drop_builtin_media(self, wanted: list[str]) -> None:
+        """Remove the media added to built-ins the image no longer has (#722): their
+        rows and cover choice, then their files, so a later built-in that takes the
+        slug starts with only what it ships. Best effort, as the sync is."""
+        try:
+            kept = sorted(self.paths.builtin_media.iterdir())
+        except FileNotFoundError:
+            return
+        except OSError:
+            logger.exception("could not list the media added to built-ins")
+            return
+        for stale in kept:
+            if stale.name in wanted:
+                continue
+            model_id = f"{BUILTIN_PREFIX}{stale.name}"
+            try:
+                # Under the lock the overlay's other writes take, so another
+                # replica's write to this built-in cannot interleave with the drop.
+                with self._overlay_write_lock():
+                    if self.media_store is not None:
+                        self.media_store.delete(model_id)
+                    _remove_tree(stale)
+            except Exception:
+                logger.exception(
+                    "could not remove a removed built-in's media", extra={"slug": model_id}
+                )
 
     def link_seeded(self) -> str | None:
         """Make every seeded template of mine a duplicate of its built-in, as one commit.

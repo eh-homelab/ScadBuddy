@@ -52,7 +52,7 @@ describe('/mcp: tools over Streamable HTTP', () => {
     const client = await open(app, { headers: auth })
     const result = await client.callTool({ name: 'list_models', arguments: {} })
     expect(result.isError).toBeFalsy()
-    expect(firstText(result)).toEqual(MODELS)
+    expect(firstText(result)).toEqual({ items: MODELS, next_cursor: null, total: MODELS.length })
   })
 
   it('surfaces a backend error as a tool error with its detail', async () => {
@@ -66,7 +66,9 @@ describe('/mcp: tools over Streamable HTTP', () => {
     const result = await client.callTool({ name: 'get_model', arguments: { slug: 'nope' } })
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('HTTP 404')
-    expect(firstText(result)).toContain('no model "nope"')
+    // The backend's detail reaches the model inside the untrusted-data envelope (#258).
+    expect(firstText(result)).toContain('"untrusted_data"')
+    expect(firstText(result)).toContain('"content": "no model \\"nope\\""')
   })
 
   it('streams progress notifications for a render before the call completes', async () => {
@@ -263,8 +265,8 @@ describe('/mcp: disabled mode', () => {
     ) as { pending_action_id: string }
     await b.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } })
 
-    const listA = firstText(await a.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
-    const listB = firstText(await b.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
+    const listA = (firstText(await a.callTool({ name: 'list_pending_actions', arguments: {} })) as { items: { tool: string }[] }).items
+    const listB = (firstText(await b.callTool({ name: 'list_pending_actions', arguments: {} })) as { items: { tool: string }[] }).items
     expect(listA.map((x) => x.tool)).toEqual(['delete_model'])
     expect(listB.map((x) => x.tool)).toEqual(['send_to_bambuddy'])
 
@@ -310,7 +312,7 @@ describe('/mcp: outward tools prepare; with no approval store, confirm is refuse
     expect(body.summary).toBe('Print output 0123456789abcdef0123456789abcdef: 2 copies of plate 1 with a 0.4 mm nozzle, fine quality (other choices as the print dialog opens)')
 
     const listed = firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))
-    expect(listed).toEqual([expect.objectContaining({ pending_action_id: body.pending_action_id, tool: 'print_output' })])
+    expect(listed).toMatchObject({ items: [expect.objectContaining({ pending_action_id: body.pending_action_id, tool: 'print_output' })], next_cursor: null })
 
     const confirmed = await client.callTool({
       name: 'confirm_action',
@@ -336,7 +338,7 @@ describe('/mcp: outward tools prepare; with no approval store, confirm is refuse
     const res = await cb.callTool({ name: 'confirm_action', arguments: { pending_action_id } })
     expect(res.isError).toBe(true)
     expect(firstText(res)).toContain('no pending action')
-    expect(firstText(await cb.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual([])
+    expect(firstText(await cb.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual({ items: [], next_cursor: null, total: 0 })
   })
 
   it('a write token cannot even prepare an outward action', async () => {

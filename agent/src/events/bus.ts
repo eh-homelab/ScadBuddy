@@ -7,8 +7,10 @@ import { z } from 'zod'
 // same transaction, `pg_notify('scadbuddy_events', <the event as JSON>)`
 // (backend/scadbuddy/core/events.py, pg_events.py). The agent LISTENs on the
 // same channel on a connection of its own (pgListener.ts) and hands each event
-// to whoever follows the bus here: today the MCP resource hub
-// (src/resources/hub.ts), later plugin hooks (#297).
+// to whoever follows the bus here: the MCP resource hub
+// (src/resources/hub.ts) and the session event log's wake-ups
+// (src/sessions/busEvents.ts, which also publishes the agent's own
+// `session.*`, #300); later plugin hooks (#297).
 //
 // Events are ids only, so a consumer re-reads what changed through the API it
 // already has. An event can therefore be dropped, repeated or reordered
@@ -37,6 +39,11 @@ export const BusEventSchema = z
     name: z.string().optional(),
     family: z.string().optional(),
     section: z.string().optional(),
+    // `session.*`, which the agent publishes itself (sessions/busEvents.ts, #300).
+    session_id: z.string().optional(),
+    seq: z.number().optional(),
+    status: z.string().optional(),
+    replica: z.string().optional(),
   })
   .loose()
 
@@ -64,6 +71,13 @@ export type EventListener = {
    * could not be replayed from the log): re-read everything followed.
    */
   onResync(): void
+  /**
+   * The LISTEN connection came back after a drop, and the backend's `events`
+   * log has been replayed. Kinds that are NOTIFY-only, with no row in that log
+   * (the agent's own `session.*`, sessions/busEvents.ts), sent while it was
+   * down are gone: a follower of those re-reads them here.
+   */
+  onReconnect?(): void
 }
 
 /** What the resource hub follows: the Postgres listener, or a test's in-memory source. */
@@ -106,6 +120,16 @@ export class Followers {
       }
     }
   }
+
+  reconnected(): void {
+    for (const l of [...this.#listeners]) {
+      try {
+        l.onReconnect?.()
+      } catch (err) {
+        console.error('event follower failed on reconnect:', (err as Error).message)
+      }
+    }
+  }
 }
 
 /** An EventSource fed by hand: tests, and a deployment with no database (it never emits). */
@@ -122,5 +146,9 @@ export class MemoryEventSource implements EventSource {
 
   resync(): void {
     this.#followers.resync()
+  }
+
+  reconnected(): void {
+    this.#followers.reconnected()
   }
 }

@@ -58,6 +58,14 @@ class VersionFile(BaseModel):
     path: str
 
 
+class VersionAgent(BaseModel):
+    """The agent a revision was made by (#252): its commit's trailers
+    (``core/authorship.py``)."""
+
+    principal: str | None = Field(default=None, description="Who the agent ran for")
+    session: str | None = Field(default=None, description="The assistant session it ran in")
+
+
 class ModelVersion(BaseModel):
     commit: str
     short: str
@@ -68,6 +76,9 @@ class ModelVersion(BaseModel):
     # True for the revision the model is currently at, which is what a render
     # without an explicit version reads.
     current: bool = False
+    agent: VersionAgent | None = Field(
+        default=None, description="Set when the agent made this revision; `author` says so too"
+    )
 
 
 class VersionDiff(BaseModel):
@@ -130,6 +141,9 @@ def _version(revision: Revision, slug: str, *, current: bool) -> ModelVersion:
         message=revision.message,
         files=_relative(revision.files, slug),
         current=current,
+        agent=VersionAgent(principal=revision.agent.principal, session=revision.agent.session)
+        if revision.agent
+        else None,
     )
 
 
