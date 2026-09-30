@@ -22,22 +22,53 @@ function memoryHeadline(item: Memory): string {
   return 'Saved to memory'
 }
 
-/** #818: an automatic recall or retain, as a quiet line. The memories themselves are never shown. */
-function MemoryLine({ item }: { item: Memory }) {
+/**
+ * #818: an automatic recall or retain, as a quiet line. Basic mode shows only that
+ * line, and nothing for a retain that worked; Advanced shows the bank, what was sent and what came back, open. Memories are
+ * untrusted text, so they render as plain text, never Markdown.
+ */
+function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
   const failed = item.outcome !== 'ok'
-  return (
-    <details className="text-[11.5px] text-faint" data-testid="agent-memory">
-      <summary className={`cursor-pointer ${failed ? 'text-warn' : ''}`}>{memoryHeadline(item)}</summary>
-      <p className="mt-0.5 pl-3 text-muted">
-        Bank <span className="font-mono">{item.bank}</span>
-        {item.action === 'recall' && item.outcome === 'ok' && <> · {item.count ?? 0} found</>}
-        {item.detail && <> · {item.detail}</>}
+  const memories = item.memories ?? []
+  if (!advanced) {
+    // A retain follows every turn, so a successful one is noise in Basic mode; a
+    // failed one still says so.
+    if (item.action === 'retain' && !failed) return null
+    return (
+      <p className={`text-[11.5px] ${failed ? 'text-warn' : 'text-faint'}`} data-testid="agent-memory">
+        {memoryHeadline(item)}
+        {failed && item.detail && <> · {item.detail}</>}
       </p>
+    )
+  }
+  return (
+    <details open className="text-[11.5px] text-faint" data-testid="agent-memory">
+      <summary className={`cursor-pointer ${failed ? 'text-warn' : ''}`}>{memoryHeadline(item)}</summary>
+      <div className="mt-0.5 space-y-1 pl-3 text-muted">
+        <p>
+          Bank <span className="font-mono">{item.bank}</span>
+          {item.action === 'recall' && item.outcome === 'ok' && <> · {item.count ?? 0} found</>}
+          {item.detail && <> · {item.detail}</>}
+        </p>
+        {item.input !== undefined && (
+          <details open data-testid="agent-memory-input">
+            <summary className="cursor-pointer">{item.action === 'recall' ? 'Query' : 'Saved'}</summary>
+            <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px]">{item.input}</pre>
+          </details>
+        )}
+        {memories.length > 0 && (
+          <details open data-testid="agent-memory-output">
+            <summary className="cursor-pointer">Memories</summary>
+            <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px]">{memories.join('\n')}</pre>
+          </details>
+        )}
+      </div>
     </details>
   )
 }
 
-function ToolCard({ item }: { item: Tool }) {
+/** Basic mode shows what ran, how it ended and its sources, collapsed; Advanced adds its arguments, and opens both. */
+function ToolCard({ item, advanced }: { item: Tool; advanced: boolean }) {
   const { result } = item
   return (
     <div className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-2 text-[12.5px]" data-testid="agent-tool">
@@ -48,12 +79,14 @@ function ToolCard({ item }: { item: Tool }) {
           {result ? (result.ok ? 'done' : 'failed') : 'running…'}
         </span>
       </div>
-      <details className="mt-1">
-        <summary className="cursor-pointer text-[11.5px] text-muted">Arguments</summary>
-        <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-muted">
-          {JSON.stringify(item.input, null, 2)}
-        </pre>
-      </details>
+      {advanced && (
+        <details open className="mt-1" data-testid="agent-tool-arguments">
+          <summary className="cursor-pointer text-[11.5px] text-muted">Arguments</summary>
+          <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-muted">
+            {JSON.stringify(item.input, null, 2)}
+          </pre>
+        </details>
+      )}
       {result && (
         <div className="mt-1.5 space-y-1">
           <p className={result.ok ? 'text-ink' : 'text-warn'}>{result.summary}</p>
@@ -66,7 +99,7 @@ function ToolCard({ item }: { item: Tool }) {
             </Link>
           )}
           {result.sources.length > 0 && (
-            <details>
+            <details open={advanced}>
               <summary className="cursor-pointer text-[11.5px] text-muted">Why? {result.sources.length} source{result.sources.length === 1 ? '' : 's'}</summary>
               <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted">
                 {result.sources.map((source, i) => {
@@ -142,9 +175,12 @@ function ApprovalCard({
 export function FeedItemView({
   item,
   onDecide,
+  advanced = false,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
+  /** The panel's Advanced switch: every detail, open. Off, only the basics. */
+  advanced?: boolean
 }) {
   switch (item.kind) {
     case 'user':
@@ -169,11 +205,11 @@ export function FeedItemView({
         </div>
       )
     case 'tool':
-      return <ToolCard item={item} />
+      return <ToolCard item={item} advanced={advanced} />
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
     case 'memory':
-      return <MemoryLine item={item} />
+      return <MemoryLine item={item} advanced={advanced} />
     case 'error':
       return (
         <p role="alert" className="text-[12.5px] text-warn">

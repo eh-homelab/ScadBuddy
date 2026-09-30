@@ -378,7 +378,11 @@ export type MemoryHooksOptions = {
   onActivity?: (activity: MemoryActivity) => Promise<void> | void
 }
 
-/** One automatic recall or retain, as `onActivity` is told of it. Never holds the query or a memory. */
+/**
+ * One automatic recall or retain, as `onActivity` is told of it. `input` and
+ * `memories` are for the panel event (shown in Advanced mode); the audit row never
+ * records them (sessions/manager.ts recordMemory).
+ */
 export type MemoryActivity = {
   action: 'recall' | 'retain'
   bank: string
@@ -392,6 +396,10 @@ export type MemoryActivity = {
   toolUseId?: string
   /** Why it failed, redacted of the turn's secrets. */
   reason?: string
+  /** What was sent, redacted: a recall's query, or the start of a retain's content. */
+  input?: string
+  /** A recall's memories, as they were injected. */
+  memories?: string[]
   startedAt: Date
   finishedAt: Date
 }
@@ -481,15 +489,17 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   ): Promise<void> => {
     const startedAt = new Date()
     const documentId = item.document_id ? { documentId: item.document_id } : {}
+    const content = scrub(item.content)
+    const input = { input: content }
     try {
-      await client.retain({ ...item, content: scrub(item.content) }, AbortSignal.timeout(retainTimeoutMs))
+      await client.retain({ ...item, content }, AbortSignal.timeout(retainTimeoutMs))
     } catch (err) {
       const why = describe(err)
       log(`hindsight: ${what} was not retained to bank ${client.bankId}: ${why}`)
-      await report({ action: 'retain', outcome: why === 'timed out' ? 'timeout' : 'error', reason: why, startedAt, ...documentId, ...about })
+      await report({ action: 'retain', outcome: why === 'timed out' ? 'timeout' : 'error', reason: why, startedAt, ...input, ...documentId, ...about })
       return
     }
-    await report({ action: 'retain', outcome: 'ok', startedAt, ...documentId, ...about })
+    await report({ action: 'retain', outcome: 'ok', startedAt, ...input, ...documentId, ...about })
   }
   /** Starts a retain and returns at once; a failure is logged, never thrown. */
   const retainLater = (what: string, item: RetainItem, about: Pick<MemoryActivity, 'tool' | 'toolUseId'>) =>
@@ -518,11 +528,11 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         const why = timeout.aborted ? `timed out after ${recallTimeoutMs} ms` : describe(err)
         log(`hindsight: recall from bank ${client.bankId} failed (${why}); no memories were injected`)
         // Not awaited: the turn goes on while it is recorded.
-        void report({ action: 'recall', outcome: timeout.aborted ? 'timeout' : 'error', reason: why, startedAt })
+        void report({ action: 'recall', outcome: timeout.aborted ? 'timeout' : 'error', reason: why, input: body.query, startedAt })
         return {}
       }
       const lines = results.slice(0, cfg.recallMaxResults).map((text, i) => `${i + 1}. ${text}`)
-      void report({ action: 'recall', outcome: 'ok', count: lines.length, startedAt })
+      void report({ action: 'recall', outcome: 'ok', count: lines.length, input: body.query, memories: lines, startedAt })
       if (lines.length === 0) return {}
       // JSON leaves `<` and `>` as they are, so a memory holding "</hindsight_memories>"
       // could close the outer tag early; escaped, the envelope is still the same JSON.
