@@ -13,6 +13,8 @@ export const MM_PER_INCH = 25.4
 
 let current: DisplayUnit = 'mm'
 let loaded = false
+/** Bumped by every {@link setDisplayUnit}, so a fetch that started earlier cannot undo it. */
+let generation = 0
 const listeners = new Set<() => void>()
 
 export function getDisplayUnit(): DisplayUnit {
@@ -22,6 +24,7 @@ export function getDisplayUnit(): DisplayUnit {
 /** The settings page calls this after a save so every open view follows at once. */
 export function setDisplayUnit(unit: DisplayUnit): void {
   loaded = true
+  generation += 1
   if (unit === current) return
   current = unit
   for (const listener of listeners) listener()
@@ -37,8 +40,12 @@ export function resetDisplayUnit(): void {
 export function loadDisplayUnit(): void {
   if (loaded) return
   loaded = true
+  const started = generation
   api.getSettings().then(
-    (settings) => setDisplayUnit(settings.display_unit),
+    // A unit set while this was in flight (a Settings save) is newer than what it read.
+    (settings) => {
+      if (generation === started) setDisplayUnit(settings.display_unit)
+    },
     () => {
       loaded = false
     },

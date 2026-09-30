@@ -243,8 +243,16 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It may open only this origin, which serves the SPA.
-        headlessBrowser: { backendUrl: config.backendUrl, sandbox: chromiumSandbox },
+        // It opens the backend, which serves the SPA; the UI's public origins
+        // are rewritten onto it, and SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what
+        // else a human may let it open (harness/browserOrigins.ts).
+        headlessBrowser: {
+          backendUrl: config.backendUrl,
+          ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
+          ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
+          ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
+          sandbox: chromiumSandbox,
+        },
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)
@@ -365,6 +373,10 @@ async function stop(): Promise<void> {
     closeSessions: async () => {
       // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
       await drainRetains()
+      // stopTurns waited for the aborted turns only so long: any still winding
+      // down append their final session.status/session.done, and publish them,
+      // before closeDatabase runs; within the same deadline (#802).
+      await sessions?.settled()
       await app.close()
       resources.close()
       await events?.close()
