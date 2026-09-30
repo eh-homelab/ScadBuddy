@@ -228,7 +228,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
             )
         else:
             removed = await sweep_content(
-                state.store.content, state.refs, grace=state.config.asset_sweep_grace
+                state.store.content, state.refs, grace=state.config.job_ttl
             )
             if isinstance(state.store.blobs, CachedBlobStore):
                 await asyncio.to_thread(state.store.blobs.evict)
