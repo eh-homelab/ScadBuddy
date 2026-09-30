@@ -385,7 +385,9 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps, store = build_worker_deps(settings)
+    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
+    # the rest opens the projection's pool and reads the store settings.
+    deps, store = await asyncio.to_thread(build_worker_deps, settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     # Only on the bambuddy store: a local-store worker shares the API's volume, whose
     # sweeps are the API's.

@@ -707,6 +707,22 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     assert len(opened) == 1 and opened[0].pool.closed
 
 
+async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
+    loops: list[asyncio.AbstractEventLoop | None] = []
+
+    def build(_settings: Settings) -> NoReturn:
+        loops.append(asyncio._get_running_loop())
+        raise StoreNotReadyError("stop here")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    with pytest.raises(StoreNotReadyError):
+        await worker_module.run_worker(settings, health_port=None)
+    assert loops == [None]
+
+
 async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
     settings: Settings, tmp_path: Path
 ) -> None:
