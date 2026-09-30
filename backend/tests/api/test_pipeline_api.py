@@ -108,3 +108,47 @@ def test_an_output_index_the_job_does_not_have_is_refused(
         f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 3}
     )
     assert response.status_code == 422
+
+
+def test_an_output_records_only_the_inputs_its_pipeline_job_rendered(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A pipeline job is keyed on its whole inputs (§3.4), so its output's recorded inputs
+    must be the job's own, not only its `params` (§8.4)."""
+    with_pipeline(paths, model)
+    rendered = {"params": {}, "v": 1, "house": {"cols": 1}}
+    job = _done(client, model, rendered)
+    url = f"/api/v1/models/{model}/outputs"
+    other = {"params": {}, "v": 1, "house": {"cols": 2}}
+    refused = client.post(url, json={"job_id": job["id"], "inputs": other})
+    assert refused.status_code == 422, refused.text
+    assert "inputs are not the ones job" in refused.json()["detail"]
+    accepted = client.post(url, json={"job_id": job["id"], "inputs": rendered})
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["inputs"]["house"] == {"cols": 1}
+
+
+def test_a_malformed_pipeline_declaration_reaches_the_worker(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Not the API's "unknown parameter": the job is accepted, and `load_pipeline` says
+    what is wrong with the declaration."""
+    with_pipeline(paths, model)
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["pipeline"]["api"] = 0
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+    accepted = client.post(
+        f"/api/v1/models/{model}/render",
+        json={"inputs": {"params": {"not_in_model_scad": 1}, "v": 1}},
+    )
+    assert accepted.status_code == 202, accepted.text
+    url = accepted.json()["status_url"]
+    deadline = time.monotonic() + 60
+    job: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        job = client.get(url).json()
+        if job["status"] in {"done", "failed"}:
+            break
+        time.sleep(0.05)
+    assert job["status"] == "failed", job
+    assert "model.json's pipeline is not valid" in str(job["error"])

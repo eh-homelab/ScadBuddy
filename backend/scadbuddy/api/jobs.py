@@ -27,6 +27,7 @@ from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
+from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
 from scadbuddy.library.catalogue import meta_from_raw
@@ -186,14 +187,15 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
 
 def _declares_pipeline(directory: Path, slug: str) -> bool:
     """Whether the template's model.json at this revision declares a pipeline (§5.1),
-    read as the catalogue reads it. An unreadable or invalid one declares none: the
-    job then renders `model.scad`'s parameters, and `load_pipeline` says what is wrong."""
+    read as the catalogue reads it. A malformed declaration counts: the job then reaches
+    the worker, whose `load_pipeline` names what is wrong with it. An unreadable
+    model.json declares none, and the job renders `model.scad`'s parameters."""
     try:
-        raw = json.loads((directory / "model.json").read_text(encoding="utf-8"))
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
         meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
     except (OSError, ValueError, ValidationError):
         return False
-    return meta.pipeline is not None
+    return meta.pipeline is not None or meta.pipeline_raw is not None
 
 
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:

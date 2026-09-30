@@ -173,12 +173,21 @@ async def create_output(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"job {job.id} has no output {body.index}"
         )
+    chosen = job.outputs[body.index] if job.outputs else None
     inputs = None
     if body.inputs is not None:
         try:
             inputs = normalize_inputs(body.inputs, None)
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        # A template's own pipeline read the job's whole inputs (§3.4), so the output
+        # records exactly those (§8.4), not only matching params.
+        own_pipeline = chosen is not None and chosen.record.pipeline_version != "default"
+        if own_pipeline and inputs != job.inputs:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"inputs are not the ones job {job.id} rendered",
+            )
         rendered = f"inputs.params are not the parameters job {job.id} rendered"
         # The store's rule, which compares type as well as value (12.0 is not 12), so
         # nothing this lets through fails the store's check half-way through the copy.
@@ -189,7 +198,6 @@ async def create_output(
             normalize_inputs(inputs, job.params)
         except InputsError:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
-    chosen = job.outputs[body.index] if job.outputs else None
     blobs = state.store.blobs
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
     await materialize_result(blobs, chosen.result if chosen is not None else job.result)
