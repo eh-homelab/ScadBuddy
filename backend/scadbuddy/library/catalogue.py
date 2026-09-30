@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
@@ -195,6 +195,21 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: `ui/` plus a relative path whose segments never start with a dot, ending `.js`
+#: or `.mjs`: no `..`, no hidden file, nothing outside the template's `ui/`.
+UI_MODULE_PATTERN = r"^ui/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.m?js$"
+
+
+class UiDeclaration(BaseModel):
+    """``model.json``'s ``ui`` (spec 2026-09-27 §4.1): the template's own interface."""
+
+    module: str = Field(pattern=UI_MODULE_PATTERN, max_length=300)
+    slot: Literal["panel", "page"] = "panel"
+    #: The host-API major the UI was written against (§4.3, §8.1). Any positive
+    #: major is a valid declaration; the page decides whether it can mount it.
+    api: int = Field(ge=1)
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -216,6 +231,26 @@ class ModelMeta(BaseModel):
     #: ships them. A template of mine keeps its list in `template_media` instead, and
     #: this is never written for one.
     media: list[MediaItem] = Field(default_factory=list)
+    #: The template's own UI (#425), or None for the generated form.
+    ui: UiDeclaration | None = None
+    #: Why a ``ui`` on disk could not be read. The template still lists and
+    #: customizes with the generated form (§4.2); never written back to model.json.
+    ui_error: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _readable_ui(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or data.get("ui") is None:
+            return data
+        try:
+            UiDeclaration.model_validate(data["ui"])
+        except ValidationError as error:
+            problems = "; ".join(
+                f"ui.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            return {**data, "ui": None, "ui_error": f"model.json's ui is not valid: {problems}"}
+        return data
 
     @field_validator("media", mode="before")
     @classmethod
@@ -339,6 +374,7 @@ class ModelRecord(ModelMeta):
     #: The entries of ``libraries`` in model.json that are not pins, which
     #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
     invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
+    ui_error: str | None = None
 
 
 class Catalogue:
@@ -622,6 +658,7 @@ class Catalogue:
             **meta.model_dump(exclude={"media"}),
             media=media,
             media_cover=media_cover,
+            ui_error=meta.ui_error,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,

@@ -1063,6 +1063,17 @@ jobs:
           fi
           echo "Two exports are byte-identical."
 
+      # Here, not in pytest: the pytest step runs in the test image, which has no
+      # frontend tree, so `test_the_page_carries_the_csp` skips its comparison with
+      # frontend/page-csp.txt there. This job has uv and both trees.
+      - name: Page CSP text matches PAGE_CSP
+        if: ${{ steps.detect.outputs.backend == 'true' && steps.detect.outputs.frontend == 'true' }}
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv run --frozen python -c "from scadbuddy.api.static import PAGE_CSP; print(PAGE_CSP)" \
+            | diff - ../frontend/page-csp.txt
+
       # The base's own tree, in a worktree beside this one, exported with the
       # base's own lockfile, so the diff shows what this PR changes and nothing
       # else.

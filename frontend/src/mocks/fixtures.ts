@@ -651,6 +651,9 @@ export const settingsDefaults = {
   asset_sweep_grace: 7 * 86400,
   asset_sweep_interval: 86400,
   duplicate_staging_max_age: 3600,
+  store_max_total_bytes: 53_687_091_200,
+  store_max_count: 200_000,
+  worker_cache_max_bytes: 10_737_418_240,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   event_log_retention_rows: 100_000,
@@ -674,6 +677,11 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   realtime_sockets: 'restart',
   preview_renders: 'restart',
   asset_sweep_interval: 'restart',
+  store_backend: 'restart',
+  bambuddy_render_api_key: 'restart',
+  store_max_total_bytes: 'restart',
+  store_max_count: 'restart',
+  worker_cache_max_bytes: 'restart',
 }
 
 export const settings: Settings = {
