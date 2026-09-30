@@ -191,20 +191,17 @@ export function SettingsPage() {
     if (isSecret(name) && next !== '') setClearing((current) => current.filter((secret) => secret !== name))
   }
 
-  // #426 — the Bambuddy store needs a URL and an inbox folder in the form: while either is
-  // empty the Blob store choice shows, sends and compares the local store instead.
-  const bambuddyStoreReady = value('bambuddy_url') !== '' && value('library_folder_id') !== ''
+  // #426 — the Bambuddy store needs a SAVED Bambuddy URL and an inbox folder in the form:
+  // until then the Blob store choice shows, sends and compares the local store. The URL is
+  // the saved one, never Connection's unsaved draft: a Projects & files save cannot commit
+  // it, so what the choice shows and what that save sends always agree.
+  const savedBambuddyUrl = settings ? baseline(settings, 'bambuddy_url') !== '' : false
+  const bambuddyStoreReady = savedBambuddyUrl && value('library_folder_id') !== ''
   const chosenBackend = bambuddyStoreReady ? value('store_backend') : 'local'
-  // What a Projects & files save sends: its own inbox against the saved URL, never
-  // another section's unsaved draft (a Connection edit is not this save's to commit).
-  const projectsBackend =
-    settings && baseline(settings, 'bambuddy_url') !== '' && value('library_folder_id') !== ''
-      ? value('store_backend')
-      : 'local'
 
   const changed = (name: FieldName): boolean => {
     if (!settings) return false
-    if (name === 'store_backend') return projectsBackend !== baseline(settings, name)
+    if (name === 'store_backend') return chosenBackend !== baseline(settings, name)
     if (isSecret(name)) return value(name) !== '' || clearing.includes(name)
     return value(name) !== baseline(settings, name)
   }
@@ -249,7 +246,7 @@ export function SettingsPage() {
     for (const name of fieldsOf(id, settings)) {
       if (!changed(name)) continue
       if (name === 'store_backend') {
-        body[name] = projectsBackend
+        body[name] = chosenBackend
         continue
       }
       if (isSecret(name)) {
@@ -952,6 +949,13 @@ export function SettingsPage() {
                     Bambuddy library (any number of render workers)
                   </option>
                 </select>
+                {!bambuddyStoreReady && (
+                  <p className="mt-1.5 text-[12px] text-muted" data-testid="store-backend-hint">
+                    {!savedBambuddyUrl && value('bambuddy_url') !== ''
+                      ? 'The Bambuddy URL is not saved yet: save Connection to choose the Bambuddy library.'
+                      : 'The Bambuddy library needs a saved Bambuddy URL and an inbox folder.'}
+                  </p>
+                )}
               </FieldRow>
 
               {storeUsage && (
