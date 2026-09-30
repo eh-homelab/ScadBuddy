@@ -106,6 +106,27 @@ def test_a_patch_keeps_ui(client: TestClient, model: str, paths: DataPaths) -> N
     assert "ui_error" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
 
 
+def test_an_uploaded_unreadable_ui_is_kept_and_reported(
+    client: TestClient, paths: DataPaths
+) -> None:
+    declared = {"module": "x.txt"}
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": ("uploaded.scad", b"cube(1);\n", "application/octet-stream"),
+            "meta": ("model.json", json.dumps({"ui": declared}).encode(), "application/json"),
+        },
+    )
+    assert response.status_code == 201, response.text
+    slug = response.json()["slug"]
+    record = client.get(f"/api/v1/models/{slug}").json()
+    assert record["ui"] is None
+    assert record["ui_error"].startswith("model.json's ui is not valid")
+    written = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    assert written["ui"] == declared
+    assert "ui_error" not in written
+
+
 def _commit(paths: DataPaths, message: str) -> str:
     def git(*args: str) -> str:
         return subprocess.run(
