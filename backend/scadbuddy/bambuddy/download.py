@@ -4,10 +4,12 @@ The stored file names ``ScadBuddy`` placeholders for every preset, which the sli
 ignores and Bambu Studio's GUI does not: it opens the file on custom presets built from
 generic defaults. So when Settings names a default printer, the download is re-plated
 for it and names the presets the print dialog would slice with, from the same resolver
-(``resolver.resolve``) and the model's remembered choices when it has any; otherwise
-the mounted nozzle's size and the default tier.
+(``resolver.resolve``) and the model's choices when they were remembered for that
+printer; otherwise the size mounted on its right-hand (main) extruder and the default
+tier. When that side reports no size, the presets stay placeholders: the left nozzle's
+size is never taken for it.
 
-A printer the resolver has no presets for, or a refusal (no spool for a colour, no
+A printer the resolver has no presets for, or a refusal (no spool for a color, no
 preset for the size), still gets the re-plated file, on the placeholders. Without a
 default printer, with Bambuddy unreachable, or when the file does not fit the printer,
 the stored file is served unchanged: a download never fails for want of either.
@@ -30,6 +32,7 @@ from fastapi.responses import FileResponse
 
 from scadbuddy.bambuddy.catalogue import _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.extruders import RIGHT, fitted_size
 from scadbuddy.bambuddy.filaments import FilamentPlan, SlotNeed, build_options, normalise_colour
 from scadbuddy.bambuddy.models import NozzleChoice, NozzleSize
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices, resolve
@@ -45,8 +48,6 @@ logger = logging.getLogger(__name__)
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 _SIZES: tuple[str, ...] = get_args(NozzleSize)
-#: ``PrinterStatus.nozzles`` is indexed by physical extruder; 0 is the right (main) one.
-RIGHT = 0
 
 
 @dataclass(frozen=True)
@@ -223,8 +224,7 @@ async def _presets(
 
 async def _mounted(client: BambuddyClient, printer_id: int) -> list[NozzleChoice]:
     """The main (right-hand) extruder's nozzle, which the dialog's size prints on."""
-    status = await client.printer_status(printer_id)
     # That side only: the left one's size is never the right one's, so a right-hand
     # nozzle that reports no size is unknown.
-    size = status.nozzles[RIGHT].nozzle_diameter if status.nozzles else None
+    size = fitted_size(await client.printer_status(printer_id), RIGHT)
     return [NozzleChoice.model_validate({"size": size})] if size in _SIZES else []
