@@ -1,5 +1,5 @@
-import { screen, within } from '@testing-library/react'
-import { delay, http } from 'msw'
+import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { BUILTIN_SLUG } from '../../mocks/fixtures'
 import {
@@ -10,7 +10,7 @@ import {
   UNCHECKED_REF,
   setMockLibraryPin,
 } from '../../mocks/features/libraryUpgrade'
-import { problem, setMockInvalidLibraries } from '../../mocks/handlers'
+import { mockModels, problem, replaceMockModel, setMockInvalidLibraries } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { LibraryUpgrade } from './LibraryUpgrade'
@@ -185,6 +185,53 @@ describe('LibraryUpgrade', () => {
     expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeEnabled()
   })
 
+  it('aborts an in-flight check when the rows unmount, so it stops holding the check permit', async () => {
+    let aborted = false
+    let started = false
+    server.use(
+      http.post('/api/v1/models/:slug/libraries/:name/check', async ({ request }) => {
+        started = true
+        request.signal.addEventListener('abort', () => {
+          aborted = true
+        })
+        await delay('infinite')
+        return undefined
+      }),
+    )
+    const { user, unmount } = await open()
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    await waitFor(() => expect(started).toBe(true))
+    unmount()
+    await waitFor(() => expect(aborted).toBe(true))
+  })
+
+  it('disables the Library select while a check or a move runs', async () => {
+    server.use(
+      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
+        await delay(300)
+        return undefined
+      }),
+      http.patch('/api/v1/models/:slug/libraries/:name', async () => {
+        await delay(300)
+        return undefined
+      }),
+    )
+    const { user } = await open()
+    const select = screen.getByLabelText('Library')
+    expect(select).toBeEnabled()
+
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    expect(select).toBeDisabled()
+    await within(row('Name Keychain')).findByTestId('library-check')
+    await waitFor(() => expect(select).toBeEnabled())
+
+    await user.click(screen.getByRole('checkbox', { name: 'Move Name Keychain' }))
+    await user.click(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' }))
+    expect(select).toBeDisabled()
+    await within(row('Name Keychain')).findByTestId('library-moved')
+    await waitFor(() => expect(select).toBeEnabled())
+  })
+
   it('shows a failing check with its diagnostics and log tail', async () => {
     const { user } = await open(BREAKING_REF)
     await user.click(within(row('Gridfinity Bin')).getByRole('button', { name: 'Check' }))
@@ -266,6 +313,25 @@ describe('LibraryUpgrade', () => {
     expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Move Gridfinity Bin' })).not.toBeChecked()
     expect(order).toEqual(['name-keychain', 'gridfinity-bin'])
+  })
+
+  it('treats a re-pin whose answer lacks the pin as not moved, and keeps the row ticked', async () => {
+    server.use(
+      http.patch('/api/v1/models/:slug/libraries/:name', () =>
+        HttpResponse.json(mockModels().find((model) => model.slug === 'name-keychain')!, { status: 200 }),
+      ),
+    )
+    const { user } = await open('v2.0.761')
+    const selected = mockModels().find((model) => model.slug === 'name-keychain')!
+    replaceMockModel({ ...selected, libraries: [] })
+    await user.click(screen.getByRole('checkbox', { name: 'Move Name Keychain' }))
+    await user.click(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' }))
+
+    expect(await within(row('Name Keychain')).findByRole('alert')).toHaveTextContent(
+      /^Not moved: the re-pin answered, but the model it returned does not pin BOSL2/,
+    )
+    expect(within(row('Name Keychain')).queryByTestId('library-moved')).toBeNull()
+    expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeChecked()
   })
 
   it('offers a built-in a check but no re-pin', async () => {

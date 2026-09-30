@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { ApiError, api } from '../../api/client'
 import type { LibraryCheck, LibraryUser, ModelSummary } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
@@ -14,7 +14,9 @@ import { Spinner } from '../ui/Spinner'
  *
  * A check holds the server's checkout gate for the clone and the parse check, which can
  * run up to the render timeout, so checks run only when asked, one at a time, and never
- * while re-pins run: a burst of them would keep a library removal waiting.
+ * while re-pins run: a burst of them would keep a library removal waiting. The permit is
+ * app-wide, so a check whose rows unmount is aborted, and the library cannot be switched
+ * while a check or a re-pin runs.
  */
 
 function message(caught: unknown): string {
@@ -44,6 +46,7 @@ export function LibraryUpgrade() {
   )
   const [library, setLibrary] = useState('')
   const [ref, setRef] = useState('')
+  const [busy, setBusy] = useState(false)
   const selectId = useId()
   const refId = useId()
 
@@ -83,6 +86,7 @@ export function LibraryUpgrade() {
             id={selectId}
             value={library}
             onChange={(event) => choose(event.target.value)}
+            disabled={busy}
             className="sb-field mt-1.5 w-48"
           >
             <option value="">Choose a library</option>
@@ -113,7 +117,9 @@ export function LibraryUpgrade() {
         </p>
       )}
       {/* Keyed by library: another library's checks and ticks never carry over. */}
-      {library && <LibraryUsers key={library} library={library} candidate={ref.trim()} models={bySlug} />}
+      {library && (
+        <LibraryUsers key={library} library={library} candidate={ref.trim()} models={bySlug} onBusy={setBusy} />
+      )}
     </div>
   )
 }
@@ -122,10 +128,12 @@ function LibraryUsers({
   library,
   candidate,
   models,
+  onBusy,
 }: {
   library: string
   candidate: string
   models: ReadonlyMap<string, ModelSummary>
+  onBusy: (busy: boolean) => void
 }) {
   const users = useAsync(() => api.listLibraryUsers(library), [library], ['libraries'])
   const [checks, setChecks] = useState<Record<string, CheckState>>({})
@@ -135,16 +143,36 @@ function LibraryUsers({
 
   const checking = Object.values(checks).some((state) => state.running)
   const busy = checking || moving
+  const inflight = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    onBusy(busy)
+  }, [busy, onBusy])
+
+  // Leaving (another library, or the page) tells the server to stop: the check permit is app-wide.
+  useEffect(
+    () => () => {
+      inflight.current?.abort()
+      onBusy(false)
+    },
+    [onBusy],
+  )
 
   async function check(slug: string) {
     if (busy || !candidate) return
     const ref = candidate
+    const controller = new AbortController()
+    inflight.current = controller
+    const { signal } = controller
     setChecks((all) => ({ ...all, [slug]: { ref, running: true } }))
     try {
-      const result = await api.checkModelLibrary(slug, library, { ref })
-      setChecks((all) => ({ ...all, [slug]: { ref, running: false, result } }))
+      const result = await api.checkModelLibrary(slug, library, { ref }, signal)
+      if (!signal.aborted) setChecks((all) => ({ ...all, [slug]: { ref, running: false, result } }))
     } catch (caught) {
-      setChecks((all) => ({ ...all, [slug]: { ref, running: false, error: message(caught) } }))
+      // An abort is this component's own doing, not a failed check.
+      if (!signal.aborted) setChecks((all) => ({ ...all, [slug]: { ref, running: false, error: message(caught) } }))
+    } finally {
+      if (inflight.current === controller) inflight.current = null
     }
   }
 
@@ -159,10 +187,18 @@ function LibraryUsers({
       try {
         const model = await api.repinModelLibrary(slug, library, { ref: candidate })
         const pin = model.libraries?.find((entry) => entry.name === library)
-        setMoves((all) => ({
-          ...all,
-          [slug]: { running: false, moved: pin && { ref: pin.ref, commit: pin.commit } },
-        }))
+        if (!pin) {
+          // Stays ticked: the user can try again.
+          setMoves((all) => ({
+            ...all,
+            [slug]: {
+              running: false,
+              error: `the re-pin answered, but the model it returned does not pin ${library}; reload to see where it stands`,
+            },
+          }))
+          continue
+        }
+        setMoves((all) => ({ ...all, [slug]: { running: false, moved: { ref: pin.ref, commit: pin.commit } } }))
         setTicked((all) => {
           const next = new Set(all)
           next.delete(slug)

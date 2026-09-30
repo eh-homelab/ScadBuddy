@@ -889,10 +889,11 @@ export const api = {
    * and parse-checks the model against it. Nothing is recorded. It holds the server's
    * checkout gate for the whole check, so callers run one at a time, on request.
    */
-  checkModelLibrary: (slug: string, name: string, body: LibraryCheckRequest) =>
+  checkModelLibrary: (slug: string, name: string, body: LibraryCheckRequest, signal?: AbortSignal) =>
     request<LibraryCheck>(`/models/${seg(slug)}/libraries/${seg(name)}/check`, {
       method: 'POST',
       body: JSON.stringify(body),
+      signal,
     }),
 
   /** #169 — re-pins from the URL the model already pins, at `ref`; one commit per model. */
