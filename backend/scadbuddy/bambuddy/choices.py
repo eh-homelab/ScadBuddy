@@ -17,7 +17,8 @@ from scadbuddy.bambuddy.hardware import (
     plate_warning,
 )
 from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
-from scadbuddy.bambuddy.pipelines import BED_TYPES, filament_options_for_output
+from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options
+from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -29,11 +30,12 @@ logger = logging.getLogger(__name__)
 SIZES = ["0.2", "0.4", "0.6", "0.8"]
 
 #: Re-exported: the helpers moved to ``hardware`` so the run can use them without an
-#: import cycle through ``pipelines``.
+#: import cycle through ``print_run``.
 __all__ = [
     "ChoicesView",
     "InstalledNozzle",
     "TierOption",
+    "choices_for",
     "choices_for_output",
     "installed_nozzles",
     "last_bed_type",
@@ -92,17 +94,15 @@ def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPr
     return out
 
 
-async def choices_for_output(
+async def choices_for(
     client: BambuddyClient,
-    store: OutputStore,
-    uploads: BambuddyUploadStore,
-    meta: OutputMeta,
+    source: PrintSource,
     settings: StoredSettings,
     *,
+    remembered: ModelPrintChoices | None,
     printer_id: int | None,
 ) -> ChoicesView:
     printers = [row for row in await client.printers() if row.is_active]
-    remembered = settings.model_print_choices.get(meta.slug)
     active = {row.id for row in printers}
 
     def still_active(candidate: int | None) -> int | None:
@@ -147,9 +147,7 @@ async def choices_for_output(
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
         or DEFAULT_BED
     )
-    filaments = await filament_options_for_output(
-        client, store, uploads, meta, settings, printer_id=printer_id
-    )
+    filaments = await filament_options(client, source, printer_id=printer_id)
     return ChoicesView(
         printer_id=printer_id,
         printers=printers,
@@ -164,4 +162,22 @@ async def choices_for_output(
         filaments=filaments,
         filament_presets=filament_presets_by_size(catalogue),
         model_choices=remembered or ModelPrintChoices(),
+    )
+
+
+async def choices_for_output(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    *,
+    printer_id: int | None,
+) -> ChoicesView:
+    return await choices_for(
+        client,
+        OutputSource(store, uploads, meta, settings),
+        settings,
+        remembered=settings.model_print_choices.get(meta.slug),
+        printer_id=printer_id,
     )

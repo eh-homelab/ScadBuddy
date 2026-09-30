@@ -17,6 +17,7 @@ import trimesh
 
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
+    MAX_BREAKDOWN_COLOURS,
     MAX_VIEW_SIZE,
     MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
@@ -24,7 +25,9 @@ from scadbuddy.render.thumbnail import (
     VIEW_DIRECTIONS,
     ViewName,
     _downsample,
+    breakdown_colours,
     encode_png,
+    render_colour_breakdown,
     render_plate_thumbnails,
     render_view,
 )
@@ -284,3 +287,46 @@ def test_a_view_refuses_what_it_cannot_draw(view: str, size: int) -> None:
 def test_a_view_of_nothing_is_refused() -> None:
     with pytest.raises(ValueError, match="at least one"):
         render_view([], "iso")
+
+
+# ── per-colour breakdown (#252) ──────────────────────────────────────────────
+
+
+def _cubes(*colours: str) -> list[ColourPart]:
+    return [
+        ColourPart(
+            index + 1,
+            f"Color {index + 1}",
+            colour,
+            trimesh.creation.box(
+                extents=(10, 10, 10),
+                transform=trimesh.transformations.translation_matrix((index * 20, 0, 0)),
+            ),
+        )
+        for index, colour in enumerate(colours)
+    ]
+
+
+def test_breakdown_colours_follow_the_extruder_order_then_the_parts() -> None:
+    parts = _cubes("#FF0000", "#00FF00", "#0000FF", "#00FF00")
+    assert breakdown_colours(parts) == ["#FF0000", "#00FF00", "#0000FF"]
+    # Lower case in `order` still matches; a colour no part has is left out.
+    assert breakdown_colours(parts, ["#0000ff", "#123456"]) == ["#0000FF", "#FF0000", "#00FF00"]
+
+
+def test_a_breakdown_is_a_near_square_grid_of_tiles() -> None:
+    drawn = render_colour_breakdown(_cubes("#FF0000", "#00FF00"), "top", 64)
+    assert drawn.columns == 2
+    assert read_png(drawn.png).shape == (64, 128, 4)
+
+
+def test_a_breakdown_past_its_deadline_stops_before_the_next_tile() -> None:
+    # Review of #750: the route's timeout cannot stop the worker thread.
+    with pytest.raises(TimeoutError, match="after 0 of 2 tiles"):
+        render_colour_breakdown(_cubes("#FF0000", "#00FF00"), "top", 64, deadline=0.0)
+
+
+def test_a_breakdown_refuses_too_many_colours() -> None:
+    colours = [f"#0000{index:02X}" for index in range(MAX_BREAKDOWN_COLOURS + 1)]
+    with pytest.raises(ValueError, match="more than a breakdown draws"):
+        render_colour_breakdown(_cubes(*colours), "top", 64)

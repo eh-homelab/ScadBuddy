@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,7 +69,8 @@ class RouteLimit:
 
     method: str
     path: re.Pattern[str]
-    limit: int
+    #: Bytes, or what to ask for them on each request: a limit Settings can change (#322).
+    limit: int | Callable[[], int]
     #: What the route is, for the refusal: "a media upload".
     what: str
     #: Where the limit is set, for the refusal: an environment variable.
@@ -110,7 +111,7 @@ class BodySizeGate:
         limit: int | None
         if route is not None:
             # Whatever the content type: the route's limit is the only one it has.
-            limit = route.limit
+            limit = route.limit() if callable(route.limit) else route.limit
             too_large = (
                 f"{route.what} is at most {megabytes(limit)} ({route.source}), "
                 "and this one is larger"

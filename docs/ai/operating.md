@@ -6,11 +6,11 @@ to [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers
 The README's "The agent sidecar (AI, #261)" section in [`README.md`](../../README.md)
 covers the same ground more briefly.
 
-> **Status.** Nothing deploys the sidecar yet, and there are no ingress routes for
-> `/mcp` or `/api/v1/ai/*` (README, "The agent sidecar"). The assistant panel is
-> hidden in production builds (`useAiAvailability()`,
+> **Status.** This repository has no cluster manifests; the ScadBuddy pod and its
+> ingress live in eh-homelab/clusters. §1.1 is what that ingress must route for the
+> assistant to appear. With the routes missing, the UI hides the assistant and says the
+> agent is unreachable (`useAiAvailability()`,
 > [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)).
-> This page is for operators who stand the service up ahead of that.
 
 ## 1. Layout
 
@@ -24,10 +24,10 @@ covers the same ground more briefly.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.
-- **Ingress routing (planned, spec §4.2).** `/mcp` and `/api/v1/ai/*` go to the agent,
+- **Ingress routing (spec §4.2).** `/mcp` and `/api/v1/ai/*` go to the agent,
   and everything else, including `/api/v1/ws`, goes to the backend. `/api/v1/ai/*` is
   under the backend's `/api/v1/*`, so the agent's rules must take precedence
-  (longest-prefix match or explicit priority).
+  (longest-prefix match or explicit priority). Details and a check are in §1.1.
 - **Runtime user and filesystem.** The image runs as uid 10001 with
   `HOME=/var/lib/scadbuddy-agent` and `CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude`
   ([`Dockerfile`](../../Dockerfile), `agent` stage). It writes only under
@@ -49,6 +49,98 @@ covers the same ground more briefly.
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
 
+### 1.1 Routing the UI's origin to the agent
+
+Spec §4.2 decides this: **the ingress** splits one origin between the two containers,
+and neither container proxies for the other. That is what makes the assistant work
+inside Bambuddy's iframe. The SPA, the backend API, the agent's routes and the
+assistant's WebSocket (`/api/v1/ai/chat`) are then all on ScadBuddy's one public
+origin:
+
+- Bambuddy frames ScadBuddy with `allow-same-origin` in its sandbox (CLAUDE.md,
+  "Bambuddy iframe facts"), so the page keeps that origin.
+- The browser sends it as `Origin` on every write and on the WebSocket handshake.
+- That value is the one the agent's allowlist accepts (`SCADBUDDY_PUBLIC_URL`, §6).
+
+A second origin for the agent would need CORS and a second allowlisted origin. A
+backend passthrough is the other alternative, and the spec rejects it because a
+uvicorn hop risks buffering the SSE and WebSocket streams.
+
+What the ingress must do:
+
+| Path | Service | Notes |
+|---|---|---|
+| `/api/v1/ai` (prefix) | agent `:8081` | REST, SSE (`/api/v1/ai/sessions/{id}/events`) and the WebSockets `/api/v1/ai/chat` and `/api/v1/ai/bridge` (the tab's socket for the `browser_*` tools, #254, [browser-bridge.md](browser-bridge.md#the-tabs-socket)) |
+| `/mcp` (prefix) | agent `:8081` | MCP Streamable HTTP (SSE) |
+| `/` (prefix) | backend `:8080` | everything else, including the backend's WebSocket `/api/v1/ws` |
+
+- **Precedence.** With a Kubernetes `Ingress`, the longest matching path wins,
+  whatever order the rules are listed in, and on a tie `Exact` beats `Prefix`
+  ([Ingress, "Multiple matches"](https://kubernetes.io/docs/concepts/services-networking/ingress/#multiple-matches)).
+  Other routers (Traefik `IngressRoute`, Gateway API) have their own ordering; check
+  it with the requests below instead of assuming.
+- **WebSockets and SSE.** For ingress-nginx, "Support for websockets is provided by
+  NGINX out of the box. No special configuration required." Its default
+  `proxy-read-timeout` is 60 s
+  ([ingress-nginx, WebSockets](https://kubernetes.github.io/ingress-nginx/user-guide/miscellaneous/#websockets)).
+  The agent pings each chat and bridge socket every 25 s (`HEARTBEAT_MS`, `startHeartbeat`,
+  [`agent/src/routes/chat.ts`](../../agent/src/routes/chat.ts)), and the session event
+  stream sends a comment every 20 s with `X-Accel-Buffering: no` (`SSE_KEEPALIVE_MS`,
+  [`agent/src/routes/sessions.ts`](../../agent/src/routes/sessions.ts)). Both
+  therefore stay open under that default. The rule: both intervals must stay under
+  the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
+  either constant above it, closes idle assistant sockets and streams.
+- **Forwarded headers.** The ingress must append `X-Forwarded-Proto` and
+  `X-Forwarded-Host`, and its pod range goes in `SCADBUDDY_AGENT_TRUSTED_PROXIES`
+  (§6). Otherwise every chat and session write is refused with 403.
+
+An `Ingress` for ingress-nginx, as an example. It is not the clusters manifest, whose
+names and TLS settings are its own:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scadbuddy
+  namespace: scadbuddy
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [scadbuddy.example]
+      secretName: scadbuddy-tls
+  rules:
+    - host: scadbuddy.example
+      http:
+        paths:
+          - path: /api/v1/ai
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
+          - path: /mcp
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: agent } } }     # 8081
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: scadbuddy, port: { name: http } } }      # 8080
+```
+
+**Checking it.** Every agent response carries `X-ScadBuddy-Service: agent`
+(`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)); the backend's
+responses do not. One request per agent path, through the public URL:
+
+```bash
+base=https://scadbuddy.example
+curl -sSI "$base/api/v1/ai/status" | grep -i '^x-scadbuddy-service: agent'   # agent
+curl -sS  "$base/api/v1/ai/status"                                           # {"available":…,"state":…,"ai":…}
+curl -sSI -X POST "$base/mcp" | grep -i '^x-scadbuddy-service: agent'        # agent (401/403/503 is fine)
+curl -sSI "$base/api/v1/settings" | grep -ci '^x-scadbuddy-service'          # 0: the backend
+```
+
+The same checks as a Playwright spec are `frontend/e2e/real-agent.spec.ts`, added in
+#533, run with `E2E_BASE_URL` pointing at the deployment and
+`E2E_AGENT=1`. With the frontend's dev or
+preview server, `frontend/vite.config.ts` routes the same way on one local origin
+(`SCADBUDDY_BACKEND_URL` and `SCADBUDDY_AGENT_URL` override the two targets).
+
 ## 2. Environment variables
 
 `ENV_VARS` in [`agent/src/config.ts`](../../agent/src/config.ts) lists the only
@@ -66,6 +158,7 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
+| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → the backend (and its aliases) only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond the backend's that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -197,8 +290,8 @@ reports AI available, which today is the msw-mocked build: nothing routes
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
-| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`, `status` (`active`, `expired` or `revoked`) and `approval_grant`. It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in?, approval_grant? }`, strict. `approval_grant: true` lets the token decide other agents' outward approvals (#300, [agent-sessions.md §3](agent-sessions.md#3-approvals-by-another-agent-the-per-token-grant)); only with `tier: "outward"`, else `400`. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
 | `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
 
 "Read guard" is `uiReadProblem()` in
@@ -404,22 +497,43 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credential.
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
-  The keys read today are `model` (`main.ts`), and `session_max_turns` and
+  The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
   `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
-  and `mcp_oidc`, the OIDC configuration for `/mcp` (#262; see
-  [§6a](#6a-mcp-sign-in-with-oidc)), which `PUT /api/v1/ai/mcp/oidc` writes.
-  No route writes them yet.
+  which Settings writes through `PUT /api/v1/ai/settings/session-limits`
+  ([§8](#8-per-query-limits));
+  `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
+  ([§12](#12-the-http-request-tool-827)); and `mcp_oidc`, the
+  OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
+  `PUT /api/v1/ai/mcp/oidc` writes. `model` and `approval_expiry_seconds` have no
+  route yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
-  "HTTP routes").
+  `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
+  through the chat socket, the session routes and the `sessions_*` tools
+  ([agent-sessions.md](agent-sessions.md)). Every event-log append is also announced
+  as `session.*` on `scadbuddy_events` (NOTIFY only, no table).
+- `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
+  prepares (#471, `20260928T0734Z_approvals.sql`; see
+  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
-  name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
+  name, tier, `created_at`, `expires_at`, `revoked_at`, `last_used_at` and
+  `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,
+  and a `CHECK` allows it only on an `outward` token). Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
   `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
   in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` and the token routes
   (§4.1) answer 503. Settings writes this table through §4.1's routes.
+
+- `ai_browser_pairings`: MCP clients the user paired with a tab by typing a code
+  (#254, spec §8.5, `20260929T1330Z_browser_pairings.sql`): who asked, the SHA-256 of
+  the code (never the code), the status (`pending`, `paired`, `denied`, `ended`), the
+  tab, wrong tries and the expiry. `PostgresPairingStore` in
+  [`agent/src/bridge/pairings.ts`](../../agent/src/bridge/pairings.ts); see
+  [browser-bridge.md](browser-bridge.md#pairing-spec-85). Without a database only chat
+  sessions reach a tab.
 
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
@@ -432,10 +546,38 @@ The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCAD
 
 Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 USD)
 (`DEFAULT_MAX_TURNS` and `DEFAULT_MAX_BUDGET_USD` in
-[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)). The comment there calls
-them "placeholders until Settings stores per-session caps". Sessions read their caps
+[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)). Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
-#377 body, "Budget and turns").
+#377 body, "Budget and turns"): each turn gets what is left as `maxBudgetUsd`.
+
+Settings → Assistant → **Assistant chat limits** sets both (#790): "Session budget
+(USD)", 0.01 to 100, stored in cents, and "Max turns per reply", 1 to 200
+(`GET`/`PUT /api/v1/ai/settings/session-limits`,
+[`agent/src/routes/sessionLimits.ts`](../../agent/src/routes/sessionLimits.ts), behind
+`uiReadProblem`/`uiRequestProblem`). Each key written is a `settings` audit row as the
+browser user. A change applies to sessions created after it; existing sessions keep
+their budget and turn cap.
+
+When a session's budget runs out, the assistant panel says so once ("This chat used
+its $1.00 budget.") and offers:
+
+- **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` copies the transcript
+  into a new session with the current Settings budget, owned by the browser user, and
+  the panel switches to it. It counts against the new-session limit (`429`). #793 adds
+  forking from a given message (`up_to`), a socket message and an audit row.
+- **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
+  (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
+  (take one over first), and never past $100. A request with the headless browser's
+  agent-actor marker (`X-ScadBuddy-Agent-Session`) is refused, no tool calls it, and
+  the panel's button carries `data-agent-user-only`, so the browser bridge cannot press
+  it. A raise is a `settings` audit row with action `session_budget_usd` and the
+  session id; refused and failed attempts are recorded from the route's status.
+- **Start a new chat.**
+
+The panel's session header shows "$0.74 of $1.00" and warns from 80%. The numbers come
+from the session's events: `session.started` and `session.result` carry `budgetUsd`,
+and `session.budget` is sent after a raise and before a send is refused because the
+budget is spent. Money is shown in cents, in the panel and in the agent's error text.
 
 ## 9. Plugin packages (#297)
 
@@ -504,3 +646,101 @@ in-page agent's `click` and `fill` refuse it. The area follows the assistant's
 availability (`useAiAvailability()`), so it is hidden in production builds until the
 agent service is deployed.
 
+## 10. MCP auth mode
+
+The `/mcp` auth mode and the anonymous cap are `ai_settings` keys, never environment
+variables (spec §8.3, §9). They are read on every `/mcp` request by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
+so a change applies to the next request on every replica, with no restart:
+
+| Key | Values | Unset |
+|---|---|---|
+| `mcp_auth_mode` | `"bearer"`, `"disabled"` | `"bearer"` |
+| `mcp_anonymous_cap` | `"read"`, `"write"`, `"outward"` (used in `disabled` mode only) | `"outward"` |
+
+`oidc` is not chosen with this key: it is on while the OIDC configuration (`mcp_oidc`,
+[§6a](#6a-mcp-sign-in-with-oidc)) is enabled, and then it wins over `mcp_auth_mode`, even
+over `"disabled"`. A stored `"oidc"` without an enabled configuration reads as `bearer`.
+
+A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
+`disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
+this once, and again after any change to either key.
+
+Change them in Settings → **MCP authentication** (shown where AI is available, beside
+the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
+choice is "Require an access token" (`bearer`) or "Allow calls without a token"
+(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
+or raising the anonymous access while they are allowed, asks for a confirmation first.
+While OIDC is enabled the section says so: OIDC applies whatever is stored here, and the
+stored choice (still confirmed) applies once OIDC is turned off.
+That confirmation is in the UI only; the route does not require it (a server-side
+approval for settings writes is #258). `PUT` writes both keys in one transaction, only if
+they still hold what the page showed (otherwise `409`, and the page reloads them), logs
+`mcp auth: mcp_auth_mode set to … (was …; from <client> via <ingress>)` as soon as it
+commits, and is guarded like the other Settings
+writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
+switched on with its own configuration once the discovery check passes (#262). The
+database still works when the UI does not, e.g. to recover. Each value is a JSON
+string:
+
+```sql
+INSERT INTO ai_settings (key, value) VALUES ('mcp_auth_mode', '"disabled"')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- back to the default:
+DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
+```
+
+Outward tools still need a human approval in the UI in every mode (spec §8.2; see
+[security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+
+## 11. Automatic Hindsight memory
+
+When a session's turn loads an enabled remote MCP plugin named `hindsight` (#297,
+`ai_plugins`), the agent recalls and retains memory itself instead of leaving it to the
+model. In production the model called `recall` once and `retain` never across four
+sessions. The code is [`agent/src/memory/hindsight.ts`](../../agent/src/memory/hindsight.ts),
+a port of `create_memory_hooks` in Hindsight's Claude Agent SDK integration
+([`hooks.py` @ eb021da3](https://github.com/vectorize-io/hindsight/blob/eb021da3b2501911e4b57c82b3de1123572a200e/hindsight-integrations/claude-agent-sdk/hindsight_claude_agent_sdk/hooks.py)),
+registered as in-process SDK hooks by `harness/run.ts`. There is no setting: the API
+base and bank come from the plugin's URL (`…/mcp/<bank>/` gives
+`/v1/default/banks/<bank>/…`), and requests carry the plugin's stored header to the
+address the plugin check pinned, with no redirects (`agent/src/http/pinned.ts`, shared
+with the forwarder).
+
+- **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
+  are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
+  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
+  logged.
+- **Retain** (`Stop`): the session's user and assistant text (tool results left out,
+  secrets redacted) is upserted as one document, `conversation:<session_id>`, so every
+  turn replaces the same document. It runs in the background and never fails or delays
+  the turn; a failure is logged. On a session's first turn the transcript file does not
+  exist yet when Stop fires, so that turn retains the prompt and the final reply, and
+  the next turn's upsert carries the whole session.
+- **Tool results** (`PostToolUse`): off unless `retainOnTools` names tools.
+
+Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). One is
+ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
+upstream's behaviour of retaining only the last result with no document id.
+
+## 12. The HTTP request tool (#827)
+
+Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
+unless Settings → AI → **AI HTTP requests** is switched off. It is on by default; the
+switch is the `ai_settings` key `http_request_enabled` (`false` turns it off),
+written by `PUT /api/v1/ai/settings/http-request` and read at the start of every turn,
+so a change applies from the next turn.
+
+- **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
+  cluster services, plain `http:` included. Only link-local and cloud metadata
+  addresses are refused. If the pod must not reach something, an egress NetworkPolicy
+  is the way to say so; see [security.md](security.md#http-request-tool-827).
+- `GET` and `HEAD` run at once; `POST`, `PUT`, `PATCH` and `DELETE` wait for an
+  approval in the UI.
+- Limits: 30 s per request by default (the model may ask for up to 120 s), 5
+  redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved under the
+  state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
+  that volume for it.
+- Every request is listed in Settings → **AI activity** under **HTTP requests**, with
+  its method, host, status and size.

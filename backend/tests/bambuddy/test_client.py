@@ -8,7 +8,7 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import (
-    ELIGIBILITY_PROBLEM,
+    CONFLICT_PROBLEM,
     NOT_FOUND_PROBLEM,
     REJECTED_PROBLEM,
     SCOPE_PROBLEM,
@@ -16,7 +16,6 @@ from scadbuddy.bambuddy.errors import (
     Scope,
 )
 from scadbuddy.bambuddy.models import (
-    PipelineRunRequest,
     PresetRef,
     PrinterStatus,
     QueueItemCreate,
@@ -62,14 +61,9 @@ async def test_the_slashless_printers_path_is_never_called(bambuddy: BambuddyCli
 
 
 @respx.mock
-async def test_folders_and_links_are_bare_lists_and_pipelines_are_wrapped(
-    bambuddy: BambuddyClient,
-) -> None:
+async def test_folders_and_links_are_bare_lists(bambuddy: BambuddyClient) -> None:
     respx.get(f"{API}/library/folders").mock(
         return_value=httpx.Response(200, json=recording("library-folders.json"))
-    )
-    respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipelines.json"))
     )
     respx.get(f"{API}/external-links/").mock(
         return_value=httpx.Response(200, json=recording("external-links.json"))
@@ -77,7 +71,6 @@ async def test_folders_and_links_are_bare_lists_and_pipelines_are_wrapped(
 
     folders = await bambuddy.folders()
     assert [(folder.id, folder.name) for folder in folders] == [(1, "MakerWorld"), (2, "Raegan")]
-    assert await bambuddy.pipelines() == []
     assert await bambuddy.external_links() == []
 
 
@@ -202,40 +195,6 @@ async def test_enqueue_sends_the_enum_calibration_flags(bambuddy: BambuddyClient
     assert payload["use_ams"] is True
     assert payload["quantity"] == 3
     assert route.called
-
-
-@respx.mock
-async def test_run_pipeline_passes_copies_and_force(bambuddy: BambuddyClient) -> None:
-    route = respx.post(f"{API}/slicer-pipelines/4/run").mock(
-        return_value=httpx.Response(
-            202,
-            json={
-                "id": 12,
-                "pipeline_id": 4,
-                "source_library_file_id": 41,
-                "copies": 2,
-                "status": "queued",
-                "slice_job_id": None,
-                "sliced_library_file_id": None,
-                "eligibility_overridden": False,
-                "created_by": None,
-                "created_at": "2026-09-23T01:00:00Z",
-                "started_at": None,
-                "completed_at": None,
-            },
-        )
-    )
-
-    run = await bambuddy.run_pipeline(4, PipelineRunRequest(source_library_file_id=41, copies=2))
-
-    assert (run.id, run.status, run.copies) == (12, "queued", 2)
-    import json as _json
-
-    assert _json.loads(route.calls.last.request.read()) == {
-        "source_library_file_id": 41,
-        "copies": 2,
-        "force": False,
-    }
 
 
 @respx.mock
@@ -390,24 +349,18 @@ async def test_a_404_stays_a_404(bambuddy: BambuddyClient) -> None:
 
 
 @respx.mock
-async def test_a_409_carries_the_eligibility_report_verbatim(bambuddy: BambuddyClient) -> None:
-    report = {
-        "ok": False,
-        "target_kind": "specific_printer",
-        "target_printer_id": 1,
-        "target_printer_name": "3DP-31B-598",
-        "issues": [
-            {"kind": "filament_type_mismatch", "slot_index": 0, "expected": "PLA", "actual": "PETG"}
-        ],
-    }
-    respx.post(f"{API}/slicer-pipelines/4/run").mock(return_value=httpx.Response(409, json=report))
+async def test_a_409_passes_bambuddys_body_through(bambuddy: BambuddyClient) -> None:
+    """Bambuddy documents no 409, but a live call that answers one is a conflict to
+    report as such, not a 502 "unavailable"."""
+    body = {"detail": "printer 1 is busy"}
+    respx.post(f"{API}/queue/").mock(return_value=httpx.Response(409, json=body))
 
     with pytest.raises(ApiError) as caught:
-        await bambuddy.run_pipeline(4, PipelineRunRequest(source_library_file_id=41))
+        await bambuddy.enqueue(QueueItemCreate(printer_id=1, library_file_id=2))
 
     assert caught.value.status == 409
-    assert caught.value.type == ELIGIBILITY_PROBLEM
-    assert caught.value.extensions["bambuddy_body"] == report
+    assert caught.value.type == CONFLICT_PROBLEM
+    assert caught.value.extensions["bambuddy_body"] == body
 
 
 @respx.mock

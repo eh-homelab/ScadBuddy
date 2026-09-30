@@ -241,8 +241,10 @@ describe('HistoryPage', () => {
     const { user } = render()
     await user.click(within(await row('Workshop')).getByRole('button', { name: 'Send again' }))
 
+    // #312: the send bar only uploads. There is no mode to choose any more.
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
-    expect(within(dialog).getByRole('radio', { name: /Slice and queue/ })).toBeChecked()
+    expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Send' })).toBeInTheDocument()
   })
 })
 

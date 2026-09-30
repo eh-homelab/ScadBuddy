@@ -390,47 +390,67 @@ h_in = holder_clearance;
 // across the corners.
 h_ext_x = ext_x + 2 * (h_in + h_wall) / (shape == "hexagon" ? cos(30) : 1);
 h_ext_y = ext_y + 2 * (h_in + h_wall);
-// The holder, when on, takes one more cell of the grid (the last one); cells
-// are sized for the holder, which is a few mm larger than a coaster.
-cell_x = holder ? h_ext_x : ext_x;
-cell_y = holder ? h_ext_y : ext_y;
-px = cell_x + gap;
-py = cell_y + gap;
-extra = holder ? 1 : 0;
+// Coasters sit in a grid of cells their own size. The holder is a few mm
+// larger than a coaster, so it does not take a grid cell (that would size
+// every cell for it, #411): it goes beside the grid, below it, or in the
+// empty end of the last row, whichever fits and is squarest.
+px = ext_x + gap;
+py = ext_y + gap;
+HOLDER_MODES = ["beside", "below", "row end"];
 
-function plate_w(c, n) = min(c, n + extra) * px - gap;
-function plate_h(c, n) = ceil((n + extra) / c) * py - gap;
-function fits(c, n) = plate_w(c, n) <= BED_X && plate_h(c, n) <= BED_Y;
+// n coasters in c columns, the holder (if any) placed by mode m:
+// [plate width, plate height, holder corner x, y, grid x] from the top left,
+// or undef where the mode does not apply (no empty end in a full last row).
+// Below the grid, the narrower of grid and holder is centred on the other.
+function arrange(c, n, m) =
+    let (R = ceil(n / c), k = n - (R - 1) * c, gw = c * px - gap, gh = R * py - gap,
+         bw = max(gw, h_ext_x))
+    !holder ? [gw, gh, 0, 0, 0]
+    : m == 0 ? [c * px + h_ext_x, max(gh, h_ext_y), c * px, 0, 0]
+    : m == 1 ? [bw, R * py + h_ext_y, (bw - h_ext_x) / 2, R * py, (bw - gw) / 2]
+    : k < c ? [max(gw, k * px + h_ext_x), (R - 1) * py + h_ext_y, k * px, (R - 1) * py, 0]
+    : undef;
+function fits(a) = is_list(a) && a[0] <= BED_X && a[1] <= BED_Y;
+// Every arrangement of n that fits, as [c, m, W, H, hx, hy, gx].
+function options(n) = [for (c = [1 : n], m = holder ? [0 : 2] : [0])
+                       let (a = arrange(c, n, m)) if (fits(a)) concat([c, m], a)];
 // Most coasters that fit (up to count), then the squarest arrangement.
-function best_cols(n) =
-    let (cs = [for (c = [1 : n + extra]) if (fits(c, n)) c],
-         sc = [for (c = cs) max(plate_w(c, n), plate_h(c, n))])
-    len(cs) == 0 ? 0 : cs[search(min(sc), sc)[0]];
-function layout(n) = (best_cols(n) > 0 || n == 1) ? [n, max(1, best_cols(n))] : layout(n - 1);
+function best(n) =
+    let (o = options(n), sc = [for (a = o) max(a[2], a[3])])
+    len(o) == 0 ? undef : o[search(min(sc), sc)[0]];
+function layout(n) = (!is_undef(best(n)) || n == 1) ? [n, best(n)] : layout(n - 1);
 LAYOUT = layout(count);
 N = LAYOUT[0];
-COLS = LAYOUT[1];
 if (N < count)
     echo(str("NOTE: only ", N, N == 1 ? " coaster" : " coasters", " of ", count, N == 1 ? " fits" : " fit",
              " on the plate; print the rest as a second plate"));
 
-// A big coaster and its holder can be too big for two holder-sized cells
-// even alone (150 mm round: 2 x 156.8 + gap > 320). Then the one coaster sits
-// in a cell of its own size above the holder, with the gap cut to fit.
-STACKED = holder && best_cols(1) == 0;
+// A big coaster and its holder can be too big to sit side by side or one
+// above the other even alone (150 mm round with a 20 mm gap: 150 + 20 +
+// 156.8 is deeper than the plate, side by side wider). Then the one coaster
+// sits above the holder, with the gap cut to fit.
+STACKED = holder && is_undef(best(1));
 s_gap = min(gap, BED_Y - ext_y - h_ext_y);
 // 150 mm + a 3 mm clearance holder leaves 9.2 mm; a wider size or clearance
 // range must fail here, not overlap the coaster and the holder.
 assert(!STACKED || s_gap >= 0, str("a ", size, " mm coaster and its holder do not fit the plate"));
-ROWS = STACKED ? 2 : ceil((N + extra) / COLS);
 if (STACKED && s_gap < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
 
-W = STACKED ? max(ext_x, h_ext_x) : plate_w(COLS, N);
+// BEST is undef when STACKED; every use below sits in the false branch of a
+// STACKED ternary, which OpenSCAD evaluates lazily, so undef is never indexed.
+BEST = LAYOUT[1];
+COLS = STACKED ? 1 : BEST[0];
+ROWS = STACKED ? 1 : ceil(N / COLS);         // rows of coasters; the holder is extra
+W = STACKED ? max(ext_x, h_ext_x) : BEST[2];
 assert(!STACKED || W <= BED_X, str("a ", size, " mm coaster's holder is wider than the plate"));
-H = STACKED ? ext_y + s_gap + h_ext_y : plate_h(COLS, N);
-function pos(i) = STACKED ? (i == 0 ? [0, H / 2 - ext_y / 2] : [0, -H / 2 + h_ext_y / 2])
-                : [-W / 2 + cell_x / 2 + (i % COLS) * px, H / 2 - cell_y / 2 - floor(i / COLS) * py];
+H = STACKED ? ext_y + s_gap + h_ext_y : BEST[3];
+function pos(i) = STACKED ? [0, H / 2 - ext_y / 2]
+                : [-W / 2 + BEST[6] + ext_x / 2 + (i % COLS) * px, H / 2 - ext_y / 2 - floor(i / COLS) * py];
+h_pos = STACKED ? [0, -H / 2 + h_ext_y / 2]
+      : holder ? [-W / 2 + BEST[4] + h_ext_x / 2, H / 2 - BEST[5] - h_ext_y / 2] : [0, 0];
+if (holder)
+    echo(HOLDER = STACKED ? "stacked" : HOLDER_MODES[BEST[1]]);
 
 // Holder: stack height is the coasters that fit, 70% of it is walled.
 stack = count * thickness;
@@ -444,7 +464,6 @@ module holder_part() {
         translate([-slot_w / 2, -h_ext_y, h_base + 3]) cube([slot_w, 2 * h_ext_y, h_height]);
     }
 }
-h_pos = pos(N);
 
 echo(COASTERS = [N, COLS, ROWS, W, H, face_down, recess_d]);
 
