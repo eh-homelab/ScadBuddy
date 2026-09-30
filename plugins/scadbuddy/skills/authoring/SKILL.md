@@ -112,6 +112,18 @@ from, returns diagnostics with line numbers and saves nothing
 parse-checks too, unless `force` is set (main spec §8). A source that fails the
 check is one the customizer cannot open, so fix it rather than forcing it.
 
+Through ScadBuddy's tools (issue #252; AI spec
+`docs/superpowers/specs/2026-09-27-ai-integration-design.md` §5.4, "As built for
+#252"):
+
+- `get_lsp_diagnostics` runs the editor's language server on a source and answers
+  its parse errors with line and column ranges, without running OpenSCAD. It only
+  knows syntax (and a missing file in a leading `include`), so still run
+  `check_source` or a render for OpenSCAD's own errors.
+- After a render, `get_render_colours` draws the model once per colour, every other
+  colour in grey, with the tiles named in extruder order. Use it to confirm each part
+  is in the colour and extruder you meant (section 5).
+
 ### Editing through ScadBuddy's tools
 
 The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):

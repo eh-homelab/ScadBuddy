@@ -84,6 +84,19 @@ def plate_routes(*, printer_id: int = 1, model: str = "H2C") -> None:
     )
 
 
+@pytest.mark.requires_postgres
+@respx.mock
+def test_links_point_at_the_first_web_url_not_the_api_url(client: TestClient, model: str) -> None:
+    """#775: the API URL may be one only the server reaches (an in-cluster Service)."""
+    configure(client, bambuddy_web_urls="https://bambuddy.sso.test/, https://bambuddy.lan.test")
+    output_id = make_output(client, model)
+    upload_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    assert body["bambuddy_url"] == "https://bambuddy.sso.test/library"
+
+
 # --- #25 library mode ---------------------------------------------------------------
 
 

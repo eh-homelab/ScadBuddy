@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -46,10 +47,14 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import (
+    BREAKDOWN_TILE_SIZE,
+    MAX_BREAKDOWN_TILE_SIZE,
     MAX_VIEW_SIZE,
     MIN_VIEW_SIZE,
     PLATE_PNG_SIZE,
+    ColourBreakdown,
     ViewName,
+    render_colour_breakdown,
     render_view,
 )
 
@@ -350,4 +355,93 @@ async def get_job_view(
         )
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
+    )
+
+
+#: The header naming a breakdown's tiles, row by row.
+COLOURS_HEADER = "X-ScadBuddy-Colours"
+#: The header giving the breakdown grid's width in tiles, so a caller reads the
+#: layout rather than working it out again (#750 review).
+COLUMNS_HEADER = "X-ScadBuddy-Colour-Columns"
+
+
+def _draw_breakdown(
+    glb: Path, view: ViewName, size: int, order: list[str], deadline: float
+) -> ColourBreakdown | None:
+    parts = read_glb(glb)
+    return render_colour_breakdown(parts, view, size, order, deadline=deadline) if parts else None
+
+
+@router.get(
+    "/jobs/{job_id}/colours.png",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {PNG_MEDIA_TYPE: {}},
+            "headers": {
+                COLOURS_HEADER: {
+                    "description": "The tiles' colours, comma-separated, row by row",
+                    "schema": {"type": "string"},
+                },
+                COLUMNS_HEADER: {
+                    "description": "Tiles per row of the grid",
+                    "schema": {"type": "integer"},
+                },
+            },
+        }
+    },
+    summary="Render job preview, one tile per colour",
+    description=(
+        "The job's preview mesh drawn once per colour from `view`, in a near-square grid: "
+        "on each tile that colour's parts are in their colour and every other part in "
+        "light grey, so a vision model can check which colour goes where (#252). "
+        f"`{COLOURS_HEADER}` names the tiles, row by row, in the job's `colors` "
+        f"(extruder) order, and `{COLUMNS_HEADER}` how many are in a row. At "
+        "most 16 colours (422 above)."
+    ),
+)
+async def get_job_colours(
+    job_id: JobIdPath,
+    queue: QueueDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    view: ViewName = "iso",
+    size: Annotated[
+        int,
+        Query(ge=MIN_VIEW_SIZE, le=MAX_BREAKDOWN_TILE_SIZE, description="Edge of each tile"),
+    ] = BREAKDOWN_TILE_SIZE,
+) -> Response:
+    job = require_job(queue, job_id)
+    if job.result is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
+        )
+    glb = paths.root / job.result.preview_glb
+    if not glb.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
+    # Off the loop and bounded, as `preview_view`: one raster per colour. The wait
+    # cannot stop the thread, so the thread stops itself at the same deadline.
+    deadline = time.monotonic() + config.render_timeout
+    try:
+        drawn = await asyncio.wait_for(
+            asyncio.to_thread(_draw_breakdown, glb, view, size, job.result.colors, deadline),
+            timeout=config.render_timeout,
+        )
+    except TimeoutError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"drawing the breakdown took longer than {config.render_timeout:g}s",
+        ) from None
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    if drawn is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} has no geometry")
+    return Response(
+        drawn.png,
+        media_type=PNG_MEDIA_TYPE,
+        headers={
+            "Cache-Control": "no-store",
+            COLOURS_HEADER: ",".join(drawn.colours),
+            COLUMNS_HEADER: str(drawn.columns),
+        },
     )

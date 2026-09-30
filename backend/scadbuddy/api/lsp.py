@@ -11,8 +11,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Response, WebSocket, status
 from fastapi import Path as PathParam
+from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import STATE_ATTR, AppState, CatalogueDep, PathsDep, SlugPath
+from scadbuddy.api.deps import STATE_ATTR, AppState, CatalogueDep, PathsDep, SlugPath, StateDep
 from scadbuddy.api.libraries import LibraryName
 from scadbuddy.api.models import MAX_SOURCE_CHARS, require_model_exists
 from scadbuddy.core.fontconfig import env_for
@@ -34,6 +35,8 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
 )
 from scadbuddy.library.lsp import serve
+from scadbuddy.library.lsp_diagnostics import LspDiagnostic, LspDiagnosticsError, lsp_diagnostics
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,16 @@ FilePath = Annotated[
 TEXT_RESPONSE: dict[int | str, dict[str, Any]] = {
     200: {"content": {"text/plain": {"schema": {"type": "string"}}}}
 }
+
+
+def _budget_full(state: AppState) -> bool:
+    """Whether every language-server permit is taken. Both callers enter
+    ``async with state.language_servers`` straight after this, with no ``await`` in
+    between, and an asyncio.Semaphore that is not locked() is acquired without
+    yielding, so no other request can take the permit in the gap. Keep it that way:
+    an ``await`` between the two would turn a fast 503 into a wait (review of #750).
+    """
+    return state.language_servers.locked()
 
 
 async def _libraries(state: AppState, slug: str) -> dict[str, Path]:
@@ -83,9 +96,7 @@ async def _serve(
         logger.warning("openscad-lsp is not on PATH; the editor runs without it")
         await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
         return
-    # No await between the check and the acquire, so nothing can take the permit
-    # in between.
-    if state.language_servers.locked():
+    if _budget_full(state):
         await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return
     async with state.language_servers:
@@ -203,3 +214,70 @@ def get_library_file(
             "reopen the editor to follow the new pin",
         )
     return _text_file(paths.libraries / name / pin.commit / name, path)
+
+
+#: What a 503 from a busy language-server budget says to wait.
+LSP_RETRY_AFTER = 2
+
+
+class LspDiagnosticsRequest(BaseModel):
+    source: str = Field(max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source")
+    slug: str | None = Field(
+        default=None,
+        pattern=MODEL_ID_PATTERN,
+        max_length=MAX_MODEL_ID_LENGTH,
+        description="Open the source in this model's directory, so its includes resolve",
+    )
+
+
+class LspDiagnostics(BaseModel):
+    available: bool = Field(description="False when no openscad-lsp is installed to ask")
+    diagnostics: list[LspDiagnostic] = Field(default_factory=list)
+
+
+@router.post(
+    "/lsp/diagnostics",
+    response_model=LspDiagnostics,
+    summary="openscad-lsp's diagnostics for a source",
+    description=(
+        "Runs the editor's language server once on `source` and returns what it "
+        "publishes: tree-sitter parse errors with line and column ranges, and a missing "
+        "file for a leading `include`. Saves nothing and runs no OpenSCAD; "
+        "`POST /models/check` is OpenSCAD's own check. Shares the editor's "
+        "`SCADBUDDY_LSP_SESSIONS` budget: 503 with Retry-After when it is full (#252)."
+    ),
+)
+async def post_lsp_diagnostics(body: LspDiagnosticsRequest, state: StateDep) -> LspDiagnostics:
+    root: Path | None = None
+    libraries: dict[str, Path] = {}
+    if body.slug is not None:
+        if not state.catalogue.exists(body.slug):
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {body.slug!r}")
+        root = state.paths.model_dir(body.slug)
+        # The editor's bridge (`_serve`, #707) resolves includes through the model's
+        # pins too, so the two report the same missing files.
+        libraries = await _libraries(state, body.slug)
+    binary = shutil.which(state.config.openscad_lsp)
+    if binary is None:
+        return LspDiagnostics(available=False)
+    if _budget_full(state):
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "every language server is in use; try again shortly",
+            headers={"Retry-After": str(LSP_RETRY_AFTER)},
+        )
+    async with state.language_servers:
+        env = env_for(state.config.data_dir)
+        if libraries:
+            env["OPENSCADPATH"] = os.pathsep.join(
+                str(directory.parent) for directory in libraries.values()
+            )
+        try:
+            if root is not None:
+                found = await lsp_diagnostics(binary, root, body.source, env=env)
+            else:
+                with tempfile.TemporaryDirectory(prefix="scadbuddy-lsp-") as scratch:
+                    found = await lsp_diagnostics(binary, Path(scratch), body.source, env=env)
+        except LspDiagnosticsError as error:
+            raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
+    return LspDiagnostics(available=True, diagnostics=found)

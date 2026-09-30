@@ -9,7 +9,9 @@
 # The case that matters most is a second image in the same pod whose name shares
 # the prefix: the agent sidecar, ghcr.io/eh-homelab/scadbuddy-agent (#249). The
 # old pattern `scadbuddy[^[:space:]]*` matched it too, so every deploy failed
-# with "expected exactly one image line, found 2" (#720).
+# with "expected exactly one image line, found 2" (#720). Since #738 the step
+# pins the agent too, to the same version at its own digest, and a manifest
+# without the agent's line fails.
 #
 # Runs in ci.yml's `lint` job. Needs mikefarah yq v4 (as the step does).
 set -euo pipefail
@@ -23,16 +25,19 @@ yq '.jobs[].steps[] | select(.id == "edit") | .run' "$workflow" > "$work/edit.sh
 [ -s "$work/edit.sh" ] || { echo "FAIL: no step with id 'edit' in $workflow" >&2; exit 1; }
 
 export IMAGE=ghcr.io/eh-homelab/scadbuddy
+export AGENT_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export VERSION=sha-2222222
 DIGEST="sha256:$(printf '2%.0s' {1..64})"
 REVISION="$(printf '2%.0s' {1..40})"
-export DIGEST REVISION
+AGENT_DIGEST="sha256:$(printf '4%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
-agent="ghcr.io/eh-homelab/scadbuddy-agent:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
+agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
 pinned="$IMAGE:$VERSION@$DIGEST"
+agent_pinned="$AGENT_IMAGE:$VERSION@$AGENT_DIGEST"
 failures=0
 
 fail() {
@@ -85,23 +90,26 @@ run() {
 
 has_line() { grep -qF "image: $1" "$work/repo/$2"; }
 
-# 1. The API alone: pinned.
+# 1. The API alone: the agent's line is missing, which fails (#738). clusters
+#    runs the agent in the API's pod, so a missing line is a dropped sidecar.
 if run "$(deployment scadbuddy "$IMAGE:$old")"; then
-  has_line "$pinned" "$MANIFEST" || fail "api only: image not pinned"
+  fail "api only: step passed, expected an error"
 else
-  fail "api only: step failed: $(grep '::error' "$work/log")"
+  grep -q 'expected exactly one agent image line, found 0' "$work/log" \
+    || fail "api only: wrong error: $(grep '::error' "$work/log")"
 fi
 
-# 2. The agent sidecar beside it: the API is pinned, the agent is left alone.
+# 2. The agent sidecar beside it: both pinned, each to its own digest.
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
   has_line "$pinned" "$MANIFEST" || fail "with agent: api image not pinned"
-  has_line "$agent" "$MANIFEST" || fail "with agent: agent image was rewritten"
+  has_line "$agent_pinned" "$MANIFEST" || fail "with agent: agent image not pinned"
 else
   fail "with agent: step failed: $(grep '::error' "$work/log")"
 fi
 
-# 3. A bare-digest pin (no tag) still counts as this image.
-if run "$(deployment scadbuddy "$IMAGE@sha256:$(printf '1%.0s' {1..64})")"; then
+# 3. A bare-digest pin (no tag) still counts as this image, and as the agent.
+if run "$(deployment scadbuddy "$IMAGE@sha256:$(printf '1%.0s' {1..64})" "$AGENT_IMAGE@sha256:$(printf '3%.0s' {1..64})")"; then
+  has_line "$agent_pinned" "$MANIFEST" || fail "bare digest: agent image not pinned"
   has_line "$pinned" "$MANIFEST" || fail "bare digest: image not pinned"
 else
   fail "bare digest: step failed: $(grep '::error' "$work/log")"
@@ -115,10 +123,10 @@ else
     || fail "two api lines: wrong error: $(grep '::error' "$work/log")"
 fi
 
-# 5. The render worker's file, when present, is pinned too, agent or not.
+# 5. The render worker's file, when present, is pinned too; it has no agent.
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")" "$(deployment scadbuddy-render "$IMAGE:$old")"; then
   has_line "$pinned" "$MANIFEST_WORKER" || fail "worker: image not pinned"
-  has_line "$agent" "$MANIFEST" || fail "worker: agent image was rewritten"
+  has_line "$agent_pinned" "$MANIFEST" || fail "worker: agent image not pinned"
 else
   fail "worker: step failed: $(grep '::error' "$work/log")"
 fi
@@ -131,6 +139,14 @@ if run "$(deployment scadbuddy "$IMAGE")"; then
 else
   grep -q 'expected exactly one image line, found 0' "$work/log" \
     || fail "bare image: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 7. Two agent lines are an error, like two API lines.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$agent")"; then
+  fail "two agent lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one agent image line, found 2' "$work/log" \
+    || fail "two agent lines: wrong error: $(grep '::error' "$work/log")"
 fi
 
 if [ "$failures" -gt 0 ]; then
