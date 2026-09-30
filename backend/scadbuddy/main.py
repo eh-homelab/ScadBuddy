@@ -330,36 +330,33 @@ async def _prepare_catalogue(state: AppState) -> None:
 async def _start_render(state: AppState) -> None:
     """Open (and migrate) the projection, prepare the catalogue, fail what a legacy
     queue left running, connect the in-process worker's client, adopt what it left
-    pending, prune, and start the reconciler. A failure closes the projection again."""
+    pending, prune, and start the reconciler. A failure leaves the projection to the
+    lifespan's guard, which closes everything a failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
-    try:
-        await _prepare_catalogue(state)
-        # Before the reconciler: what a pre-Temporal release was running, nothing
-        # will finish (#546).
-        failed = await asyncio.to_thread(projection.fail_legacy_running)
-        if failed:
-            logger.warning(
-                "failed the renders a pre-Temporal release left running",
-                extra={"job_ids": [job.id for job in failed]},
-            )
-        if settings.temporal_worker_inprocess:
-            # Eager: a worker cannot run on the API's lazy client (dev and tests).
-            state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
-        # Before the reconciler's first pass (`service.start`), which starts only rows
-        # that name a workflow: what a pre-Temporal release's queue left pending
-        # becomes this path's.
-        adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
-        if adopted:
-            logger.info(
-                "adopted the renders the legacy queue left pending",
-                extra={"count": len(adopted), "job_ids": adopted},
-            )
-        await service.prune()
-        await service.start()
-    except BaseException:
-        await asyncio.to_thread(projection.close)
-        raise
+    await _prepare_catalogue(state)
+    # Before the reconciler: what a pre-Temporal release was running, nothing
+    # will finish (#546).
+    failed = await asyncio.to_thread(projection.fail_legacy_running)
+    if failed:
+        logger.warning(
+            "failed the renders a pre-Temporal release left running",
+            extra={"job_ids": [job.id for job in failed]},
+        )
+    if settings.temporal_worker_inprocess:
+        # Eager: a worker cannot run on the API's lazy client (dev and tests).
+        state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+    # Before the reconciler's first pass (`service.start`), which starts only rows
+    # that name a workflow: what a pre-Temporal release's queue left pending
+    # becomes this path's.
+    adopted = await asyncio.to_thread(projection.adopt_legacy_pending)
+    if adopted:
+        logger.info(
+            "adopted the renders the legacy queue left pending",
+            extra={"count": len(adopted), "job_ids": adopted},
+        )
+    await service.prune()
+    await service.start()
 
 
 def _worker_exited(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
@@ -414,27 +411,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
-    state.paths.ensure()
-    # Before the built-in sync: an existing models directory becomes revision 1,
-    # so what a newer image changes in a built-in is a commit on top of it rather
-    # than an unversioned overwrite.
-    await asyncio.to_thread(state.history.ensure_repo)
-    # Before anything shells out to openscad or fc-list: it is what points
-    # fontconfig at the fonts on the data volume.
-    state.fonts.prepare()
-    state.openscad_version = await probe_openscad_version(state.config)
-    await _start_render(state)
-    # After the projection, which migrated the database: the bus writes the event
-    # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
-    # was published before now (the built-in sync's commits) waited.
-    if isinstance(state.events, PgNotifyEventBus):
-        try:
+    # From the store's construction to the `try` below, whose `finally` owns shutdown:
+    # a failure anywhere here (a refused OpenSCAD probe, a render service or bus that
+    # will not start) releases what is open, the store and its pool included, rather
+    # than leaking it for this failed boot.
+    try:
+        state.paths.ensure()
+        # Before the built-in sync: an existing models directory becomes revision 1,
+        # so what a newer image changes in a built-in is a commit on top of it rather
+        # than an unversioned overwrite.
+        await asyncio.to_thread(state.history.ensure_repo)
+        # Before anything shells out to openscad or fc-list: it is what points
+        # fontconfig at the fonts on the data volume.
+        state.fonts.prepare()
+        state.openscad_version = await probe_openscad_version(state.config)
+        await _start_render(state)
+        # After the projection, which migrated the database: the bus writes the event
+        # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
+        # was published before now (the built-in sync's commits) waited.
+        if isinstance(state.events, PgNotifyEventBus):
             await state.events.start()
-        except BaseException:
-            # Before the `try` below, so its `finally` never runs: release the
-            # render service that did start (reconciler, listener, pool) here.
-            await _close_quietly(state)
-            raise
+    except BaseException:
+        await _close_quietly(state)
+        await asyncio.to_thread(state.settings_store.close)
+        raise
 
     # Everything from here holds the render service's resources (the Postgres pool,
     # its reconciler), so it runs inside the `try` whose `finally` releases them: a

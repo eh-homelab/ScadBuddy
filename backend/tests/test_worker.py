@@ -554,6 +554,27 @@ async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_fa
     assert cache.calls >= 3
 
 
+@pytest.mark.parametrize(("sweep", "interval"), [(0.0, 300.0), (60.0, 60.0)])
+async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sweep: float, interval: float
+) -> None:
+    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's cache
+    eviction, which then runs every WORKER_CACHE_EVICT_INTERVAL."""
+    intervals: list[float] = []
+
+    async def evict(_blobs: object, every: float) -> None:
+        intervals.append(every)
+
+    monkeypatch.setattr(worker_module, "_evict_periodically", evict)
+    cache = CachedBlobStore.__new__(CachedBlobStore)
+    task = worker_module._start_eviction(cache, sweep)
+    assert task is not None
+    await task
+    assert intervals == [interval]
+    assert worker_module._start_eviction(LocalBlobStore(tmp_path), sweep) is None
+    assert intervals == [interval]
+
+
 class _Source:
     async def current(self) -> RenderStoreSettings:
         return RenderStoreSettings(
