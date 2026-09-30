@@ -12,6 +12,7 @@ import {
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/audit (#258): the audit log of AI actions, for Settings.
 //
@@ -115,4 +116,19 @@ export function registerAuditRoutes(app: Hono, deps: AuditRouteDeps): void {
     })
     return c.json({ retention_days: days })
   })
+}
+
+/**
+ * The audit log routes (#258). `audit` is declared in `AppDeps` itself (app.ts), since
+ * the write-auditing middleware there uses it too.
+ */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerAuditRoutes(app, {
+      audit: deps.audit,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

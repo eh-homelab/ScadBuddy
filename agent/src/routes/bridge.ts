@@ -3,6 +3,7 @@ import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import type { TabConnection, TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import type { RouteModule } from './module.js'
 
 // The tab socket of the browser bridge (#254): `GET /api/v1/ai/bridge`,
 // upgraded to a WebSocket that carries bridge/protocol.ts both ways. Every
@@ -67,4 +68,17 @@ export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
       }
     }),
   )
+}
+
+/** The browser bridge's tab socket (#254), when the app has the tabs. */
+export const route: RouteModule = {
+  register(app, deps) {
+    if (!deps.tabs) return
+    registerBridgeRoute(app, {
+      tabs: deps.tabs,
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      upgradeWebSocket: deps.upgradeWebSocket,
+    })
+  },
 }
