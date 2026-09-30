@@ -296,3 +296,22 @@ def test_clearing_what_the_bambuddy_store_needs_while_on_it_is_refused(
     # Leaving the store first, then clearing, is fine.
     assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
     assert client.put("/api/v1/settings", json={cleared: None}).status_code == 200
+
+
+def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
+    client: TestClient,
+) -> None:
+    """A reset clears the stored row, so the merged value is the deployment's (none here):
+    the same unready store as an explicit clear, refused before anything is deleted."""
+    ready = {
+        "bambuddy_url": "http://bambuddy.test",
+        "library_folder_id": 7,
+        "store_backend": "bambuddy",
+    }
+    assert client.put("/api/v1/settings", json=ready).status_code == 200
+    response = client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]})
+    assert response.status_code == 422
+    assert "library folder" in response.json()["detail"]
+    assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
+    assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
+    assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200

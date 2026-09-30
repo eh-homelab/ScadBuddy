@@ -644,6 +644,28 @@ def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(
     assert deps.assets.ids() == [upload.id]
 
 
+@pytest.mark.parametrize(("sweep", "interval"), [(0.0, 300.0), (60.0, 60.0)])
+async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sweep: float, interval: float
+) -> None:
+    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's
+    housekeeping (its cache eviction), which then runs every WORKER_CACHE_EVICT_INTERVAL."""
+    intervals: list[float] = []
+
+    async def housekeep(_deps: object, every: float) -> None:
+        intervals.append(every)
+
+    monkeypatch.setattr(worker_module, "_housekeep_periodically", housekeep)
+    cache = CachedBlobStore.__new__(CachedBlobStore)
+    task = worker_module._start_housekeeping(cast(WorkerDeps, SimpleNamespace(blobs=cache)), sweep)
+    assert task is not None
+    await task
+    assert intervals == [interval]
+    local = cast(WorkerDeps, SimpleNamespace(blobs=LocalBlobStore(tmp_path)))
+    assert worker_module._start_housekeeping(local, sweep) is None
+    assert intervals == [interval]
+
+
 class _Source:
     async def current(self) -> RenderStoreSettings:
         return RenderStoreSettings(
