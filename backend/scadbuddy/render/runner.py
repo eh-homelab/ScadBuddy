@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import shutil
 import signal
 import tempfile
 import time
@@ -44,6 +46,8 @@ _MISSING_FILE = re.compile(
 
 #: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
 _PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+
+logger = logging.getLogger(__name__)
 
 
 #: A message a template echoes for the person customizing it (#285): `NOTE:` by
@@ -321,6 +325,31 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
     fontconfig cache rebuild openscad forked (spec §3.4, a phase-1 requirement)."""
     with suppress(ProcessLookupError):
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+
+#: `openscad --version`'s own budget.
+VERSION_TIMEOUT = 10.0
+
+
+async def probe_openscad_version(config: Config) -> str | None:
+    """``openscad --version`` writes to stderr, so both streams are merged."""
+    if shutil.which(config.openscad) is None:
+        return None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            config.openscad,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=VERSION_TIMEOUT)
+    except (OSError, TimeoutError):
+        logger.exception("could not read the openscad version")
+        return None
+    if process.returncode != 0:
+        return None
+    first = stdout.decode("utf-8", "replace").strip().splitlines()
+    return first[0].strip() if first else None
 
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:

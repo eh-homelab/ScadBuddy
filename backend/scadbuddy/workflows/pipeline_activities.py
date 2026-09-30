@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.library.catalogue import ModelMeta
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.pipelines import (
     DEFAULT_PIPELINE_FILE,
     DEFAULT_PIPELINE_SOURCE,
@@ -87,10 +87,13 @@ class PipelineActivities:
         directory = await self.model_dir(req.slug, req.revision)
         try:
             raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
+        except FileNotFoundError:
+            raw = {}  # model.json is optional: the catalogue reads a missing one as empty
         except (OSError, ValueError) as error:
             raise _refuse(f"model.json could not be read: {error}") from None
         try:
-            meta = ModelMeta.model_validate(raw)
+            # Read as the catalogue reads it (`Catalogue.read_raw_meta`, `meta_from_raw`).
+            meta = meta_from_raw(raw if isinstance(raw, dict) else {}, req.slug)
         except ValidationError as error:
             # The template's own data: a retry reads the same file.
             raise _refuse(f"model.json is not a template's: {error}") from None

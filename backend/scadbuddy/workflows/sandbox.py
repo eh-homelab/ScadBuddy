@@ -39,3 +39,10 @@ def pipeline_error(error: BaseException, filename: str) -> str:
     where = filename if line is None else f"{filename}:{line}"
     message = error.msg if isinstance(error, SyntaxError) else str(error)
     return f"{where}: {type(error).__name__}: {message}"
+
+
+def pipeline_error_at(error: BaseException, filename: str, message: str) -> str:
+    """`pipeline_error`'s location with ``message`` in place of the exception's own: an
+    activity's refusal, raised where the pipeline awaited it."""
+    where = pipeline_error(error, filename).split(": ", 1)[0]
+    return f"{where}: {message}"

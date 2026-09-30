@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import BomEntry, JobResult, OutputRecord, StepInfo
+from scadbuddy.render.job_models import BomEntry, JobResult, OutputRecord, PipelineOutput, StepInfo
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.template import Blob as Blob
 from scadbuddy.template import Part as Part
@@ -101,6 +101,8 @@ class PieceOutcome(BaseModel):
 
     result: PieceResult | None = None
     failure: Failure | None = None
+    #: Which piece: one job waits on many (§3.4).
+    piece_key: str = ""
 
 
 class Projection(BaseModel):
@@ -116,6 +118,10 @@ class Projection(BaseModel):
     pipeline_version: str = "default"
     #: The piece the result lives in; `project` adds the job's blob ref (Task 4).
     blob_key: str | None = None
+    #: Every `ctx.output`, in order (§5.2); ``result`` is the first one's.
+    outputs: list[PipelineOutput] = Field(default_factory=list)
+    #: Every blob the job reads (pieces and outputs); `project` refs each on done.
+    blob_keys: list[str] = Field(default_factory=list)
 
 
 class PlateSize(BaseModel):

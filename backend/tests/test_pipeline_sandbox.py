@@ -99,3 +99,11 @@ async def test_the_testing_api_verify_pipeline_uses() -> None:
         assert result == "ok|1"
     finally:
         await env.shutdown()
+
+
+def test_pipeline_error_at_keeps_the_location() -> None:
+    from scadbuddy.workflows.sandbox import pipeline_error_at
+
+    assert pipeline_error_at(ValueError("x"), "pipeline/pipeline.py", "pack goal nope") == (
+        "pipeline/pipeline.py: pack goal nope"
+    )

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
@@ -53,7 +52,6 @@ from scadbuddy.workflows.client import connect_lazily
 logger = logging.getLogger(__name__)
 
 STATE_ATTR = "scadbuddy"
-VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
@@ -284,27 +282,6 @@ def build_state(settings: Settings) -> AppState:
         projection=projection,
         refs=BlobRefs(pool),
     )
-
-
-async def probe_openscad_version(config: Config) -> str | None:
-    """``openscad --version`` writes to stderr, so both streams are merged."""
-    if shutil.which(config.openscad) is None:
-        return None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            config.openscad,
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=VERSION_TIMEOUT)
-    except (OSError, TimeoutError):
-        logger.exception("could not read the openscad version")
-        return None
-    if process.returncode != 0:
-        return None
-    first = stdout.decode("utf-8", "replace").strip().splitlines()
-    return first[0].strip() if first else None
 
 
 def get_state(connection: HTTPConnection) -> AppState:

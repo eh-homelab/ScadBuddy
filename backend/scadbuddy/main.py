@@ -17,7 +17,7 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.api import health, libraries, media, metrics, models
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
-from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
@@ -32,6 +32,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
+from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource

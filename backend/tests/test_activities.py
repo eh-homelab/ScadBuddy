@@ -55,6 +55,7 @@ from scadbuddy.workflows.models import (
     RenderMainResult,
     piece_key,
 )
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import write_openscad_3mf
 from tests.support.openscad import install_fake_openscad
@@ -427,6 +428,7 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
         log_tail=["fine"],
         steps=[StepInfo(name="render", state="done", done=1, total=1)],
         blob_key="piece-key",
+        blob_keys=["piece-key", "output-x-0"],
     )
     await acts.project(done)
 
@@ -438,7 +440,7 @@ async def test_project_done_copies_the_result_and_refs_the_blob(
     assert stored.diagnostics == _result().diagnostics
     assert stored.diagnostics_dropped == 2
     assert stored.steps == done.steps
-    assert "piece-key" in refs.referenced()
+    assert {"piece-key", "output-x-0"} <= refs.referenced()
 
     # A second `done` (a retried activity) returns and changes nothing.
     await acts.project(done.model_copy(update={"log_tail": ["other"]}))
@@ -563,6 +565,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):
@@ -615,6 +618,7 @@ async def test_a_revision_less_job_never_renders_over_another_jobs_files(
             client,
             queue,
             RenderActivities(deps),
+            pipeline=PipelineActivities(deps),
             build_id="test",
             max_concurrent_activities=2,
         ):

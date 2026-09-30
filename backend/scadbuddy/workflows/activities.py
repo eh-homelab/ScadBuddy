@@ -184,7 +184,10 @@ def _render_file(prepared: Prepared, file: str) -> Prepared:
         or any(part in (".", "..") for part in file.split("/"))
         or path.as_posix() != file
     ):
-        raise _parameter_error(f"{file} is not a file of the template")
+        raise _parameter_error(
+            f"{file} is not a file of the template: name it by its plain path inside"
+            " the template, e.g. parts/roof.scad"
+        )
     if file == "model.scad":
         return prepared
     root = prepared.scad.parent.resolve()
@@ -540,9 +543,12 @@ class RenderActivities:
             job.diagnostics = failure.diagnostics
             job.diagnostics_dropped = failure.diagnostics_dropped
             job.warnings = failure.warnings
-        if projection.blob_key is not None and projection.state == "done":
-            # Before `finish`, so a sweep between the two cannot take the blob.
-            await asyncio.to_thread(self.deps.refs.add, projection.blob_key, "job", job.id)
+        if projection.state == "done":
+            job.outputs = projection.outputs
+            # Before `finish`, so a sweep between the two cannot take a blob.
+            keys = [*projection.blob_keys, *([projection.blob_key] if projection.blob_key else [])]
+            for key in dict.fromkeys(keys):
+                await asyncio.to_thread(self.deps.refs.add, key, "job", job.id)
         job.finished_at = job.finished_at or now()
         if not await asyncio.to_thread(p.finish, job):
             logger.debug(

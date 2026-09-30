@@ -164,13 +164,13 @@ async def test_a_piece_renders_another_file_of_the_template(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     ("file", "params", "message"),
     [
-        ("../escape.scad", {}, "not a file of the template"),
+        ("../escape.scad", {}, "by its plain path inside the template"),
         # Inside the template, but not canonical: the template root is derived from the
         # string, so each would root the fonts scan and the store folder elsewhere.
-        ("parts/../model.scad", {}, "not a file of the template"),
-        ("./model.scad", {}, "not a file of the template"),
-        ("parts//roof.scad", {}, "not a file of the template"),
-        ("ABSOLUTE", {}, "not a file of the template"),
+        ("parts/../model.scad", {}, "by its plain path inside the template"),
+        ("./model.scad", {}, "by its plain path inside the template"),
+        ("parts//roof.scad", {}, "by its plain path inside the template"),
+        ("ABSOLUTE", {}, "by its plain path inside the template"),
         ("model.scad", {"nope": 1}, "unknown parameters: nope"),
         ("model.scad", {"width": "wide"}, "expects a number"),
     ],

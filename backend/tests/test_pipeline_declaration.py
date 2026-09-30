@@ -229,3 +229,13 @@ async def test_a_pipeline_symlinked_within_the_template_loads(tmp_path: Path) ->
         _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
     )
     assert loaded.source == PIPELINE and loaded.file == "pipeline/pipeline.py"
+
+
+async def test_a_template_without_model_json_loads_the_default(tmp_path: Path) -> None:
+    """model.json is optional (`Catalogue.read_raw_meta` reads a missing one as empty)."""
+    paths = _template(tmp_path, {}, {})
+    paths.model_meta("demo").unlink()
+    loaded = await ActivityEnvironment().run(
+        _acts(paths).load_pipeline, LoadRequest(slug="demo", revision=None)
+    )
+    assert loaded.version == "default"
