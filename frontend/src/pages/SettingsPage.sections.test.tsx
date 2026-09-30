@@ -507,6 +507,63 @@ describe('SettingsPage blob store (#426)', () => {
     expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
   })
 
+  it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
+    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
+  })
+
+  it('resets only the Bambuddy URL while on the local store', async () => {
+    const bodies = serve(stored)
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await user.click(screen.getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
+  })
+
+  it('keeps the Bambuddy store on a Connection save while an unsaved Projects edit drops the inbox', async () => {
+    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '')
+    const own = screen.getByLabelText('ScadBuddy’s own URL')
+    await user.clear(own)
+    await user.type(own, 'https://mine.test')
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ public_url: 'https://mine.test' })
+  })
+
+  it('keeps the Bambuddy store on a Projects save while an unsaved Connection edit clears the URL', async () => {
+    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
+    await user.clear(screen.getByLabelText('Bambuddy URL'))
+    await user.selectOptions(screen.getByLabelText(/Inbox folder/), '3')
+    await user.click(screen.getByRole('button', { name: 'Save Projects & files' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ library_folder_id: 3 })
+  })
+
+  it('removes a stored render key when Connection is saved', async () => {
+    const bodies = serve({ ...stored, has_render_api_key: true, render_key_fallback: false })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const row = screen.getByLabelText('Render key').closest('div') as HTMLElement
+    await user.click(within(row).getByRole('button', { name: 'Remove key' }))
+    expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Cleared when you save.')
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ bambuddy_render_api_key: '' })
+  })
+
   it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
     serve({ ...stored, library_folder_id: null })
     renderPage(<SettingsPage />)

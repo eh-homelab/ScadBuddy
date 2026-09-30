@@ -138,6 +138,12 @@ class RenderService:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
             model_version = await self.snapshots.pin(slug, model_version)
+            if model_version is None:
+                # Started without one, the worker would look for a live source it has not got.
+                raise SnapshotUnavailableError(
+                    f"no commit of {slug} to snapshot for its render: the API has no git"
+                    " history, or the template was never committed"
+                )
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,

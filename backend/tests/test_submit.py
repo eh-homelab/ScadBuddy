@@ -360,6 +360,22 @@ class _NoCommit(_Pinning):
         return None
 
 
+async def test_a_render_on_the_bambuddy_store_with_no_commit_to_pin_is_refused(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """As for a preview: refused at submit, before a row or a workflow exists."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        service.snapshots = _NoCommit()  # type: ignore[assignment]
+        with pytest.raises(SnapshotUnavailableError, match=SLUG):
+            await service.submit(SLUG, {"size": 1})
+        await service.aclose()
+
+    # No row, so no workflow: `submit` starts one only for the row it recorded.
+    assert await asyncio.to_thread(projection.list_jobs) == []
+
+
 async def test_a_preview_on_the_bambuddy_store_with_no_commit_to_pin_is_refused(
     make_service: ServiceFactory,
 ) -> None:
