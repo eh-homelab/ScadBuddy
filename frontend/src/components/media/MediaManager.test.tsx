@@ -46,6 +46,7 @@ function missingVideo(): MediaView {
     caption: 'Lost with the volume',
     poster: null,
     missing: true,
+    readonly: false,
     content_type: 'video/mp4',
     size: null,
   }
@@ -80,6 +81,7 @@ describe('MediaManager (#279)', () => {
           caption: '',
           poster: null,
           missing: false,
+          readonly: false,
           content_type: 'image/png',
           size: file.size,
         }
@@ -240,22 +242,62 @@ describe('MediaManager (#279)', () => {
     expect(await serverIds()).toEqual(GALLERY)
   })
 
-  it('shows a built-in media read-only, and offers Duplicate instead', async () => {
+  it("shows a built-in's shipped media read-only, and lets media be added after it (#722)", async () => {
     const gallery = (await api.getModel(GALLERY_SLUG)).media ?? []
-    setMockMedia(BUILTIN_SLUG, gallery)
+    setMockMedia(
+      BUILTIN_SLUG,
+      gallery.map((entry) => ({ ...entry, readonly: true })),
+    )
     await render(BUILTIN_SLUG)
 
     expect(shownIds()).toEqual(GALLERY)
-    expect(screen.getByText(/Built-in media is read-only/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
-    for (const name of ['Move up', 'Move down', 'Make cover', 'Delete', 'Remove']) {
+    expect(screen.getByText(/ships is read-only/)).toBeInTheDocument()
+    expect(screen.getAllByText('Shipped')).toHaveLength(GALLERY.length)
+    for (const name of ['Move up', 'Move down', 'Delete', 'Remove']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
     }
     expect(screen.queryByRole('textbox', { name: 'Caption' })).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Add images or videos')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('media-dropzone')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Add images or videos')).toBeInTheDocument()
+    expect(screen.getByTestId('media-dropzone')).toBeInTheDocument()
     expect(item(0).getAttribute('draggable')).not.toBe('true')
     expect(screen.getByText('Printed in blue and orange')).toBeInTheDocument()
+  })
+
+  it("edits only a built-in's added media, and chooses its cover apart from the order", async () => {
+    const [shipped] = (await api.getModel(GALLERY_SLUG)).media ?? []
+    const added = (id: string, caption: string): MediaView => ({
+      ...shipped!,
+      id,
+      file: `${id}.png`,
+      caption,
+      readonly: false,
+    })
+    setMockMedia(BUILTIN_SLUG, [
+      { ...shipped!, id: 'front', readonly: true },
+      added('aaaaaaaaaaaa', 'One'),
+      added('bbbbbbbbbbbb', 'Two'),
+    ])
+    const { user } = await render(BUILTIN_SLUG)
+
+    expect(within(item(0)).queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(within(item(1)).getByRole('button', { name: 'Move up' })).toBeDisabled()
+    await user.click(within(item(1)).getByRole('button', { name: 'Move down' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb', 'aaaaaaaaaaaa']))
+
+    await user.click(within(item(2)).getByRole('button', { name: 'Make cover' }))
+    await waitFor(() => expect(shownIds()).toEqual(['aaaaaaaaaaaa', 'front', 'bbbbbbbbbbbb']))
+    expect(within(item(0)).getByText('Cover')).toBeInTheDocument()
+    // The chosen cover is not moved with the rest.
+    expect(within(item(0)).queryByRole('button', { name: 'Move up' })).not.toBeInTheDocument()
+    expect((await api.getModel(BUILTIN_SLUG)).media_cover).toBe('aaaaaaaaaaaa')
+
+    await user.click(within(item(0)).getByRole('button', { name: 'Use the shipped cover' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb', 'aaaaaaaaaaaa']))
+
+    await user.click(within(item(2)).getByRole('button', { name: 'Delete' }))
+    await user.click(within(item(2)).getByRole('button', { name: 'Yes, delete' }))
+    await waitFor(() => expect(shownIds()).toEqual(['front', 'bbbbbbbbbbbb']))
+    expect(await serverIds(BUILTIN_SLUG)).toEqual(['front', 'bbbbbbbbbbbb'])
   })
 
   it('says why a write failed and keeps the list as it was', async () => {
@@ -266,5 +308,165 @@ describe('MediaManager (#279)', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('the database is down')
     expect(shownIds()).toEqual(GALLERY)
+  })
+})
+
+describe('MediaManager paste (#722)', () => {
+  function clipboard(files: File[], asItems = false) {
+    return asItems
+      ? {
+          files: [],
+          items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
+          types: ['Files'],
+        }
+      : { files, items: [], types: ['Files'] }
+  }
+
+  function spyUploads() {
+    const names: string[] = []
+    const upload = vi.spyOn(api, 'uploadMedia').mockImplementation(async (slug, file) => {
+      names.push(file.name)
+      return api.getModel(slug)
+    })
+    return { upload, names }
+  }
+
+  const shot = () => new File([PNG], 'image.png', { type: 'image/png' })
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  function outsideField() {
+    const field = document.createElement('input')
+    document.body.appendChild(field)
+    field.focus()
+    return field
+  }
+
+  afterEach(() => {
+    for (const extra of document.body.querySelectorAll(':scope > input, :scope > button')) {
+      extra.remove()
+    }
+  })
+
+  it('adds a pasted screenshot as an upload, named for when it was pasted', async () => {
+    const { names } = spyUploads()
+    await render()
+    expect(screen.getByTestId('media-paste-hint')).toHaveTextContent('or paste an image or video')
+
+    fireEvent.paste(screen.getByTestId('media-dropzone'), { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(names).toHaveLength(1))
+    expect(names[0]).toMatch(/^pasted-\d{8}-\d{6}\.png$/)
+  })
+
+  it('takes a paste from clipboard items, and keeps a real file name', async () => {
+    const { names } = spyUploads()
+    await render()
+    const clip = new File([PNG], 'clip.webm', { type: 'video/webm' })
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([clip], true) })
+
+    await waitFor(() => expect(names).toEqual(['clip.webm']))
+  })
+
+  it('takes a paste anywhere on the page while no text field has focus', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const button = document.createElement('button')
+    document.body.appendChild(button)
+    button.focus()
+
+    fireEvent.paste(button, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it('leaves a paste into a text field outside the section to that field', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const field = outsideField()
+
+    fireEvent.paste(field, { clipboardData: clipboard([shot()]) })
+
+    await settle()
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it('takes a paste into that field while the pointer is over the section', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const field = outsideField()
+
+    fireEvent.pointerEnter(screen.getByRole('region', { name: 'Media' }))
+    fireEvent.paste(field, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it('gives a page-wide paste to the newest of two mounted managers only', async () => {
+    const { upload } = spyUploads()
+    await render()
+    const second = await api.getModel(BUILTIN_SLUG)
+    renderPage(<MediaManager model={second} onChanged={vi.fn()} />)
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(upload).toHaveBeenCalledTimes(1)
+    expect(upload.mock.calls[0]?.[0]).toBe(BUILTIN_SLUG)
+  })
+
+  it("takes a paste into a caption, since that field is the section's own", async () => {
+    const { upload } = spyUploads()
+    await render()
+    const caption = within(item(0)).getByRole('textbox', { name: 'Caption' })
+    caption.focus()
+
+    fireEvent.paste(caption, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1))
+  })
+
+  it('ignores a paste of plain text', async () => {
+    const { upload } = spyUploads()
+    await render()
+
+    fireEvent.paste(document.body, {
+      clipboardData: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain' }],
+        types: ['text/plain'],
+      },
+    })
+
+    await settle()
+    expect(upload).not.toHaveBeenCalled()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('checks a pasted file as it checks an upload', async () => {
+    setMockUploadLimit(MiB)
+    const { upload } = spyUploads()
+    await render()
+    const gif = new File(['GIF89a'], 'image.gif', { type: 'image/gif' })
+    const clip = new File([new Uint8Array(MiB + 1)], 'clip.mp4', { type: 'video/mp4' })
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([gif, clip]) })
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/is not a PNG, JPEG or WebP image/)
+    expect(alert).toHaveTextContent('clip.mp4 is larger than the 1 MB upload limit')
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it("takes a paste into a built-in's media, after what it ships (#722)", async () => {
+    const { upload, names } = spyUploads()
+    await render(BUILTIN_SLUG)
+    expect(screen.getByTestId('media-paste-hint')).toBeInTheDocument()
+
+    fireEvent.paste(document.body, { clipboardData: clipboard([shot()]) })
+
+    await waitFor(() => expect(names).toHaveLength(1))
+    expect(upload).toHaveBeenCalledWith(BUILTIN_SLUG, expect.any(File), {}, expect.any(Function))
   })
 })

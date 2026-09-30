@@ -117,7 +117,7 @@ test.describe('agent bridge', () => {
 
     const test = await call(page, 'test_connection')
     expect(test).toMatchObject({ ok: false, error: { code: 'refused' } })
-    const save = await call(page, 'click', { role: 'button', name: 'Save changes' })
+    const save = await call(page, 'click', { role: 'button', name: 'Save Preview' })
     expect(save).toMatchObject({ ok: false, error: { code: 'refused' } })
   })
 })

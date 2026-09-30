@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import { defaultValues } from './params'
-import { applyPreset, presetParams } from './presets'
+import {
+  MAX_PRESET_DESCRIPTION,
+  MAX_PRESET_TAG,
+  MAX_PRESET_TAGS,
+  applyPreset,
+  parsePresetTags,
+  presetDescriptionProblem,
+  presetParams,
+  presetTagsProblem,
+} from './presets'
 
 describe('applyPreset', () => {
   it('lays the preset over the defaults', () => {
@@ -10,6 +19,8 @@ describe('applyPreset', () => {
       name: 'Tiny',
       origin: 'mine',
       params: { text_size: 10 },
+      description: '',
+      tags: [],
     })
     expect(values).toEqual({ ...defaultValues(keychainSchema), text_size: 10 })
     expect(skipped).toEqual([])
@@ -21,6 +32,8 @@ describe('applyPreset', () => {
       name: 'Old',
       origin: 'mine',
       params: { name: 'Ada', engrave_depth: 2 },
+      description: '',
+      tags: [],
     })
     expect(values['name']).toBe('Ada')
     expect(values).not.toHaveProperty('engrave_depth')
@@ -36,5 +49,46 @@ describe('presetParams', () => {
 
   it('is empty at the defaults', () => {
     expect(presetParams(keychainSchema, defaultValues(keychainSchema))).toEqual({})
+  })
+})
+
+describe('parsePresetTags', () => {
+  it('splits on commas and cleans each tag as the server does', () => {
+    expect(parsePresetTags(' gift,Gift , ,  big   tag,x')).toEqual(['gift', 'big tag', 'x'])
+    expect(parsePresetTags('')).toEqual([])
+  })
+
+  it('treats tags the server would fold together as one', () => {
+    expect(parsePresetTags('Straße, STRASSE, strasse')).toEqual(['Straße'])
+  })
+})
+
+describe('presetTagsProblem', () => {
+  it('names the bound a set of tags is past, or nothing', () => {
+    expect(presetTagsProblem(['a', 'b'])).toBeNull()
+    expect(presetTagsProblem(Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`))).toBe(
+      `At most ${MAX_PRESET_TAGS} tags.`,
+    )
+    expect(presetTagsProblem(['t'.repeat(MAX_PRESET_TAG + 1)])).toContain(
+      `longer than ${MAX_PRESET_TAG} characters`,
+    )
+  })
+
+  it('counts a tag\'s length in code points, as the server does', () => {
+    // 40 emoji are 80 UTF-16 units but 40 characters to the server.
+    expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG)])).toBeNull()
+    expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG + 1)])).not.toBeNull()
+  })
+})
+
+describe('presetDescriptionProblem', () => {
+  it('names the bound a description is past, counting code points as the server does', () => {
+    expect(presetDescriptionProblem('')).toBeNull()
+    expect(presetDescriptionProblem('d'.repeat(MAX_PRESET_DESCRIPTION))).toBeNull()
+    expect(presetDescriptionProblem('d'.repeat(MAX_PRESET_DESCRIPTION + 1))).toBe(
+      `The description is longer than ${MAX_PRESET_DESCRIPTION} characters.`,
+    )
+    // Twice the UTF-16 units of the bound, but within it to the server.
+    expect(presetDescriptionProblem('\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION))).toBeNull()
   })
 })
