@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { hasTier } from '../auth/principal.js'
 import { defineTool, errorResult, json, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // The `confirm` half of spec §8.2's prepare/confirm flow for external MCP
 // clients. An outward tool call (the `prepare`, registry.ts runTool) records
@@ -13,18 +14,23 @@ import { defineTool, errorResult, json, type Tool } from './registry.js'
 export const approvalTools: Tool[] = [
   defineTool({
     name: 'list_pending_actions',
-    description: 'Outward actions this caller has prepared and that are waiting for a human approval.',
-    input: z.object({}),
+    description: 'Outward actions this caller has prepared and that are waiting for a human approval.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     routes: [],
-    handler: async (_args, { pending, principal }) =>
+    handler: async (args, { pending, principal }) =>
       json(
-        (await pending.list(principal)).map((a) => ({
-          pending_action_id: a.id,
-          tool: a.tool,
-          summary: a.summary,
-          expires_at: a.expiresAt.toISOString(),
-        })),
+        page(
+          (await pending.list(principal)).map((a) => ({
+            pending_action_id: a.id,
+            tool: a.tool,
+            summary: a.summary,
+            expires_at: a.expiresAt.toISOString(),
+          })),
+          args,
+          (a) => a.pending_action_id,
+          'list_pending_actions',
+        ),
       ),
   }),
 
@@ -50,11 +56,17 @@ export const approvalTools: Tool[] = [
     routes: [],
     handler: async ({ pending_action_id, arguments: args }, ctx) => {
       const { pending, principal } = ctx
+      // The audit row (#258, registry.ts RunReport): a confirm that ran nothing
+      // is `refused`, never `ok`; one that ran names the approval and the tool.
+      const refused = (reason: string) => {
+        ctx.report?.({ outcome: 'refused', detail: reason })
+        return errorResult(reason)
+      }
       const action = await pending.find(pending_action_id, principal)
-      if (!action) return errorResult(`no pending action ${pending_action_id} for this caller (it may have expired)`)
+      if (!action) return refused(`no pending action ${pending_action_id} for this caller (it may have expired)`)
       const tool = ctx.lookup?.(action.tool)
       if (!tool?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
-      if (!hasTier(principal, tool.risk)) return errorResult(`${tool.name} needs the "${tool.risk}" tier`)
+      if (!hasTier(principal, tool.risk)) return refused(`${tool.name} needs the "${tool.risk}" tier`)
       // Parsed as the prepare parsed them, so the hash compares like with like.
       // The tool's own schema, as the prepare parsed it (runTool: `tool.parse`),
       // so the hash compares like with like and no top-level refinement is lost.
@@ -63,14 +75,18 @@ export const approvalTools: Tool[] = [
         input = tool.parse(args)
       } catch (err) {
         if (!(err instanceof z.ZodError)) throw err
-        return errorResult(
+        return refused(
           `Not confirmed: these arguments are not valid for ${tool.name} (${z.prettifyError(err)}). ` +
             'Pass exactly the arguments the action was prepared with. Nothing was sent.',
         )
       }
       const claim = await pending.claim(pending_action_id, principal, input)
-      if (claim.status === 'refused') return errorResult(claim.reason)
+      if (claim.status === 'refused') return refused(claim.reason)
       if (claim.status === 'pending') {
+        ctx.report?.({
+          outcome: 'refused',
+          detail: `waiting for approval (pending action ${claim.action.id}); nothing was sent`,
+        })
         return json({
           status: 'pending_approval',
           pending_action_id: claim.action.id,
@@ -80,6 +96,9 @@ export const approvalTools: Tool[] = [
         })
       }
       // Approved and now used up: whatever happens next, this approval never runs again.
+      // The report also names the tool, so runToolWithOutcome's untrusted-data
+      // envelope (and its error attribution) says the content is that tool's, not confirm_action's.
+      ctx.report?.({ approvalId: claim.action.id, ran: { tool: tool.name, input } })
       return tool.execute(input, ctx)
     },
   }),

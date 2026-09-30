@@ -223,16 +223,6 @@ def bed_types_for(model: str | None) -> tuple[str, ...]:
     return BED_TYPES[known] if known is not None else tuple(BED_TYPE_LABELS)
 
 
-def nozzle_diameter_of(preset_name: str | None) -> str | None:
-    """The nozzle a printer preset names — ``"0.2"`` for ``"Bambu Lab H2C 0.2 nozzle"``.
-
-    The same suffix :func:`plate_for` strips, read rather than discarded. ``None`` for
-    a name that states no nozzle, which leaves the 3MF's placeholder in place (#126).
-    """
-    match = _NOZZLE_SUFFIX.search(preset_name.strip()) if preset_name else None
-    return match.group(1) if match else None
-
-
 def _clear_of_exclusions(
     centre: tuple[float, float],
     width: float,

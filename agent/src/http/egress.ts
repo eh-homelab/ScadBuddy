@@ -199,6 +199,27 @@ export function assertSecureUrl(url: string, label: string): URL {
   return target
 }
 
+/**
+ * `http:` or `https:` to ANY host; anything else throws EgressError. For the
+ * assistant's `http_request` tool (#827, harness/httpRequest.ts), whose reach
+ * is open until it runs in a sandbox: LAN services are mostly plain http, so
+ * the scheme check here is only "an HTTP URL, with no credentials in it".
+ * The host is still checked, resolved and pinned by `assertHostAllowed`.
+ */
+export function assertHttpUrl(url: string, label: string): URL {
+  let target: URL
+  try {
+    target = new URL(url)
+  } catch {
+    throw new EgressError(`${label} ${url} is not a URL`)
+  }
+  if (target.protocol !== 'https:' && target.protocol !== 'http:') {
+    throw new EgressError(`${label} ${url} must be an http or https URL`)
+  }
+  if (target.username || target.password) throw new EgressError(`${label} ${url} must not carry credentials`)
+  return target
+}
+
 type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void
 
 /** GETs `url` and parses the body as JSON. Every refusal or failure is an EgressError. */

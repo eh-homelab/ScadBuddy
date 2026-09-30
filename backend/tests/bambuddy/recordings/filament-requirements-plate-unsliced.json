@@ -1,0 +1,23 @@
+{
+    "file_id": 89,
+    "filename": "bag-clip-3155628dc2bb43d4940fad6dba164efc.3mf",
+    "plate_id": 1,
+    "filaments": [
+        {
+            "slot_id": 1,
+            "type": "",
+            "color": "#F505D5",
+            "used_grams": 0,
+            "used_meters": 0,
+            "used_in_plate": true
+        },
+        {
+            "slot_id": 2,
+            "type": "",
+            "color": "#C70A0A",
+            "used_grams": 0,
+            "used_meters": 0,
+            "used_in_plate": true
+        }
+    ]
+}

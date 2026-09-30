@@ -6,17 +6,14 @@ import { renderPage } from '../../test/utils'
 import { MediaButton } from './MediaButton'
 
 describe('MediaButton (#279)', () => {
-  it('closes only the Duplicate dialog opened over it on Escape', async () => {
+  it("opens a built-in's media to add to, and closes on Escape (#722)", async () => {
     const model = await api.getModel(BUILTIN_SLUG)
     const { user } = renderPage(<MediaButton model={model} />)
 
     await user.click(screen.getByRole('button', { name: 'Media' }))
-    await user.click(screen.getByRole('button', { name: 'Duplicate' }))
-    expect(screen.getByRole('dialog', { name: 'Duplicate Keychain Template' })).toBeInTheDocument()
-
-    await user.keyboard('{Escape}')
-    expect(screen.queryByRole('dialog', { name: 'Duplicate Keychain Template' })).not.toBeInTheDocument()
-    expect(screen.getByRole('dialog', { name: 'Media' })).toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: 'Media' })
+    expect(dialog).toHaveTextContent('What the template ships, then the images and videos added to it.')
+    expect(screen.getByLabelText('Add images or videos')).toBeInTheDocument()
 
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('dialog', { name: 'Media' })).not.toBeInTheDocument()

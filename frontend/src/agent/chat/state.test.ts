@@ -1,5 +1,5 @@
 import type { ServerEvent } from './protocol'
-import { chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
+import { budgetUsed, chatReducer, initialChatState, isBusy, type ChatAction, type ChatState } from './state'
 
 const you = { kind: 'browser', id: 'browser', label: 'You' } as const
 const desktop = { kind: 'bearer', id: 'tok', label: 'Claude Desktop' } as const
@@ -107,6 +107,25 @@ describe('chatReducer', () => {
     expect(isBusy(state.sessions.s1)).toBe(false)
   })
 
+  it('adds memory activity as its own item, a late retain after the turn settled included, and the same on replay', () => {
+    const events = [
+      server({ type: 'user.turn', sessionId: 's1', turnId: 'u1', text: 'hi', author: you }),
+      server({ type: 'memory', sessionId: 's1', turnId: 'u1', action: 'recall', bank: 'b', outcome: 'ok', count: 2 }),
+      server({ type: 'assistant.text.delta', sessionId: 's1', messageId: 'm1', delta: 'Hello' }),
+      server({ type: 'assistant.text.done', sessionId: 's1', messageId: 'm1' }),
+      server({ type: 'session.status', sessionId: 's1', status: 'idle' }),
+      server({ type: 'memory', sessionId: 's1', turnId: 'u1', action: 'retain', bank: 'b', outcome: 'ok' }),
+    ]
+    const state = run(events, started)
+    expect(state.sessions.s1?.status).toBe('idle')
+    expect(state.sessions.s1?.items.map((i) => i.kind)).toEqual(['user', 'memory', 'assistant', 'memory'])
+    expect(state.sessions.s1?.items[1]).toEqual({ kind: 'memory', id: 'memory-1', action: 'recall', bank: 'b', outcome: 'ok', count: 2 })
+    expect(state.sessions.s1?.items[3]).toMatchObject({ kind: 'memory', action: 'retain', outcome: 'ok' })
+    // Attaching clears the feed and the server replays the log in its order.
+    const replayed = run([{ type: 'select', sessionId: 's1' }, ...events], state)
+    expect(replayed.sessions.s1?.items).toEqual(state.sessions.s1?.items)
+  })
+
   it('drops events for sessions it never heard of', () => {
     const state = run([server({ type: 'assistant.text.delta', sessionId: 'ghost', messageId: 'm', delta: 'x' })])
     expect(state).toEqual(initialChatState)
@@ -123,6 +142,61 @@ describe('chatReducer', () => {
       started,
     )
     expect(state.sessions.s1?.items).toEqual([])
+  })
+
+  it('takes a later snapshot as a live update: new sessions first, known ones kept and refreshed', () => {
+    const state = run(
+      [
+        server({ type: 'user.turn', sessionId: 's1', turnId: 'u1', text: 'hi', author: you }),
+        server({
+          type: 'sessions.snapshot',
+          sessions: [
+            { sessionId: 'x', title: 'Bin', origin: 'mcp', owner: desktop, status: 'running' },
+            { sessionId: 's1', title: 'Mine', origin: 'chat', owner: you, status: 'idle' },
+          ],
+        }),
+      ],
+      started,
+    )
+    expect(state.order).toEqual(['x', 's1'])
+    expect(state.activeId).toBe('s1')
+    // The open session's status comes from its live events, which are newer than
+    // a list read before them; the rest of its summary is refreshed.
+    expect(state.sessions.s1).toMatchObject({ title: 'Mine', status: 'running' })
+    // The transcript already on screen is kept.
+    expect(state.sessions.s1?.items).toHaveLength(1)
+    const later = run(
+      [
+        server({
+          type: 'sessions.snapshot',
+          sessions: [
+            { sessionId: 'x', title: 'Bin', origin: 'mcp', owner: desktop, status: 'idle' },
+            { sessionId: 's1', title: 'Mine', origin: 'chat', owner: you, status: 'idle' },
+          ],
+        }),
+      ],
+      state,
+    )
+    expect(later.sessions.x?.status).toBe('idle')
+  })
+
+  it('drops the sessions a later snapshot leaves out, but never the open one', () => {
+    const withOther = run(
+      [server({ type: 'session.started', sessionId: 'x', origin: 'mcp', owner: desktop })],
+      started,
+    )
+    const state = run(
+      [
+        server({
+          type: 'sessions.snapshot',
+          sessions: [{ sessionId: 'y', title: 'New', origin: 'mcp', owner: desktop, status: 'idle' }],
+        }),
+      ],
+      withOther,
+    )
+    expect(state.order).toEqual(['y', 's1'])
+    expect(Object.keys(state.sessions).sort()).toEqual(['s1', 'y'])
+    expect(state.activeId).toBe('s1')
   })
 
   it('records a handoff', () => {
@@ -142,5 +216,72 @@ describe('chatReducer', () => {
     )
     expect(state.sessions.s1?.items).toEqual([{ kind: 'error', id: 'error-0', message: 'busy' }])
     expect(state.notice).toBe('down')
+  })
+
+  it('says plainly when the agent turned a message away for its connection limits', () => {
+    const state = run(
+      [
+        server({ type: 'error', sessionId: 's1', code: 'busy', message: 'too many messages waiting' }),
+        { type: 'started-new' },
+        server({ type: 'error', code: 'rate_limited', message: 'too many new chats' }),
+      ],
+      started,
+    )
+    const [busy] = state.sessions.s1?.items ?? []
+    expect(busy).toMatchObject({ kind: 'error', message: expect.stringMatching(/still working.*send it again/) })
+    expect(state.notice).toMatch(/Too many new chats.*Wait a minute/)
+    expect(state.awaitingStart).toBe(false)
+  })
+
+  describe('the session budget (#790)', () => {
+    const budgeted = run([
+      { type: 'started-new' },
+      server({ type: 'session.started', sessionId: 's1', origin: 'chat', owner: you, budgetUsd: 1 }),
+    ])
+
+    it('starts at nothing spent, and follows each turn’s result', () => {
+      expect(budgeted.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
+      const state = run([server({ type: 'session.result', sessionId: 's1', costUsd: 0.74, turns: 2, budgetUsd: 1 })], budgeted)
+      expect(state.sessions.s1?.budget).toEqual({ costUsd: 0.74, budgetUsd: 1 })
+      expect(budgetUsed(state.sessions.s1)).toBeCloseTo(0.74)
+      expect(state.sessions.s1?.budgetSpent).toBe(false)
+    })
+
+    it('has no budget for a session whose log never said one', () => {
+      expect(started.sessions.s1?.budget).toBeUndefined()
+      expect(budgetUsed(started.sessions.s1)).toBeUndefined()
+    })
+
+    it.each(['error_max_budget_usd', 'budget_exhausted'])('marks it spent on %s, instead of adding the error', (code) => {
+      const state = run(
+        [
+          server({ type: 'session.result', sessionId: 's1', costUsd: 1.016, turns: 3, budgetUsd: 1 }),
+          server({ type: 'error', sessionId: 's1', code, message: 'raw text' }),
+        ],
+        budgeted,
+      )
+      expect(state.sessions.s1?.budgetSpent).toBe(true)
+      expect(state.sessions.s1?.items.filter((i) => i.kind === 'error')).toEqual([])
+    })
+
+    it('is no longer spent once the budget is raised', () => {
+      const state = run(
+        [
+          server({ type: 'session.budget', sessionId: 's1', costUsd: 1.016, budgetUsd: 1 }),
+          server({ type: 'error', sessionId: 's1', code: 'budget_exhausted', message: 'spent' }),
+          server({ type: 'session.budget', sessionId: 's1', costUsd: 1.016, budgetUsd: 2 }),
+        ],
+        budgeted,
+      )
+      expect(state.sessions.s1?.budget).toEqual({ costUsd: 1.016, budgetUsd: 2 })
+      expect(state.sessions.s1?.budgetSpent).toBe(false)
+    })
+
+    it('recomputes "spent" from the replay on attach, keeping the numbers', () => {
+      const spent = run([server({ type: 'error', sessionId: 's1', code: 'budget_exhausted', message: 'spent' })], budgeted)
+      const reattached = run([{ type: 'select', sessionId: 's1' }], spent)
+      expect(reattached.sessions.s1?.budgetSpent).toBe(false)
+      expect(reattached.sessions.s1?.budget).toEqual({ costUsd: 0, budgetUsd: 1 })
+    })
   })
 })
