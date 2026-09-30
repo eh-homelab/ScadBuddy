@@ -304,8 +304,8 @@ async def _drain(
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
-    """Kill the child and everything it spawned: a template activity's helper, or a
-    fontconfig cache rebuild openscad forked (spec §3.4, a phase-1 requirement)."""
+    """Kill the child and everything it spawned: a plain kill() on the parent would
+    orphan its children (spec 2026-09-27 §3.4, a phase-1 requirement)."""
     with suppress(ProcessLookupError):
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
 

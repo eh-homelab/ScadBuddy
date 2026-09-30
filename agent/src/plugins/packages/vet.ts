@@ -113,6 +113,21 @@ const PACKAGE_HOOK_EVENTS = new Set([
 ])
 const MAX_REPORTED_PROBLEMS = 50
 
+/**
+ * The fields of a hook or MCP server config whose key or value holds a `$`,
+ * as dotted paths (`headers.Authorization`), so a refusal says where. Every
+ * field is scanned, not just the ones known to expand: fail closed.
+ */
+export function dollarFields(value: unknown, at = ''): string[] {
+  if (typeof value === 'string') return value.includes('$') ? [at || '(value)'] : []
+  if (Array.isArray(value)) return value.flatMap((v, i) => dollarFields(v, `${at}[${i}]`))
+  if (!isRecord(value)) return []
+  return Object.entries(value).flatMap(([k, v]) => {
+    const field = at ? `${at}.${k}` : k
+    return k.includes('$') ? [field] : dollarFields(v, field)
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -366,7 +381,10 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
       if (type === 'mcp_tool') {
         problems.push(`${where}: ${event} has an mcp_tool hook, which calls a tool outside the approval seam`)
       } else if (type === 'http' && isRecord(handler)) {
-        if (JSON.stringify(handler).includes('$')) problems.push(`${where}: ${event} http hook references a variable ($)`)
+        const dollars = dollarFields(handler)
+        if (dollars.length) {
+          problems.push(`${where}: ${event} http hook references a variable ($) in ${dollars.join(', ')}`)
+        }
         if (handler.allowedEnvVars !== undefined) problems.push(`${where}: ${event} http hook sets allowedEnvVars`)
         if (typeof handler.url === 'string') {
           hook.url = handler.url
@@ -383,8 +401,11 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   for (const { where, map } of declared.mcp) {
     for (const [server, config] of mcpEntries(map)) {
       if (!isRecord(config)) continue // pluginProblems reports it
-      if (JSON.stringify(config).includes('$')) {
-        problems.push(`${where}: MCP server "${server}" references a variable ($), which could expand to a secret`)
+      const dollars = dollarFields(config)
+      if (dollars.length) {
+        problems.push(
+          `${where}: MCP server "${server}" references a variable ($) in ${dollars.join(', ')}, which could expand to a secret`,
+        )
       }
       if (config.headersHelper !== undefined) problems.push(`${where}: MCP server "${server}" has a headersHelper command`)
       if (config.type !== NON_COMMAND_MCP_TYPE && config.type !== undefined && config.command === undefined) {

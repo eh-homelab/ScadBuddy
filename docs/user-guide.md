@@ -171,19 +171,15 @@ stored on ScadBuddy's server and is never sent to the browser.
    | Scope | Used for |
    |---|---|
    | **Manage Library** | uploading 3MFs, library folders, slicing, presets, and the sidebar External Link |
-   | **Manage Queue** | queueing prints and running slicer pipelines |
+   | **Manage Queue** | queueing prints from the print picker |
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
 
-   Which scope Bambuddy checks for `/slicer-pipelines/` hasn't been confirmed:
-   ScadBuddy assumes Manage Queue. If a call is refused, ScadBuddy's error names the
-   scope that call asked for.
-
 2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
    **Test connection**.
-3. Under **Where files go**, choose the library folder, the slicer pipeline the send
-   bar runs and the printer. That one pipeline is used for every model; a per-model
-   pipeline saved by an older ScadBuddy is no longer used.
+3. Under **Where files go**, choose the library folder and the printer. **Send to
+   Bambuddy** lays its upload out for that printer's plate, and the print picker opens
+   on it.
 4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
    should link to; ScadBuddy can't work it out from behind a proxy). Then press
    **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
@@ -192,8 +188,13 @@ stored on ScadBuddy's server and is never sent to the browser.
    a second one.
 5. Press **Save changes**.
 
+If the Bambuddy URL is one only ScadBuddy's server can reach (an in-cluster address,
+say), list the addresses browsers use under **Bambuddy web URLs**, comma-separated.
+"Open in Bambuddy" links use the first, or, when ScadBuddy is open inside one of the
+others, that one.
+
 The same values can be set on first start with `SCADBUDDY_BAMBUDDY_URL`,
-`SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
+`SCADBUDDY_BAMBUDDY_WEB_URLS`, `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL`. Once settings have been
 saved from the UI, the saved values take precedence.
 
 ![Settings](images/settings.png)
@@ -222,10 +223,14 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
 
 - **Generate** saves the current render as an output, with its parameters and a
   thumbnail.
-- **Download 3MF** downloads that output.
-- **Send to Bambuddy** uploads the output to the library, or slices and queues it.
-  If ScadBuddy's own URL is set, the library file gets an "Edit in ScadBuddy" link
-  that opens these parameters again.
+- **Download 3MF** downloads that output. When the template declares default slicer
+  settings (`print_settings` in its `model.json`, such as the name keychain's prime
+  tower), the file carries them, and Bambu Studio shows them as changes to the system
+  process. **Print** slices with them too.
+- **Send to Bambuddy** uploads the output to the library, laid out for the printer set
+  in Settings, or on the default plate without one. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
+  is set, the library file gets an "Edit in ScadBuddy" link that opens these parameters
+  again.
 - **Print** opens the print picker.
 
 The button at the top right of the preview shows it full screen, with the plate and
@@ -242,8 +247,8 @@ it, the view fills the frame instead.
 The print picker is spool-first: you choose the spools, the nozzle size, a quality
 tier and a plate, and ScadBuddy derives every Bambu printer, process and filament
 preset itself, then slices and queues through Bambuddy. There is no slicer pipeline to
-pick or maintain here — pipelines still exist in Bambuddy, and the one-click send bar
-and Settings' default pipeline still use one, until #312.
+pick or maintain. Pipelines still exist in Bambuddy, but ScadBuddy doesn't use them, and
+**Print** is the only way it prints.
 
 Top to bottom, the dialog is:
 
@@ -256,14 +261,27 @@ Top to bottom, the dialog is:
   printer set in Settings, else the first active printer — skipping a remembered or
   Settings printer that is no longer active. Presets are only resolved for the H2C, so
   printing on any other model is refused before anything is sliced.
-- **Filament** — the same spool-inventory picker the send bar uses. Loaded spools are
+- **Filament** — a spool-inventory picker. Loaded spools are
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
   presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
-  the first option.
+  the first option. The slicer picks each color's extruder, and
+  ScadBuddy can't steer it. So when only one nozzle is the chosen size, a multi-color
+  print is refused before upload (the slicer would put a color on the other nozzle and
+  the printer would pause at the first layer), and a one-color print warns you. With the
+  Filament Track Switch fitted, any spool can reach either nozzle, and a loaded spool's
+  badge only says where it rests ("rests on L"). Without the switch,
+  each AMS feeds one side: a spool on a side whose nozzle is another size is grayed out
+  with the reason (for example "L · 0.4 fitted"), and the dialog never opens on one.
+  If neither nozzle is the chosen size, the print is refused before upload. A spare
+  hotend of the chosen size in the H2C's rack counts for one side, since the printer
+  swaps it on for the print.
 - **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
   there is no per-side size control. Sizes installed in the rack are marked
-  "(installed)"; picking one that isn't warns you to install it first. Advanced adds
+  "(installed)". A size neither mounted nozzle has, and the rack holds no spare of, is
+  refused before upload (on a single-nozzle printer, a size its nozzle isn't); if the
+  printer doesn't report what's mounted, picking one the rack lacks warns you to install
+  it first. Advanced adds
   Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
   choice slices as Standard and the dialog says so: "Bambuddy slices this as Standard
   flow; High Flow presets aren't supported by Bambuddy yet."
@@ -284,7 +302,9 @@ Top to bottom, the dialog is:
   completion.
 
 **Errors that keep the dialog open.** A combination ScadBuddy cannot turn into presets —
-a filament slot with no resolvable preset, or mixed nozzle sizes — comes back as an
+a filament slot with no resolvable preset, mixed nozzle sizes, no nozzle of the chosen
+size, a multi-color print when only one nozzle is that size, or a spool wired to the
+side whose nozzle doesn't match — comes back as an
 error shown above Print and disables the button until something changes. Any other
 failure (Bambuddy unreachable, a timeout) shows the same way but leaves Print enabled to
 retry as it stands.
@@ -295,6 +315,24 @@ model, the same way print options and copies already are. The plate type is reme
 per **printer**, not per model. Reopening the dialog restores all of it, and opens
 straight into Advanced mode if the remembered choice is a named process or a High Flow
 flow — either would otherwise apply unseen from Simple mode.
+
+### Library
+
+The **Library** page lists everything already in Bambuddy's library, by folder. By
+default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
+shown without **Print**, since a sliced file is printed from Bambuddy directly.
+
+**Print** on a file opens the same print picker an output uses. The file itself is
+never touched: it prints exactly as its author left it, never replated for the
+printer (#105) or recolored for the spools (#476), and never uploaded again. The
+nozzle refusals above still apply, since they read the printer, not the file.
+
+Choices are remembered per library file, the way an output's are remembered per
+model. There's no ScadBuddy progress panel or History entry for a library print —
+Bambuddy's queue and archives are the record — so once it's queued, the dialog
+links to Bambuddy's queue instead. The queue item is tagged with the last-used
+project, the same as an output's.
 
 ### History and versions
 

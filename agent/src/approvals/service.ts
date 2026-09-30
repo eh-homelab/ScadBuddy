@@ -1,5 +1,6 @@
 import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import type { Tier } from '../auth/principal.js'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import type { Kek } from '../secrets.js'
@@ -14,6 +15,7 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -41,7 +43,8 @@ import { scrubForLog } from '../sessions/sdkEvents.js'
 //     same input hash, once, before `usable_until`). If the session cannot
 //     start that turn, the approval is voided at once and the session gets an
 //     `error` event saying so. This is the "deny-then-resume" fallback of spec
-//     §3.2, needed only for orphans;
+//     §3.2, needed only for orphans. The resumed turn runs with the tiers the
+//     asking turn had (`requested_tiers`, #300), never more;
 //   - deny → recorded; the session goes back to `idle`.
 //   Resuming claims the session, and a new turn cancels the session's other
 //   pending approvals (below): approving one of several orphans of the same
@@ -132,6 +135,12 @@ export type ApprovalRecord = {
   inputHash: string
   tier: RiskTier
   requestedBy: Owner
+  /**
+   * The tiers the asking turn ran with, when its sender's were passed in
+   * (sessions/manager.ts SendOptions.tiers); a resumed turn gets no more.
+   * Null: the owner's default applied.
+   */
+  requestedTiers: Tier[] | null
   createdAt: string
   expiresAt: string
   decision: Decision | null
@@ -198,6 +207,11 @@ export type ApprovalServiceDeps = {
    */
   hashKey?: Buffer
   pollMs?: number
+  /**
+   * The audit log (#258, audit/log.ts): every decision, expiry, cancellation
+   * and void is recorded as an `approval` row.
+   */
+  audit?: AuditSink
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -211,6 +225,8 @@ export type GateContext = {
   turnId: string
   /** The principal the turn runs for; recorded as `requested_by`. */
   requestedBy: Owner
+  /** The turn's tiers, when not the owner's default; recorded as `requested_tiers`. */
+  requestedTiers?: readonly Tier[]
   /** Redacted from the stored summary and the events (the turn's credential). */
   secrets: () => readonly string[]
   /** The turn's own abort signal (interrupt, shutdown). */
@@ -229,6 +245,7 @@ type Row = {
   requested_by_kind: Owner['kind']
   requested_by_id: string
   requested_by_label: string
+  requested_tiers: Tier[] | null
   created_at: Date
   expires_at: Date
   decision: Decision | null
@@ -245,7 +262,7 @@ type Row = {
 }
 
 const COLUMNS = `id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-  requested_by_kind, requested_by_id, requested_by_label, created_at, expires_at, decision,
+  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, created_at, expires_at, decision,
   decided_by_kind, decided_by_id, decided_by_label, decided_at, reason, usable_until, resume_turn_id,
   consumed_at, revoked_at, (decision IS NULL AND expires_at <= now()) AS due`
 
@@ -263,6 +280,7 @@ function record(row: Row): ApprovalRecord {
     inputHash: row.input_hash,
     tier: row.tier,
     requestedBy: { kind: row.requested_by_kind, id: row.requested_by_id, label: row.requested_by_label },
+    requestedTiers: row.requested_tiers,
     createdAt: row.created_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     decision: row.decision,
@@ -333,6 +351,8 @@ function refusal(approval: ApprovalRecord): string {
 type SessionAccess = {
   owner: Owner
   creator: Pick<Owner, 'kind' | 'id'>
+  /** A live handoff offer's target, who may see the session too (sessions/protocol.ts `canSee`). */
+  offer: { to: Pick<Owner, 'kind' | 'id'> } | null
   status: string
   turnId: string | null
   turnActive: boolean
@@ -346,6 +366,8 @@ export type CreateApproval = {
   input: Record<string, unknown>
   tier: RiskTier
   requestedBy: Owner
+  /** See GateContext.requestedTiers. */
+  requestedTiers?: readonly Tier[]
   secrets?: readonly string[]
 }
 
@@ -354,6 +376,14 @@ export type DecideOptions = {
   sessionId?: string
   /** When given, the hash the decider was shown; a mismatch is refused. */
   inputHash?: string
+  /** For the audit log: the decider's address and the surface it decided on ('http' when omitted). */
+  clientIp?: string | undefined
+  surface?: AuditSurface
+}
+
+/** An approval decision as the audit log's outcome: approved ok, denied denied, the rest refused. */
+function auditOutcome(decision: Decision): AuditOutcome {
+  return decision === 'approved' ? 'ok' : decision === 'denied' ? 'denied' : 'refused'
 }
 
 export type RevokeFilter = {
@@ -408,18 +438,24 @@ export class ApprovalService {
         owner_label: string
         creator_kind: Owner['kind']
         creator_id: string
+        offer_kind: Owner['kind'] | null
+        offer_id: string | null
         status: string
         turn_id: string | null
         turn_active: boolean
       }[]
     >`
-      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id, status, turn_id,
+      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id,
+             CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
+             CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id,
+             status, turn_id,
              (turn_id IS NOT NULL AND lease_until > now()) AS turn_active
       FROM ai_sessions WHERE id = ${id}`
     if (!row) return undefined
     return {
       owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
       creator: { kind: row.creator_kind, id: row.creator_id },
+      offer: row.offer_kind && row.offer_id ? { to: { kind: row.offer_kind, id: row.offer_id } } : null,
       status: row.status,
       turnId: row.turn_id,
       turnActive: row.turn_active,
@@ -481,6 +517,14 @@ export class ApprovalService {
     return rows.map(record)
   }
 
+  /** The latest approval a session's tool call asked for, if any (the audit log's link to it). */
+  async idForToolUse(sessionId: string, toolUseId: string): Promise<string | undefined> {
+    const [row] = await this.deps.sql<{ id: string }[]>`
+      SELECT id FROM ai_approvals WHERE session_id = ${sessionId} AND tool_use_id = ${toolUseId}
+      ORDER BY created_at DESC LIMIT 1`
+    return row?.id
+  }
+
   async hasPending(sessionId: string): Promise<boolean> {
     const [row] = await this.deps.sql<{ n: number }[]>`
       SELECT count(*)::int AS n FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL`
@@ -500,8 +544,8 @@ export class ApprovalService {
     const { requestedBy: by } = request
     const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                 requested_by_kind, requested_by_id, requested_by_label, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + ($12 * interval '1 second'))
+                                 requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 * interval '1 second'))
        RETURNING ${COLUMNS}`,
       [
         randomUUID(),
@@ -515,6 +559,7 @@ export class ApprovalService {
         by.kind,
         by.id,
         by.label,
+        request.requestedTiers ? [...request.requestedTiers] : null,
         ttl,
       ],
     )
@@ -525,16 +570,20 @@ export class ApprovalService {
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
     const summary = summariseInput(request.tool, request.input, secrets)
-    const row = await this.insert(this.deps.sql, request, summary)
-    if (!row) throw new Error('approval vanished after insert')
-    const approval = record(row)
-    const id = approval.id
-    if (approval.sessionId !== null) {
+    // The row and its `approval.required` commit together: a decision can only
+    // see the row once it has committed, so its `approval.resolved` cannot be
+    // logged before the event that asked for it.
+    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const row = await this.insert(tx, request, summary)
+      if (!row) throw new Error('approval vanished after insert')
+      const created = record(row)
+      if (created.sessionId === null) return created
       const tail: ServerEvent[] = [
         event({
           type: 'approval.required',
-          sessionId: approval.sessionId,
-          id,
+          sessionId: created.sessionId,
+          id: created.id,
           tool: request.toolUseId,
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
@@ -542,15 +591,19 @@ export class ApprovalService {
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
-        const moved = await this.deps.sql`
+        const moved = await tx`
           UPDATE ai_sessions SET status = 'waiting_approval', updated_at = now()
-          WHERE id = ${approval.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
+          WHERE id = ${created.sessionId} AND turn_id = ${request.turnId} AND status <> 'waiting_approval'`
         if (moved.count > 0) {
-          tail.push(event({ type: 'session.status', sessionId: approval.sessionId, status: 'waiting_approval' }))
+          tail.push(event({ type: 'session.status', sessionId: created.sessionId, status: 'waiting_approval' }))
         }
       }
-      await this.append(approval.sessionId, tail, secrets)
-    }
+      const events = tail.map((e) => scrubForLog(e, secrets))
+      logged = { sessionId: created.sessionId, events, seqs: await this.deps.events.append(created.sessionId, events, tx) }
+      return created
+    })
+    // Committed: wake followers, and announce it on the bus (#300).
+    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
     return approval
   }
 
@@ -560,30 +613,78 @@ export class ApprovalService {
    * row. Emits `approval.resolved` and wakes a waiter on this replica.
    * Undefined when it was already decided (or, for approve/deny, has expired).
    */
-  private async settle(id: string, decision: Decision, by: Owner | undefined, reason: string | null): Promise<ApprovalRecord | undefined> {
+  private async settle(
+    id: string,
+    decision: Decision,
+    by: Owner | undefined,
+    reason: string | null,
+    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+  ): Promise<ApprovalRecord | undefined> {
     const ttl = decision === 'approved' ? await this.expirySeconds() : 0
-    const [row] = await this.deps.sql.unsafe<Row[]>(
-      `UPDATE ai_approvals
-       SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
-           decided_at = now(), reason = $6,
-           usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
-       WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
-       RETURNING ${COLUMNS}`,
-      [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
-    )
-    if (!row) return undefined
-    const approval = record(row)
-    await this.append(approval.sessionId, [
-      event({
-        type: 'approval.resolved',
-        sessionId: approval.sessionId ?? '-',
-        id,
-        approved: decision === 'approved',
-        ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
-      }),
-    ])
+    // The decision and its `approval.resolved` commit together: a parked gate
+    // polling the row must not see the decision (and log the session's
+    // `running`) before the event that reports it is in the log.
+    let logged: { sessionId: string; events: ServerEvent[]; seqs: number[] } | undefined
+    const approval = await this.deps.sql.begin(async (tx) => {
+      const [row] = await tx.unsafe<Row[]>(
+        `UPDATE ai_approvals
+         SET decision = $2, decided_by_kind = $3, decided_by_id = $4, decided_by_label = $5,
+             decided_at = now(), reason = $6,
+             usable_until = CASE WHEN $2 = 'approved' THEN now() + ($7 * interval '1 second') END
+         WHERE id = $1 AND decision IS NULL AND ($2 IN ('expired', 'cancelled') OR expires_at > now())
+         RETURNING ${COLUMNS}`,
+        [id, decision, by?.kind ?? null, by?.id ?? null, by?.label ?? null, reason, ttl],
+      )
+      if (!row) return undefined
+      const settled = record(row)
+      if (settled.sessionId !== null) {
+        const resolved = event({
+          type: 'approval.resolved',
+          sessionId: settled.sessionId,
+          id,
+          approved: decision === 'approved',
+          ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
+        })
+        const events = [scrubForLog(resolved, [])]
+        logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
+      }
+      return settled
+    })
+    if (!approval) return undefined
+    // Committed: wake followers, and announce it on the bus (#300).
+    if (logged) this.deps.events.committed(logged.sessionId, logged.events, logged.seqs)
     this.wakeWaiters(id)
+    await this.audited(approval, decision, auditOutcome(decision), by, reason, where)
     return approval
+  }
+
+  /** One `approval` row in the audit log (#258). */
+  private async audited(
+    approval: ApprovalRecord,
+    action: string,
+    outcome: AuditOutcome,
+    by: Owner | undefined,
+    reason: string | null,
+    where: Pick<DecideOptions, 'clientIp' | 'surface'> = {},
+  ): Promise<void> {
+    await this.deps.audit?.record({
+      kind: 'approval',
+      action,
+      surface: by ? (where.surface ?? 'http') : 'system',
+      actor: by ?? SYSTEM_ACTOR,
+      clientIp: where.clientIp,
+      sessionId: approval.sessionId,
+      turnId: approval.turnId,
+      toolUseId: approval.toolUseId,
+      tier: approval.tier,
+      inputHash: approval.inputHash,
+      inputSummary: approval.inputSummary,
+      approvalId: approval.id,
+      outcome,
+      detail: `${approval.tool}${reason ? `: ${reason}` : ''} (requested by ${approval.requestedBy.label})`,
+      startedAt: new Date(approval.createdAt),
+      finishedAt: new Date(),
+    })
   }
 
   /**
@@ -639,7 +740,10 @@ export class ApprovalService {
         `approval ${id} is for a different input than the one you were shown; the call needs a new approval`,
       )
     }
-    const settled = await this.settle(id, approve ? 'approved' : 'denied', principal, null)
+    const settled = await this.settle(id, approve ? 'approved' : 'denied', principal, null, {
+      clientIp: options.clientIp,
+      ...(options.surface ? { surface: options.surface } : {}),
+    })
     if (!settled) {
       const now = await this.row(id)
       if (now?.due) {
@@ -715,6 +819,10 @@ export class ApprovalService {
         }),
       ])
       this.wakeWaiters(r.id)
+      if (this.deps.audit) {
+        const voided = await this.row(r.id)
+        if (voided) await this.audited(voided, 'voided', 'refused', undefined, reason)
+      }
     }
   }
 
@@ -935,7 +1043,8 @@ export class ApprovalService {
       const input = structuredClone(request.input)
       const hash = this.hash(request.toolName, input)
       // This turn resumes an orphan approved for this very call: use it once.
-      if (await this.consume(context.sessionId, context.turnId, request.toolName, hash)) return { approved: true, input }
+      const resumed = await this.consume(context.sessionId, context.turnId, request.toolName, hash)
+      if (resumed) return { approved: true, input, approvalId: resumed.id, decision: 'approved' }
 
       const approval = await this.create({
         sessionId: context.sessionId,
@@ -945,6 +1054,7 @@ export class ApprovalService {
         input,
         tier: request.tier,
         requestedBy: context.requestedBy,
+        ...(context.requestedTiers ? { requestedTiers: context.requestedTiers } : {}),
         secrets: context.secrets(),
       })
       // An abort (interrupt, shutdown) ends the wait and leaves the row
@@ -952,13 +1062,14 @@ export class ApprovalService {
       // (sessions/manager.ts finish). The SDK has dropped the request by then.
       const decided = await this.waitFor(approval.id, AbortSignal.any([context.signal, request.signal]))
       await this.refreshStatus(context.sessionId)
+      const source = { approvalId: decided.id, decision: decided.decision ?? undefined }
       if (decided.decision === 'approved') {
-        if (await this.consumeById(decided.id)) return { approved: true, input }
+        if (await this.consumeById(decided.id)) return { approved: true, input, ...source }
         // Voided between the decision and now (interrupt, handoff).
         const now = await this.row(decided.id)
-        return { approved: false, message: refusal(now ?? decided) }
+        return { approved: false, message: refusal(now ?? decided), ...source }
       }
-      return { approved: false, message: refusal(decided) }
+      return { approved: false, message: refusal(decided), ...source }
     }
   }
 

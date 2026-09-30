@@ -26,6 +26,25 @@ function checkRoute(route: string): string {
 }
 
 /**
+ * The option of a select that `value` names: its value, or else the one option whose
+ * visible label it is (the snapshot and the screen show labels, and a preset's value
+ * can be an opaque id).
+ */
+function optionValue(select: HTMLSelectElement, label: string, value: string): string {
+  const options = [...select.options]
+  if (options.some((option) => option.value === value)) return value
+  const byLabel = options.filter((option) => option.text.trim() === value.trim())
+  if (byLabel.length === 1) return (byLabel[0] as HTMLOptionElement).value
+  const listed = options.map((option) => `${JSON.stringify(option.text.trim())} (${JSON.stringify(option.value)})`).join(', ')
+  throw new AgentToolError(
+    'invalid_args',
+    byLabel.length > 1
+      ? `${byLabel.length} options of "${label}" are labelled "${value}"; pass one's value: ${listed}.`
+      : `"${value}" is not one of the options of "${label}" (label (value)): ${listed}.`,
+  )
+}
+
+/**
  * The tools every route has — `navigate`, `snapshot` and the fallbacks `click` and
  * `fill` — registered by the app shell, which is mounted under the router for as long as
  * the app is. It also tells the bridge where the router is.
@@ -104,14 +123,9 @@ export function useGlobalAgentTools() {
       if (isDisabled(element) || (element as HTMLInputElement).readOnly) {
         throw new AgentToolError('invalid_args', `"${label}" is not editable.`)
       }
-      if (element instanceof HTMLSelectElement && ![...element.options].some((option) => option.value === value)) {
-        throw new AgentToolError(
-          'invalid_args',
-          `"${value}" is not one of the options of "${label}": ${[...element.options].map((option) => JSON.stringify(option.value)).join(', ')}.`,
-        )
-      }
+      const target = element instanceof HTMLSelectElement ? optionValue(element, label, value) : value
       touch(element)
-      setControlValue(element, value)
+      setControlValue(element, target)
       return { filled: nameOf(element), value: element.value }
     },
   })

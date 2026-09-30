@@ -10,6 +10,7 @@ import {
   AGENT_ACTOR_HEADER,
   BROWSER_TOOL_TIERS,
   DISALLOWED_BROWSER_TOOLS,
+  type HeadlessBrowserOptions,
   materializeHeadlessBrowser,
   SERVER_NAME,
 } from '../src/harness/headlessBrowser.js'
@@ -35,7 +36,11 @@ type ToolResult = { content?: { type: string; text?: string }[]; isError?: boole
  * the session's cwd, which is separate from the browser directory as in
  * production (stateDirs.ts `sessionBrowserDir`).
  */
-async function connect(backendUrl: string, sessionId = randomUUID()) {
+async function connect(
+  backendUrl: string,
+  sessionId = randomUUID(),
+  extra: Partial<Pick<HeadlessBrowserOptions, 'publicUrl' | 'browserAllowedOrigins' | 'approvedOrigins'>> = {},
+) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pw-'))
   const cwd = path.join(root, 'cwd')
   await mkdir(cwd)
@@ -43,6 +48,7 @@ async function connect(backendUrl: string, sessionId = randomUUID()) {
     sessionId,
     backendUrl,
     dir: path.join(root, 'browser'),
+    ...extra,
     ...chromium,
   })
   const mcp = JSON.parse(readFileSync(path.join(plugin.pluginDir, '.mcp.json'), 'utf8')) as {
@@ -80,19 +86,23 @@ const marker = (h: Hit | undefined) => h?.headers[AGENT_ACTOR_HEADER.toLowerCase
 describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromium ? '' : ' (skipped: no Chromium)'}`, () => {
   let ui: PageServer
   let other: PageServer
+  let third: PageServer
 
   beforeAll(async () => {
     other = await startOtherOrigin()
+    third = await startOtherOrigin()
     ui = await startUi(other.origin)
   })
   afterEach(async () => {
     await Promise.all(clients.splice(0).map((c) => c.close()))
     ui.hits.length = 0
     other.hits.length = 0
+    third.hits.length = 0
   })
   afterAll(async () => {
     await ui.close()
     await other.close()
+    await third.close()
   })
 
   it('offers the core tools, including the four the harness must disallow', async () => {
@@ -118,7 +128,7 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(environ).toContain(`HOME=${path.join(path.dirname(plugin.pluginDir), 'home')}`)
   }, 60_000)
 
-  it('sends the marker on every request, and a page fetch cannot replace it', async () => {
+  it('sends the marker on every request to the backend, and a page fetch cannot replace it', async () => {
     const { call, sessionId } = await connect(ui.origin)
     expect((await call('browser_navigate', { url: `${ui.origin}/` })).isError).toBe(false)
     const snap = (await call('browser_snapshot')).text
@@ -130,13 +140,77 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
     expect(marker(ui.hits.find((h) => h.url === '/api/v1/prints'))).toBe(sessionId)
   }, 60_000)
 
-  it('blocks page JavaScript from reaching another origin', async () => {
+  it('blocks page JavaScript from reaching another origin, by fetch or WebSocket', async () => {
     const { call } = await connect(ui.origin)
     await call('browser_navigate', { url: `${ui.origin}/` })
     const snap = (await call('browser_snapshot')).text
     await call('browser_click', { element: 'Probe', target: refOf(snap, 'button', 'Probe') })
     await call('browser_wait_for', { text: 'probe blocked' })
+    await call('browser_click', { element: 'Socket', target: '#socket' })
+    await call('browser_wait_for', { text: 'socket closed' })
     expect(other.hits).toEqual([])
+    // Closed by the request guard before any connection was tried: Chromium
+    // logs no failed connection (compare the approved case below).
+    expect((await call('browser_console_messages')).text).not.toContain('WebSocket connection to')
+  }, 60_000)
+
+  // SCADBUDDY_BROWSER_ALLOWED_ORIGINS (browserOrigins.ts): what the request
+  // guard lets through once the harness has recorded an origin as approved.
+  // The approval itself is the harness's (headlessBrowser.test.ts, the session
+  // e2e test); here the plugin's approve() stands in for it, mid-session, as
+  // run.ts calls it.
+
+  it('reaches an approved origin without the marker, and still marks the backend', async () => {
+    const { call, plugin, sessionId } = await connect(ui.origin, randomUUID(), { browserAllowedOrigins: '*' })
+    // Not approved yet: the guard refuses it even though the variable allows it.
+    expect((await call('browser_navigate', { url: `${other.origin}/before` })).text).toContain('Blocked')
+    expect(other.hits).toEqual([])
+    plugin.approve(other.origin)
+    const opened = await call('browser_navigate', { url: `${other.origin}/page` })
+    expect(opened.text).toContain('Page Title: Other origin')
+    // The backend's page fetching the approved origin: through, unmarked.
+    await call('browser_navigate', { url: `${ui.origin}/` })
+    await call('browser_click', { element: 'Probe', target: '#probe' })
+    await call('browser_wait_for', { text: 'probe reached' })
+    expect(other.hits.map((h) => h.url)).toEqual(['/page', '/probe'])
+    for (const hit of other.hits) expect(marker(hit)).toBeUndefined()
+    expect(ui.hits.length).toBeGreaterThan(0)
+    for (const hit of ui.hits) expect(marker(hit)).toBe(sessionId)
+    // A WebSocket to it is handed to Chromium now. Measured: Chromium then
+    // refuses it itself (net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS), since
+    // a page the guard fulfilled has no address space of its own and this
+    // target is loopback; what matters here is that the guard let it try.
+    await call('browser_click', { element: 'Socket', target: '#socket' })
+    await call('browser_wait_for', { text: 'socket closed' })
+    expect((await call('browser_console_messages')).text).toContain(
+      `WebSocket connection to '${other.origin.replace(/^http/, 'ws')}/socket' failed`,
+    )
+  }, 60_000)
+
+  it('follows a redirect to an approved origin, and refuses one from it to an unapproved origin', async () => {
+    const { call } = await connect(ui.origin, randomUUID(), {
+      browserAllowedOrigins: `${other.origin}, ${third.origin}`,
+      approvedOrigins: [other.origin],
+    })
+    // The backend redirecting to the approved origin lands there.
+    const away = await call('browser_navigate', { url: `${ui.origin}/redirect-away` })
+    await call('browser_wait_for', { time: 1 })
+    expect(away.isError).toBe(false)
+    expect(other.hits.map((h) => [h.url, marker(h)])).toEqual([['/', undefined]])
+    // The approved origin redirecting to one that is allowed but not approved: refused.
+    const onward = await call('browser_navigate', { url: `${other.origin}/redirect?to=${encodeURIComponent(`${third.origin}/`)}` })
+    expect(onward.text).toContain('Blocked')
+    await call('browser_wait_for', { time: 1 })
+    expect(third.hits).toEqual([])
+  }, 60_000)
+
+  it('turns a navigation to an alias of the backend into one to the backend', async () => {
+    // `scadbuddy.invalid` never resolves (RFC 2606): only the rewrite can land.
+    const { call, sessionId } = await connect(ui.origin, randomUUID(), { publicUrl: 'http://scadbuddy.invalid' })
+    const alias = await call('browser_navigate', { url: 'http://scadbuddy.invalid/m/box?via=alias' })
+    await call('browser_wait_for', { time: 1 })
+    expect(alias.isError).toBe(false)
+    expect(ui.hits.map((h) => [h.url, marker(h)])).toContainEqual(['/m/box?via=alias', sessionId])
   }, 60_000)
 
   it('refuses a direct navigation off the origin, and a redirect off it, but follows one on it', async () => {

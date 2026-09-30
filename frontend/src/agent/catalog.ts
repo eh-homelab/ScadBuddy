@@ -30,7 +30,6 @@ export const SETTINGS_FIELDS = [
   'bambuddy_url',
   'public_url',
   'library_folder_id',
-  'pipeline_id',
   'printer_id',
   'default_plate',
   'display_unit',
@@ -74,7 +73,8 @@ export const TOOLS = {
   fill: tool({
     description:
       'Fallback for UI no other tool covers: type a value into the visible field with this label ' +
-      '(a text box, number box, select or slider). Never fills a password or API key.',
+      "(a text box, number box, select or slider). A select takes an option's value or its visible label. " +
+      'Never fills a password or API key.',
     risk: 'write',
     scope: 'global',
     input: z
@@ -226,8 +226,9 @@ export const TOOLS = {
       'the test saves the form first and that is for the user to do.',
     // `read`, though it reaches Bambuddy: AI spec §8.1 tiers by effect, and `outward` is
     // "send, print, delete, settings or credential writes". This changes nothing:
-    // `POST /settings/test` only runs `GET /printers/` on Bambuddy with the stored settings
-    // (backend/scadbuddy/api/settings.py `test_settings`); the handler skips the
+    // `POST /settings/test` runs only `GET /printers/` on Bambuddy with the stored settings
+    // and reports the write scopes as not checked (backend/scadbuddy/api/settings.py
+    // `test_settings`); the handler skips the
     // button's save and refuses while the form is dirty, and the stored key never
     // reaches the browser or the result.
     risk: 'read',

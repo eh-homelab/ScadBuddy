@@ -208,11 +208,50 @@ class TestReplate:
         # Same one-entry arity as the placeholder it replaces.
         assert settings["nozzle_diameter"] == ["0.2"]
 
+    def test_replating_for_a_nozzle_maps_every_filament_to_one_extruder(
+        self, tmp_path: Path
+    ) -> None:
+        """#768: the shape Bambu Studio saved for the maintainer's two-colour keychain
+        that printed on one 0.2 mm nozzle."""
+        two = tmp_path / "two.3mf"
+        box = trimesh.creation.box(extents=(10, 10, 4))
+        write_bambu_3mf(
+            [ColourPart(1, "Color 1", "#C48CF3", box), ColourPart(2, "Color 2", "#EC008C", box)],
+            two,
+            thumbnails=None,
+            model_name="two",
+        )
+        moved = replate_3mf(two.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["filament_map"] == ["1", "1"]
+        assert settings["filament_map_mode"] == "Auto For Flush"
+
+    def test_replating_states_which_extruders_have_the_nozzle(self, written: Path) -> None:
+        """#834: the key the slicer groups filaments by, and its newer twin, which it
+        reads first; Bambu Studio writes both."""
+        stats = ["Standard#0", "Standard#1"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2", nozzle_stats=stats
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["extruder_nozzle_stats"] == stats
+        assert settings["extruder_nozzle_stats_new"] == stats
+
+    def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "extruder_nozzle_stats" not in settings
+        assert "extruder_nozzle_stats_new" not in settings
+
     def test_replating_without_a_nozzle_keeps_the_placeholder(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:
             settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert settings["nozzle_diameter"] == PLACEHOLDER_NOZZLE_DIAMETER
+        assert "filament_map" not in settings
 
     def test_a_model_too_big_for_the_printer_is_refused(self, tmp_path: Path) -> None:
         big = tmp_path / "big.3mf"
