@@ -26,7 +26,11 @@ The server declares
 
 Every resource is read by a `read` tool of the registry (`RESOURCES` in
 [`catalog.ts`](../../agent/src/resources/catalog.ts)), so its content is exactly what
-that tool returns, in the MIME type below.
+that tool returns, in the MIME type below. The one difference is paging: the
+`list_*` tools answer one page at a time (#837), and a resource backed by one is
+read to its last page (`allPages()` in
+[`pagination.ts`](../../agent/src/tools/pagination.ts)), so it still holds the
+whole collection, in the shape it had before paging.
 
 | URI | MIME type | Tool |
 |---|---|---|

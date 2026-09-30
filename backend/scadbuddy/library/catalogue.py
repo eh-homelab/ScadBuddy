@@ -20,7 +20,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scadbuddy.core.config import DEFAULT_DUPLICATE_STAGING_MAX_AGE
 from scadbuddy.core.files import write_atomic
@@ -216,6 +223,67 @@ class InvalidModelMetaError(ValueError):
         self.slug = slug
 
 
+#: `ui/` plus a relative path whose segments never start with a dot, ending `.js`
+#: or `.mjs`: no `..`, no hidden file, nothing outside the template's `ui/`.
+UI_MODULE_PATTERN = r"^ui/(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.m?js$"
+
+
+class UiDeclaration(BaseModel):
+    """``model.json``'s ``ui`` (spec 2026-09-27 §4.1): the template's own interface."""
+
+    module: str = Field(pattern=UI_MODULE_PATTERN, max_length=300)
+    slot: Literal["panel", "page"] = "panel"
+    #: The host-API major the UI was written against (§4.3, §8.1). Any positive
+    #: major is a valid declaration; the page decides whether it can mount it.
+    api: int = Field(ge=1)
+
+
+_BOOLEAN = ("0", "1")
+
+#: The process settings a template may declare in ``print_settings`` (#770), in the
+#: order a download lists them as edits, each with the values it takes. Each is a
+#: Bambu Studio process key, and its value the string a Bambu config stores; the
+#: enums are ``s_keys_map_SupportType`` and ``s_keys_map_BrimType`` in Bambu Studio's
+#: ``src/libslic3r/PrintConfig.cpp``. ``None`` is ``brim_width``, a non-negative
+#: number of millimetres. Only these: a template states how it prints best, not a
+#: whole profile.
+PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
+    "enable_prime_tower": _BOOLEAN,
+    "wipe_tower_no_sparse_layers": _BOOLEAN,
+    "enable_support": _BOOLEAN,
+    "support_type": ("normal(auto)", "tree(auto)", "normal(manual)", "tree(manual)"),
+    "brim_width": None,
+    "brim_type": (
+        "auto_brim",
+        "brim_ears",
+        "outer_only",
+        "inner_only",
+        "outer_and_inner",
+        "no_brim",
+    ),
+}
+PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
+
+
+def _print_setting_problem(key: str, value: str) -> str | None:
+    """Why ``value`` is not one ``key`` takes, or ``None`` when it is."""
+    allowed = PRINT_SETTING_VALUES[key]
+    if allowed is not None:
+        if value in allowed:
+            return None
+        return f"{key} is {value!r}; it must be one of {', '.join(map(repr, allowed))}"
+    # Plain digits only ("5", "2.5"), as the file stores it and a download writes it:
+    # float() would also take "1e2", "5_0" and " 5 " (#851).
+    whole, point, fraction = value.partition(".")
+    parts = (whole, fraction) if point else (whole,)
+    if all(part.isascii() and part.isdigit() for part in parts):
+        return None
+    return (
+        f"{key} is {value!r}; it must be a non-negative number of millimetres "
+        "in plain digits, like '5' or '2.5'"
+    )
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -237,6 +305,56 @@ class ModelMeta(BaseModel):
     #: ships them. A template of mine keeps its list in `template_media` instead, and
     #: this is never written for one.
     media: list[MediaItem] = Field(default_factory=list)
+    #: The template's own UI (#425), or None for the generated form.
+    ui: UiDeclaration | None = None
+    #: Why a ``ui`` on disk could not be read. The template still lists and
+    #: customizes with the generated form (§4.2); never written back to model.json.
+    ui_error: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _readable_ui(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or data.get("ui") is None:
+            return data
+        try:
+            UiDeclaration.model_validate(data["ui"])
+        except ValidationError as error:
+            problems = "; ".join(
+                f"ui.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            return {**data, "ui": None, "ui_error": f"model.json's ui is not valid: {problems}"}
+        return data
+
+    #: The template's default slicer settings (#770): process overrides on the print
+    #: run's slice, and edits to the system process in a downloaded 3MF. Keys from
+    #: :data:`PRINT_SETTING_KEYS` only; not in `ModelPatch`, it is edited in the file.
+    print_settings: dict[str, StrictStr] = Field(
+        default_factory=dict,
+        description=(
+            "The template's own default slicer settings, as Bambu Studio process keys "
+            "and values from its model.json. The server applies them to every slice and "
+            "every downloaded 3MF; for clients they are informational, and no request "
+            "sets them."
+        ),
+    )
+
+    @field_validator("print_settings")
+    @classmethod
+    def _known_print_settings(cls, value: dict[str, str]) -> dict[str, str]:
+        """Only the allowlisted keys, each with a value it takes, in the allowlist's
+        order. An unknown key or value is refused rather than dropped: a template that
+        means a setting must not print without it."""
+        for key, setting in value.items():
+            if key not in PRINT_SETTING_VALUES:
+                raise ValueError(
+                    f"{key!r} is not a print setting a template can set; "
+                    f"the allowed keys are {', '.join(PRINT_SETTING_KEYS)}"
+                )
+            problem = _print_setting_problem(key, setting)
+            if problem is not None:
+                raise ValueError(problem)
+        return {key: value[key] for key in PRINT_SETTING_KEYS if key in value}
 
     @field_validator("media", mode="before")
     @classmethod
@@ -260,7 +378,9 @@ class ModelMeta(BaseModel):
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
 #: one is the field left out, as a missing one is (#179).
-DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries", "media"})
+DEFAULTED_META_FIELDS = frozenset(
+    {"name", "description", "tags", "libraries", "media", "print_settings"}
+)
 
 
 def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
@@ -360,6 +480,7 @@ class ModelRecord(ModelMeta):
     #: The entries of ``libraries`` in model.json that are not pins, which
     #: ``libraries`` leaves out (#217): what stops the model rendering, and why.
     invalid_libraries: list[InvalidLibraryEntry] = Field(default_factory=list)
+    ui_error: str | None = None
 
 
 class Catalogue:
@@ -601,6 +722,12 @@ class Catalogue:
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version, self._has_history)
 
+    def print_settings(self, slug: str) -> dict[str, str]:
+        """The template's ``print_settings`` as its model.json has them now (#770);
+        none for a template that is gone. One whose model.json is invalid is
+        :class:`InvalidModelMetaError`, naming the key."""
+        return self._meta(slug, self.read_raw_meta(slug)).print_settings
+
     def _record(
         self,
         slug: str,
@@ -646,6 +773,7 @@ class Catalogue:
             **meta.model_dump(exclude={"media"}),
             media=media,
             media_cover=media_cover,
+            ui_error=meta.ui_error,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
@@ -790,7 +918,9 @@ class Catalogue:
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
-            self.write_raw_meta(slug, meta.model_dump(exclude={"media"}))
+            # No print settings is no key, as a hand-written model.json leaves it (#770).
+            excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            self.write_raw_meta(slug, meta.model_dump(exclude=excluded))
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)

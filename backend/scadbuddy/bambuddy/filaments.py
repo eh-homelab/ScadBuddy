@@ -73,6 +73,7 @@ WarningKind = Literal[
     "not-installed",
     "plate-differs",
     "hf-unsupported",
+    "hf-mounted",
 ]
 
 

@@ -3,6 +3,7 @@ import { binary } from './binary.js'
 import { ok } from './call.js'
 import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Catalogue & models (issue #251): list, get, create, import, check, duplicate,
 // delete, and edit details, README, source and thumbnail. Routes:
@@ -12,14 +13,15 @@ export const catalogueTools: Tool[] = [
   defineTool({
     name: 'list_models',
     description:
-      'List every model in the catalogue (bundled templates and user models) with name, slug, tags, ' +
-      'version, origin and upstream state.',
-    input: z.object({}),
+      'List the models in the catalogue (bundled templates and user models) with name, slug, tags, ' +
+      'version, origin and upstream state.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/models'), 'list models')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/models'), 'list models'), args, (m) => m.slug, 'list_models')),
   }),
 
   defineTool({

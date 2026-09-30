@@ -11,13 +11,18 @@ import pytest
 from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
 
 
 @pytest.fixture
 def store(tmp_path: Path, pg_conninfo: str) -> Iterator[SettingsStore]:
-    opened = SettingsStore(Settings(data_dir=tmp_path, database_url=pg_conninfo))
+    opened = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        )
+    )
     opened.open()
     try:
         yield opened

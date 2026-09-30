@@ -341,7 +341,10 @@ jobs:
           cache-from: |
             type=gha,scope=openscad-lsp-arm64
             type=gha
-          cache-to: type=gha,scope=openscad-lsp-arm64,mode=max
+          # mode=min: only the final stage's layers. The repo's Actions cache sits at its
+          # ~10 GB ceiling, and every intermediate arm64 layer this PR-only job wrote
+          # pushed the backend image's cache out sooner (#743).
+          cache-to: type=gha,scope=openscad-lsp-arm64,mode=min
 
       # `uname -m` proves the container really is arm64 (binfmt runs it under
       # QEMU); a silently amd64 image would print x86_64 and fail here.

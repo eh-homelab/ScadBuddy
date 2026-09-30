@@ -127,8 +127,8 @@ def test_a_live_field_applies_at_once(client: TestClient) -> None:
     assert body["log_level"] == "DEBUG"
     assert body["restart_required"] == []
     assert state.config.render_timeout == 12.5
-    assert state.queue.config.render_timeout == 12.5
-    assert state.queue.config.job_ttl == 3600
+    assert state.render.config.render_timeout == 12.5
+    assert state.render.config.job_ttl == 3600
     assert state.settings.render_timeout == 12.5
     assert state.assets.max_count == 5
     assert state.libraries.max_bytes == 1000
@@ -166,8 +166,7 @@ def test_a_restart_field_is_listed_until_the_process_runs_with_it(settings: Sett
     with TestClient(create_app(settings)) as client:
         state = _state(client)
         assert state.settings.render_concurrency == 3
-        assert state.queue.config.render_concurrency == 3
-        assert state.metrics.workers._value.get() == 3
+        assert state.render.config.render_concurrency == 3
         assert client.get("/api/v1/settings").json()["restart_required"] == []
 
 

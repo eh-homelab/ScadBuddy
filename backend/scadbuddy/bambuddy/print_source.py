@@ -11,7 +11,7 @@ shared unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from fastapi import status
@@ -58,6 +58,12 @@ class PrintSource(Protocol):
         """The model whose remembered print options apply (#88); ``None`` for none."""
         ...
 
+    @property
+    def print_settings(self) -> dict[str, str]:
+        """The template's default slicer settings (#770), the slice's process
+        overrides; none for a file ScadBuddy did not render."""
+        ...
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile: ...
@@ -70,6 +76,7 @@ class PrintSource(Protocol):
         nozzle_size: str,
         plan: FilamentPlan,
         project_id: int | None,
+        nozzle_stats: list[str] | None = None,
     ) -> PrintFile: ...
 
     async def record(
@@ -110,6 +117,8 @@ class OutputSource:
     settings: StoredSettings
     #: Names a copy uploaded into a project's folder (``project_filename``, #317).
     stem: str | None = None
+    #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
+    print_settings: dict[str, str] = field(default_factory=dict)
 
     @property
     def colours(self) -> list[str]:
@@ -134,6 +143,7 @@ class OutputSource:
         nozzle_size: str,
         plan: FilamentPlan,
         project_id: int | None,
+        nozzle_stats: list[str] | None = None,
     ) -> PrintFile:
         # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
         target = await target_for(
@@ -142,6 +152,7 @@ class OutputSource:
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
             colours=await _spool_colours(client, self.meta, plan),
+            nozzle_stats=nozzle_stats,
         )
         # A project's folder replaces the one from Settings for this send, which is what
         # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload,
@@ -259,6 +270,10 @@ class LibrarySource:
         # file laid out that way still has something on the bed to print.
         return cls(file_id=file_id, colours=colours or [UNKNOWN_COLOUR], plates=plates or [1])
 
+    @property
+    def print_settings(self) -> dict[str, str]:
+        return {}
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         return list(self.plates)
 
@@ -273,6 +288,7 @@ class LibrarySource:
         nozzle_size: str,
         plan: FilamentPlan,
         project_id: int | None,
+        nozzle_stats: list[str] | None = None,
     ) -> PrintFile:
         return PrintFile(self.file_id)
 

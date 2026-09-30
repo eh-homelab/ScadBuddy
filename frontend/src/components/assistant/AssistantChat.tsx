@@ -38,12 +38,36 @@ interface Props {
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
+
+/** The panel's Advanced switch, per browser (the Library page's pattern). */
+const ADVANCED_KEY = 'scadbuddy.assistant.advanced'
+
+function readAdvanced(): boolean {
+  try {
+    return window.localStorage.getItem(ADVANCED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 export function AssistantChat({ factory, onClose, focusKey, embedded = false }: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  const [advanced, setAdvanced] = useState(readAdvanced)
+  function toggleAdvanced() {
+    setAdvanced((was) => {
+      const next = !was
+      try {
+        window.localStorage.setItem(ADVANCED_KEY, next ? '1' : '0')
+      } catch {
+        // Private mode or blocked storage: the switch still works for this page.
+      }
+      return next
+    })
+  }
   const composer = useRef<HTMLTextAreaElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
@@ -156,6 +180,15 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           <Button variant="ghost" size="sm" onClick={startNewChat}>
             New chat
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-pressed={advanced}
+            title="Show every tool call's arguments and sources, and what memory recalled and saved"
+            onClick={toggleAdvanced}
+          >
+            Advanced
+          </Button>
           <Button variant="ghost" size="sm" aria-label="Close assistant" onClick={onClose}>
             ✕
           </Button>
@@ -237,6 +270,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
           <FeedItemView
             key={`${item.kind}-${item.id}`}
             item={item}
+            advanced={advanced}
             onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
           />
         ))}

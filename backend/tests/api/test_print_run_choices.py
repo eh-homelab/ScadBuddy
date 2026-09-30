@@ -173,6 +173,65 @@ def test_choices_slice_with_derived_presets_and_queue_without_a_pipeline(
     assert all("/slicer-pipelines" not in str(call.request.url) for call in respx.calls)
 
 
+def declare_print_settings(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+    """Give ``model``'s model.json the ``print_settings`` (#770)."""
+    meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+    meta["print_settings"] = settings
+    paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
+
+
+@respx.mock
+def test_a_templates_print_settings_reach_the_slice(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#770: the template's defaults are the slice's process overrides."""
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"enable_support": "0", "enable_prime_tower": "1"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body())
+
+    assert response.status_code == 200, response.text
+    slice_body = json.loads(sliced.calls.last.request.content)
+    assert slice_body["process_overrides"] == {"enable_prime_tower": "1", "enable_support": "0"}
+    # The same presets as a template without them: only the overrides differ.
+    assert slice_body["process_preset"] == {"source": "cloud", "id": "GP243"}
+
+
+@respx.mock
+def test_a_template_without_print_settings_sends_no_overrides(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    assert run_print(client, output_id, json=body()).status_code == 200
+    assert "process_overrides" not in json.loads(sliced.calls.last.request.content)
+
+
+@respx.mock
+def test_an_unknown_print_setting_is_refused_before_anything_is_sliced(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = prepared(client, model)
+    declare_print_settings(paths, model, {"infill": "15%"})
+    upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = run_print(client, output_id, json=body())
+
+    assert response.status_code == 409
+    assert "'infill' is not a print setting" in response.json()["detail"]
+    assert not sliced.called
+
+
 @respx.mock
 def test_a_resolver_error_is_a_422_before_anything_is_sliced(
     client: TestClient, model: str
@@ -976,7 +1035,7 @@ BOTH_04_LEFT_HF = {
     ]
 }
 #: The kinds the removed nozzle checks warned with; none may come back.
-NOZZLE_KINDS = {"side-unknown", "hf-unsupported"}
+NOZZLE_KINDS = {"side-unknown", "hf-unsupported", "hf-mounted"}
 
 
 def _two_colour_run(
@@ -1012,6 +1071,40 @@ def test_one_matching_nozzle_prints_two_colours_whose_spools_are_on_its_side(
     # Every filament on one extruder, as Bambu Studio saved the test print (#768).
     assert _uploaded_settings(upload)["filament_map"] == ["1", "1"]
     assert not NOZZLE_KINDS & _kinds(response)
+
+
+@respx.mock
+def test_the_file_offers_the_slicer_only_the_side_with_the_nozzle(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#834, queue item 159: the right 0.2 and the left 0.4 High Flow (the recorded
+    status). Without this the slicer put a filament on the left as if it were a 0.2,
+    and the printer paused."""
+    response, upload = _two_colour_run(client, model, paths, ONE_ON_LEFT)
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    # The slicer's order: its first extruder is the left, its second the right.
+    assert settings["extruder_nozzle_stats"] == ["Standard#0", "Standard#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["Standard#0", "Standard#1"]
+
+
+@respx.mock
+def test_an_unreadable_status_leaves_the_slicer_to_choose(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    # After run_routes, whose recorded status it replaces.
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json={**body(), "filament_plan": BOTH_ON_RIGHT})
+
+    assert response.status_code == 200, response.text
+    assert "extruder_nozzle_stats" not in _uploaded_settings(upload)
 
 
 @respx.mock
@@ -1073,10 +1166,10 @@ def test_a_single_nozzle_printers_other_size_is_not_refused(client: TestClient, 
 
 
 HF_LEFT = (
-    "The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow "
-    "slicing is supported (#484), so if the print uses the left, the printer pauses at the "
-    'first layer ("the left nozzle is not matched with slicing file"). Fit a standard '
-    "nozzle there before it starts."
+    "The left nozzle is High Flow and this print is sliced for Standard flow (High Flow "
+    "slicing isn't supported yet, #484), so if it prints on the left, the printer pauses "
+    'at the first layer ("the left nozzle is not matched with slicing file"). Fit a '
+    "standard nozzle there before it starts."
 )
 
 
@@ -1094,8 +1187,28 @@ def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_not_refused(
 
     assert response.status_code == 200, response.text
     warnings = [(w["kind"], w["message"]) for w in response.json()["warnings"]]
-    assert ("hf-unsupported", HF_LEFT) in warnings
+    assert ("hf-mounted", HF_LEFT) in warnings
     assert "side-unknown" not in _kinds(response)
+
+
+@respx.mock
+def test_the_high_flow_warning_changes_nothing_the_run_sends(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#797: the advisory never refuses, and the upload is the one a standard left gets."""
+    _status(**{**BOTH_04_LEFT_HF, "nozzles": [BOTH_04_LEFT_HF["nozzles"][0]] * 2})
+    _, upload = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
+    )
+    standard = _uploaded_settings(upload)
+    _status(**BOTH_04_LEFT_HF)
+    response, upload = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
+    )
+
+    assert response.status_code == 200, response.text
+    assert "hf-mounted" in _kinds(response)
+    assert _uploaded_settings(upload) == standard
 
 
 @respx.mock
@@ -1172,27 +1285,78 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
     assert not upload.called
 
 
+def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(tier="standard", **choices), "filament_plan": ONE_ON_LEFT},
+    )
+    return response
+
+
 @respx.mock
 def test_the_check_carries_the_high_flow_warning(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#723: the run's one mounted-nozzle advisory is said before Print too."""
+    """#723, #797: a mounted High Flow nozzle of the chosen size is said before Print,
+    as a warning that holds nothing."""
     output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
     _status(**BOTH_04_LEFT_HF)
 
-    check = client.post(
-        f"/api/v1/print/outputs/{output_id}/check",
-        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "filament_plan": ONE_ON_LEFT},
-    )
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "standard"}])
 
     assert check.status_code == 200, check.text
     assert check.json() == {
         "errors": [],
-        "warnings": [{"kind": "hf-unsupported", "slot_id": None, "message": HF_LEFT}],
+        "warnings": [{"kind": "hf-mounted", "slot_id": None, "message": HF_LEFT}],
     }
     assert not upload.called
+
+
+@respx.mock
+def test_the_check_says_nothing_of_standard_mounted_nozzles(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4"}])
+
+    assert check.status_code == 200, check.text
+    assert check.json() == {"errors": [], "warnings": []}
+
+
+@respx.mock
+def test_the_check_carries_the_high_flow_warning_when_high_flow_is_chosen(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
+    of a mounted High Flow nozzle of the chosen size."""
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(**BOTH_04_LEFT_HF)
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
+
+    assert check.status_code == 200, check.text
+    assert "hf-mounted" in {warning["kind"] for warning in check.json()["warnings"]}
+
+
+@respx.mock
+def test_the_check_gives_no_high_flow_warning_when_the_status_is_unreadable(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """No side is assumed: an unreadable status is no nozzle known, so no warning."""
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4"}])
+
+    assert check.status_code == 200, check.text
+    assert check.json()["warnings"] == []
 
 
 @respx.mock

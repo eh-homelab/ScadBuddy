@@ -18,7 +18,7 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    QueueDep,
+    RenderDep,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
@@ -137,12 +137,12 @@ def create_output(
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
     outputs: OutputsDep,
-    queue: QueueDep,
+    render: RenderDep,
     store: SettingsStoreDep,
     events: EventsDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
-    job = require_job(queue, body.job_id)
+    job = require_job(render, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
@@ -273,14 +273,15 @@ async def delete_output(
     summary="Download the 3MF",
 )
 async def download_output(
-    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep
+    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
 ) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # For the default printer, on its real presets (#769).
-    return await download_3mf(path, meta, store.load())
+    # For the default printer, on its real presets (#769), with the template's own
+    # print settings (#770).
+    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
 
 
 @router.get(

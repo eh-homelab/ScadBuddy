@@ -20,10 +20,11 @@ from scadbuddy.bambuddy.extruders import (
     extruder_of,
     high_flow_warnings,
     side_of,
+    slicer_nozzle_stats,
     with_sides,
 )
 from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 from tests.bambuddy.conftest import recording
 
 
@@ -148,14 +149,123 @@ def _nozzles(*types: tuple[str, str]) -> PrinterStatus:
     )
 
 
+STANDARD_04 = [NozzleChoice(size="0.4")]
+
+
 def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about() -> None:
-    """#723: queue item 149's printer, a standard right and a High Flow left, both 0.4."""
-    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), "0.4")
-    assert warning.kind == "hf-unsupported"
-    assert warning.message.startswith("The left nozzle is High Flow.")
+    """#723, #797: queue item 149's printer, a standard right and a High Flow left, both
+    0.4, and a print chosen for Standard flow."""
+    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), STANDARD_04)
+    assert warning.kind == "hf-mounted"
+    assert warning.message.startswith("The left nozzle is High Flow")
+
+
+def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_when_high_flow_is_chosen() -> None:
+    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
+    of a mounted High Flow nozzle of the chosen size."""
+    status = _nozzles(("HS01", "0.4"), ("HH01", "0.4"))
+    [warning] = high_flow_warnings(status, [NozzleChoice(size="0.4", flow="high_flow")])
+    assert warning.kind == "hf-mounted"
+    assert warning.message.startswith("The left nozzle is High Flow")
+
+
+def test_index_0_is_the_right_nozzle() -> None:
+    """``PrinterStatus.nozzles[0]`` is the right (main) extruder."""
+    [warning] = high_flow_warnings(_nozzles(("HH01", "0.4"), ("HS01", "0.4")), STANDARD_04)
+    assert warning.message.startswith("The right nozzle is High Flow")
 
 
 def test_no_high_flow_warning_for_standard_nozzles_another_size_or_no_status() -> None:
-    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), "0.4") == []
-    assert high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), "0.2") == []
-    assert high_flow_warnings(None, "0.4") == []
+    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), STANDARD_04) == []
+    assert (
+        high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), [NozzleChoice(size="0.2")])
+        == []
+    )
+    assert high_flow_warnings(None, STANDARD_04) == []
+
+
+# --- #834: which extruders the slicer may put filament on ---------------------------------
+#
+# ``extruder_nozzle_stats`` is in the slicer's extruder order, which is not the printer's:
+# the H2C preset's ``physical_extruder_map`` is ["1", "0"], so the slicer's first extruder
+# is the left (physical 1) and its second the right (physical 0). Measured against the
+# deployed slicer (bambu-studio-api bambuddy-1.2.5.6), 2026-09-30: ["Standard#0",
+# "Standard#1"] puts every filament on the right (``extruder_id="2"``), ["Standard#1",
+# "Standard#0"] on the left, and ["Standard#0", "Standard#0"] fails the slice.
+ONLY_RIGHT = ["Standard#0", "Standard#1"]
+ONLY_LEFT = ["Standard#1", "Standard#0"]
+
+
+def test_only_the_side_with_the_size_is_offered_to_the_slicer() -> None:
+    """Queue item 159's printer: the right 0.2 HS00, the left 0.4 HH01."""
+    assert slicer_nozzle_stats(fts_status(), "0.2") == ONLY_RIGHT
+
+
+def test_a_size_only_the_left_has_puts_everything_on_the_left() -> None:
+    status = _nozzles(("HS01", "0.4"), ("HS00", "0.2"))
+    assert slicer_nozzle_stats(status, "0.2") == ONLY_LEFT
+
+
+def test_the_rack_counts_for_the_right_side() -> None:
+    """The rack swaps onto the right (it serves physical extruder 0), so a spare of the
+    size there is the right side's even when another size is mounted."""
+    status = _nozzles(("HS01", "0.4"), ("HS00", "0.2"))
+    # Every recorded spare is a 0.4, so the right has a standard 0.4 and the left does
+    # not: the left's 0.2 is not the size.
+    assert slicer_nozzle_stats(status, "0.4") == ONLY_RIGHT
+
+
+def test_a_standard_nozzle_is_preferred_to_a_high_flow_one_of_the_size() -> None:
+    """ScadBuddy slices standard flow, and queue item 149 paused on a High Flow left."""
+    status = _nozzles(("HH01", "0.2"), ("HS00", "0.2"))
+    assert slicer_nozzle_stats(status, "0.2") == ONLY_LEFT
+
+
+def test_a_high_flow_nozzle_of_the_size_still_beats_another_size() -> None:
+    """Nothing is refused on the mounted nozzles (#768), and #723 warns of the flow."""
+    status = _nozzles(("HH01", "0.2"), ("HS01", "0.6"))
+    assert slicer_nozzle_stats(status, "0.2") == ONLY_RIGHT
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (_nozzles(("HH01", "0.2"), ("HS01", "0.6")), ONLY_RIGHT),
+        (_nozzles(("HS01", "0.6"), ("HH01", "0.2")), ONLY_LEFT),
+    ],
+)
+def test_a_high_flow_only_side_is_stated_as_standard(
+    status: PrinterStatus, expected: list[str]
+) -> None:
+    """ScadBuddy slices a Standard process, and the deployed slicer (bambu-studio-api
+    bambuddy-1.2.5.6, 2026-09-30) groups ["Standard#0", "High Flow#1"] and Studio's
+    ["Standard#0|High Flow#0", "Standard#0|High Flow#1"] exactly as ["Standard#0",
+    "Standard#1"], rewriting both to it. So the side is stated as Standard, never as
+    High Flow: the label would change nothing but the cache key."""
+    stats = slicer_nozzle_stats(status, "0.2")
+    assert stats == expected
+    assert not any("High Flow" in entry for entry in stats)
+
+
+@pytest.mark.parametrize(
+    ("status", "size"),
+    [
+        # Both sides have it (the owner's case (a)): either may print, so the slicer
+        # keeps its own choice.
+        (_nozzles(("HS00", "0.2"), ("HS00", "0.2")), "0.2"),
+        # Neither has it: stating no nozzle anywhere fails the slice, and the printer
+        # may swap one in (#768), so the file is left as it was.
+        (fts_status(), "0.6"),
+        # Unreadable, and a printer without a left extruder.
+        (None, "0.2"),
+        (
+            mapped_status(
+                nozzles=[{"nozzle_type": "HS00", "nozzle_diameter": "0.2"}],
+                ams_extruder_map={"0": 0},
+            ),
+            "0.2",
+        ),
+    ],
+)
+def test_otherwise_the_slicer_is_left_to_choose(status: PrinterStatus | None, size: str) -> None:
+    assert slicer_nozzle_stats(status, size) is None

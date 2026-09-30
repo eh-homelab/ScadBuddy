@@ -253,6 +253,9 @@ const sessions =
           ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
           sandbox: chromiumSandbox,
         },
+        // The http_request tool (#827): on for a turn unless the
+        // `http_request_enabled` setting is false (routes/httpRequest.ts).
+        httpRequest: {},
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)

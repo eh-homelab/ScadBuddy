@@ -20,7 +20,7 @@ from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome, SlicePlan, slice_and_queue
 from scadbuddy.bambuddy.errors import not_configured
-from scadbuddy.bambuddy.extruders import high_flow_warnings, with_sides
+from scadbuddy.bambuddy.extruders import high_flow_warnings, slicer_nozzle_stats, with_sides
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -264,11 +264,11 @@ async def check_print(
     the catalogue refuses — in the run's own words. It no longer refuses by the mounted
     nozzles (#768): the maintainer's test print, 2026-09-29, printed a two-colour 0.2 mm
     slice through the one 0.2 mm nozzle. It warns only of a mounted High Flow nozzle of
-    the size (#723). What needs the uploaded file is still found by the run. Only the
-    run's own refusals
-    (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy fails the check,
-    as it would fail the run. With no printer chosen or configured there is nothing to
-    judge, and the run says why."""
+    the size, whatever flow is chosen, since the slice is always Standard flow (#723,
+    #797, #484). What needs the uploaded file is still found by the run. Only the run's
+    own refusals (:class:`RunRefusalError`) become ``errors``: a failed read of Bambuddy
+    fails the check, as it would fail the run. With no printer chosen or configured there
+    is nothing to judge, and the run says why."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
@@ -276,9 +276,7 @@ async def check_print(
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
     # The one mounted-nozzle advisory kept (#723): a warning, never a refusal.
-    return PrintCheck(
-        warnings=high_flow_warnings(prepared.printer_status, request.choices.nozzles[0].size)
-    )
+    return PrintCheck(warnings=high_flow_warnings(prepared.printer_status, request.choices.nozzles))
 
 
 async def check_for_output(
@@ -412,6 +410,8 @@ async def execute_run(
         nozzle_size=choices.nozzles[0].size,
         plan=request.filament_plan,
         project_id=project_id,
+        # Only the side with the nozzle is offered to the slicer (#834).
+        nozzle_stats=slicer_nozzle_stats(printer_status, choices.nozzles[0].size),
     )
     library_file_id = printed.id
     # The picker's project is its own control (ProjectPicker, defaulting to the last
@@ -464,6 +464,7 @@ async def execute_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
+            process_overrides=source.print_settings,
         )
         planned.append((plate_id, options, resolved, plan))
     if errors:
@@ -472,7 +473,7 @@ async def execute_run(
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
     )
-    hardware += high_flow_warnings(printer_status, choices.nozzles[0].size)
+    hardware += high_flow_warnings(printer_status, choices.nozzles)
     outcomes: list[QueueOutcome] = []
     sent: list[PlateSend] = []
     warnings: list[FilamentWarning] = []

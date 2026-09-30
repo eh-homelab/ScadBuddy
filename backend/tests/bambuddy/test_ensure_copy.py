@@ -21,13 +21,12 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.send import Target, ensure_copy
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.plate import DEFAULT_PLATE
+from scadbuddy.render.projection import JobProjection
 
 FOLDER = 9
 
@@ -215,15 +214,12 @@ async def test_two_replicas_filing_and_printing_at_once_upload_one_copy(
     monkeypatch.setattr(send, "_copy_lock", lambda key: asyncio.Lock())
     bambuddy = SlowBambuddy()
     meta = output("g")
-    replicas = [
-        PostgresJobStore(pg_conninfo, DataPaths(tmp_path / name), pool_size=2)
-        for name in ("one", "two")
-    ]
+    replicas = [JobProjection(pg_conninfo, pool_size=2) for _name in ("one", "two")]
     for replica in replicas:
         replica.open()
     try:
 
-        def ensure(replica: PostgresJobStore) -> asyncio.Future[send.EnsuredCopy]:
+        def ensure(replica: JobProjection) -> asyncio.Future[send.EnsuredCopy]:
             return asyncio.ensure_future(
                 ensure_copy(
                     cast(BambuddyClient, bambuddy),

@@ -67,6 +67,48 @@ describe('AiAuditSection', () => {
     expect(screen.getByRole('option', { name: 'Memory' })).toBeInTheDocument()
   })
 
+  it('shows http rows as method, host, status and size (#827)', async () => {
+    const row = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({
+      ...AUDIT_FIXTURES[3]!,
+      id,
+      kind: 'http' as const,
+      duration_ms: 40,
+      ...fields,
+    })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            row('2', {
+              action: 'GET',
+              tier: 'read',
+              outcome: 'ok',
+              input_summary: '{"method":"GET","scheme":"http","host":"printer.lan:8080","status":200,"size_bytes":512}',
+            }),
+            row('1', {
+              action: 'POST',
+              tier: 'outward',
+              outcome: 'refused',
+              input_summary: '{"method":"POST","host":"example.com"}',
+              detail: "the Authorization header contains the agent's own credential",
+            }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const [get, refused] = rows()
+    expect(get).toHaveTextContent('HTTP GET')
+    expect(get).toHaveTextContent('http://printer.lan:8080 · HTTP 200 · 512 bytes')
+    expect(get).not.toHaveTextContent('{')
+    expect(refused).toHaveTextContent('Refused')
+    expect(refused).toHaveTextContent("example.com · the Authorization header contains the agent's own credential")
+    expect(screen.getByRole('option', { name: 'HTTP requests' })).toBeInTheDocument()
+  })
+
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))
