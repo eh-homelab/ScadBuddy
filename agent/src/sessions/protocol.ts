@@ -56,6 +56,22 @@ export type ServerEvent = V &
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number }
     | { type: 'error'; sessionId?: string; code?: string; message: string }
+    /**
+     * An automatic Hindsight recall or retain (#818, memory/hindsight.ts). A
+     * retain finishes after its turn, so this can follow the turn's last
+     * status. `count` is a recall's; `detail` is why one failed, redacted.
+     * Never the query or a memory.
+     */
+    | {
+        type: 'memory'
+        sessionId: string
+        turnId: string
+        action: 'recall' | 'retain'
+        bank: string
+        outcome: 'ok' | 'timeout' | 'error'
+        count?: number
+        detail?: string
+      }
   )
 
 export type ServerEventType = ServerEvent['type']

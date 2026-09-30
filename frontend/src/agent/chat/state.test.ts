@@ -107,6 +107,25 @@ describe('chatReducer', () => {
     expect(isBusy(state.sessions.s1)).toBe(false)
   })
 
+  it('adds memory activity as its own item, a late retain after the turn settled included, and the same on replay', () => {
+    const events = [
+      server({ type: 'user.turn', sessionId: 's1', turnId: 'u1', text: 'hi', author: you }),
+      server({ type: 'memory', sessionId: 's1', turnId: 'u1', action: 'recall', bank: 'b', outcome: 'ok', count: 2 }),
+      server({ type: 'assistant.text.delta', sessionId: 's1', messageId: 'm1', delta: 'Hello' }),
+      server({ type: 'assistant.text.done', sessionId: 's1', messageId: 'm1' }),
+      server({ type: 'session.status', sessionId: 's1', status: 'idle' }),
+      server({ type: 'memory', sessionId: 's1', turnId: 'u1', action: 'retain', bank: 'b', outcome: 'ok' }),
+    ]
+    const state = run(events, started)
+    expect(state.sessions.s1?.status).toBe('idle')
+    expect(state.sessions.s1?.items.map((i) => i.kind)).toEqual(['user', 'memory', 'assistant', 'memory'])
+    expect(state.sessions.s1?.items[1]).toEqual({ kind: 'memory', id: 'memory-1', action: 'recall', bank: 'b', outcome: 'ok', count: 2 })
+    expect(state.sessions.s1?.items[3]).toMatchObject({ kind: 'memory', action: 'retain', outcome: 'ok' })
+    // Attaching clears the feed and the server replays the log in its order.
+    const replayed = run([{ type: 'select', sessionId: 's1' }, ...events], state)
+    expect(replayed.sessions.s1?.items).toEqual(state.sessions.s1?.items)
+  })
+
   it('drops events for sessions it never heard of', () => {
     const state = run([server({ type: 'assistant.text.delta', sessionId: 'ghost', messageId: 'm', delta: 'x' })])
     expect(state).toEqual(initialChatState)

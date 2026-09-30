@@ -153,6 +153,8 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3 }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
+    event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),
+    event({ type: 'memory', sessionId: S, turnId: S, action: 'retain', bank: 'b', outcome: 'timeout', detail: 'timed out' }),
   ]
 
   it('produces events the panel’s own schema accepts', async () => {

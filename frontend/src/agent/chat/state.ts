@@ -36,6 +36,16 @@ export type FeedItem =
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
+  /** An automatic memory recall or retain (#818): a quiet status line, never the memories. */
+  | {
+      kind: 'memory'
+      id: string
+      action: 'recall' | 'retain'
+      bank: string
+      outcome: 'ok' | 'timeout' | 'error'
+      count?: number
+      detail?: string
+    }
 
 export interface SessionState {
   id: string
@@ -265,6 +275,21 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         ...s,
         result: { costUsd: event.costUsd, turns: event.turns },
       }))
+
+    case 'memory':
+      // Appended where it arrives: a retain that finished after its turn lands after
+      // the turn's replies, in the same place on a replay (the event log's order).
+      return patchSession(state, event.sessionId, (s) =>
+        push(s, {
+          kind: 'memory',
+          id: `memory-${s.items.length}`,
+          action: event.action,
+          bank: event.bank,
+          outcome: event.outcome,
+          ...(event.count === undefined ? {} : { count: event.count }),
+          ...(event.detail === undefined ? {} : { detail: event.detail }),
+        }),
+      )
 
     case 'error': {
       const message = errorMessage(event.code, event.message)
