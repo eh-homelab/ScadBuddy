@@ -1,6 +1,6 @@
 import type { CustomizerSchema, Param, ParamValue } from '../api/types'
-import { getPath, splitInputs, type JsonObject } from '../lib/inputs'
-import { allParams, type ParamValues } from '../lib/params'
+import { getPath, type JsonObject } from '../lib/inputs'
+import { allParams } from '../lib/params'
 import type { HostElement } from './elements'
 
 interface BindingContext {
@@ -46,19 +46,4 @@ export function bindingOf(element: HostElement, context: BindingContext): Bindin
     value: initial ?? '',
     mistyped: `${bind} holds ${JSON.stringify(bound)}, not a ${expected} for “${name}”; showing its default.`,
   }
-}
-
-/** The values the widgets show: `params`, with every `<sb-param>`'s bound value applied,
- *  so colour parameters bound outside `params` are numbered with the rest. */
-export function effectiveValues(
-  elements: readonly HostElement[],
-  context: BindingContext,
-): ParamValues {
-  const values: ParamValues = { ...splitInputs(context.inputs).params }
-  for (const element of elements) {
-    if (element.localName !== 'sb-param') continue
-    const binding = bindingOf(element, context)
-    if (typeof binding !== 'string' && !binding.mistyped) values[binding.name] = binding.value
-  }
-  return values
 }

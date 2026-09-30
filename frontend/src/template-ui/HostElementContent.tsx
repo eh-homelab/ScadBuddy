@@ -55,7 +55,7 @@ export function HostElementContent({
 }: {
   element: HostElement
   context: ElementContext
-  /** `effectiveValues` over every element, for the extruder numbers. */
+  /** The rendered values (`inputs.params`), for the extruder numbers. */
   values: ParamValues
   /** The one `<sb-preview>` the preview mounts into: one canvas, one capture ref. */
   firstPreview: HostElement | undefined

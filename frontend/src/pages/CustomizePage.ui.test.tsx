@@ -191,6 +191,41 @@ describe('CustomizePage with a template UI', () => {
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
 
+  it('a colour bound outside params starts no render and leaves the extruder numbers to params', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const param = document.createElement('sb-param')
+        param.setAttribute('name', 'text_color')
+        param.setAttribute('bind', 'style.c')
+        root.append(param)
+      },
+    }))
+    let renders = 0
+    server.use(
+      http.post('/api/v1/models/:slug/render', () => {
+        renders += 1
+      }),
+    )
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(renders).toBe(1))
+    const before = structuredClone(host?.inputs.get()['params'])
+    const text = await waitFor(() => {
+      const found = shadow().querySelector<HTMLInputElement>('input[type="text"]')
+      if (!found) throw new Error('no colour field yet')
+      return found
+    })
+    const extruder = () => shadow().textContent?.match(/extruder (\d+)/)?.[1]
+    const numbered = extruder()
+    fireEvent.change(text, { target: { value: '#123456' } })
+    await waitFor(() => expect(host?.inputs.get()['style']).toEqual({ c: '#123456' }))
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders).toBe(1)
+    expect(host?.inputs.get()['params']).toEqual(before)
+    expect(extruder()).toBe(numbered)
+  })
+
   it('keeps a template without ui exactly on the generated form', async () => {
     open('name-keychain')
     await waitFor(() => expect(document.querySelector('[data-param]')).not.toBeNull())
