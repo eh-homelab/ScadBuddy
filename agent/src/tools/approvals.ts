@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { hasTier } from '../auth/principal.js'
 import { defineTool, errorResult, json, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // The `confirm` half of spec §8.2's prepare/confirm flow for external MCP
 // clients. An outward tool call (the `prepare`, registry.ts runTool) records
@@ -13,18 +14,23 @@ import { defineTool, errorResult, json, type Tool } from './registry.js'
 export const approvalTools: Tool[] = [
   defineTool({
     name: 'list_pending_actions',
-    description: 'Outward actions this caller has prepared and that are waiting for a human approval.',
-    input: z.object({}),
+    description: 'Outward actions this caller has prepared and that are waiting for a human approval.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     routes: [],
-    handler: async (_args, { pending, principal }) =>
+    handler: async (args, { pending, principal }) =>
       json(
-        (await pending.list(principal)).map((a) => ({
-          pending_action_id: a.id,
-          tool: a.tool,
-          summary: a.summary,
-          expires_at: a.expiresAt.toISOString(),
-        })),
+        page(
+          (await pending.list(principal)).map((a) => ({
+            pending_action_id: a.id,
+            tool: a.tool,
+            summary: a.summary,
+            expires_at: a.expiresAt.toISOString(),
+          })),
+          args,
+          (a) => a.pending_action_id,
+          'list_pending_actions',
+        ),
       ),
   }),
 

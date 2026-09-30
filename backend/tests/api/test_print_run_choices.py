@@ -1015,6 +1015,40 @@ def test_one_matching_nozzle_prints_two_colours_whose_spools_are_on_its_side(
 
 
 @respx.mock
+def test_the_file_offers_the_slicer_only_the_side_with_the_nozzle(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#834, queue item 159: the right 0.2 and the left 0.4 High Flow (the recorded
+    status). Without this the slicer put a filament on the left as if it were a 0.2,
+    and the printer paused."""
+    response, upload = _two_colour_run(client, model, paths, ONE_ON_LEFT)
+
+    assert response.status_code == 200, response.text
+    settings = _uploaded_settings(upload)
+    # The slicer's order: its first extruder is the left, its second the right.
+    assert settings["extruder_nozzle_stats"] == ["Standard#0", "Standard#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["Standard#0", "Standard#1"]
+
+
+@respx.mock
+def test_an_unreadable_status_leaves_the_slicer_to_choose(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    # After run_routes, whose recorded status it replaces.
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json={**body(), "filament_plan": BOTH_ON_RIGHT})
+
+    assert response.status_code == 200, response.text
+    assert "extruder_nozzle_stats" not in _uploaded_settings(upload)
+
+
+@respx.mock
 def test_without_the_switch_a_spool_on_the_other_nozzle_is_not_refused(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

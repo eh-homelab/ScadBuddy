@@ -370,6 +370,36 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     in_spool_nines_colour(paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
+    # The recorded printer has its 0.2 on the right only, which the file states (#834).
+    assert [copy["target_key"] for copy in detail["library_files"]] == [
+        "Bambu Lab H2C@0.2^Standard#0,Standard#1"
+    ]
+
+    again = run_print(client, fresh, json=run_request(project_id=PROJECT))
+    assert again.json()["library_file_id"] == 42
+    assert uploaded.call_count == 2
+
+
+@respx.mock
+def test_generate_with_the_printer_status_unreadable_states_no_sides(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#834: an unreadable status leaves the slicer to choose, on Generate as on the
+    print, so the two still agree and the print reuses the file."""
+    configure(client)
+    printed = make_output(client, model)
+    project_folder_routes()
+    uploaded = uploads(41, 42)
+    run_routes()
+    slice_routes()
+    queue_route()
+    assert run_print(client, printed, json=run_request(project_id=PROJECT)).status_code == 200
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+
+    fresh = make_output(client, model, name="Second")
+    in_spool_nines_colour(paths, model, fresh)
+    assert file_into_project(client, fresh).json()["library_file_id"] == 42
+    detail = client.get(f"/api/v1/outputs/{fresh}").json()
     assert [copy["target_key"] for copy in detail["library_files"]] == ["Bambu Lab H2C@0.2"]
 
     again = run_print(client, fresh, json=run_request(project_id=PROJECT))

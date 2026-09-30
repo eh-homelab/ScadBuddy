@@ -344,7 +344,9 @@ def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
     Not measured to steer Bambuddy's headless slicer: on 2026-09-28 it kept a
     full-length ``["1", "1"]`` map, Auto or Manual, and still spread two filaments onto
     two nozzles (#745). Only the project-level map is written; one at plate level in
-    ``model_settings.config`` crashed that slicer the same day."""
+    ``model_settings.config`` crashed that slicer the same day. Nor is it where Bambu
+    Studio's filaments went: that file's ``slice_info.config`` says ``"2 2"``, and
+    extruder 1 is the left (#834). ``extruder_nozzle_stats`` is what steers the slicer."""
     return {"filament_map": ["1"] * filaments, "filament_map_mode": "Auto For Flush"}
 
 
@@ -693,7 +695,11 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
 
 
 def replate_3mf(
-    payload: bytes, plate: PlateGeometry, *, nozzle_diameter: str | None = None
+    payload: bytes,
+    plate: PlateGeometry,
+    *,
+    nozzle_diameter: str | None = None,
+    nozzle_stats: Sequence[str] | None = None,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -709,6 +715,12 @@ def replate_3mf(
     ``nozzle_diameter``, when the target names one, replaces the placeholder in
     ``project_settings.config`` (#126), and every filament is mapped to one extruder
     (:func:`one_extruder_map`, #768); ``None`` leaves whatever the file states.
+
+    ``nozzle_stats``, when given, is written as ``extruder_nozzle_stats`` and its newer
+    twin ``extruder_nozzle_stats_new``, which the slicer reads first (#834). It is what
+    the slicer's "Auto For Flush" grouping actually follows: an extruder stated with no
+    nozzle gets no filament. See
+    :func:`scadbuddy.bambuddy.extruders.slicer_nozzle_stats`.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -761,6 +773,9 @@ def replate_3mf(
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
+            if nozzle_stats is not None:
+                settings["extruder_nozzle_stats"] = list(nozzle_stats)
+                settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))

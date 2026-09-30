@@ -235,12 +235,50 @@ That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)"
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL
 H2C 0.2 nozzle`, `Bambu PLA Basic @BBL H2C 0.2 nozzle` for the second filament,
 `nozzle_diameter` `["0.2","0.2"]`, Standard flow on both sides, and `filament_map`
-`["1","1"]` under `"Auto For Flush"`: both filaments on one extruder. The run's presets
-for a Fine 0.2 run are the same, and the print run's upload now writes the same
-project-level map (`bambu3mf.one_extruder_map`). Bambuddy's headless slicer was
-measured on 2026-09-28 to keep that map and still spread two filaments onto two nozzles
-(#745), so whether a ScadBuddy slice lands on one nozzle is still to be measured on a
-real print.
+`["1","1"]` under `"Auto For Flush"`. The run's presets for a Fine 0.2 run are the
+same, and the print run's upload writes the same project-level map
+(`bambu3mf.one_extruder_map`).
+
+**Which extruders the slicer may use (#834).** That `filament_map` is not where the
+filaments went. `project_settings.config` keeps the map it was given; the slicer's
+actual grouping is in `slice_info.config` (`filament_maps`, and one `<nozzle
+extruder_id>` per group). Archive 36 (the test print) says `filament_maps` `"2 2"` and
+one nozzle, `extruder_id="2"`: every filament on the slicer's second extruder. Queue
+item 159, sliced through Bambuddy with the same presets, says `"2 1"` and two nozzles:
+filament 2 on the slicer's first extruder, whose G-code pre-heats the left (`M104 T1`).
+It paused with HMS 05FE8053. Both files state `nozzle_diameter` `["0.2","0.2"]`, so the
+printer does not check an extruder the file leaves unused. It checks the ones the slice
+prints on.
+
+The slicer's extruder order is not the printer's. The H2C preset's
+`physical_extruder_map` `["1","0"]` makes the slicer's extruder 1 the left (physical 1)
+and its extruder 2 the right (physical 0). Upstream Bambuddy maps dispatches through
+the same table (0 right, 1 left), and its `extract_nozzle_mapping_from_3mf` gives item
+159 `{1: 0, 2: 1}` (slot 2 on the left) and archive 36 `{1: 0, 2: 0}`. So `filament_map`
+"1" is the left, and `one_extruder_map` names the left. It is inert either way: under
+"Auto For Flush" the slicer does its own grouping.
+
+What the grouping follows is `extruder_nozzle_stats`, the nozzles each extruder has, in
+the slicer's order. Bambu Studio writes it from the printer (archive 36:
+`["Standard#0|High Flow#0","Standard#1"]`, so no 0.2 on the left). The headless slicer
+falls back to the preset's `["Standard#1","Standard#6"]`, so both sides look like they
+have the size. Measured against the deployed slicer (`bambu-studio-api:bambuddy-1.2.5.6`,
+2026-09-30) on a ScadBuddy 3MF: `["Standard#0","Standard#1"]` in the 3MF's
+`project_settings.config` puts every filament on extruder 2 (`"2 2"`, one nozzle, no
+second-extruder pre-heat). `["Standard#1","Standard#0"]` puts them on extruder 1, and
+`["Standard#0","Standard#0"]` fails the slice ("No valid nozzle found"). The run's
+upload now writes it (`extruders.slicer_nozzle_stats`), and so does Generate's project
+file, so a print on the same printer still reuses that file. It is written only when
+exactly one side has a nozzle of the size: the one mounted, or for the right, a spare in
+the rack. A standard nozzle is preferred to a High Flow one. When both sides or neither
+has the size, or the status cannot be read, the file is left as it was, and nothing is
+refused (#768). #791's download keeps `nozzle_diameter` `[size, size]`. Bambu Studio
+writes the same, and archive 36 printed with it.
+
+Not done: several hotends of one size on the rack side, one per color. `Standard#6` on
+the right gives two groups on extruder 2, and each group needs a rack position picked at
+dispatch (upstream #1784). `status.nozzle_rack` lists the spares, but ScadBuddy picks no
+position (§6).
 
 What stays is a label. Extruders are physical: 0 is the right (main), 1 the left, and
 `status.nozzles` is indexed the same way. The filament step marks each loaded spool
@@ -358,7 +396,9 @@ A two-color print sliced for 0.2 mm printed through the one 0.2 mm nozzle, while
   placement preview is not requested upstream for now; ScadBuddy shows only facts it can
   read (loaded or not, installed or not).
 - **Which rack nozzle is used.** The printer picks the physical nozzle matching the
-  sliced size and flow type; ScadBuddy does not set `nozzle_rack_choice`.
+  sliced size and flow type; ScadBuddy does not set `nozzle_rack_choice`. The slicer
+  still decides which extruders the file prints on. ScadBuddy only tells it which sides
+  have the size (`extruder_nozzle_stats`, §4.3, #834).
 - **Queue behavior.** Manual start, waiting for filament, order: Bambuddy's options,
   Bambuddy's defaults.
 
