@@ -802,6 +802,24 @@ describe('PrintPicker · Plate type', () => {
   })
 })
 
+describe('PrintPicker · Simple-mode plate type (#768)', () => {
+  it('sends the plate type the choices read chose, with the step not shown', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({ ...choicesView, bed_type: 'Engineering Plate' }),
+      ),
+    )
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.queryByLabelText('Plate')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ choices: { bed_type: 'Engineering Plate' } })
+  })
+})
+
 describe('PrintPicker · Copies', () => {
   /** Remembers print options the way Settings does, so the GET and the run both see them. */
   async function remember(scope: 'global' | 'printer' | 'model', options: object, key?: string) {
@@ -1529,6 +1547,31 @@ describe('PrintPicker · A library file (#313)', () => {
     expect(modelRemember).not.toHaveBeenCalled()
     expect(screen.queryByTestId('print-progress')).toBeNull()
     expect(screen.getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
+  })
+
+  it('files a Simple-mode print under the last project printed to, with no picker shown (#768)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({ projects: fixtures.projectViews, last_project_id: 2 }),
+      ),
+    )
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const { user } = renderPage(
+      <PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+
+    expect(screen.getByRole('switch', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.queryByTestId('project-select')).toBeNull()
+    const print = screen.getByRole('button', { name: /^Print$/ })
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+    await screen.findByTestId('queued-items')
+    expect(run).toHaveBeenCalledWith(
+      89,
+      expect.objectContaining({ project_id: 2 }),
+      expect.any(AbortSignal),
+    )
   })
 
   it('reopens on the spools this file last printed with', async () => {

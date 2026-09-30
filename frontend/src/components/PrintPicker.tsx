@@ -30,7 +30,7 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import type { ProjectList } from '../lib/projects'
+import { type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -58,7 +58,7 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  *   Checks. The nozzles, quality, plate type, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
  *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project. Advanced also adds the full process list,
+ *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
@@ -113,6 +113,12 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   /** #79 — the Bambuddy project this print is filed under: the page's, when it has one. */
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
+  /**
+   * #768 — the dialog's own list, read here rather than by its picker, which is an
+   * Advanced step: Simple mode must still seed the project from the last one printed to.
+   * Read on each open, as the picker was, and never when the page passes its project.
+   */
+  const ownProjects = useProjectList(setOwnProjectId, open && !project)
 
   const runPrint = useRunPrint({
     source,
@@ -294,7 +300,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || loading || !choices || refused || runRefuses}
+              // Held while the dialog's own project list loads, so a Simple-mode print
+              // cannot go out before the last project has seeded it.
+              disabled={
+                running || loading || !choices || refused || runRefuses || ownProjects.loading
+              }
               data-testid="run-print"
               {...USER_ONLY}
             >
@@ -450,11 +460,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
                   {project ? (
                     <ProjectPicker value={project.value} onChange={project.onChange} list={project.list} />
                   ) : (
-                    <ProjectPicker
-                      value={ownProjectId}
-                      onChange={setOwnProjectId}
-                      onLoaded={setOwnProjectId}
-                    />
+                    <ProjectPicker value={ownProjectId} onChange={setOwnProjectId} list={ownProjects} />
                   )}
 
                   <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
