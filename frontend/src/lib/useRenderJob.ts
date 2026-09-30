@@ -26,7 +26,7 @@ interface Submission {
 export interface RenderState {
   /** The job currently being rendered, or the last one that finished. */
   job: Job | undefined
-  /** True from submit until the job reaches `done` or `failed`. */
+  /** True from submit until the job reaches `done`, `failed` or `cancelled`. */
   rendering: boolean
   error: Error | undefined
   /**
@@ -132,7 +132,7 @@ export function useRenderJob(
           const next = await api.getJob(jobId)
           if (isStale()) return
           setJob(next)
-          if (next.status === 'done' || next.status === 'failed') finish()
+          if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
         } catch (cause) {
           if (isStale()) return
           setError(cause instanceof Error ? cause : new Error(String(cause)))

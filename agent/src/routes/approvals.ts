@@ -3,7 +3,8 @@ import { z } from 'zod'
 import { ApprovalError, type ApprovalRecord, type ApprovalService } from '../approvals/service.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { Owner } from '../sessions/protocol.js'
-import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/approvals (#258): the panel's and the tests' way to see and decide
 // approvals of outward tool calls until #266's socket carries the panel's
@@ -103,7 +104,8 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
     }
   })
 
-  app.post(`${base}/:id/:verb{approve|deny}`, async (c) => {
+  // The body is at most {"input_hash": "<64 hex>"}; anything over the cap is 413 unread.
+  app.post(`${base}/:id/:verb{approve|deny}`, jsonBodyLimit(), async (c) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'approval decisions')
     if (problem) return c.json({ detail: problem }, 403)
     const approvals = await service()
@@ -127,6 +129,7 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
     try {
       const decided = await approvals.decide(BROWSER_USER, c.req.param('id'), c.req.param('verb') === 'approve', {
         ...(body.input_hash === undefined ? {} : { inputHash: body.input_hash }),
+        clientIp: deps.remoteAddress(c),
       })
       return c.json(approvalView(decided))
     } catch (err) {
@@ -134,4 +137,23 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
       throw err
     }
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+    approvals?: ApprovalService
+  }
+}
+
+/** The approval routes (#258). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerApprovalRoutes(app, {
+      approvals: deps.approvals,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

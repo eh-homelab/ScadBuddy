@@ -156,6 +156,16 @@ class PrintEvent(BaseEvent):
     slug: str
 
 
+class PrintRunEvent(BaseEvent):
+    """A print run (#470) was accepted or ended: re-read ``GET /print/runs/{run_id}``.
+    Published on the output's ``print:<output id>`` topic, beside ``print.progress``."""
+
+    kind: Literal["print.run"] = "print.run"
+    output_id: str
+    slug: str
+    run_id: str
+
+
 class LibraryChanged(BaseEvent):
     """A library was pinned to, re-pinned on, or removed from a model."""
 
@@ -181,10 +191,10 @@ class FontInstalled(BaseEvent):
 SettingsSection = Literal[
     "connection",
     "print_options",
-    "model_pipeline",
     "model_choices",
     "printer_bed_type",
     "last_project",
+    "remembered",
 ]
 
 
@@ -203,6 +213,34 @@ class AnalyzerDecisionEvent(BaseEvent):
     scope: str
     scope_key: str
     action: Literal["recorded", "removed"]
+
+
+SessionBusKind = Literal[
+    "session.started",
+    "session.owner",
+    "session.waiting",
+    "session.done",
+    "session.message",
+]
+
+SessionStatus = Literal["running", "waiting_input", "waiting_approval", "idle", "done", "failed"]
+
+
+class SessionBusEvent(BaseEvent):
+    """An AI agent session changed (#300, AI spec §7: ``session.*`` "from the agent
+    side"). The agent service publishes these itself
+    (``agent/src/sessions/busEvents.ts``): NOTIFY only, never into ``events``, so
+    they are not replayed. Declared here so this process decodes them instead of
+    logging each as undecodable; they go to no WebSocket topic (``realtime.py``),
+    since the UI follows a session over the agent's own socket, which checks who
+    may see it. ``seq`` is the session's event-log position, ``replica`` the
+    publishing agent process."""
+
+    kind: SessionBusKind
+    session_id: str
+    seq: int
+    status: SessionStatus | None = None
+    replica: str | None = None
 
 
 #: The resync marker's kind. Every subscription receives it, whatever its filter.
@@ -232,11 +270,13 @@ Event = Annotated[
     | UpstreamAvailable
     | OutputEvent
     | PrintEvent
+    | PrintRunEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled
     | SettingsChanged
     | AnalyzerDecisionEvent
+    | SessionBusEvent
     | BusResync,
     Field(discriminator="kind"),
 ]
@@ -381,6 +421,10 @@ class EventBus(Protocol):
 
     async def aclose(self) -> None:
         """Close every subscription, ending each consumer's iteration."""
+        ...
+
+    def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
+        """Call ``listener`` on the publishing thread for every event; returns its remover."""
         ...
 
 

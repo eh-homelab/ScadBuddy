@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../../api/client'
 import type { Param, ParamValue } from '../../api/types'
+import { GALLERY_SLUG } from '../../mocks/fixtures'
 import { ASSET_REFUSAL, storeAsset } from '../../mocks/handlers'
 import { ParamWidget } from './ParamWidget'
 
@@ -24,18 +25,20 @@ function Harness({
   onChange,
   of = param,
   version,
+  slug = SLUG,
 }: {
   initial: ParamValue
   onChange: (next: ParamValue) => void
   of?: Param
   version?: string
+  slug?: string
 }) {
   const [value, setValue] = useState(initial)
   return (
     <ParamWidget
       param={of}
       value={value}
-      slug={SLUG}
+      slug={slug}
       version={version}
       fonts={[]}
       onChange={(next) => {
@@ -46,11 +49,11 @@ function Harness({
   )
 }
 
-function setup(initial: ParamValue = '', of: Param = param, version?: string) {
+function setup(initial: ParamValue = '', of: Param = param, version?: string, slug = SLUG) {
   const onChange = vi.fn()
   // The picker's `accept` is a hint to the OS dialog; the server sniffs regardless.
   const user = userEvent.setup({ applyAccept: false })
-  render(<Harness initial={initial} onChange={onChange} of={of} version={version} />)
+  render(<Harness initial={initial} onChange={onChange} of={of} version={version} slug={slug} />)
   return { onChange, user }
 }
 
@@ -272,5 +275,87 @@ describe('mock API: file parameters (#204)', () => {
     expect(svg.headers.get('content-type')).toBe('image/svg+xml')
     expect(await svg.text()).toContain('<svg')
     expect((await fetch(api.sampleContentUrl(SLUG, 'model.scad'))).status).toBe(404)
+  })
+})
+
+describe('file parameter: the media picker', () => {
+  beforeEach(mockUpload)
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+  const withSamples: Param = { ...param, samples: ['sample-heart.svg', 'sample-star.png'] }
+
+  async function openPicker(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Choose…' }))
+    return screen.getByRole('dialog', { name: 'Choose Label artwork' })
+  }
+
+  it("offers the samples and the template's images in one place", async () => {
+    const { user } = setup('', withSamples, undefined, GALLERY_SLUG)
+    const picker = await openPicker(user)
+
+    const samples = within(picker).getByRole('region', { name: 'Samples' })
+    expect(within(samples).getAllByRole('button')).toHaveLength(2)
+    const images = await within(picker).findByRole('region', { name: "Template's images" })
+    // Images only: a video cannot be a parameter's file.
+    expect(within(images).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Choose Printed in blue and orange',
+      'Choose The raised rim',
+      'Choose Image 3',
+    ])
+  })
+
+  it('takes a sample picked there', async () => {
+    const { onChange, user } = setup('', withSamples)
+    const picker = await openPicker(user)
+    await user.click(within(picker).getByRole('button', { name: 'Choose sample-star.png' }))
+
+    expect(onChange).toHaveBeenCalledWith('sample-star.png')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it("stores one of the template's images as the parameter's PNG", async () => {
+    const { onChange, user } = setup('', param, undefined, GALLERY_SLUG)
+    const picker = await openPicker(user)
+    const images = await within(picker).findByRole('region', { name: "Template's images" })
+    await user.click(within(images).getByRole('button', { name: 'Choose The raised rim' }))
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/)))
+    expect(api.uploadAsset).toHaveBeenCalledWith(
+      GALLERY_SLUG,
+      expect.objectContaining({ name: 'The raised rim.png', type: 'image/png' }),
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('uploads a new file from the picker and takes it', async () => {
+    const { onChange, user } = setup()
+    const picker = await openPicker(user)
+    await user.upload(
+      within(picker).getByLabelText('Upload a file'),
+      new File([HEART], 'heart.svg', { type: 'image/svg+xml' }),
+    )
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/)))
+    expect(await screen.findByText('heart.svg')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps the picker open with the reason when an upload is refused', async () => {
+    const { onChange, user } = setup()
+    const picker = await openPicker(user)
+    await user.upload(
+      within(picker).getByLabelText('Upload a file'),
+      new File(['GIF89a'], 'cat.gif', { type: 'image/gif' }),
+    )
+
+    expect(await within(picker).findByRole('alert')).toHaveTextContent(ASSET_REFUSAL)
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("leaves the template's images out for a parameter that takes only SVG", async () => {
+    const { user } = setup('', { ...param, accept: ['svg'] }, undefined, GALLERY_SLUG)
+    const picker = await openPicker(user)
+    expect(within(picker).queryByRole('region', { name: "Template's images" })).not.toBeInTheDocument()
   })
 })

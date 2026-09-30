@@ -18,7 +18,13 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
-import type { SessionManager } from '../src/sessions/manager.js'
+import type { EventLog } from '../src/sessions/eventLog.js'
+import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
+import type { Owner } from '../src/sessions/protocol.js'
+import { hasTier, type Tier } from '../src/auth/principal.js'
+import { turnPrincipal } from '../src/tools/harness.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
+import { SERVER_NAME } from '../src/tools/projections.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -147,6 +153,36 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     const { session, approval } = await orphan()
     expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ decision: 'denied', decidedBy: browser })
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turns: 0 })
+  })
+
+  it('a decision racing create cannot log approval.resolved before approval.required', async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    // An event log that tries to decide the approval just before
+    // `approval.required` is written: the fastest possible decision.
+    let raced: unknown
+    const events = Object.create(m.events) as EventLog
+    events.append = async (sessionId, batch, tx) => {
+      const required = batch.find((e) => e.type === 'approval.required')
+      if (required && 'id' in required) {
+        raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
+      }
+      return m.events.append(sessionId, batch, tx)
+    }
+    const service = new ApprovalService({ sql: db.sql, events })
+    const approval = await service.create({
+      sessionId: session.id,
+      turnId: null,
+      toolUseId: 'toolu_1',
+      tool: 'mcp__stub__print',
+      input: { job: 'box.3mf' },
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    // The row is not there to decide until it commits with its event.
+    expect(raced).toMatchObject({ code: 'not_found' })
+    await service.decide(browser, approval.id, false)
+    const types = (await m.events.read(session.id, 0, 1000)).map((e) => e.event.type)
+    expect(types.filter((t) => t.startsWith('approval.'))).toEqual(['approval.required', 'approval.resolved'])
   })
 
   it('an approved orphan is used once, only by the turn it is bound to, with the same tool and input', async () => {
@@ -297,7 +333,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await m.approvals.decide(browser, approval.id, true)
     await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
     expect(await m.interrupt(session.id, browser)).toBe(false)
-    await m.handoff(session.id, agentA, agentB)
+    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
     const turn = await m.send(session.id, agentB, 'print the box')
     await turn.done
     const [{ turn_id: none } = { turn_id: null }] = await db.sql<{ turn_id: string | null }[]>`SELECT turn_id FROM ai_sessions WHERE id = ${session.id}`
@@ -315,7 +351,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
       await db.sql`UPDATE ai_approvals SET decision = 'approved', decided_at = now(), usable_until = now() + interval '1 hour',
                    resume_turn_id = ${turnA} WHERE id = ${approval.id}`
       if (end === 'interrupt') expect(await m.interrupt(session.id, browser)).toBe(true)
-      else await m.handoff(session.id, agentA, agentB)
+      else await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
       const after = await m.approvals.get(approval.id, browser)
       expect(after.revokedAt).not.toBeNull()
       expect(await m.approvals.consume(session.id, turnA, approval.tool, approval.inputHash)).toBeUndefined()
@@ -364,6 +400,115 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(after.revokedAt).not.toBeNull()
   })
 
+  describe("a resumed orphan's turn (PR #715 review)", () => {
+    // A registry tool only an outward principal is offered (tools/harness.ts `mcpServers`).
+    const outward = ALL_TOOLS.find((t) => t.risk === 'outward' && !t.name.startsWith('sessions_'))!
+    const outwardName = `mcp__${SERVER_NAME}__${outward.name}`
+
+    /** A manager whose turns park on `outwardName`, recording what each turn is offered. */
+    async function recording(currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>) {
+      const offered: string[][] = []
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          await Promise.resolve()
+          if (offered.length > 1) {
+            yield* [] // the resumed turn: its tools are what is checked
+            return
+          }
+          await run.approvalGate!({
+            toolName: outwardName,
+            input: { url: 'https://example.com/box.scad' },
+            toolUseId: 'toolu_resume',
+            tier: 'outward',
+            signal: run.signal!,
+          }).catch(() => {})
+          throw new Error('Claude Code process aborted by user')
+        })()
+      const r = manager({
+        sql: db.sql,
+        paths: await tempPaths(),
+        run: runner,
+        approvalPollMs: 20,
+        // What tools/harness.ts offers a turn, by name.
+        mcpServers: (session: { owner: Owner }, turn?: TurnPrincipal) => {
+          const principal = turnPrincipal(session.owner, turn)
+          offered.push(ALL_TOOLS.filter((t) => hasTier(principal, t.risk)).map((t) => `mcp__${SERVER_NAME}__${t.name}`))
+          return {}
+        },
+        ...(currentTiers ? { currentTiers } : {}),
+      })
+      return { r, offered }
+    }
+
+    /** A token-owned session sent to with outward tiers, whose turn parked and then lost its process. */
+    async function parkedThenRestarted(r: SessionManager) {
+      const { session, turn } = await r.start(agentA, { origin: 'mcp', prompt: 'import it', tiers: ['read', 'write', 'outward'] })
+      let parked: string | undefined
+      await expect.poll(async () => {
+        parked = (await r.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id
+        return parked
+      }).toBeDefined()
+      r.abortAll() // shutdown: the approval stays pending
+      await turn!.done
+      await expect.poll(async () => (await r.get(session.id, agentA)).turnActive).toBe(false)
+      return { session, approvalId: parked! }
+    }
+
+    it("runs with the asking turn's tiers, so the approved outward tool is offered again", async () => {
+      const { r, offered } = await recording()
+      const { session, approvalId } = await parkedThenRestarted(r)
+      expect(offered[0]).toContain(outwardName)
+      expect((await r.approvals.get(approvalId, browser)).requestedTiers).toEqual(['read', 'write', 'outward'])
+
+      await r.approvals.decide(browser, approvalId, true)
+      await expect.poll(() => offered.length).toBe(2)
+      await expect.poll(async () => (await r.get(session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
+      // Without the recorded tiers this turn was `read` only and not offered the tool it was told to call again.
+      expect(offered[1]).toContain(outwardName)
+      expect(offered[1]).toEqual(offered[0])
+    })
+
+    it('gets no more than the owner holds now: a downgraded token loses the tool, a revoked one keeps `read`', async () => {
+      let now: readonly Tier[] = ['read', 'write']
+      const { r, offered } = await recording((owner) => Promise.resolve(owner.id === agentA.id ? now : undefined))
+      const first = await parkedThenRestarted(r)
+      await r.approvals.decide(browser, first.approvalId, true)
+      await expect.poll(() => offered.length).toBe(2)
+      await expect.poll(async () => (await r.get(first.session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
+      expect(offered[1]).not.toContain(outwardName)
+      expect(offered[1]).toContain(`mcp__${SERVER_NAME}__sessions_send`) // write, still held
+
+      now = []
+      offered.length = 0
+      const second = await parkedThenRestarted(r)
+      await r.approvals.decide(browser, second.approvalId, true)
+      await expect.poll(() => offered.length).toBe(2)
+      await expect.poll(async () => (await r.get(second.session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
+      expect(offered[1]).toEqual(ALL_TOOLS.filter((t) => t.risk === 'read').map((t) => `mcp__${SERVER_NAME}__${t.name}`))
+    })
+
+    it('are not carried to another owner: a stored approval of agent A resumed in B’s session runs with B’s default', async () => {
+      const { r, offered } = await recording()
+      const { session } = await r.start(agentB, { origin: 'mcp', title: 't' })
+      await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
+      const approval = await r.approvals.create({
+        sessionId: session.id,
+        turnId: null,
+        toolUseId: 'toolu_1',
+        tool: outwardName,
+        input: { url: 'https://example.com/box.scad' },
+        tier: 'outward',
+        requestedBy: agentA,
+        requestedTiers: ['read', 'write', 'outward'],
+      })
+      offered.push([]) // so the runner treats the next turn as the resumed one
+      await r.approvals.decide(browser, approval.id, true)
+      await expect.poll(() => offered.length).toBe(2)
+      expect(offered[1]).not.toContain(outwardName)
+      expect(offered[1]).not.toContain(`mcp__${SERVER_NAME}__sessions_send`)
+    })
+  })
+
   it('interrupting a session with an orphan cancels it; a new turn supersedes one', async () => {
     const first = await orphan()
     expect(await m.interrupt(first.session.id, browser)).toBe(true)
@@ -381,8 +526,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   it('handing off a session cancels its pending approval', async () => {
     const { session, approval } = await orphan()
-    await m.handoff(session.id, agentA, agentB)
-    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'the session was handed off to Agent B' })
+    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
+    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'the session was handed off to another MCP token' })
   })
 
   it('lists by visibility: the browser sees all, an agent only its own sessions', async () => {

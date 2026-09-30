@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
-import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
 import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
+  RESTARTING,
   SessionError,
   SETTING_SESSION_BUDGET_USD,
   SETTING_SESSION_MAX_TURNS,
@@ -15,6 +17,11 @@ import {
   titleFrom,
   type TurnOutcome,
 } from '../src/sessions/manager.js'
+import type { PluginsForRun } from '../src/plugins/forwarder.js'
+import type { CheckedPlugin } from '../src/plugins/registry.js'
+import { AuditLog } from '../src/audit/log.js'
+import { drainRetains } from '../src/memory/hindsight.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
@@ -68,8 +75,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
     }
 
     it('serves a principal’s list from the owner and creator indexes, not a table scan', async () => {
+      // Only this test's schema: test files run in parallel, each in a throwaway
+      // schema, and describing another one's index while it is dropped fails with
+      // "could not open relation with OID".
       const indexes = await db.sql<{ indexname: string; indexdef: string }[]>`
-        SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'ai_sessions'`
+        SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname = current_schema() AND tablename = 'ai_sessions'`
       const defs = Object.fromEntries(indexes.map((i) => [i.indexname, i.indexdef]))
       expect(defs.ai_sessions_owner).toMatch(/\(owner_kind, owner_id, updated_at DESC\)/)
       expect(defs.ai_sessions_creator).toMatch(/\(creator_kind, creator_id, updated_at DESC\)/)
@@ -88,6 +99,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(plan).not.toContain('Seq Scan')
       expect(plan).toContain('ai_sessions_owner')
       expect(plan).toContain('ai_sessions_creator')
+      expect(plan).toContain('ai_sessions_pending_owner')
     })
 
     it('starts a session with limits from ai_settings, and defaults without them', async () => {
@@ -313,6 +325,72 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await (await m.send(session.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
     })
 
+    it('reaps a turn whose lease ran out: it says it stopped, and the session is idle again', async () => {
+      const paths = await tempPaths()
+      const { runner } = scriptedRunner(() => ({ hang: true }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const dead = (await m.start(agentA, { origin: 'mcp' })).session
+      const parked = (await m.start(agentA, { origin: 'mcp' })).session
+      const live = (await m.start(agentA, { origin: 'mcp' })).session
+      // Two turns whose process died before finish() (a restart closed the pool
+      // under them, 2026-09-30); one of them left an approval pending.
+      await db.sql`
+        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE id IN ${db.sql([dead.id, parked.id])}`
+      await db.sql`
+        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+        SELECT gen_random_uuid(), id, turn_id, 't1', 'send_to_bambuddy', 'send', 'h', 'outward',
+               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+        FROM ai_sessions WHERE id = ${parked.id}`
+      // A live one, on this replica.
+      const running = await m.send(live.id, agentA, 'long job')
+
+      expect((await m.reapExpired()).sort()).toEqual([dead.id, parked.id].sort())
+      expect(await m.get(dead.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+      expect(await m.get(parked.id, agentA)).toMatchObject({ status: 'waiting_approval', turnActive: false })
+      expect(await m.get(live.id, agentA)).toMatchObject({ status: 'running', turnActive: true })
+      const events = (await m.events.read(dead.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
+      expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+      // Reaped once: a second sweep (or another replica's) finds nothing.
+      expect(await m.reapExpired()).toEqual([])
+      // And the session takes a turn again.
+      const { runner: ok } = scriptedRunner(() => ({ reply: 'back' }))
+      const after = manager({ sql: db.sql, paths, run: ok })
+      expect(await (await after.send(dead.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
+
+      await m.interrupt(live.id, agentA)
+      await running.done
+    })
+
+    it('on a restart, lets a running turn finish, then aborts the rest and waits for them to record it', async () => {
+      const paths = await tempPaths()
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const turns: FakeTurn[] = [{ reply: 'nearly done', holdAfterResult: held }, { hang: true }]
+      const { runner } = scriptedRunner(() => turns.shift()!)
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const finishing = (await m.start(agentA, { origin: 'mcp' })).session
+      const stuck = (await m.start(agentA, { origin: 'mcp' })).session
+      const first = await m.send(finishing.id, agentA, 'a')
+      const second = await m.send(stuck.id, agentA, 'b')
+
+      const stopping = m.stopTurns({ graceMs: 300, abortWaitMs: 5_000 })
+      // Draining: nothing new starts here.
+      await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
+      release()
+      await stopping
+      // The one that could finish did; the other was aborted and recorded it
+      // before stopTurns returned, so the pool can close now.
+      expect(await first.done).toMatchObject({ kind: 'result' })
+      expect(await second.done).toEqual({ kind: 'interrupted' })
+      expect(await m.get(stuck.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+      const events = (await m.events.read(stuck.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
+      expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+    })
+
     it('records a failed turn and says why', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ throws: 'spawn failed' }))
@@ -323,6 +401,146 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const events = (await m.events.read(session.id)).map((e) => e.event)
       expect(events.at(-2)).toMatchObject({ type: 'error', code: 'turn_failed', message: 'spawn failed' })
       expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'failed' })
+    })
+
+    it('gives a turn memory hooks only when it loaded an enabled hindsight plugin, recalling the user’s words', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/b/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        // What forwardForRun gives the manager: the plugin is there only when
+        // it is enabled and its endpoint passed the egress check this turn.
+        let loaded: CheckedPlugin | undefined = hindsight
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), release: () => {} })
+        const context = '<page_context>\n{"route":"/"}\n</page_context>'
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box', context })
+        await turn!.done
+        const hooks = runs[0]!.memoryHooks
+        expect(Object.keys(hooks ?? {}).sort()).toEqual(['Stop', 'UserPromptSubmit'])
+        await hooks!.UserPromptSubmit![0]!.hooks[0]!(
+          { session_id: session.id, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[0]!.prompt as string },
+          undefined,
+          { signal: new AbortController().signal },
+        )
+        expect(runs[0]!.prompt).toBe(`Make a box\n\n${context}`)
+        expect(fake.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['Make a box'])
+
+        loaded = undefined
+        await (await m.send(session.id, agentA, 'again')).done
+        expect(runs[1]!.memoryHooks).toBeUndefined()
+
+        loaded = hindsight
+        const off = manager({ sql: db.sql, paths, run: runner, remotePlugins, memory: false })
+        await (await off.send(session.id, agentA, 'once more')).done
+        expect(runs[2]!.memoryHooks).toBeUndefined()
+      } finally {
+        await fake.close()
+      }
+    })
+
+    it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        fake.memories = ['The user prints in PETG.', 'Boxes get 2 mm walls.']
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/bank1/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+        const failures: unknown[] = []
+        const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+        await turn!.done
+        // The hooks run as Claude Code would call them; this is after the turn ended,
+        // the case of a retain that finishes late.
+        const hooks = runs[0]!.memoryHooks!
+        const signal = new AbortController().signal
+        const base = { session_id: session.id, transcript_path: '/nonexistent', cwd: '/' }
+        for (const matcher of hooks.UserPromptSubmit!) {
+          await matcher.hooks[0]!({ ...base, hook_event_name: 'UserPromptSubmit', prompt: 'Make a box' }, undefined, { signal })
+        }
+        await hooks.Stop![0]!.hooks[0]!(
+          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'A box, 40 mm wide.' },
+          undefined,
+          { signal },
+        )
+        await drainRetains()
+        await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(2)
+        const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
+        const recall = entries.find((e) => e.action === 'recall')
+        const retain = entries.find((e) => e.action === 'retain')
+        expect(recall).toMatchObject({
+          surface: 'harness',
+          actor: agentA,
+          session_id: session.id,
+          turn_id: expect.any(String),
+          outcome: 'ok',
+          input_summary: '{"bank":"bank1","results":2}',
+          duration_ms: expect.any(Number),
+        })
+        expect(retain).toMatchObject({
+          outcome: 'ok',
+          turn_id: recall!.turn_id,
+          input_summary: `{"bank":"bank1","document_id":"conversation:${session.id}"}`,
+        })
+        expect(JSON.stringify(entries)).not.toMatch(/PETG|Make a box|40 mm/)
+        expect(failures).toEqual([])
+
+        const events = (await m.events.read(session.id)).map((e) => e.event)
+        const memory = events.filter((e) => e.type === 'memory')
+        // The panel event carries what was sent and what came back (shown in Advanced);
+        // the audit rows above never do.
+        expect(memory).toEqual([
+          {
+            v: 1,
+            type: 'memory',
+            sessionId: session.id,
+            turnId: recall!.turn_id,
+            action: 'recall',
+            bank: 'bank1',
+            outcome: 'ok',
+            count: 2,
+            input: 'Make a box',
+            memories: [expect.stringMatching(/^1\. /), expect.stringMatching(/^2\. /)],
+          },
+          {
+            v: 1,
+            type: 'memory',
+            sessionId: session.id,
+            turnId: recall!.turn_id,
+            action: 'retain',
+            bank: 'bank1',
+            outcome: 'ok',
+            input: expect.stringContaining('40 mm'),
+          },
+        ])
+        // Both arrived after the turn's last status: the log keeps them in that order for a replay.
+        const lastStatus = events.findLastIndex((e) => e.type === 'session.status')
+        expect(events.findIndex((e) => e.type === 'memory')).toBeGreaterThan(lastStatus)
+
+        // A failed retain is recorded as an error with its reason.
+        fake.respond = (r) => (r.path.endsWith('/memories') ? { status: 503, text: 'overloaded' } : undefined)
+        await hooks.Stop![0]!.hooks[0]!(
+          { ...base, hook_event_name: 'Stop', stop_hook_active: false, last_assistant_message: 'Again.' },
+          undefined,
+          { signal },
+        )
+        await drainRetains()
+        const failed = (await audit.list({ sessionId: session.id, kind: 'memory', outcome: 'error' })).entries
+        expect(failed).toMatchObject([{ action: 'retain', detail: expect.stringMatching(/HTTP 503/) }])
+      } finally {
+        await fake.close()
+      }
     })
 
     it('refuses sends once the session budget is spent, and passes what is left to the SDK', async () => {
@@ -360,9 +578,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
       await turn!.done
       expect(runs[0]!.headlessBrowser).toBeUndefined()
+      // The prompt says which browser each browser_* set drives (a model called
+      // mcp__scadbuddy__browser_find in production, a name only the headless set has).
+      expect(runs[0]!.systemPromptAppend).toContain(browserToolsGuide(false))
 
       await settings.set(SETTING_HEADLESS_BROWSER, true)
       await (await m.send(session.id, agentA, 'look again')).done
+      expect(runs[1]!.systemPromptAppend).toContain(browserToolsGuide(true))
       expect(runs[1]!.headlessBrowser).toEqual({
         sessionId: session.id,
         backendUrl,
@@ -380,6 +602,27 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const bare = manager({ sql: db.sql, paths, run: runner, settings })
       await (await bare.send(session.id, agentA, 'once more')).done
       expect(runs[2]!.headlessBrowser).toBeUndefined()
+    })
+
+    it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
+      const paths = await tempPaths()
+      const settings = new SettingsStore(db.sql)
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      const m = manager({ sql: db.sql, paths, run: runner, settings, httpRequest: {} })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'fetch' })
+      await turn!.done
+      expect(Object.keys(runs[0]!.mcpServers ?? {})).toContain(HTTP_SERVER)
+      // Its tier follows the method: a GET runs, a POST waits for approval.
+      expect(runs[0]!.tierOf?.(HTTP_TOOL_NAME, { method: 'GET', url: 'http://x/' })).toBe('read')
+      expect(runs[0]!.tierOf?.(HTTP_TOOL_NAME, { method: 'POST', url: 'http://x/' })).toBe('outward')
+
+      await settings.set(SETTING_HTTP_REQUEST, false)
+      await (await m.send(session.id, agentA, 'fetch again')).done
+      expect(Object.keys(runs[1]!.mcpServers ?? {})).not.toContain(HTTP_SERVER)
+
+      await settings.set(SETTING_HTTP_REQUEST, true)
+      await (await m.send(session.id, agentA, 'and again')).done
+      expect(Object.keys(runs[2]!.mcpServers ?? {})).toContain(HTTP_SERVER)
     })
 
     describe('ownership and handoff', () => {
@@ -414,7 +657,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         })
       })
 
-      it('moves ownership only explicitly: owner to anyone, browser takes over, nobody else', async () => {
+      it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {
         const paths = await tempPaths()
         const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
         const m = manager({ sql: db.sql, paths, run: runner })
@@ -430,8 +673,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // The creator still sees it after handing it off.
         expect((await m.list(agentA)).map((s) => s.id)).toEqual([session.id])
 
-        // The owner hands it to another agent, which can then send.
-        await m.handoff(session.id, browser, agentB)
+        // The owner offers it to another agent, which must accept before it can send.
+        expect((await m.handoff(session.id, browser, agentB)).owner).toEqual(browser)
+        await expect(m.send(session.id, agentB, 'not yet')).rejects.toMatchObject({ code: 'forbidden' })
+        await m.handoff(session.id, agentB, agentB)
         expect(await (await m.send(session.id, agentB, 'agent b here')).done).toMatchObject({ kind: 'result' })
         await expect(m.send(session.id, browser, 'x')).rejects.toMatchObject({ code: 'forbidden' })
 
