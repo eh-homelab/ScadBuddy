@@ -13,6 +13,7 @@ import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
+import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
 function shortId(id: string): string {
@@ -29,7 +30,7 @@ export function HistoryPage() {
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
   const settings = useAsync(() => api.getSettings(), []).data
-  const bambuddyUrl = settings?.bambuddy_url ?? undefined
+  const bambuddyUrl = bambuddyBase(webUrls(settings)) ?? undefined
   const [sendFor, setSendFor] = useState<Output | undefined>(undefined)
   const [deleting, setDeleting] = useState<string | null>(null)
   // #316 — an output with copies in Bambuddy asks first, and offers the inbox ones.

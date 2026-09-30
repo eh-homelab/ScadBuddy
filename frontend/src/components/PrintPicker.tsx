@@ -31,11 +31,12 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import { useProjectList, type ProjectList } from '../lib/projects'
+import { type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
 
 /**
  * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
@@ -58,7 +59,7 @@ import { Spinner } from './ui/Spinner'
  *   Checks. The nozzles, quality, plate type, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
  *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project. Advanced also adds the full process list,
+ *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
@@ -117,9 +118,9 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
   const [ownProjectId, setOwnProjectId] = useState<number | null>(null)
   const projectId = project ? project.value : ownProjectId
   /**
-   * The dialog's own project list, read here rather than by its ProjectPicker, which only
-   * Advanced mounts (#768): a Simple-mode print still goes to the last project, as the
-   * picker would have opened on. Read again on each open, since closing clears the value.
+   * #768 — the dialog's own list, read here rather than by its picker, which is an
+   * Advanced step: Simple mode must still seed the project from the last one printed to.
+   * Read on each open, as the picker was, and never when the page passes its project.
    */
   const ownProjects = useProjectList(setOwnProjectId, open && !project)
 
@@ -142,8 +143,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     async () => (open && unanswered !== null ? await api.getSettings() : null),
     [open, unanswered !== null],
   )
-  // As typed in Settings: a trailing slash would make `…//queue` below.
-  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
+  const bambuddyUrl = bambuddyBase(webUrls(settings.data))
 
   /**
    * #89 — follow only the print this dialog just started, so opening the dialog on an
@@ -289,7 +289,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
+            <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url))}>
               Open in queue
             </Button>
           </>
@@ -314,7 +314,11 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || loading || !choices || refused || runRefuses}
+              // Held while the dialog's own project list loads, so a Simple-mode print
+              // cannot go out before the last project has seeded it.
+              disabled={
+                running || loading || !choices || refused || runRefuses || ownProjects.loading
+              }
               data-testid="run-print"
               {...USER_ONLY}
             >

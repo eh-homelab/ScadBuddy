@@ -999,3 +999,66 @@ describe('project tools (#317)', () => {
     ).rejects.toThrow(/HTTP 404/)
   })
 })
+
+describe('dependencies: include resolution and fonts (#253)', () => {
+  const REPORT = {
+    includes: [
+      {
+        file: 'model.scad',
+        line: 1,
+        kind: 'use',
+        target: 'BOSL2/std.scad',
+        status: 'unresolved',
+        reason: 'no BOSL2/std.scad beside the file that names it, and the model pins no libraries',
+        suggestion: { name: 'BOSL2', source: 'catalogue', url: 'https://github.com/BelfrySCAD/BOSL2.git', ref: 'v2.0.761' },
+      },
+    ],
+    unresolved: 1,
+    fonts: [],
+    fonts_checked: true,
+    missing_checkouts: [],
+    truncated: false,
+  }
+
+  it('check_dependencies is a read tool that sends the unsaved source, or none', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/dependencies`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json(REPORT)
+      }),
+    )
+    const check = tool('check_dependencies')
+    expect(check.risk).toBe('read')
+    expect(firstText(await runTool(check, { slug: 'box', source: 'use <BOSL2/std.scad>\n' }, ctx()))).toEqual(REPORT)
+    await runTool(check, { slug: 'box' }, ctx())
+    expect(bodies).toEqual([{ source: 'use <BOSL2/std.scad>\n' }, { source: null }])
+  })
+
+  it("passes the backend's refusal of a missing font family through as an error", async () => {
+    const detail =
+      "parameter 'font' names font family 'Pacifico', which is not installed. OpenSCAD would silently draw it " +
+      'in the default font instead; install the family (POST /fonts/install) or name one GET /fonts lists'
+    server.use(
+      http.post(`${BACKEND}/api/v1/fonts/install`, () =>
+        HttpResponse.json(
+          { detail: "'Pacifico' was downloaded, but fontconfig does not resolve that family afterwards" },
+          { status: 500 },
+        ),
+      ),
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () =>
+        HttpResponse.json({ groups: [], parameters: [{ name: 'font', type: 'font', initial: 'DejaVu Sans' }] }),
+      ),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () =>
+        HttpResponse.json({ detail, parameters: ['font'], families: ['Pacifico'] }, { status: 422 }),
+      ),
+    )
+    const install = await runTool(tool('install_font'), { family: 'Pacifico' }, ctx())
+    expect(install.isError).toBe(true)
+    expect(JSON.stringify(install.content)).toContain('does not resolve')
+
+    const render = await runTool(tool('render_model'), { slug: 'box', params: { font: 'Pacifico' } }, ctx())
+    expect(render.isError).toBe(true)
+    expect(JSON.stringify(render.content)).toContain('default font instead')
+  })
+})

@@ -630,6 +630,7 @@ export const outputs: Output[] = [
  */
 export const settingsDefaults = {
   bambuddy_url: null,
+  bambuddy_web_urls: null,
   public_url: null,
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,

@@ -12,6 +12,7 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
     FetcherDep,
+    FontsDep,
     HistoryDep,
     PathsDep,
     PresetsDep,
@@ -23,6 +24,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
@@ -59,6 +61,7 @@ async def _require_valid(
     config: Config,
     assets: AssetStore,
     fetcher: CheckoutFetcher,
+    fonts: FontService,
 ) -> None:
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
@@ -70,6 +73,7 @@ async def _require_valid(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
 
 
@@ -132,6 +136,7 @@ async def create_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     await _require_valid(
@@ -142,6 +147,7 @@ async def create_preset(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
     try:
         return await asyncio.to_thread(presets.create, slug, body)
@@ -175,6 +181,7 @@ async def duplicate_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     try:
@@ -189,6 +196,7 @@ async def duplicate_preset(
         config=config,
         assets=assets,
         fetcher=fetcher,
+        fonts=fonts,
     )
     # The original's details come along too (#327): only the name is the copy's own.
     copy = ParamPresetCreate(
@@ -226,6 +234,7 @@ async def update_preset(
     history: HistoryDep,
     config: ConfigDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ParamPreset:
     require_model_exists(catalogue, slug)
     _require_saved(slug, preset_id)
@@ -238,6 +247,7 @@ async def update_preset(
             config=config,
             assets=assets,
             fetcher=fetcher,
+            fonts=fonts,
         )
     try:
         return await asyncio.to_thread(presets.update, slug, preset_id, body)
