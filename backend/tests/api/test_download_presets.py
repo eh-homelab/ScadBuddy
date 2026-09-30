@@ -135,6 +135,17 @@ def test_without_a_default_printer_the_stored_file_is_served(
     assert _project_settings(response.content)["printer_settings_id"] == PRESET_PLACEHOLDER
 
 
+def test_the_stored_file_is_still_served_in_ranges(client: TestClient, model: str) -> None:
+    """Unchanged, it is the FileResponse it was before #769, so a download can resume."""
+    configure(client)
+    output_id = make_output(client, model)
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf", headers={"Range": "bytes=0-3"})
+
+    assert response.status_code == 206
+    assert response.content == b"PK\x03\x04"
+
+
 @respx.mock
 def test_an_unreachable_bambuddy_serves_the_stored_file(
     client: TestClient, model: str, paths: DataPaths

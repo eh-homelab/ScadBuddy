@@ -163,6 +163,13 @@ def test_the_merge_route_documents_each_409(tmp_path: Path) -> None:
         assert case in merge["description"], case
 
 
+def test_the_download_documents_only_a_3mf(tmp_path: Path) -> None:
+    """#769: it answers a FileResponse or a rewritten one, and either is a 3MF."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+    download = paths["/api/v1/outputs/{output_id}/model.3mf"]["get"]
+    assert set(download["responses"]["200"]["content"]) == {"model/3mf"}
+
+
 def test_the_view_routes_document_a_png(tmp_path: Path) -> None:
     paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
 
