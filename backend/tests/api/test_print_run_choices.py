@@ -1193,10 +1193,11 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
 
 
 def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
-    return client.post(
+    response: httpx.Response = client.post(
         f"/api/v1/print/outputs/{output_id}/check",
         json={**body(tier="standard", **choices), "filament_plan": ONE_ON_LEFT},
     )
+    return response
 
 
 @respx.mock
