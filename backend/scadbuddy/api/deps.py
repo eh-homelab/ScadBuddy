@@ -61,6 +61,11 @@ INSTALL_CONCURRENCY = 2
 #: N x this. As many as the resolver has threads. Library installs share those
 #: threads; an import that finds none free is the same retryable 503.
 IMPORT_CONCURRENCY = 2
+#: `POST /models/{slug}/dependencies` reports worked out at once per replica (#253,
+#: review of #740). Each reads the model's files and every model.json in a worker
+#: thread; uncapped, a burst of them holds the default executor every other
+#: `to_thread` route shares. A report past it waits on the loop, not in a thread.
+DEPENDENCY_CHECK_CONCURRENCY = 2
 
 
 @dataclass
@@ -118,6 +123,10 @@ class AppState:
     #: queued.
     imports: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
+    )
+    #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
+    dependency_checks: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(DEPENDENCY_CHECK_CONCURRENCY)
     )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
     #: render queue holds the same one.
@@ -491,6 +500,10 @@ def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
 
 
+def get_dependency_checks(state: StateDep) -> asyncio.Semaphore:
+    return state.dependency_checks
+
+
 def get_imports(state: StateDep) -> asyncio.Semaphore:
     return state.imports
 
@@ -518,6 +531,7 @@ PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
 PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
 ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 

@@ -337,13 +337,13 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     const { user } = renderPicker()
     await loaded()
-    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+    expect(screen.queryByTestId('print-verdict-error')).toBeNull()
 
     await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
 
-    const error = await screen.findByTestId('nozzle-verdict-error')
+    const error = await screen.findByTestId('print-verdict-error')
     expect(error).toHaveTextContent(refusal)
-    expect(within(screen.getByTestId('print-checks')).getByTestId('nozzle-verdict-error')).toBe(error)
+    expect(within(screen.getByTestId('print-checks')).getByTestId('print-verdict-error')).toBe(error)
     expect(screen.getByTestId('run-print')).toBeDisabled()
     expect(run).not.toHaveBeenCalled()
     const last = checks.bodies.at(-1) as { choices: unknown; filament_plan: unknown; printer_id: unknown }
@@ -369,13 +369,13 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     renderPicker()
     await loaded()
 
-    expect(await screen.findByTestId('nozzle-verdict-warning')).toHaveTextContent(
+    expect(await screen.findByTestId('print-verdict-warning')).toHaveTextContent(
       'Only the right nozzle is 0.2 mm',
     )
-    expect(screen.queryByTestId('nozzle-verdict-error')).toBeNull()
+    expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('says when the nozzle check could not run, and reads it again on request', async () => {
+  it('says when the check before Print could not run, and reads it again on request', async () => {
     let failing = true
     server.use(
       http.post('/api/v1/print/outputs/:id/check', () =>
@@ -387,14 +387,14 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     const { user } = renderPicker()
     await loaded()
 
-    const failed = await screen.findByTestId('nozzle-verdict-failed')
-    expect(failed).toHaveTextContent('The nozzle check could not run: Bambuddy did not answer')
+    const failed = await screen.findByTestId('print-verdict-failed')
+    expect(failed).toHaveTextContent('The check before Print could not run: Bambuddy did not answer')
     expect(screen.getByTestId('run-print')).toBeEnabled()
 
     failing = false
     await user.click(within(failed).getByRole('button', { name: 'Check again' }))
-    expect(await screen.findByTestId('nozzle-verdict-error')).toHaveTextContent(refusal)
-    expect(screen.queryByTestId('nozzle-verdict-failed')).toBeNull()
+    expect(await screen.findByTestId('print-verdict-error')).toHaveTextContent(refusal)
+    expect(screen.queryByTestId('print-verdict-failed')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeDisabled()
   })
 })

@@ -211,7 +211,7 @@ interface Props {
   request: AnalysisRequest | null
   /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
   allPlates?: boolean
-  /** #755 — the run's nozzle verdict, listed first: it is the one check that holds Print. */
+  /** #755, #760 — the run's own refusals, listed first: the one check that holds Print. */
   children?: ReactNode
 }
 

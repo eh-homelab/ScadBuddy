@@ -213,8 +213,16 @@ the font comment in `Dockerfile`).
   running instance actually has with `GET /api/v1/fonts`, which lists the
   families fontconfig resolves (main spec §8).
 - Any other Google Fonts family must be installed first with
-  `POST /api/v1/fonts/install` (main spec §5.4 and §8). Until it is installed,
-  the render uses DejaVu with no error.
+  `POST /api/v1/fonts/install` (main spec §5.4 and §8). The install answers an
+  error if fontconfig still does not resolve the family afterwards
+  (`backend/scadbuddy/library/fonts.py` `FontService.install`, #253).
+- A `// font` parameter value that names a family which isn't installed is
+  refused by the render and preset routes with a 422 naming it
+  (`backend/scadbuddy/api/params.py` `require_installed_fonts`, #253). A
+  `font = "…"` literal in the source is not: OpenSCAD still draws it in DejaVu
+  with no error. `POST /api/v1/models/{slug}/dependencies` lists every such
+  literal with the families that are missing, and every `include`/`use` that
+  does not resolve (`backend/scadbuddy/library/includes.py`, #253).
 - A `verify.sh` that depends on a face must check that the face is present
   before it measures anything. `models/name-keychain/verify.sh` greps `fc-list`
   for "Lobster Two" and builds an image that has it if it is missing.

@@ -29,7 +29,7 @@ export interface SourceApi {
   plateThumbnailUrl: (index: number) => string
   /** `signal` stops waiting on the run (the dialog went away); the run itself goes on. */
   run: (body: PrintRunRequest, signal?: AbortSignal) => Promise<PrintRunResult>
-  /** #755 — the run's nozzle verdict for `body`, with nothing uploaded or queued. */
+  /** #755, #760 — what the run would refuse for `body`, with nothing uploaded or queued. */
   check: (body: PrintRunRequest) => Promise<PrintCheck>
   /** What this source reopens on next time: per model for an output, per file here. */
   remember: (choices: ModelPrintChoices) => Promise<ModelPrintChoices>
