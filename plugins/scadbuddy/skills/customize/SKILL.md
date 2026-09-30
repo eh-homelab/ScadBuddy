@@ -70,8 +70,10 @@ parameter type means (main spec §5.1 and §5.2):
 
 - **Send only parameters in the schema, with the right types.** A render refuses
   an unknown parameter with a 422 (main spec §6.1).
-- **Fonts.** A family that isn't installed silently renders in DejaVu, which
-  changes the geometry. `GET /api/v1/fonts` lists the installed families, and
+- **Fonts.** OpenSCAD silently renders a family that isn't installed in DejaVu,
+  which changes the geometry, so a render or preset whose font value names one is
+  refused with a 422 naming the family (`backend/scadbuddy/api/params.py`
+  `require_installed_fonts`, #253). `GET /api/v1/fonts` lists the installed families, and
   `GET /api/v1/fonts/catalogue?q=` searches Google Fonts. Installing a family
   (`POST /api/v1/fonts/install`, body `{family}`) downloads it onto the data
   volume (main spec §5.4 and §8; `CLAUDE.md`, section "Verified OpenSCAD facts").

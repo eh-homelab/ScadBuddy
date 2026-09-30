@@ -7,6 +7,7 @@ import { useAsync } from '../lib/useAsync'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 
 interface Props {
   open: boolean
@@ -64,7 +65,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
           <>
             <Button onClick={close}>Done</Button>
             {result.bambuddy_url && (
-              <Button variant="primary" onClick={() => openExternal(result.bambuddy_url as string)}>
+              <Button variant="primary" onClick={() => openExternal(bambuddyLink(result.bambuddy_url as string))}>
                 Open in library
               </Button>
             )}

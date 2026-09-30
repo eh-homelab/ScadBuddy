@@ -93,7 +93,10 @@ for the project picker).
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`,
+  `SCADBUDDY_BAMBUDDY_WEB_URLS` (comma-separated URLs browsers reach Bambuddy at, when
+  `SCADBUDDY_BAMBUDDY_URL` is one only the server can; the first is where links point),
+  `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
   1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
   from the UI it wins; a field the UI never saved keeps following the variable,

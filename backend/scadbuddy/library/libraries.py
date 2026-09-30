@@ -382,7 +382,7 @@ def _size(n: int) -> str:
     return f"{n / 1e6:.0f} MB" if n >= 1_000_000 else f"{n} bytes"
 
 
-def _same_repository(first: str, second: str) -> bool:
+def same_repository(first: str, second: str) -> bool:
     """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository,
     whatever the case of the scheme and host (the path's case is significant)."""
 
@@ -671,7 +671,7 @@ class LibraryStore:
             if known is None:
                 raise LibraryNotFoundError(name)
             url = known.url
-        trusted = known is not None and _same_repository(url, known.url)
+        trusted = known is not None and same_repository(url, known.url)
         if trusted:
             assert known is not None
             url = known.url

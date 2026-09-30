@@ -297,7 +297,7 @@ describe('the resource list covers the catalogue', () => {
   it('has the fixed resources the issue names', () => {
     const fixed = RESOURCES.filter((d) => !isTemplate(d)).map((d) => d.template)
     expect(fixed.sort()).toEqual(
-      ['scadbuddy://fonts', 'scadbuddy://libraries', 'scadbuddy://models', 'scadbuddy://plates', 'scadbuddy://settings'].sort(),
+      ['scadbuddy://docs/authoring', 'scadbuddy://fonts', 'scadbuddy://libraries', 'scadbuddy://models', 'scadbuddy://plates', 'scadbuddy://settings'].sort(),
     )
   })
 })
