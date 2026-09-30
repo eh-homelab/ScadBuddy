@@ -12,6 +12,16 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/models/{slug}/ui/{path}',
+    reason:
+      "Serves a template's own UI module and assets to the browser (#425). An agent reads the `ui` " +
+      'declaration from get_model and has no page to mount a module in.',
+  },
+  {
+    operation: 'GET /api/v1/models/{slug}/versions/{commit}/ui/{path}',
+    reason: 'The same UI files at a pinned revision, for the browser (#425).',
+  },
+  {
     operation: 'PUT /api/v1/settings',
     reason:
       'Writes the Bambuddy URL and API key. Credentials are entered in the Settings UI only and never pass ' +
