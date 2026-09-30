@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
 import type {
   AnalysisRequest,
+  FilamentWarning,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
@@ -64,6 +65,9 @@ import { Spinner } from './ui/Spinner'
  * (#88), the project (#79), copies with the remembered quantity (#124/#145), which plate
  * of a multi-plate 3MF (#83), and following the run to completion (#89).
  */
+
+/** The warnings about nozzles, shown in Advanced mode only (#772). */
+const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['hf-unsupported', 'not-installed'])
 
 interface Props {
   open: boolean
@@ -234,12 +238,22 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
       : null
   const check = usePrintCheck(source, checkRequest)
   const runRefuses = check.current && (check.verdict?.errors ?? []).length > 0
+  /**
+   * #772 — Simple mode shows no nozzle message at all: the High Flow note (#723, kept by
+   * the owner as a non-blocking warning) and the rack's not-installed note are about the
+   * nozzle step, which only Advanced shows.
+   */
+  const shown = (warnings: FilamentWarning[] | undefined) =>
+    picker.advanced
+      ? (warnings ?? [])
+      : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
+  const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
   const verdict = (
-    <PrintVerdict verdict={check.verdict} error={check.error} onRetry={check.reload} />
+    <PrintVerdict verdict={checkVerdict} error={check.error} onRetry={check.reload} />
   )
   const verdictShown =
     check.error !== undefined ||
-    (check.verdict?.errors ?? []).length + (check.verdict?.warnings ?? []).length > 0
+    (checkVerdict?.errors ?? []).length + (checkVerdict?.warnings ?? []).length > 0
 
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
@@ -307,7 +321,7 @@ export function PrintPicker({ open, source, onClose, onRan, onPrinterModel, proj
     >
       {result ? (
         <QueuedPanel
-          result={result}
+          result={{ ...result, warnings: shown(result.warnings) }}
           printerName={printer?.name ?? null}
           progress={progress}
           polling={polling}

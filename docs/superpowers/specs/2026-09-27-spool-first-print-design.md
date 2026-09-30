@@ -218,7 +218,10 @@ maintainer's test print, 2026-09-29: a two-colour print sliced for 0.2 mm printe
 through the one 0.2 mm nozzle while the other extruder had a different size fitted. The
 printer handles its nozzles itself, and the H2C swaps hotends from its rack (§6), so
 those refusals and warnings are gone, from the run, the check before Print (#755) and
-the dialog alike.
+the dialog alike. One stays, by the owner's ruling on #772: a mounted High Flow nozzle
+of the sliced size is an `hf-unsupported` warning (#723; queue item 149 paused on it),
+never a refusal, since a print may be set up before its nozzle is fitted. The dialog
+shows it, like every nozzle message, in Advanced mode only.
 
 That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL

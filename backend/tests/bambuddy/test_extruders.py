@@ -14,7 +14,14 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.bambuddy.extruders import LEFT, RIGHT, extruder_of, side_of, with_sides
+from scadbuddy.bambuddy.extruders import (
+    LEFT,
+    RIGHT,
+    extruder_of,
+    high_flow_warnings,
+    side_of,
+    with_sides,
+)
 from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
 from scadbuddy.bambuddy.models import PrinterStatus
 from tests.bambuddy.conftest import recording
@@ -133,3 +140,22 @@ def test_with_sides_labels_each_spool_loaded_here(status: PrinterStatus, switch:
         (None, None),
         (None, None),
     ]
+
+
+def _nozzles(*types: tuple[str, str]) -> PrinterStatus:
+    return mapped_status(
+        nozzles=[{"nozzle_type": kind, "nozzle_diameter": size} for kind, size in types]
+    )
+
+
+def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about() -> None:
+    """#723: queue item 149's printer, a standard right and a High Flow left, both 0.4."""
+    [warning] = high_flow_warnings(_nozzles(("HS01", "0.4"), ("HH01", "0.4")), "0.4")
+    assert warning.kind == "hf-unsupported"
+    assert warning.message.startswith("The left nozzle is High Flow.")
+
+
+def test_no_high_flow_warning_for_standard_nozzles_another_size_or_no_status() -> None:
+    assert high_flow_warnings(_nozzles(("HS01", "0.4"), ("HS01", "0.4")), "0.4") == []
+    assert high_flow_warnings(_nozzles(("HS00", "0.2"), ("HH01", "0.4")), "0.2") == []
+    assert high_flow_warnings(None, "0.4") == []

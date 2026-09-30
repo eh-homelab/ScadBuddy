@@ -269,6 +269,7 @@ describe('PrintPicker', () => {
     const onRan = vi.fn()
     const { user } = renderPicker({ onRan })
     await loaded()
+    await showAdvanced()
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     const warnings = await screen.findByTestId('run-warnings')
@@ -374,6 +375,34 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
+  it('shows the High Flow warning in Advanced only, and never holds Print on it (#772)', async () => {
+    const highFlow =
+      'The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow ' +
+      'slicing is supported (#484).'
+    server.use(
+      http.post('/api/v1/print/outputs/:id/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            { kind: 'hf-unsupported', message: highFlow },
+            { kind: 'not-installed', message: 'No 0.6 mm nozzle is installed. Install one before this prints.' },
+          ],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    // Simple mode: no nozzle message at all.
+    expect(screen.queryByTestId('print-verdict-warning')).toBeNull()
+    expect(screen.queryByText(/High Flow/)).toBeNull()
+
+    await showAdvanced()
+    const shown = await screen.findAllByTestId('print-verdict-warning')
+    expect(shown[0]).toHaveTextContent('The left nozzle is High Flow.')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+  })
+
   it('says when the check before Print could not run, and reads it again on request', async () => {
     let failing = true
     server.use(
