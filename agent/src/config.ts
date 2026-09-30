@@ -1,3 +1,4 @@
+import { BrowserOriginsError, parseBrowserAllowedOrigins } from './harness/browserOrigins.js'
 import { OriginConfigError, originPolicy } from './http/origins.js'
 
 // The agent service's whole environment surface. Design spec §9
@@ -11,6 +12,10 @@ import { OriginConfigError, originPolicy } from './http/origins.js'
 // key-encryption key (and the previous one while rotating it), and how the pod
 // is reached (its public URL and the proxies in front of it). The last two
 // cannot live in Settings: they decide which requests may change Settings.
+// SCADBUDDY_BROWSER_ALLOWED_ORIGINS is here for the same reason: it decides
+// what on the network the headless browser inside the pod may reach
+// (harness/browserOrigins.ts), which is the operator's call, not a setting a
+// request could change.
 
 export type Config = {
   /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
@@ -35,6 +40,12 @@ export type Config = {
   allowedOrigins: string | undefined
   /** CIDR list of proxies whose X-Forwarded-* headers are believed. Unset → none. */
   trustedProxies: string | undefined
+  /**
+   * Origins beyond the backend's that the headless browser may open, each once
+   * a human approves it for the session (harness/browserOrigins.ts): a
+   * comma-separated list, or `*` for any. Unset → none.
+   */
+  browserAllowedOrigins: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
@@ -48,6 +59,7 @@ export const ENV_VARS = [
   'SCADBUDDY_PUBLIC_URL',
   'SCADBUDDY_ALLOWED_ORIGINS',
   'SCADBUDDY_AGENT_TRUSTED_PROXIES',
+  'SCADBUDDY_BROWSER_ALLOWED_ORIGINS',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -99,6 +111,13 @@ export function loadConfig(env: Env = process.env): Config {
     if (err instanceof OriginConfigError) throw new ConfigError(err.message)
     throw err
   }
+  const browserAllowedOrigins = present(env.SCADBUDDY_BROWSER_ALLOWED_ORIGINS)
+  try {
+    parseBrowserAllowedOrigins(browserAllowedOrigins)
+  } catch (err) {
+    if (err instanceof BrowserOriginsError) throw new ConfigError(err.message)
+    throw err
+  }
 
   return {
     databaseUrl,
@@ -109,5 +128,6 @@ export function loadConfig(env: Env = process.env): Config {
     publicUrl,
     allowedOrigins,
     trustedProxies,
+    browserAllowedOrigins,
   }
 }

@@ -941,6 +941,113 @@ describe('print media (#307)', () => {
   })
 })
 
+describe('prints (#308)', () => {
+  it('lists prints with the filters as query parameters', async () => {
+    let query: URLSearchParams | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints`, ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json({ items: [], next_cursor: null })
+      }),
+    )
+    const result = await runTool(
+      tool('list_prints'),
+      { slug: 'keychain', status: 'failed', printer_id: 2, from: '2026-09-01', to: '2026-09-28', q: 'Elan', limit: 10, cursor: '35' },
+      ctx(),
+    )
+    expect(result.isError).toBeFalsy()
+    expect(Object.fromEntries(query!)).toEqual({
+      slug: 'keychain',
+      status: 'failed',
+      printer_id: '2',
+      from: '2026-09-01',
+      to: '2026-09-28',
+      q: 'Elan',
+      limit: '10',
+      cursor: '35',
+    })
+  })
+
+  it('gets one print, asking the printer only when told to', async () => {
+    const asked: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints/35`, ({ request }) => {
+        asked.push(new URL(request.url).search)
+        return HttpResponse.json({ archive_id: 35 })
+      }),
+    )
+    await runTool(tool('get_print'), { archive_id: 35 }, ctx())
+    await runTool(tool('get_print'), { archive_id: 35, printer_media: true }, ctx())
+    expect(asked).toEqual(['', '?printer_media=true'])
+  })
+
+  it('reads only', () => {
+    expect(tool('list_prints').risk).toBe('read')
+    expect(tool('get_print').risk).toBe('read')
+  })
+})
+
+describe('print_again and pull_print_timelapse (#311)', () => {
+  it('queues the archive again', async () => {
+    let posted = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/reprint`, () => {
+        posted = true
+        return HttpResponse.json({ queue_item_id: 51, printer_id: 1, bambuddy_url: 'https://b/queue' }, { status: 201 })
+      }),
+    )
+    const pending = await runTool(tool('print_again'), { archive_id: 35 }, { ...ctx(), pending: new PendingActionStore() })
+    expect(firstText(pending)).toMatchObject({ status: 'pending_approval' })
+    expect(posted).toBe(false)
+    const result = await runTool({ ...tool('print_again'), gated: false }, { archive_id: 35 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('51')
+  })
+
+  it('pulls a named timelapse off the printer', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/prints/35/timelapse/pull`, async ({ request }) => {
+        body = await request.json()
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const result = await runTool({ ...tool('pull_print_timelapse'), gated: false }, { archive_id: 35, filename: 'video_1.mp4' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(body).toEqual({ filename: 'video_1.mp4' })
+  })
+
+  it('are outward, behind the approval gate', () => {
+    expect(tool('print_again').risk).toBe('outward')
+    expect(tool('pull_print_timelapse').risk).toBe('outward')
+  })
+
+  it('declare every Bambuddy scope their route needs: the archive read, then the write', () => {
+    expect(tool('print_again').bambuddyScope).toEqual(['Read Status', 'Manage Queue'])
+    expect(tool('pull_print_timelapse').bambuddyScope).toEqual(['Read Status', 'Manage Archives'])
+  })
+})
+
+describe('get_output_preview (#308)', () => {
+  it("embeds the output's preview mesh", async () => {
+    const id = 'a'.repeat(32)
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${id}/preview.glb`, () =>
+        new HttpResponse(new Uint8Array([1, 2, 3, 4]), { headers: { 'content-type': 'model/gltf-binary' } }),
+      ),
+    )
+    const result = await runTool(tool('get_output_preview'), { output_id: id }, ctx({ maxInlineBytes: 16 }))
+    expect(result.content).toEqual([
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
+      {
+        type: 'resource',
+        resource: { uri: `scadbuddy://outputs/${id}/preview.glb`, mimeType: 'model/gltf-binary', blob: 'AQIDBA==' },
+      },
+    ])
+  })
+})
+
 describe('project tools (#317)', () => {
   const OUT = 'c'.repeat(32)
 

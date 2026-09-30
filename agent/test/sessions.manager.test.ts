@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
-import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
+import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
+  RESTARTING,
   SessionError,
   SETTING_SESSION_BUDGET_USD,
   SETTING_SESSION_MAX_TURNS,
@@ -323,6 +324,72 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await (await m.send(session.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
     })
 
+    it('reaps a turn whose lease ran out: it says it stopped, and the session is idle again', async () => {
+      const paths = await tempPaths()
+      const { runner } = scriptedRunner(() => ({ hang: true }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const dead = (await m.start(agentA, { origin: 'mcp' })).session
+      const parked = (await m.start(agentA, { origin: 'mcp' })).session
+      const live = (await m.start(agentA, { origin: 'mcp' })).session
+      // Two turns whose process died before finish() (a restart closed the pool
+      // under them, 2026-09-30); one of them left an approval pending.
+      await db.sql`
+        UPDATE ai_sessions SET status = 'running', turn_id = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE id IN ${db.sql([dead.id, parked.id])}`
+      await db.sql`
+        INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                  requested_by_kind, requested_by_id, requested_by_label, requested_tiers, expires_at)
+        SELECT gen_random_uuid(), id, turn_id, 't1', 'send_to_bambuddy', 'send', 'h', 'outward',
+               'bearer', 'token:a', 'Agent A', '{}', now() + interval '1 hour'
+        FROM ai_sessions WHERE id = ${parked.id}`
+      // A live one, on this replica.
+      const running = await m.send(live.id, agentA, 'long job')
+
+      expect((await m.reapExpired()).sort()).toEqual([dead.id, parked.id].sort())
+      expect(await m.get(dead.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+      expect(await m.get(parked.id, agentA)).toMatchObject({ status: 'waiting_approval', turnActive: false })
+      expect(await m.get(live.id, agentA)).toMatchObject({ status: 'running', turnActive: true })
+      const events = (await m.events.read(dead.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
+      expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+      // Reaped once: a second sweep (or another replica's) finds nothing.
+      expect(await m.reapExpired()).toEqual([])
+      // And the session takes a turn again.
+      const { runner: ok } = scriptedRunner(() => ({ reply: 'back' }))
+      const after = manager({ sql: db.sql, paths, run: ok })
+      expect(await (await after.send(dead.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
+
+      await m.interrupt(live.id, agentA)
+      await running.done
+    })
+
+    it('on a restart, lets a running turn finish, then aborts the rest and waits for them to record it', async () => {
+      const paths = await tempPaths()
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const turns: FakeTurn[] = [{ reply: 'nearly done', holdAfterResult: held }, { hang: true }]
+      const { runner } = scriptedRunner(() => turns.shift()!)
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const finishing = (await m.start(agentA, { origin: 'mcp' })).session
+      const stuck = (await m.start(agentA, { origin: 'mcp' })).session
+      const first = await m.send(finishing.id, agentA, 'a')
+      const second = await m.send(stuck.id, agentA, 'b')
+
+      const stopping = m.stopTurns({ graceMs: 300, abortWaitMs: 5_000 })
+      // Draining: nothing new starts here.
+      await expect(m.send(finishing.id, agentA, 'c')).rejects.toMatchObject({ code: 'busy', message: RESTARTING })
+      release()
+      await stopping
+      // The one that could finish did; the other was aborted and recorded it
+      // before stopTurns returned, so the pool can close now.
+      expect(await first.done).toMatchObject({ kind: 'result' })
+      expect(await second.done).toEqual({ kind: 'interrupted' })
+      expect(await m.get(stuck.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+      const events = (await m.events.read(stuck.id)).map((e) => e.event)
+      expect(events.at(-2)).toMatchObject({ type: 'error', code: 'interrupted' })
+      expect(events.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+    })
+
     it('records a failed turn and says why', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ throws: 'spawn failed' }))
@@ -488,9 +555,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
       await turn!.done
       expect(runs[0]!.headlessBrowser).toBeUndefined()
+      // The prompt says which browser each browser_* set drives (a model called
+      // mcp__scadbuddy__browser_find in production, a name only the headless set has).
+      expect(runs[0]!.systemPromptAppend).toContain(browserToolsGuide(false))
 
       await settings.set(SETTING_HEADLESS_BROWSER, true)
       await (await m.send(session.id, agentA, 'look again')).done
+      expect(runs[1]!.systemPromptAppend).toContain(browserToolsGuide(true))
       expect(runs[1]!.headlessBrowser).toEqual({
         sessionId: session.id,
         backendUrl,

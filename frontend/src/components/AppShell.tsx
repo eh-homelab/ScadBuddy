@@ -31,6 +31,7 @@ const AssistantPanel = lazy(async () => ({
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
+  { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
@@ -135,7 +136,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             Scad<span className="text-accent">Buddy</span>
           </span>
           {!embedded && (
-            <span className="text-[11px] text-faint">OpenSCAD customizer</span>
+            <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
           )}
         </NavLink>
 

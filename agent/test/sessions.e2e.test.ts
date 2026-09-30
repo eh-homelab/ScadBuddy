@@ -199,6 +199,31 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     // Three Claude Code runs; past vitest's 5 s default on a loaded machine.
   }, 60_000)
 
+  it('keeps a turn stopped by a restart in the transcript, so the next turn on another replica has it', async () => {
+    let n = 0
+    script = (r) => (conversation(r).includes('kettle') && ++n === 1 ? { hang: true } : { text: `answer ${n}` })
+    const a = await replica()
+    const b = await replica()
+    const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'remember the word teapot' })
+    await turn!.done
+    // Turn 2 is still with the "model" when the restart comes (2026-09-30).
+    const cut = await a.send(session.id, agentA, 'and the second word is kettle')
+    for (let i = 0; i < 200 && !conversation(fake.messageCalls().at(-1)).includes('kettle'); i++) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    await a.stopTurns({ graceMs: 0, abortWaitMs: 10_000 })
+    expect(await cut.done).toEqual({ kind: 'interrupted' })
+    expect(await b.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+
+    // Replica B resumes from Postgres: the cut-off turn's prompt is there,
+    // because stopTurns waited for the aborted query to end (and flush).
+    await (await b.send(session.id, agentA, 'what were the words?')).done
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('remember the word teapot')
+    expect(sent).toContain('and the second word is kettle')
+    expect(sent).toContain('what were the words?')
+  }, 60_000)
+
   it('interrupts a running turn through the abort signal', async () => {
     script = () => ({ hang: true })
     const a = await replica()

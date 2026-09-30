@@ -8,6 +8,7 @@ import {
   type JWTVerifyGetKey,
 } from 'jose'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
 import { EgressError, egressGetJson, type Resolver } from '../http/egress.js'
 import { type Principal, type Tier, TIERS, tiersUpTo } from './principal.js'
 
@@ -129,13 +130,14 @@ export function defaultOidcConfig(issuer = 'https://idp.example.com/'): OidcConf
 /** Where the OIDC configuration is kept. */
 export interface OidcConfigRepo {
   get(): Promise<OidcConfig | undefined>
-  put(config: OidcConfig): Promise<void>
+  /** `context` says who saved it, for the audit row (#831). */
+  put(config: OidcConfig, context: AuditContext): Promise<void>
 }
 
 /** The slice of `SettingsStore` (src/credentials.ts) this needs. */
 export type SettingsLike = {
   get<T>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown): Promise<void>
+  set(key: string, value: unknown, context?: AuditContext): Promise<void>
 }
 
 /**
@@ -165,8 +167,8 @@ export class SettingsOidcConfigRepo implements OidcConfigRepo {
     return parsed.data
   }
 
-  async put(config: OidcConfig): Promise<void> {
-    await this.#settings.set(OIDC_SETTINGS_KEY, OidcConfigSchema.parse(config))
+  async put(config: OidcConfig, context: AuditContext): Promise<void> {
+    await this.#settings.set(OIDC_SETTINGS_KEY, OidcConfigSchema.parse(config), context)
   }
 }
 
