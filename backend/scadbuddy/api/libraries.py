@@ -3,7 +3,9 @@
 A pin belongs to one model: ``PUT /models/{slug}/libraries/{name}`` clones the
 library at a ref and records the commit in that model's ``model.json``, as one
 revision of the model. Another model declaring the same library keeps its own pin.
-``PATCH`` re-pins from the upstream the model already pins (#253).
+``PATCH`` re-pins from the upstream the model already pins (#253), and
+``POST /models/{slug}/dependencies`` reports what each ``include``/``use`` resolves to
+against those pins, without fetching anything (#253, library/includes.py).
 
 The checkouts themselves are a cache on the volume: ``GET /libraries/installed``
 lists them and ``DELETE /libraries/{name}`` removes them, refused while any model
@@ -28,8 +30,10 @@ from scadbuddy.api.deps import (
     CheckoutsDep,
     ChecksDep,
     ConfigDep,
+    DependencyChecksDep,
     EventsDep,
     FetcherDep,
+    FontsDep,
     InstallsDep,
     LibrariesDep,
     PathsDep,
@@ -37,7 +41,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.library_pins import resolve_pin
 from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
-from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.api.models import MAX_SOURCE_CHARS, require_mine, require_model_exists
 from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
@@ -48,6 +52,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.history import GitError
+from scadbuddy.library.includes import Candidates, DependencyReport, resolve_dependencies
 from scadbuddy.library.libraries import (
     COMMIT_PATTERN,
     NAME_PATTERN,
@@ -484,6 +489,65 @@ async def remove_library(
     # `model.updated`: only the checkouts on the volume moved.
     emit(events, LibraryRemoved(name=name, commits=removed))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class DependencyCheckRequest(BaseModel):
+    source: str | None = Field(
+        default=None,
+        max_length=MAX_SOURCE_CHARS,
+        description="Unsaved source to read in place of the model's `model.scad`, "
+        "resolved against the model's directory and pins as a render of it would be; "
+        "the saved source when omitted",
+    )
+
+
+@router.post(
+    "/models/{slug}/dependencies",
+    response_model=DependencyReport,
+    summary="Resolve a model's includes, libraries and fonts",
+    description=(
+        "Read-only, though it takes a body (an unsaved source). Reports every "
+        "`include <…>` and `use <…>` of the model's source, and of the model's own files "
+        "those reach, as OpenSCAD resolves it: beside the file that names it, then in each "
+        "library the model pins, in order. An unresolved one says why, and names a library "
+        "that would provide it when there is one: the curated library of that name, else "
+        'one another model pins. Also lists every `font = "…"` literal with the families '
+        "fontconfig does not resolve, which a render would silently draw in the default "
+        "font. Nothing is cloned: a pinned checkout missing from the volume is listed in "
+        "`missing_checkouts`."
+    ),
+)
+async def check_dependencies(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    libraries: LibrariesDep,
+    fonts: FontsDep,
+    permits: DependencyChecksDep,
+    body: DependencyCheckRequest | None = None,
+) -> DependencyReport:
+    require_model_exists(catalogue, slug)
+    model_dir = paths.model_dir(slug)
+
+    def report() -> DependencyReport:
+        source = body.source if body is not None and body.source is not None else None
+        if source is None:
+            source = paths.model_source(slug).read_text(encoding="utf-8", errors="replace")
+        return resolve_dependencies(
+            model_dir,
+            source,
+            declared_libraries(model_dir),
+            libraries_root=paths.libraries,
+            candidates=Candidates(
+                catalogue=libraries.entries(), pin_index=catalogue.library_pin_index
+            ),
+            resolvable_fonts=fonts.resolvable(),
+        )
+
+    # Reads the model's files, every model.json and fc-list; off the loop, and a few
+    # at a time so a burst cannot hold the executor other routes share (review of #740).
+    async with permits:
+        return await asyncio.to_thread(report)
 
 
 def install_library_handlers(app: FastAPI) -> None:

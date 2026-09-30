@@ -34,6 +34,7 @@ from scadbuddy.api.deps import (
     ConfigDep,
     EventsDep,
     FetcherDep,
+    FontsDep,
     HistoryDep,
     ImportsDep,
     InstallsDep,
@@ -881,6 +882,7 @@ async def patch_model(
     assets: AssetsDep,
     presets: PresetsDep,
     fetcher: FetcherDep,
+    fonts: FontsDep,
 ) -> ModelRecord:
     require_mine(slug)
     # The record, not only existence: a model.json that no longer reads as metadata is
@@ -895,6 +897,7 @@ async def patch_model(
             config=config,
             assets=assets,
             fetcher=fetcher,
+            fonts=fonts,
         )
         patch.presets = with_keys(patch.presets)
     update = partial(catalogue.update, slug, patch)
