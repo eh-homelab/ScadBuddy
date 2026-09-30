@@ -4,11 +4,13 @@ The prints list reads one archive per print, and a history page, its next page a
 detail opened from it read the same ones again within seconds. Each read is kept for
 `ARCHIVE_TTL` seconds, per Bambuddy and archive, and nothing longer: Bambuddy stays
 the source of truth, and this is not a second store of its data. A failed read is not
-kept, except the 404 of an archive deleted in Bambuddy, which is an answer.
+kept, except the 404 of an archive deleted in Bambuddy, which is an answer. Requests
+that miss on the same key while its read is in flight share that one read.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from typing import TypeVar, cast
@@ -43,6 +45,7 @@ class ArchiveCache:
         self._clock = clock
         self._max_entries = max_entries
         self._entries: dict[tuple[str, str, int], tuple[float, object]] = {}
+        self._loading: dict[tuple[str, str, int], asyncio.Task[object]] = {}
 
     async def archive(self, client: BambuddyClient, archive_id: int) -> ArchiveDetail | None:
         """The archive, or None when Bambuddy has none by that id (deleted there)."""
@@ -91,6 +94,11 @@ class ArchiveCache:
             k for k in self._entries if k[0] == client.config.base_url and k[2] == archive_id
         ]:
             del self._entries[key]
+        # A read already in flight may predate the change: it is not kept when it lands.
+        for key in [
+            k for k in self._loading if k[0] == client.config.base_url and k[2] == archive_id
+        ]:
+            del self._loading[key]
 
     async def _get(
         self,
@@ -103,8 +111,23 @@ class ArchiveCache:
         hit = self._entries.get(key)
         if hit is not None and hit[0] > self._clock():
             return cast(T, hit[1])
-        value = await load()
-        self._put(key, value)
+        task = self._loading.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._load(key, load))
+            self._loading[key] = task
+        # Shielded: one caller going away does not cancel the read the others wait on.
+        return cast(T, await asyncio.shield(task))
+
+    async def _load(self, key: tuple[str, str, int], load: Callable[[], Awaitable[T]]) -> T:
+        task = asyncio.current_task()
+        try:
+            value = await load()
+        finally:
+            owned = self._loading.get(key) is task
+            if owned:
+                del self._loading[key]
+        if owned:
+            self._put(key, value)
         return value
 
     def _put(self, key: tuple[str, str, int], value: object) -> None:

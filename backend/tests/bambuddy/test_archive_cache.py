@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -99,3 +101,33 @@ async def test_the_cache_is_bounded(clock: Clock) -> None:
         assert len(respx.calls) == 3, "the newest is still kept"
         await cache.archive(bambuddy, 1)
     assert len(respx.calls) == 4, "the oldest was dropped"
+
+
+@respx.mock
+async def test_concurrent_misses_share_one_read(clock: Clock) -> None:
+    """#609 review: a list and a detail opened together do not both read Bambuddy."""
+    route = respx.get(f"{BASE}/api/v1/archives/35").mock(
+        return_value=httpx.Response(200, json=recording("archive-detail.json"))
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        first, second = await asyncio.gather(
+            cache.archive(bambuddy, 35), cache.archive(bambuddy, 35)
+        )
+    assert first == second
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_read_in_flight_when_forgotten_is_not_kept(clock: Clock) -> None:
+    route = respx.get(f"{BASE}/api/v1/archives/35").mock(
+        return_value=httpx.Response(200, json=recording("archive-detail.json"))
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        pending = asyncio.ensure_future(cache.archive(bambuddy, 35))
+        await asyncio.sleep(0)
+        cache.forget(bambuddy, 35)
+        await pending
+        await cache.archive(bambuddy, 35)
+    assert route.call_count == 2
