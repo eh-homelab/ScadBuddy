@@ -304,6 +304,12 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.
 - The `agent` jobs in `ci.yml` and `build-image.yml` use the buildx `type=gha` cache
   with `scope=agent`, so they do not overwrite the backend image's cache index.
+- `build-image.yml`'s `openscad-lsp-arm64` job (#199) is the one job there that runs on
+  PRs (when the Dockerfile or that file changes): it builds the `openscad-lsp` stage for
+  arm64 under QEMU and runs `openscad-lsp --version`, caching under
+  `scope=openscad-lsp-arm64`. It is not a required check. Making it one needs its
+  `pull_request.paths` filter dropped first: a required check that never runs on a PR
+  outside those paths leaves that PR waiting for it forever.
 
 ## PR conventions
 
