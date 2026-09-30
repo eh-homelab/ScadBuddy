@@ -3,16 +3,21 @@ import {
   createServer,
   type IncomingHttpHeaders,
   type IncomingMessage,
-  request as httpRequest,
   type OutgoingHttpHeaders,
   type Server,
   type ServerResponse,
 } from 'node:http'
-import { request as httpsRequest } from 'node:https'
-import { type AddressInfo, isIP, type LookupFunction } from 'node:net'
-import { plainAddress } from '../http/origins.js'
+import type { AddressInfo } from 'node:net'
+import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrustedContent, wrapUntrustedText } from '../safety/untrusted.js'
-import { harnessToolName, headerSecretVariants, type LoadedPlugins, type RemotePlugin } from './registry.js'
+import {
+  type CheckedPlugin,
+  HINDSIGHT_PLUGIN,
+  harnessToolName,
+  headerSecretVariants,
+  type LoadedPlugins,
+  type RemotePlugin,
+} from './registry.js'
 
 // The loopback forwarder between Claude Code and plugin endpoints (#297).
 //
@@ -374,30 +379,11 @@ export class PluginForwarder {
     }
 
     const target = new URL(route.plugin.url)
-    const hostname = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname
-    const address = plainAddress(route.address)
-    const family = isIP(address) === 6 ? 6 : 4
-    // Pinned: the checked address, whatever the name resolves to now.
-    const lookup = ((_host: string, opts: { all?: boolean }, cb: (...args: unknown[]) => void) => {
-      if (opts.all) cb(null, [{ address, family }])
-      else cb(null, address, family)
-    }) as unknown as LookupFunction
     const headers: OutgoingHttpHeaders = { ...pick(req.headers, REQUEST_HEADERS), host: target.host }
     if (route.plugin.header) headers[route.plugin.header.name] = route.plugin.header.value
     if (body) headers['content-length'] = body.length
 
-    const send = target.protocol === 'https:' ? httpsRequest : httpRequest
-    const upstream = send({
-      protocol: target.protocol,
-      hostname,
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: `${target.pathname}${target.search}`,
-      method,
-      headers,
-      lookup,
-      agent: false,
-      ...(target.protocol === 'https:' && isIP(hostname) === 0 ? { servername: hostname } : {}),
-    })
+    const upstream = requestFor(target)({ ...pinnedRequestOptions(target, route.address), method, headers })
     res.on('close', () => {
       if (!res.writableFinished) upstream.destroy()
     })
@@ -506,6 +492,12 @@ export type PluginsForRun = {
   problems: string[]
   /** Header values and their bare tokens, for redaction. */
   secrets: string[]
+  /**
+   * The enabled `hindsight` plugin with the address its check passed, when this
+   * run loaded one: the endpoint, bank and header of the session manager's
+   * automatic memory (memory/hindsight.ts). Never given to Claude Code.
+   */
+  hindsight?: CheckedPlugin
   release(): void
 }
 
@@ -515,6 +507,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     plugin,
     registration: forwarder.register(plugin, address),
   }))
+  const hindsight = loaded.plugins.find(({ plugin }) => plugin.name === HINDSIGHT_PLUGIN)
   return {
     plugins: registrations.map(({ plugin, registration }) => ({
       name: plugin.name,
@@ -524,6 +517,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
     })),
     problems: loaded.problems,
     secrets: loaded.plugins.flatMap(({ plugin }) => (plugin.header ? headerSecretVariants(plugin.header.value) : [])),
+    ...(hindsight ? { hindsight } : {}),
     release: () => {
       for (const { registration } of registrations) registration.release()
     },

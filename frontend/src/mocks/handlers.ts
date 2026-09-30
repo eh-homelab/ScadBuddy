@@ -2591,8 +2591,8 @@ export const handlers = [
   }),
 
   /**
-   * #755 — the run's nozzle verdict before Print. The mock printer's nozzles never
-   * refuse anything; a test that needs a verdict answers this route itself.
+   * #755 — the check before Print. The run checks no mounted nozzle (#768), so it
+   * refuses nothing here; a test that needs a verdict answers this route itself.
    */
   http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
     if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')

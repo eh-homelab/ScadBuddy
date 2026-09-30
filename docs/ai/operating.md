@@ -289,8 +289,8 @@ reports AI available, which today is the msw-mocked build: nothing routes
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
-| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at`, `status` (`active`, `expired` or `revoked`) and `approval_grant`. It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in?, approval_grant? }`, strict. `approval_grant: true` lets the token decide other agents' outward approvals (#300, [agent-sessions.md §3](agent-sessions.md#3-approvals-by-another-agent-the-per-token-grant)); only with `tier: "outward"`, else `400`. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
 | `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
 
 "Read guard" is `uiReadProblem()` in
@@ -507,13 +507,16 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
-  through the chat socket and the session routes (README, "Sessions and the
-  assistant's chat").
+  through the chat socket, the session routes and the `sessions_*` tools
+  ([agent-sessions.md](agent-sessions.md)). Every event-log append is also announced
+  as `session.*` on `scadbuddy_events` (NOTIFY only, no table).
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
   [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
-  name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
+  name, tier, `created_at`, `expires_at`, `revoked_at`, `last_used_at` and
+  `approval_grant` (#300, `20260929T0249Z_mcp_token_approval_grant.sql`: off by default,
+  and a `CHECK` allows it only on an `outward` token). Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
   `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
   [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
@@ -658,3 +661,33 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
 [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+
+## 11. Automatic Hindsight memory
+
+When a session's turn loads an enabled remote MCP plugin named `hindsight` (#297,
+`ai_plugins`), the agent recalls and retains memory itself instead of leaving it to the
+model. In production the model called `recall` once and `retain` never across four
+sessions. The code is [`agent/src/memory/hindsight.ts`](../../agent/src/memory/hindsight.ts),
+a port of `create_memory_hooks` in Hindsight's Claude Agent SDK integration
+([`hooks.py` @ eb021da3](https://github.com/vectorize-io/hindsight/blob/eb021da3b2501911e4b57c82b3de1123572a200e/hindsight-integrations/claude-agent-sdk/hindsight_claude_agent_sdk/hooks.py)),
+registered as in-process SDK hooks by `harness/run.ts`. There is no setting: the API
+base and bank come from the plugin's URL (`…/mcp/<bank>/` gives
+`/v1/default/banks/<bank>/…`), and requests carry the plugin's stored header to the
+address the plugin check pinned, with no redirects (`agent/src/http/pinned.ts`, shared
+with the forwarder).
+
+- **Recall** (`UserPromptSubmit`): the prompt is the query, and the top five memories
+  are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
+  3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
+  logged.
+- **Retain** (`Stop`): the session's user and assistant text (tool results left out,
+  secrets redacted) is upserted as one document, `conversation:<session_id>`, so every
+  turn replaces the same document. It runs in the background and never fails or delays
+  the turn; a failure is logged. On a session's first turn the transcript file does not
+  exist yet when Stop fires, so that turn retains the prompt and the final reply, and
+  the next turn's upsert carries the whole session.
+- **Tool results** (`PostToolUse`): off unless `retainOnTools` names tools.
+
+Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). One is
+ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
+upstream's behaviour of retaining only the last result with no document id.
