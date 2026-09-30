@@ -204,6 +204,23 @@ describe('render_model', () => {
     expect(firstText(done)).toMatchObject({ status: 'done', output: { id: '0123456789abcdef0123456789abcdef' } })
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
   })
+
+  it('saves the given inputs with the output, UI state and all', async () => {
+    let saved: unknown
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
+        saved = await request.json()
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
+      }),
+    )
+    const inputs = { params: { width: 40 }, v: 1, picked: 'x' }
+    const done = await runTool(tool('render_model'), { slug: 'box', inputs, save_output: true }, ctx())
+    expect(firstText(done)).toMatchObject({ status: 'done' })
+    expect(saved).toEqual({ job_id: 'j', name: null, inputs })
+  })
 })
 
 describe('uploads', () => {

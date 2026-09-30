@@ -154,7 +154,7 @@ export const customizerTools: Tool[] = [
       const output = await ok(
         ctx.backend.POST('/api/v1/models/{slug}/outputs', {
           params: { path: { slug } },
-          body: { job_id: job.id, name: output_name ?? null },
+          body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
         }),
         `save output of ${job.id}`,
       )
