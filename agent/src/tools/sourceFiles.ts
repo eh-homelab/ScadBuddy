@@ -3,10 +3,19 @@ import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
 
-/** The backend's MAX_SOURCE_CHARS (`SourceFileUpdate.content` in
- * backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks the two
- * against the OpenAPI spec (PR #752 review). */
+/** The backend's MAX_SOURCE_CHARS and MAX_SUBJECT (`SourceFileUpdate.content` and
+ * `.message` in backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks
+ * both against the OpenAPI spec (PR #752 review). */
 export const MAX_SOURCE_CHARS = 1_000_000
+export const MAX_MESSAGE_CHARS = 200
+
+/** Characters as Pydantic's `max_length` counts them: code points, where a JS string's
+ * `length` (and so Zod's `.max`) counts UTF-16 units and an astral character twice. */
+function codePoints(text: string): number {
+  let count = 0
+  for (const _ of text) count++
+  return count
+}
 
 // Multi-file models (issue #252: "Multi-file models are supported (includes
 // inside the model folder)"): the `.scad` files beside model.scad that it
@@ -60,8 +69,10 @@ export const sourceFileTools: Tool[] = [
     input: z.object({
       slug,
       name: fileName,
-      content: z.string().max(MAX_SOURCE_CHARS),
-      message: z.string().max(200).optional().describe("What the revision is called in the history: the user's instruction, in short"),
+      content: z
+        .string()
+        .refine((text) => codePoints(text) <= MAX_SOURCE_CHARS, `at most ${MAX_SOURCE_CHARS} characters`),
+      message: z.string().max(MAX_MESSAGE_CHARS).optional().describe("What the revision is called in the history: the user's instruction, in short"),
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],
