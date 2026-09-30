@@ -224,6 +224,23 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     code: z.string().optional(),
     message: z.string().min(1),
   }),
+  /**
+   * An automatic Hindsight recall or retain (#818): memory the agent read or wrote
+   * without a tool call. A retain finishes after its turn, so this can arrive after
+   * the turn's last `session.status`. It never carries the query or a memory, only
+   * the bank, a recall's count and, when it failed, why.
+   */
+  z.object({
+    v,
+    type: z.literal('memory'),
+    sessionId,
+    turnId: z.string().min(1),
+    action: z.enum(['recall', 'retain']),
+    bank: z.string(),
+    outcome: z.enum(['ok', 'timeout', 'error']),
+    count: z.number().int().nonnegative().optional(),
+    detail: z.string().optional(),
+  }),
 ])
 export type ServerEvent = z.infer<typeof ServerEventSchema>
 export type ServerEventOf<T extends ServerEvent['type']> = Extract<ServerEvent, { type: T }>
