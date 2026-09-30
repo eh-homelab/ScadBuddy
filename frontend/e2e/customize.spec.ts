@@ -197,7 +197,7 @@ test.describe('customizer', () => {
       (request) =>
         request.method() === 'POST' &&
         request.url().endsWith('/render') &&
-        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.params?.label_art ?? '')),
+        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.inputs?.params?.label_art ?? '')),
     )
     await page.getByLabel('Label artwork').setInputFiles({
       name: 'heart.svg',
@@ -227,7 +227,7 @@ test.describe('customizer', () => {
       (request) =>
         request.method() === 'POST' &&
         request.url().endsWith('/render') &&
-        request.postDataJSON()?.params?.label_art === 'sample-heart.svg',
+        request.postDataJSON()?.inputs?.params?.label_art === 'sample-heart.svg',
     )
     await samples.getByRole('button', { name: 'Use sample sample-heart.svg' }).click()
 
