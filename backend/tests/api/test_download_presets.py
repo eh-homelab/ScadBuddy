@@ -122,6 +122,50 @@ def test_a_download_uses_the_models_remembered_choices(
     assert body["nozzle_diameter"] == ["0.4", "0.4"]
 
 
+@respx.mock
+def test_choices_remembered_for_another_printer_are_not_used(
+    client: TestClient, model: str, settings: Settings
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)",
+            (model, Jsonb({"printer_id": 2, "nozzles": [{"size": "0.4"}], "tier": "fine"})),
+        )
+    _bambuddy()
+
+    body = _project_settings(client.get(f"/api/v1/outputs/{output_id}/model.3mf").content)
+
+    # Printer 1's own right-hand 0.2 and the default tier, not printer 2's 0.4 Fine.
+    assert body["printer_settings_id"] == "Bambu Lab H2C 0.2 nozzle"
+    assert body["print_settings_id"] == "0.10mm Standard @BBL H2C 0.2 nozzle"
+
+
+@respx.mock
+def test_an_unreported_right_hand_nozzle_is_not_the_left_ones_size(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    _bambuddy(status=False)
+    status = {
+        **recording("printer-status.json"),
+        "nozzles": [
+            {"nozzle_type": "", "nozzle_diameter": ""},
+            {"nozzle_type": "HS01", "nozzle_diameter": "0.4"},
+        ],
+    }
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
+
+    response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
+
+    assert response.status_code == 200
+    # No mounted size is known, so the presets stay placeholders; the plate still fits.
+    stored = _stored(paths, model, output_id)
+    _assert_refitted_on_placeholders(response.content, stored, plate_for("H2C"))
+
+
 def test_without_a_default_printer_the_stored_file_is_served(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

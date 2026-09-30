@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 THREE_MF_MEDIA_TYPE = "model/3mf"
 
 _SIZES: tuple[str, ...] = get_args(NozzleSize)
+#: ``PrinterStatus.nozzles`` is indexed by physical extruder; 0 is the right (main) one.
+RIGHT = 0
 
 
 @dataclass(frozen=True)
@@ -156,7 +158,10 @@ async def _presets(
     # The resolver names H2C presets only; another printer keeps the placeholders.
     if model != f"Bambu Lab {PRINTER_MODEL}":
         return None
-    remembered = settings.model_print_choices.get(meta.slug) or ModelPrintChoices()
+    remembered = settings.model_print_choices.get(meta.slug)
+    # Choices remembered for another printer say nothing about this one's nozzles.
+    if remembered is None or remembered.printer_id != printer_id:
+        remembered = ModelPrintChoices()
     nozzles = remembered.nozzles or await _mounted(client, printer_id)
     if not nozzles:
         return None
@@ -219,5 +224,7 @@ async def _presets(
 async def _mounted(client: BambuddyClient, printer_id: int) -> list[NozzleChoice]:
     """The main (right-hand) extruder's nozzle, which the dialog's size prints on."""
     status = await client.printer_status(printer_id)
-    size = next((n.nozzle_diameter for n in status.nozzles if n.nozzle_diameter in _SIZES), None)
-    return [NozzleChoice.model_validate({"size": size})] if size is not None else []
+    # That side only: the left one's size is never the right one's, so a right-hand
+    # nozzle that reports no size is unknown.
+    size = status.nozzles[RIGHT].nozzle_diameter if status.nozzles else None
+    return [NozzleChoice.model_validate({"size": size})] if size in _SIZES else []
