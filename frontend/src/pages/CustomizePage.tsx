@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
@@ -181,6 +181,12 @@ export function CustomizePage() {
   const choosing = (!record && !modelState.error) || !schema
   const [presetsRevision, setPresetsRevision] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
+  // The inputs as of the last write, ahead of the render that shows it: two writes in one
+  // tick (`host.inputs.set`, then an `<sb-param>` edit) each start from the one before.
+  const latestInputs = useRef(inputs)
+  useLayoutEffect(() => {
+    latestInputs.current = inputs
+  }, [inputs])
   const actions = useRef<ActionBarHandle>(null)
   const describeRef = useRef<(() => string) | null>(null)
   const uiVersion = version ?? record?.version ?? undefined
@@ -307,8 +313,9 @@ export function CustomizePage() {
       slug,
       version: uiVersion,
       getSchema: schemaNow,
-      getInputs: () => live.current.inputs,
+      getInputs: () => latestInputs.current,
       setInputs: (next: JsonObject) => {
+        latestInputs.current = next
         setEdits((current) => {
           const shown = current.values ?? current.of ?? NOTHING
           const { params, extra: nextExtra } = splitInputs(next, shown)
@@ -616,6 +623,7 @@ export function CustomizePage() {
     version,
     fonts: fontsState.data ?? [],
     inputs,
+    getInputs: hostDeps.getInputs,
     onInputs: hostDeps.setInputs,
     preview: previewElement,
     generate: (

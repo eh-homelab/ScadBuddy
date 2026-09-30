@@ -94,6 +94,29 @@ describe('CustomizePage with a template UI', () => {
     expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
   })
 
+  it('keeps a UI-state set made just before a parameter edit', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const param = document.createElement('sb-param')
+        param.setAttribute('name', 'name')
+        root.append(param)
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    const field = await waitFor(() => {
+      const found = shadow()?.querySelector('input')
+      if (!found) throw new Error('no field yet')
+      return found
+    })
+    // No re-render between the two: the field's write must not start from the old inputs.
+    host?.inputs.set({ demo: { touched: true } })
+    fireEvent.change(field, { target: { value: 'Zed' } })
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Zed'))
+    expect(host?.inputs.get()['demo']).toEqual({ touched: true })
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

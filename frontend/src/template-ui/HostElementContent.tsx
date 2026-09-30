@@ -13,6 +13,8 @@ export interface ElementContext {
   version?: string
   fonts: FontFamily[]
   inputs: JsonObject
+  /** The inputs as of the last write, which may be newer than `inputs` (this render's). */
+  getInputs?: () => JsonObject
   onInputs: (next: JsonObject) => void
   slot: UiSlot
   preview: ReactNode
@@ -39,7 +41,7 @@ function BoundParam({ element, context, values }: { element: HostElement; contex
         version={context.version}
         fonts={context.fonts}
         extruder={extrudersOf(context.schema, values).get(name)}
-        onChange={(next) => context.onInputs(setPath(context.inputs, bind, next))}
+        onChange={(next) => context.onInputs(setPath(context.getInputs?.() ?? context.inputs, bind, next))}
       />
     </div>
   )
