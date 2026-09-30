@@ -41,6 +41,7 @@ import type {
   PlateFit,
   PrinterBedType,
   PrintProgress,
+  PrintCheck,
   PrintRun,
   PrintRunRequest,
   PrintRunResult,
@@ -822,6 +823,16 @@ export const api = {
   },
 
   /**
+   * #755 — the run's nozzle verdict (`plan_extruders`) for the body the run would take:
+   * `errors` are what it would refuse as a 422, `warnings` its advisories. Reads only.
+   */
+  checkPrint: (outputId: string, body: PrintRunRequest) =>
+    request<PrintCheck>(`/print/outputs/${seg(outputId)}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
    * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
    */
@@ -936,6 +947,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
       signal,
+    }),
+
+  checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
+    request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>

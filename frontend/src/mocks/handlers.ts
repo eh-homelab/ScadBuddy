@@ -29,6 +29,7 @@ import type {
   Plate,
   PlateFit,
   PrintProgress,
+  PrintCheck,
   PrintRunRequest,
   PrintRun,
   PrintRunResult,
@@ -2576,6 +2577,15 @@ export const handlers = [
   http.get(`${base}/print/runs/:id`, ({ params }) => {
     const run = state.printRuns.get(String(params['id']))
     return run ? HttpResponse.json(run) : problem(404, 'Not Found', `there is no print run ${params['id']}`)
+  }),
+
+  /**
+   * #755 — the run's nozzle verdict before Print. The mock printer's nozzles never
+   * refuse anything; a test that needs a verdict answers this route itself.
+   */
+  http.post(`${base}/print/outputs/:id/check`, ({ params }) => {
+    if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
+    return HttpResponse.json({ errors: [], warnings: [] } satisfies PrintCheck)
   }),
 
   // --- #79 projects -----------------------------------------------------------------
