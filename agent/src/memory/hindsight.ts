@@ -378,7 +378,11 @@ export type MemoryHooksOptions = {
   onActivity?: (activity: MemoryActivity) => Promise<void> | void
 }
 
-/** One automatic recall or retain, as `onActivity` is told of it. Never holds the query or a memory. */
+/**
+ * One automatic recall or retain, as `onActivity` is told of it. `input` and
+ * `memories` are for the panel event (shown in Advanced mode); the audit row never
+ * records them (sessions/manager.ts recordMemory).
+ */
 export type MemoryActivity = {
   action: 'recall' | 'retain'
   bank: string
