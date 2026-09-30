@@ -27,6 +27,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -224,6 +225,11 @@ def resolvable_families(env: Mapping[str, str] | None = None) -> set[str] | None
     }
 
 
+#: How long one fontconfig answer serves the render and preset checks
+#: (``FontService.resolved``). An install rebuilds the cache and drops it at once.
+RESOLVED_TTL = 10.0
+
+
 class FontService:
     """``<data>/fonts/`` — the catalogue cache, the downloaded families, the fontconfig
     config that makes OpenSCAD see them."""
@@ -242,6 +248,8 @@ class FontService:
         #: Set when the key changes (#322): the cached catalogue came from the other
         #: source, so the next read fetches. A failed fetch still serves the cache.
         self.catalogue_stale = False
+        self._resolved: tuple[float, set[str] | None] | None = None
+        self._resolving = asyncio.Lock()
 
     def use_api_key(self, api_key: str | None) -> None:
         """Fetch the catalogue with ``api_key`` from now on, and refetch it."""
@@ -285,6 +293,19 @@ class FontService:
         """:func:`resolvable_families` under the render's own environment."""
         return resolvable_families(self.env())
 
+    async def resolved(self) -> set[str] | None:
+        """:meth:`resolvable` for the render and preset checks, which run on every
+        request that sets a font: one fc-list at a time, its answer shared for
+        :data:`RESOLVED_TTL`, so a burst of them waits on the loop rather than taking
+        a worker thread each from the executor every other route shares (review of
+        #740)."""
+        async with self._resolving:
+            if self._resolved is not None and time.monotonic() - self._resolved[0] < RESOLVED_TTL:
+                return self._resolved[1]
+            known = await asyncio.to_thread(self.resolvable)
+            self._resolved = (time.monotonic(), known)
+            return known
+
     def missing_families(self, families: Iterable[str]) -> list[str] | None:
         """Those of ``families`` fontconfig does not resolve, which a render would
         silently draw in the default font instead; None without fontconfig to ask."""
@@ -294,6 +315,7 @@ class FontService:
         return [family for family in families if normalise_family(family) not in known]
 
     def refresh_cache(self) -> None:
+        self._resolved = None
         if _run_fc([FC_CACHE, "--force", str(self.root)], self.env()) is None:
             logger.warning("fc-cache did not run; the new fonts may not resolve until restart")
 

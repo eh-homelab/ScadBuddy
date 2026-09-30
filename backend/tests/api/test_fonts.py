@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -321,6 +322,18 @@ async def test_one_ask_of_fontconfig_serves_every_value_judged_against_it() -> N
     for _ in range(3):
         await require_installed_fonts(FONT_SCHEMA, {"font": "DejaVu Sans"}, installed)
     assert fonts.asked == 1
+
+
+async def test_requests_at_once_share_one_ask_of_fontconfig() -> None:
+    """Review of #740: a burst of font checks runs one fc-list, not one each."""
+    fonts = Resolving({"DejaVu Sans"})
+    await asyncio.gather(
+        *(require_installed_fonts(FONT_SCHEMA, {"font": "DejaVu Sans"}, fonts) for _ in range(8))
+    )
+    assert fonts.asked == 1
+    fonts.refresh_cache()  # an install: the next check asks again
+    await require_installed_fonts(FONT_SCHEMA, {"font": "DejaVu Sans"}, fonts)
+    assert fonts.asked == 2
 
 
 async def test_the_dash_hint_is_only_for_the_family_the_dash_cut() -> None:

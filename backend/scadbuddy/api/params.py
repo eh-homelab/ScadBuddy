@@ -94,8 +94,7 @@ class InstalledFamilies:
 
     async def get(self) -> set[str] | None:
         if not self._asked:
-            # fc-list shells out; off the loop.
-            self._known = await asyncio.to_thread(self._fonts.resolvable)
+            self._known = await self._fonts.resolved()
             self._asked = True
         return self._known
 
