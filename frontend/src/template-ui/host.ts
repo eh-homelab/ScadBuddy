@@ -50,6 +50,27 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   }
 }
 
+/** The backend's cap on saved inputs (``render/inputs.py`` ``MAX_INPUTS_BYTES``). */
+const MAX_INPUTS_BYTES = 65536
+
+function finite(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(finite)
+  if (isJsonObject(value)) return Object.values(value).every(finite)
+  return true
+}
+
+/** What ``normalize_inputs`` would refuse, refused here, before it is on screen. */
+function checkedInputs(inputs: JsonObject): void {
+  const v = inputs['v']
+  if (v !== undefined && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) {
+    throw new HostInputError('inputs.v must be a non-negative integer')
+  }
+  if (!finite(inputs)) throw new HostInputError('inputs must be JSON: no NaN or Infinity')
+  const size = new TextEncoder().encode(JSON.stringify(inputs)).length
+  if (size > MAX_INPUTS_BYTES) throw new HostInputError(`inputs are ${size} bytes; at most ${MAX_INPUTS_BYTES}`)
+}
+
 function unmounted(): Promise<never> {
   return Promise.reject(new Error('the template UI is unmounted'))
 }
@@ -69,6 +90,7 @@ export function createHost(deps: HostDeps): HostHandle {
         checkedParams(deps.getSchema(), patch)
         const next = mergePatch(deps.getInputs(), structuredClone(patch))
         if (!isJsonObject(next)) throw new HostInputError('inputs must stay a JSON object')
+        checkedInputs(next)
         deps.setInputs(next)
       },
       subscribe: (fn) => {
