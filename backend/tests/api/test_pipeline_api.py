@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.workflows.models import MigrateResult
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -183,3 +184,83 @@ def test_the_record_carries_the_inputs_version(
 ) -> None:
     with_pipeline(paths, model)
     assert client.get(f"/api/v1/models/{model}").json()["inputs_version"] == 1
+
+
+def _spy_migrations(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Replace the service's migration with one that records its calls."""
+    calls: list[object] = []
+    service = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+
+    async def migrate(
+        slug: str, inputs: dict[str, object], *, version: str | None
+    ) -> MigrateResult:
+        calls.append((slug, inputs, version))
+        return MigrateResult(inputs={**inputs, "v": 1}, from_version=0, to_version=1)
+
+    monkeypatch.setattr(service, "migrate_inputs", migrate)
+    return calls
+
+
+def test_migrate_for_an_unknown_template_is_a_404(client: TestClient) -> None:
+    response = client.post("/api/v1/models/nope/inputs/migrate", json={"inputs": {"v": 0}})
+    assert response.status_code == 404
+
+
+def test_migrate_refuses_a_malformed_version(client: TestClient, model: str) -> None:
+    response = client.post(
+        f"/api/v1/models/{model}/inputs/migrate",
+        json={"inputs": {"params": {}, "v": 0}, "version": "../other"},
+    )
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["loc"] == ["body", "version"]
+
+
+def test_migrate_at_an_unknown_revision_is_a_404(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_pipeline(paths, model)
+    calls = _spy_migrations(client, monkeypatch)
+    response = client.post(
+        f"/api/v1/models/{model}/inputs/migrate",
+        json={"inputs": {"params": {}, "v": 0}, "version": "0" * 40},
+    )
+    assert response.status_code == 404
+    assert calls == []
+
+
+def test_migrate_resolves_a_short_revision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created = client.post("/api/v1/models", json={"name": "Pasted", "source": "cube();\n"})
+    assert created.status_code == 201, created.text
+    full = client.get("/api/v1/models/pasted").json()["version"]
+    calls = _spy_migrations(client, monkeypatch)
+    response = client.post(
+        "/api/v1/models/pasted/inputs/migrate",
+        json={"inputs": {"params": {}, "v": 0}, "version": full[:7]},
+    )
+    assert response.status_code == 200, response.text
+    assert calls == [("pasted", {"params": {}, "v": 0}, full)]
+
+
+@pytest.mark.parametrize("inputs", [{"params": {"width": 3}}, {"params": {}, "v": 0}])
+def test_current_inputs_of_a_template_without_a_pipeline_come_back_unchanged(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, inputs: dict[str, object]
+) -> None:
+    calls = _spy_migrations(client, monkeypatch)
+    response = client.post(f"/api/v1/models/{model}/inputs/migrate", json={"inputs": inputs})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"inputs": inputs, "from_version": 0, "to_version": 0}
+    assert calls == []  # no workflow
+
+
+def test_current_inputs_of_a_pipeline_template_come_back_unchanged(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_pipeline(paths, model)
+    calls = _spy_migrations(client, monkeypatch)
+    inputs = {"params": {}, "v": 1, "house": {}}
+    response = client.post(f"/api/v1/models/{model}/inputs/migrate", json={"inputs": inputs})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"inputs": inputs, "from_version": 1, "to_version": 1}
+    assert calls == []

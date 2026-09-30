@@ -23,7 +23,7 @@ from scadbuddy.api.deps import (
     SlugPath,
     StateDep,
 )
-from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.models import require_model, require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
@@ -58,6 +58,7 @@ from scadbuddy.render.thumbnail import (
     render_view,
 )
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.workflows.models import MigrateResult
 
 router = APIRouter(tags=["jobs"])
 
@@ -409,3 +410,40 @@ async def get_job_view(
     return await preview_view(
         paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
     )
+
+
+class MigrateInputsRequest(BaseModel):
+    inputs: dict[str, Any]
+    #: The template revision to migrate for, as the render route takes it; the live
+    #: template by default.
+    version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+
+
+@router.post(
+    "/models/{slug}/inputs/migrate",
+    response_model=MigrateResult,
+    summary="Migrate saved inputs",
+    responses={
+        status.HTTP_413_CONTENT_TOO_LARGE: {"description": "the inputs are too large to carry"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": "the render service is unavailable"},
+        status.HTTP_504_GATEWAY_TIMEOUT: {"description": "the migration ran out of time"},
+    },
+)
+async def migrate_inputs(
+    slug: SlugPath,
+    body: MigrateInputsRequest,
+    render: RenderDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+) -> MigrateResult:
+    """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
+    record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
+    v = body.inputs.get("v", 0)
+    if body.version is None and isinstance(v, int) and v == record.inputs_version:
+        # Already current (for a template without a pipeline, v 0 always is): no worker.
+        return MigrateResult(inputs=body.inputs, from_version=v, to_version=v)
+    version = await _resolve_version(history, slug, body.version)
+    try:
+        return await render.migrate_inputs(slug, body.inputs, version=version)
+    except InputsError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None

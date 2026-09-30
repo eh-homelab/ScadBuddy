@@ -25,6 +25,7 @@ from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureEr
 from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
@@ -39,6 +40,7 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
 from scadbuddy.workflows.models import MigrateRequest, MigrateResult
 from scadbuddy.workflows.pipelines import (
+    MIGRATE_EXECUTION_TIMEOUT,
     PREVIEW_TRANSFER,
     MigrateInputs,
     RenderPreview,
@@ -267,25 +269,50 @@ class RenderService:
     ) -> MigrateResult:
         """``inputs`` brought up to the template's `INPUTS_VERSION` by its `migrate`, run
         on a worker (§8.2, §9). The template's refusal is an `InputsError` with its
-        message. On the bambuddy store the worker has no volume, so the latest version
-        is the snapshot of the last commit, as for a render."""
+        message; a request too large to carry is a 413, the service unreachable a 503,
+        and a migration that ran out of time a 504. On the bambuddy store the worker has
+        no volume, so every revision is pinned as a snapshot first, as for a render
+        (`pin` takes None as the last commit)."""
         revision = version
-        if revision is None and self.snapshots is not None:
-            revision = await self.snapshots.pin(slug, None)
+        if self.snapshots is not None:
+            revision = await self.snapshots.pin(slug, version)
+        req = MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs))
+        size = len(pydantic_data_converter.payload_converter.to_payload(req).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these inputs make a migration request of {size} bytes; the most one"
+                f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
         try:
             result: MigrateResult = await self.client.execute_workflow(
                 MigrateInputs.run,
-                MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs)),
+                req,
                 id=f"migrate-{uuid.uuid4().hex}",
                 task_queue=self.task_queue,
-                execution_timeout=timedelta(seconds=120),
+                execution_timeout=MIGRATE_EXECUTION_TIMEOUT,
+                rpc_timeout=RPC_TIMEOUT,
             )
+        except RPCError as error:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                f"the render service is unavailable: {error.message}",
+            ) from None
         except WorkflowFailureError as error:
             cause: BaseException | None = error.cause
+            timed_out = False
             while cause is not None and not isinstance(cause, ApplicationError):
+                timed_out = timed_out or isinstance(cause, TemporalTimeoutError)
                 cause = cause.__cause__
-            message = cause.message if isinstance(cause, ApplicationError) else str(error)
-            raise InputsError(message) from None
+            if isinstance(cause, ApplicationError):
+                raise InputsError(cause.message) from None
+            if timed_out:
+                raise ApiError(
+                    status.HTTP_504_GATEWAY_TIMEOUT,
+                    "migrating the inputs timed out after"
+                    f" {MIGRATE_EXECUTION_TIMEOUT.total_seconds():g}s",
+                ) from None
+            raise InputsError(str(error)) from None
         return result
 
     def retry_after(self) -> int:

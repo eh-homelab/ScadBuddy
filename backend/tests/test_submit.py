@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+from temporalio.exceptions import TimeoutType
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
@@ -29,12 +31,17 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job, JobNotFoundError, now, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RenderService
+from scadbuddy.render.submit import MAX_WORKFLOW_INPUT_BYTES, RPC_TIMEOUT, RenderService
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.models import Projection
-from scadbuddy.workflows.pipelines import RenderPiece, RenderPreview, TemplatePipeline
+from scadbuddy.workflows.models import MigrateRequest, MigrateResult, Projection
+from scadbuddy.workflows.pipelines import (
+    MIGRATE_EXECUTION_TIMEOUT,
+    RenderPiece,
+    RenderPreview,
+    TemplatePipeline,
+)
 from tests.support.pipelines import FakeWorld
 from tests.support.temporal import temporal_client
 from tests.test_template_pipeline import NEVER_YIELDS
@@ -775,3 +782,92 @@ async def test_only_a_workflow_temporal_no_longer_has_is_settled_as_gone(
     assert [j.error for j in finished] == (
         ["the job's workflow ended without settling it"] if settled else []
     )
+
+
+class _MigrationClient:
+    """A client whose `execute_workflow` records its calls and answers or raises."""
+
+    def __init__(self, outcome: BaseException | None = None) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute_workflow(self, _run: object, req: MigrateRequest, **kwargs: Any) -> Any:
+        self.calls.append({"req": req, **kwargs})
+        if self.outcome is not None:
+            raise self.outcome
+        return MigrateResult(inputs=req.inputs, from_version=0, to_version=0)
+
+
+class _RecordingSnapshots:
+    def __init__(self) -> None:
+        self.pinned: list[tuple[str, str | None]] = []
+
+    async def pin(self, slug: str, revision: str | None) -> str:
+        self.pinned.append((slug, revision))
+        return revision or "f" * 40
+
+
+@pytest.mark.parametrize("version", ["a" * 40, None])
+async def test_a_migration_on_the_bambuddy_store_pins_its_revision(
+    make_service: ServiceFactory, version: str | None
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
+    try:
+        await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=version)
+    finally:
+        await service.aclose()
+    assert snapshots.pinned == [(SLUG, version)]
+    assert client.calls[0]["req"].revision == (version or "f" * 40)
+    assert client.calls[0]["rpc_timeout"] == RPC_TIMEOUT
+    assert client.calls[0]["execution_timeout"] == MIGRATE_EXECUTION_TIMEOUT
+
+
+async def test_inputs_too_large_to_migrate_are_refused_before_any_workflow(
+    make_service: ServiceFactory,
+) -> None:
+    client = _MigrationClient()
+    service = make_service(client, "q")
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(
+                SLUG, {"blob": "x" * (MAX_WORKFLOW_INPUT_BYTES + 1)}, version=None
+            )
+    finally:
+        await service.aclose()
+    assert raised.value.status == 413
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "message"),
+    [
+        (
+            RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b""),
+            503,
+            "the render service is unavailable",
+        ),
+        (
+            WorkflowFailureError(
+                cause=TemporalTimeoutError(
+                    "timed out", type=TimeoutType.START_TO_CLOSE, last_heartbeat_details=[]
+                )
+            ),
+            504,
+            "migrating the inputs timed out",
+        ),
+    ],
+)
+async def test_a_migration_the_service_cannot_finish_is_a_server_error(
+    make_service: ServiceFactory, outcome: BaseException, status: int, message: str
+) -> None:
+    service = make_service(_MigrationClient(outcome), "q")
+    try:
+        with pytest.raises(ApiError) as raised:
+            await service.migrate_inputs(SLUG, {"params": {}, "v": 0}, version=None)
+    finally:
+        await service.aclose()
+    assert raised.value.status == status
+    assert message in str(raised.value.detail)

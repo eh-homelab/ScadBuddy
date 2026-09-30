@@ -529,6 +529,17 @@ def _output_timeout(req: OutputRequest) -> timedelta:
     return _openscad_timeout() + moves * TRANSFER
 
 
+#: `migrate_inputs`' retries: two attempts, a second after the first.
+MIGRATE_RETRY = RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=1))
+#: The migration workflow's bound: both attempts of `SHORT`, the backoff between them,
+#: and a margin for scheduling, so it outlasts its activity rather than cutting it off.
+MIGRATE_EXECUTION_TIMEOUT = (
+    (MIGRATE_RETRY.maximum_attempts or 1) * SHORT
+    + (MIGRATE_RETRY.initial_interval or timedelta())
+    + timedelta(seconds=10)
+)
+
+
 @workflow.defn(name="MigrateInputs")
 class MigrateInputs:
     """Saved inputs brought up to the template's `INPUTS_VERSION` (§8.2), on a worker."""
@@ -540,6 +551,6 @@ class MigrateInputs:
             req,
             result_type=MigrateResult,
             start_to_close_timeout=SHORT,
-            retry_policy=RetryPolicy(maximum_attempts=2),
+            retry_policy=MIGRATE_RETRY,
         )
         return result
