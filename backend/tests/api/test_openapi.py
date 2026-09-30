@@ -17,6 +17,8 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/upstream/dismiss",
     "/api/v1/models/{slug}/upstream/detach",
     "/api/v1/models/{slug}/source",
+    "/api/v1/models/{slug}/files",
+    "/api/v1/models/{slug}/files/{name}",
     "/api/v1/models/{slug}/source/patch",
     "/api/v1/lsp/diagnostics",
     "/api/v1/models/{slug}/schema",
