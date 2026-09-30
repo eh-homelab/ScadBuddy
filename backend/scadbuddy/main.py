@@ -219,8 +219,6 @@ async def _sweep_duplicate_staging_logged(state: AppState) -> None:
 
 async def _sweep_blobs_logged(state: AppState) -> None:
     """The Temporal path's blob store: the pieces no job references any more."""
-    if state.blobs is None or state.refs is None:
-        return
     try:
         if state.store.content is None:
             removed = await asyncio.to_thread(

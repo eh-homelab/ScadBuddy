@@ -29,8 +29,15 @@ def refresh_asset_metrics(state: AppState) -> None:
     state.metrics.assets_max_bytes.set(usage.max_total_bytes)
 
 
+#: Seconds a local store walk answers the scraper for.
+STORE_USAGE_MAX_AGE = 60.0
+
+
 async def refresh_store_metrics(state: AppState) -> None:
-    usage = await asyncio.to_thread(store_usage, state.store, state.config)
+    # A scrape every 15-30s would otherwise walk the whole local store each time.
+    usage = await asyncio.to_thread(
+        store_usage, state.store, state.config, max_age=STORE_USAGE_MAX_AGE
+    )
     state.metrics.store_blobs.set(usage.count)
     for kind, size in usage.by_kind.items():
         state.metrics.store_bytes.labels(kind).set(size)

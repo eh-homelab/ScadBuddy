@@ -13,6 +13,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
+from scadbuddy.store import factory
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import RECOVER_LOCAL_SQL, build_store, store_health, store_usage
@@ -62,6 +63,24 @@ async def test_local_is_phase_one_exactly(tmp_path: Path, pool: Pool) -> None:
     assert (usage.backend, usage.count, usage.bytes) == ("local", 1, 5)
     health = await store_health(bundle)
     assert health.backend == "local" and health.multi_worker is False
+    await bundle.aclose()
+
+
+async def test_the_local_walk_is_reused_within_max_age_for_the_scraper(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/metrics` passes a max age, so a scrape does not walk the whole local store."""
+    config, bundle = _build(tmp_path, pool, "local", RenderStoreSettings())
+    now = [1000.0]
+    monkeypatch.setattr(factory, "monotonic", lambda: now[0])
+    (bundle.blobs.dir_for("a") / "m").write_bytes(b"12345")
+    assert store_usage(bundle, config, max_age=60).count == 1
+    (bundle.blobs.dir_for("b") / "m").write_bytes(b"1")
+    now[0] += 59
+    assert store_usage(bundle, config, max_age=60).count == 1  # the last walk
+    assert store_usage(bundle, config).count == 2  # no max age: walked now
+    now[0] += 61
+    assert store_usage(bundle, config, max_age=60).bytes == 6
     await bundle.aclose()
 
 
