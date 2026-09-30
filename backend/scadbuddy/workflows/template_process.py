@@ -9,7 +9,6 @@ import json
 import os
 import signal
 import tempfile
-from collections import deque
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,8 @@ from scadbuddy.core.fontconfig import env_for
 from scadbuddy.render.runner import LOG_TAIL_LINES
 
 MAX_RESULT_BYTES = 1 << 20
+#: The template's output kept in memory: the last MiB, and how much went before it.
+OUTPUT_LOG_MAX_BYTES = 1 << 20
 
 
 class TemplateError(RuntimeError):
@@ -49,10 +50,43 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
         os.killpg(process.pid, signal.SIGKILL)
 
 
-def _tail(log: Path) -> list[str]:
-    with log.open("rb") as f:
-        lines = deque(f, maxlen=LOG_TAIL_LINES)
-    return [line.decode("utf-8", errors="replace").rstrip("\n") for line in lines]
+#: After the group is killed, how long the output pipe may take to reach EOF. Only a
+#: process that left the group (`setsid`) can hold it open past that.
+OUTPUT_EOF_WAIT = 1.0
+
+
+class _Output(asyncio.Protocol):
+    """The template's stdout and stderr, read as they come: only the last
+    `OUTPUT_LOG_MAX_BYTES` are kept, with a count of what was dropped before them."""
+
+    def __init__(self, closed: asyncio.Future[None]) -> None:
+        self.kept = bytearray()
+        self.dropped = 0
+        self.closed = closed
+
+    def data_received(self, data: bytes) -> None:
+        self.kept += data
+        over = len(self.kept) - OUTPUT_LOG_MAX_BYTES
+        if over > 0:
+            del self.kept[:over]
+            self.dropped += over
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if not self.closed.done():
+            self.closed.set_result(None)
+
+    def tail(self) -> list[str]:
+        lines = self.kept.decode("utf-8", errors="replace").splitlines()
+        if not self.dropped:
+            return lines[-LOG_TAIL_LINES:]
+        # The first kept line starts mid-line; the notice takes its place.
+        notice = f"[scadbuddy: the first {self.dropped} bytes of output were dropped]"
+        return [notice, *lines[1:][-(LOG_TAIL_LINES - 1) :]]
+
+
+async def _drained(output: _Output) -> None:
+    with suppress(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(output.closed), OUTPUT_EOF_WAIT)
 
 
 async def run_template(
@@ -65,6 +99,7 @@ async def run_template(
     data_dir: Path,
     timeout: float,
 ) -> Any:
+    loop = asyncio.get_running_loop()
     with tempfile.TemporaryDirectory(prefix="scadbuddy-template-") as scratch:
         result_path = Path(scratch) / "result.json"
         # The allowlist openscad gets (#281), not the worker's environment (§9).
@@ -77,46 +112,58 @@ async def run_template(
                 "PYTHONUNBUFFERED": "1",
             }
         )
-        # Output goes to a file, not a pipe: asyncio's `wait()` returns only once every
-        # pipe has closed, so a grandchild still holding one would keep it waiting
-        # after the function returned.
-        log = Path(scratch) / "output.log"
-        with log.open("wb") as output:
-            process = await asyncio.create_subprocess_exec(
-                python,
-                "-m",
-                "scadbuddy.workflows.template_runner",
-                str(model_dir),
-                str(result_path),
-                cwd=model_dir,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=output,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
-        if process.stdin is None:
-            raise RuntimeError("the template process has no stdin")
-        with suppress(BrokenPipeError, ConnectionResetError):
-            process.stdin.write(json.dumps(request).encode())
-            await process.stdin.drain()
-            process.stdin.close()
+        # Output goes to our own pipe, not one of asyncio's: its `wait()` returns only
+        # once every pipe it made has closed, so a grandchild still holding one would
+        # keep it waiting after the function returned. Read as it comes and capped, so
+        # a chatty function never fills memory or the worker's disk.
+        read_fd, write_fd = os.pipe()
+        output = _Output(loop.create_future())
+        transport, _ = await loop.connect_read_pipe(
+            lambda: output, os.fdopen(read_fd, "rb", buffering=0)
+        )
         try:
-            await asyncio.wait_for(process.wait(), timeout)
-        except TimeoutError:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    python,
+                    "-m",
+                    "scadbuddy.workflows.template_runner",
+                    str(model_dir),
+                    str(result_path),
+                    cwd=model_dir,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=write_fd,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                )
+            finally:
+                os.close(write_fd)
+            if process.stdin is None:
+                raise RuntimeError("the template process has no stdin")
+            with suppress(BrokenPipeError, ConnectionResetError):
+                process.stdin.write(json.dumps(request).encode())
+                await process.stdin.drain()
+                process.stdin.close()
+            try:
+                await asyncio.wait_for(process.wait(), timeout)
+            except TimeoutError:
+                _kill_group(process)
+                await process.wait()
+                await _drained(output)
+                name = request.get("name")
+                raise TemplateError(
+                    f"pipeline/activities.py:{name} timed out after {timeout:g}s", output.tail()
+                ) from None
+            except asyncio.CancelledError:
+                _kill_group(process)
+                await process.wait()
+                raise
+            # The function returned; whatever it left running goes with its group.
             _kill_group(process)
-            await process.wait()
-            name = request.get("name")
-            raise TemplateError(
-                f"pipeline/activities.py:{name} timed out after {timeout:g}s", _tail(log)
-            ) from None
-        except asyncio.CancelledError:
-            _kill_group(process)
-            await process.wait()
-            raise
-        # The function returned; whatever it left running goes with its group.
-        _kill_group(process)
-        tail = _tail(log)
+            await _drained(output)
+        finally:
+            transport.close()
+        tail = output.tail()
         if process.returncode != 0 or not result_path.is_file():
             raise TemplateError(
                 f"the template process exited with {process.returncode}", tail, retryable=True

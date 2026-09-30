@@ -5,20 +5,29 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+import uuid
+from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from temporalio import workflow
+from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
+from temporalio.worker import Worker
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.store import BlobStore
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.template import Blob
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.models import TemplateCall
+from scadbuddy.workflows.models import Failure, TemplateCall
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from scadbuddy.workflows.template_process import OUTPUT_LOG_MAX_BYTES
+from tests.support.temporal import temporal_client
 
 ACTIVITIES = """\
 import os, subprocess, time
@@ -52,13 +61,45 @@ def spawn(pid_file):
         f.write(f"{os.getpid()} {child.pid}")
     time.sleep(300)
 
-def leave_child():
-    subprocess.Popen(["sleep", "300"])
+def leave_child(pid_file):
+    child = subprocess.Popen(["sleep", "300"])
+    with open(pid_file, "w") as f:
+        f.write(str(child.pid))
     return "done"
+
+def aset():
+    return {1, 2}
+
+def counted(path):
+    with open(path, "a") as f:
+        f.write("x")
+    return emit("n.txt", "n")
+
+def slow(seconds):
+    time.sleep(seconds)
+    return "slept"
+
+def chatty():
+    for i in range(3000):
+        print(f"line {i} " + "x" * 1000)
+    raise ValueError("too chatty")
 """
 
 
-def _world(tmp_path: Path) -> tuple[PipelineActivities, DataPaths]:
+class RecordingRefs:
+    def __init__(self) -> None:
+        self.held: set[tuple[str, str, str]] = set()
+
+    def add(self, key: str, holder_kind: str, holder_id: str) -> None:
+        self.held.add((key, holder_kind, holder_id))
+
+    def referenced(self) -> set[str]:
+        return {key for key, _, _ in self.held}
+
+
+def _world(
+    tmp_path: Path, *, blobs: BlobStore | None = None, refs: RecordingRefs | None = None
+) -> tuple[PipelineActivities, DataPaths]:
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
     paths.model_dir("demo").mkdir(parents=True)
@@ -72,15 +113,17 @@ def _world(tmp_path: Path) -> tuple[PipelineActivities, DataPaths]:
         config=Config(data_dir=paths.root),
         paths=paths,
         assets=AssetStore(paths.assets),
-        blobs=LocalBlobStore(paths.blobs),
-        refs=None,  # type: ignore[arg-type]
+        blobs=blobs or LocalBlobStore(paths.blobs),
+        refs=refs or RecordingRefs(),  # type: ignore[arg-type]
         projection=None,  # type: ignore[arg-type]
         template_python=sys.executable,
     )
     return PipelineActivities(deps), paths
 
 
-def _call(name: str, *args: object, timeout_s: float = 60, **kwargs: object) -> TemplateCall:
+def _call(
+    name: str, *args: object, timeout_s: float = 60, job_id: str = "job-1", **kwargs: object
+) -> TemplateCall:
     return TemplateCall(
         slug="demo",
         revision=None,
@@ -88,6 +131,7 @@ def _call(name: str, *args: object, timeout_s: float = 60, **kwargs: object) -> 
         args=list(args),
         kwargs=dict(kwargs),
         timeout_s=timeout_s,
+        job_id=job_id,
     )
 
 
@@ -128,6 +172,7 @@ async def test_an_emitted_file_comes_back_as_a_blob_and_can_be_read_again(tmp_pa
         ("missing", "pipeline/activities.py has no function 'missing'"),
         ("_private", "pipeline/activities.py has no function '_private'"),
         ("huge", "return scadbuddy.template.emit"),
+        ("aset", "aset() returned a value that is not JSON"),
     ],
 )
 async def test_a_template_error_is_non_retryable_and_names_its_line(
@@ -160,8 +205,15 @@ async def test_cancelling_kills_the_template_process_group(tmp_path: Path) -> No
     pids = [int(p) for p in pid_file.read_text().split()]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, 10)  # a group left alive would hang it
     deadline = time.monotonic() + 5
+    while not all(_dead(pid) for pid in pids):
+        assert time.monotonic() < deadline, f"still alive: {pids}"
+        await asyncio.sleep(0.05)
+
+
+async def _until_dead(pids: list[int], within: float = 5) -> None:
+    deadline = time.monotonic() + within
     while not all(_dead(pid) for pid in pids):
         assert time.monotonic() < deadline, f"still alive: {pids}"
         await asyncio.sleep(0.05)
@@ -169,17 +221,128 @@ async def test_cancelling_kills_the_template_process_group(tmp_path: Path) -> No
 
 async def test_a_timed_out_function_is_killed_and_refused(tmp_path: Path) -> None:
     acts, _ = _world(tmp_path)
+    pid_file = tmp_path / "p"
     with pytest.raises(ApplicationError) as raised:
-        await ActivityEnvironment().run(
-            acts.run_template_activity, _call("spawn", str(tmp_path / "p"), timeout_s=1)
+        await asyncio.wait_for(
+            ActivityEnvironment().run(
+                acts.run_template_activity, _call("spawn", str(pid_file), timeout_s=5)
+            ),
+            30,
         )
-    assert "timed out after 1s" in raised.value.message
+    assert "timed out after 5s" in raised.value.message
+    # The function and the child it started: the whole group.
+    await _until_dead([int(p) for p in pid_file.read_text().split()])
 
 
 async def test_a_returned_function_does_not_wait_for_its_children(tmp_path: Path) -> None:
     acts, _ = _world(tmp_path)
+    pid_file = tmp_path / "child"
     started = time.monotonic()
     assert (
-        await ActivityEnvironment().run(acts.run_template_activity, _call("leave_child")) == "done"
+        await asyncio.wait_for(
+            ActivityEnvironment().run(
+                acts.run_template_activity, _call("leave_child", str(pid_file))
+            ),
+            30,
+        )
+        == "done"
     )
     assert time.monotonic() - started < 20
+    # What it left running goes with its group.
+    await _until_dead([int(pid_file.read_text())])
+
+
+async def test_an_emitted_blob_is_held_for_the_job(tmp_path: Path) -> None:
+    refs = RecordingRefs()
+    acts, _ = _world(tmp_path, refs=refs)
+    env = ActivityEnvironment()
+    blob = Blob.model_validate(
+        await env.run(acts.run_template_activity, _call("guide", 2, job_id="j1"))
+    )
+    assert (blob.key, "job", "j1") in refs.held
+    # A second job's identical call reuses the blob, and holds it too.
+    again = await env.run(acts.run_template_activity, _call("guide", 2, job_id="j2"))
+    assert Blob.model_validate(again) == blob
+    assert (blob.key, "job", "j2") in refs.held
+
+
+async def test_identical_calls_at_once_on_one_worker_run_once(tmp_path: Path) -> None:
+    acts, _ = _world(tmp_path)
+    count = tmp_path / "count"
+    env = ActivityEnvironment()
+    first, second = await asyncio.gather(
+        env.run(acts.run_template_activity, _call("counted", str(count))),
+        env.run(acts.run_template_activity, _call("counted", str(count))),
+    )
+    assert first == second
+    assert count.read_text() == "x"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"kind": "blob", "key": "act-nope", "path": "guide.svg"},
+        {"kind": "part", "piece_key": "nope"},
+    ],
+)
+async def test_a_blob_the_store_does_not_hold_is_refused_before_the_call(
+    tmp_path: Path, value: dict[str, str]
+) -> None:
+    acts, _ = _world(tmp_path)
+    with pytest.raises(ApplicationError) as raised:
+        await ActivityEnvironment().run(acts.run_template_activity, _call("read", value))
+    assert raised.value.type == "TemplateActivityError" and raised.value.non_retryable
+    assert "is not in the store" in raised.value.message
+
+
+async def test_a_chatty_function_keeps_only_the_end_of_its_log(tmp_path: Path) -> None:
+    acts, _ = _world(tmp_path)
+    with pytest.raises(ApplicationError) as raised:
+        await asyncio.wait_for(
+            ActivityEnvironment().run(acts.run_template_activity, _call("chatty")), 60
+        )
+    failure = raised.value.details[0]
+    assert isinstance(failure, Failure)
+    tail = "\n".join(failure.log_tail)
+    # About 3 MiB printed: only the last OUTPUT_LOG_MAX_BYTES are kept, and it says so.
+    assert "bytes of output were dropped" in tail
+    assert OUTPUT_LOG_MAX_BYTES == 1 << 20
+    assert failure.log_tail[-1].startswith("line 2999 ")
+    assert "ValueError: too chatty" in raised.value.message
+
+
+@workflow.defn(name="CallsATemplateActivity", sandboxed=False)
+class _CallsATemplateActivity:
+    @workflow.run
+    async def run(self, call: TemplateCall) -> Any:
+        return await workflow.execute_activity(
+            "run_template_activity",
+            call,
+            start_to_close_timeout=timedelta(seconds=60),
+            heartbeat_timeout=timedelta(seconds=8),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+
+
+@pytest.mark.requires_temporal
+async def test_a_call_longer_than_its_heartbeat_timeout_survives(tmp_path: Path) -> None:
+    """`_heartbeating` beats every 5 s; a 12 s call outlives an 8 s heartbeat timeout."""
+    acts, _ = _world(tmp_path)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[_CallsATemplateActivity],
+            activities=[acts.run_template_activity],
+        ):
+            result = await asyncio.wait_for(
+                client.execute_workflow(
+                    _CallsATemplateActivity.run,
+                    _call("slow", 12),
+                    id=f"calls-{uuid.uuid4().hex[:8]}",
+                    task_queue=queue,
+                ),
+                60,
+            )
+    assert result == "slept"

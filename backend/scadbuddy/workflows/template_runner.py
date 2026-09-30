@@ -96,14 +96,21 @@ def main(argv: list[str]) -> int:
             value = fn(*_decode(request["args"]), **_decode(request["kwargs"]))
             if inspect.isawaitable(value):
                 value = asyncio.run(_await(value))
-        reply: dict[str, Any] = {"ok": _encode(value)}
+        encoded = _encode(value)
+        try:
+            text = json.dumps({"ok": encoded})
+        except (TypeError, ValueError) as error:
+            what = "migrate()" if migrate else f"{request['name']}()"
+            raise TypeError(f"{what} returned a value that is not JSON: {error}") from None
     except Exception as error:
-        reply = {
-            "error": f"{type(error).__name__}: {error}",
-            "line": _line(error, path),
-            "file": f"pipeline/{path.name}",
-        }
-    result_path.write_text(json.dumps(reply), encoding="utf-8")
+        text = json.dumps(
+            {
+                "error": f"{type(error).__name__}: {error}",
+                "line": _line(error, path),
+                "file": f"pipeline/{path.name}",
+            }
+        )
+    result_path.write_text(text, encoding="utf-8")
     return 0
 
 

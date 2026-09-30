@@ -731,3 +731,47 @@ async def test_a_timed_out_pipeline_is_failed_by_the_reconciler(
     assert stored.error == "the pipeline did not finish within 8s" or (
         stored.error or ""
     ).startswith("pipeline/pipeline.py:")
+
+
+class _DescribeFails:
+    """A client whose `describe` answers every workflow with one RPC error."""
+
+    def __init__(self, status: RPCStatusCode) -> None:
+        self.status = status
+
+    def get_workflow_handle(self, workflow_id: str) -> _DescribeFails:
+        return self
+
+    async def describe(self, **_: object) -> None:
+        raise RPCError("describe failed", self.status, b"")
+
+
+@pytest.mark.parametrize(
+    ("status", "settled"), [(RPCStatusCode.NOT_FOUND, 1), (RPCStatusCode.UNAVAILABLE, 0)]
+)
+async def test_only_a_workflow_temporal_no_longer_has_is_settled_as_gone(
+    make_service: ServiceFactory,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    status: RPCStatusCode,
+    settled: int,
+) -> None:
+    """NOT_FOUND is the workflow gone from retention; any other error (the frontend
+    briefly down) says nothing about the job, which stays running until next pass."""
+    job = Job(id=uuid.uuid4().hex, slug=SLUG, params={}, created_at=now(), state="running")
+    finished: list[Job] = []
+
+    def finish(j: Job) -> bool:
+        finished.append(j)
+        return True
+
+    monkeypatch.setattr(projection, "stale_running", lambda older_than: [job])
+    monkeypatch.setattr(projection, "finish", finish)
+    service = make_service(_DescribeFails(status), "unused")
+    try:
+        assert await service.settle_timed_out() == settled
+    finally:
+        await service.aclose()
+    assert [j.error for j in finished] == (
+        ["the job's workflow ended without settling it"] if settled else []
+    )

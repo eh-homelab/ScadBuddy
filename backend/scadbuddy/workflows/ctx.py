@@ -181,6 +181,7 @@ class Ctx:
             args=[_json(a) for a in args],
             kwargs={k: _json(v) for k, v in kwargs.items()},
             timeout_s=seconds,
+            job_id=self._job.id,
         )
         # The subprocess's own kill (at ``seconds``) always fires before Temporal's.
         return await workflow.execute_activity(

@@ -344,7 +344,16 @@ class RenderService:
             try:
                 handle = self.client.get_workflow_handle(workflow_id_for(job.id))
                 status = (await handle.describe(rpc_timeout=RPC_TIMEOUT)).status
-            except RPCError:
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    # The server could not say (unavailable, a deadline): nothing is
+                    # known about the job, so it waits for the next pass.
+                    logger.warning(
+                        "could not describe a stale job's workflow",
+                        extra={"job_id": job.id},
+                        exc_info=True,
+                    )
+                    continue
                 status = None  # gone from the server's retention
             if status == WorkflowExecutionStatus.RUNNING:
                 continue

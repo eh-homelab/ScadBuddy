@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,10 @@ from scadbuddy.library.pipelines import (
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.plate import plate_for
+from scadbuddy.store import BlobStore
+from scadbuddy.store.cache import StaleBlobError
 from scadbuddy.store.content import BlobScope
+from scadbuddy.template import ACTIVITY_RESULT_NAME
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _heartbeating
 from scadbuddy.workflows.models import (
     Failure,
@@ -70,6 +74,9 @@ class PipelineActivities:
         #: `prepare`'s snapshot step, shared: a worker on the bambuddy store has no
         #: source of its own until it materializes the revision.
         self._render = RenderActivities(deps)
+        #: One run per `act-` key at a time on this worker: an identical call waits,
+        #: then is answered from the blob the first one wrote.
+        self._calls: dict[str, asyncio.Lock] = {}
 
     def all(self) -> Sequence[Callable[..., Any]]:
         return [self.load_pipeline, self.pack, self.write_output, self.run_template_activity]
@@ -172,7 +179,7 @@ class PipelineActivities:
             return [await self._localize(v) for v in value]
         if isinstance(value, dict):
             if value.get("kind") == "blob":
-                await blobs.fetch(value["key"])
+                await _fetched(blobs, value["key"])
                 root = blobs.dir_for(value["key"]).resolve()
                 path = (root / value["path"]).resolve()
                 if not path.is_relative_to(root):
@@ -183,7 +190,7 @@ class PipelineActivities:
                     )
                 return {**value, "local": str(path)}
             if value.get("kind") == "part":
-                await blobs.fetch(value["piece_key"])
+                await _fetched(blobs, value["piece_key"])
                 return {**value, "local": str(blobs.dir_for(value["piece_key"]))}
             return {k: await self._localize(v) for k, v in value.items()}
         return value
@@ -192,7 +199,11 @@ class PipelineActivities:
     async def run_template_activity(self, call: TemplateCall) -> Any:
         """One function of the template's `pipeline/activities.py`, in its own process
         group (`template_process`). The template's exception is non-retryable; a crash
-        or kill of the process is retried."""
+        or kill of the process is retried.
+
+        Identical calls share one `act-` blob holding the emitted files and the value
+        returned (`ACTIVITY_RESULT_NAME`): one already in the store is the answer, on
+        any worker, and runs nothing. The job holds a ref on the blob either way."""
         d = self.deps
         model_dir = await self.model_dir(call.slug, call.revision)
         source = model_dir / "pipeline" / "activities.py"
@@ -202,6 +213,48 @@ class PipelineActivities:
             else ""
         )
         out_key = template_out_key(call, source_sha)
+        lock = self._calls.setdefault(out_key, asyncio.Lock())
+        async with lock:
+            stored = await self._stored_result(out_key)
+            if stored is not None:
+                await self._hold(out_key, call)
+                return stored[0]
+            value = await self._run_call(call, model_dir, out_key)
+            await self._hold(out_key, call)
+            scope = BlobScope(slug=call.slug)
+            try:
+                await d.blobs.publish_fresh(
+                    out_key, scope=scope, expected=await d.blobs.indexed_sha(out_key)
+                )
+            except StaleBlobError:
+                # Another worker published the same call in between: its blob is the
+                # answer (identical calls write identical files).
+                stored = await self._stored_result(out_key)
+                if stored is None:
+                    raise
+                return stored[0]
+            return value
+
+    async def _stored_result(self, out_key: str) -> tuple[Any] | None:
+        """The value a finished identical call returned, as a 1-tuple; None when the
+        store holds no finished call (nothing, or files from before the result file)."""
+        blobs = self.deps.blobs
+        if not await blobs.fetch(out_key):
+            return None
+        result = blobs.dir_for(out_key) / ACTIVITY_RESULT_NAME
+        if not result.is_file():
+            return None
+        return (json.loads(await asyncio.to_thread(result.read_text, encoding="utf-8")),)
+
+    async def _hold(self, out_key: str, call: TemplateCall) -> None:
+        # `dir_for` first (it touches the blob), as every claimant does before its ref.
+        self.deps.blobs.dir_for(out_key)
+        await asyncio.to_thread(self.deps.refs.add, out_key, "job", call.job_id)
+
+    async def _run_call(self, call: TemplateCall, model_dir: Path, out_key: str) -> Any:
+        d = self.deps
+        # Nothing of an attempt that did not finish survives into this one.
+        await asyncio.to_thread(shutil.rmtree, d.blobs.dir_for(out_key))
         out = d.blobs.dir_for(out_key)
         request = {
             "mode": "call",
@@ -229,6 +282,16 @@ class PipelineActivities:
                 type="TemplateActivityError",
                 non_retryable=not error.retryable,
             ) from None
-        if any(out.iterdir()):
-            await d.blobs.publish(out_key, scope=BlobScope(slug=call.slug))
+        await asyncio.to_thread(
+            (out / ACTIVITY_RESULT_NAME).write_text, json.dumps(value), encoding="utf-8"
+        )
         return value
+
+
+async def _fetched(blobs: BlobStore, key: str) -> None:
+    """A blob passed to a template activity must be in the store: its absence is a
+    store problem, not the template's line that would then fail to read it."""
+    if not await blobs.fetch(key):
+        raise ApplicationError(
+            f"blob {key} is not in the store", type="TemplateActivityError", non_retryable=True
+        )

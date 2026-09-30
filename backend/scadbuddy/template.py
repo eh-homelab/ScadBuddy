@@ -70,11 +70,18 @@ class Part(BaseModel):
         return {part.colour: part.mesh for part in layout.plates[0].parts}
 
 
+#: Beside a call's emitted files in its `act-` blob: the value it returned, so an
+#: identical call on any worker is answered from the store without running.
+ACTIVITY_RESULT_NAME = "_scadbuddy_result.json"
+
+
 def emit(name: str, data: bytes | str) -> Blob:
     """Write a file a template activity returns; ``name`` is a plain file name."""
     out = Path(os.environ["SCADBUDDY_TEMPLATE_OUT"])
     if "/" in name or name.startswith(".") or not name:
         raise ValueError(f"not a plain file name: {name!r}")
+    if name == ACTIVITY_RESULT_NAME:
+        raise ValueError(f"{name!r} is reserved for the call's own result")
     target = out / name
     if isinstance(data, str):
         target.write_text(data, encoding="utf-8")

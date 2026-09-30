@@ -211,3 +211,5 @@ class TemplateCall(BaseModel):
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     timeout_s: float
+    #: The job that holds (refs) the blob the call emits.
+    job_id: str = ""
