@@ -14,6 +14,7 @@ import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { PreviewGallery } from '../components/media/PreviewGallery'
 import { ParameterPanel } from '../components/ParameterPanel'
+import { RawInputs } from '../components/RawInputs'
 import { PresetPicker } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
@@ -30,7 +31,8 @@ import {
   diffFromDefaults,
   type ParamValues,
 } from '../lib/params'
-import { NO_EXTRA, splitInputs, type InputsExtra } from '../lib/inputs'
+import { NO_EXTRA, isJsonObject, joinInputs, splitInputs, type InputsExtra, type JsonObject } from '../lib/inputs'
+import { migrateIfOld, type MigrateOutcome } from '../lib/useMigratedInputs'
 import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
@@ -115,12 +117,47 @@ export function CustomizePage() {
   // useAsync reports loading whether or not it has anything to fetch, so reading it
   // directly would hold the values back for a render even when the target is already
   // in hand — long enough to paint the schema defaults and snap off them.
-  const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
-
-  const reopenedInputs = useMemo(
-    () => (reopened ? splitInputs(reopened.inputs, reopened.params) : null),
+  // An output's inputs are brought up to the template's INPUTS_VERSION before they are
+  // applied (spec 2026-09-27 §8.2): the version is on the model record.
+  const inputsVersion = modelState.data?.inputs_version
+  const reopenedRaw = useMemo<JsonObject | null>(
+    () =>
+      reopened
+        ? isJsonObject(reopened.inputs)
+          ? (reopened.inputs as JsonObject)
+          : joinInputs(reopened.params ?? {}, NO_EXTRA)
+        : null,
     [reopened],
   )
+  const migration = useAsync(
+    async () =>
+      reopenedRaw && inputsVersion !== undefined
+        ? await migrateIfOld(slug, reopenedRaw, inputsVersion, version)
+        : null,
+    [slug, reopenedRaw, inputsVersion ?? null, version ?? null],
+  )
+  // Held back until the model says which version is current (a model that did not load
+  // applies the inputs as they are), then until the migration has answered.
+  const migrating =
+    reopenedRaw !== null &&
+    ((inputsVersion === undefined && !modelState.error) ||
+      (inputsVersion !== undefined && migration.loading))
+  const reopenOutcome: MigrateOutcome | null = migration.data ?? null
+
+  const resolving = (Boolean(reopenId) && !preloaded && reopenState.loading) || migrating
+
+  const reopenedInputs = useMemo(() => {
+    if (!reopened) return null
+    if (reopenOutcome?.kind === 'failed') return null // the current (default) state stays
+    const raw = reopenOutcome?.kind === 'ready' ? reopenOutcome.inputs : reopened.inputs
+    return splitInputs(raw, reopened.params)
+  }, [reopened, reopenOutcome])
+  // Inputs that could not be migrated, shown read-only until something else is loaded.
+  const [presetFailure, setPresetFailure] = useState<{ inputs: JsonObject; error: string } | null>(null)
+  const [dismissedReopen, setDismissedReopen] = useState<MigrateOutcome | null>(null)
+  const unmigrated =
+    presetFailure ??
+    (reopenOutcome?.kind === 'failed' && reopenOutcome !== dismissedReopen ? reopenOutcome : null)
   const seed = useMemo(
     // Null until there is something to show: the schema has to be here, and a deep
     // link's values have to have arrived, before the defaults are the right answer.
@@ -214,13 +251,37 @@ export function CustomizePage() {
 
   const onReset = useCallback(() => {
     if (schema) {
+      setPresetFailure(null)
+      setDismissedReopen(reopenOutcome)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
     }
-  }, [schema])
+  }, [schema, reopenOutcome])
 
-  const onApplyPreset = useCallback((next: ParamValues, nextExtra: InputsExtra) => {
-    setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
-  }, [])
+  const onApplyPreset = useCallback(
+    (next: ParamValues, nextExtra: InputsExtra) => {
+      const apply = (values: ParamValues, extra: InputsExtra) => {
+        setPresetFailure(null)
+        setDismissedReopen(reopenOutcome)
+        setEdits((current) => ({ of: current.of, values, extra }))
+      }
+      const saved = joinInputs(next, nextExtra)
+      const v = typeof saved.v === 'number' ? saved.v : 0
+      // Current inputs apply at once, as before; only old ones wait for the migration.
+      if (inputsVersion === undefined || v === inputsVersion) {
+        apply(next, nextExtra)
+        return
+      }
+      void migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
+        if (outcome.kind === 'failed') {
+          setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
+          return
+        }
+        const migrated = splitInputs(outcome.inputs, next)
+        apply({ ...next, ...migrated.params }, migrated.extra)
+      })
+    },
+    [slug, version, inputsVersion, reopenOutcome],
+  )
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
 
@@ -428,7 +489,8 @@ export function CustomizePage() {
     )
   }
 
-  if (schemaState.loading) {
+  // Reopened inputs wait for their migration: the panel must not paint defaults first.
+  if (schemaState.loading || migrating) {
     return (
       <p className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
         <Spinner /> Loading model
@@ -615,6 +677,7 @@ export function CustomizePage() {
               : 'min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line'
           }
         >
+          {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} />}
           <ParameterPanel
             schema={schema}
             slug={slug}

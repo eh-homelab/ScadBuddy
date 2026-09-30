@@ -236,7 +236,7 @@ export const media: Record<string, MediaView[]> = {
   ],
 }
 
-export const models: ModelSummary[] = [
+const modelsSeed: ModelSummary[] = [
   {
     slug: 'name-keychain',
     name: 'Name Keychain',
@@ -294,6 +294,9 @@ export const models: ModelSummary[] = [
     media: media[GALLERY_SLUG],
   },
 ]
+
+/** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
+export const models: ModelSummary[] = modelsSeed.map((entry) => ({ inputs_version: 0, ...entry }))
 
 /**
  * #90 — the git history of `name-keychain`. Commit ids are the real shape (40 hex
@@ -517,7 +520,7 @@ export const libraries: CatalogueLibrary[] = [
 /** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
 export const MISSING_REF = 'v9.9.9'
 
-export const outputs: Output[] = [
+const outputsSeed: Output[] = [
   {
     id: 'a'.repeat(32),
     slug: 'name-keychain',
@@ -606,6 +609,9 @@ export const outputs: Output[] = [
     warnings: [],
   },
 ]
+
+/** Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null. */
+export const outputs: Output[] = outputsSeed.map((entry) => ({ bom: [], files: [], record: null, ...entry }))
 
 export const settings: Settings = {
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',

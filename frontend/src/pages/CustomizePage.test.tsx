@@ -1233,4 +1233,47 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
       expect(bodies[0]).toMatchObject({ inputs: { params: { name: 'Kai' }, tab: 'lid', v: 0 } }),
     )
   })
+
+  function reopenOld(migrate: () => Response) {
+    const outputId = 'c'.repeat(32)
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.get(`/api/v1/outputs/${outputId}/edit`, () =>
+        HttpResponse.json({
+          output_id: outputId,
+          slug: 'name-keychain',
+          name: 'Old',
+          params: { name: 'Kai' },
+          inputs: { params: { name: 'Kai' }, v: 0 },
+          model_version: null,
+          source: 'record',
+        }),
+      ),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', migrate),
+    )
+    return render(`/m/name-keychain?from=${outputId}`)
+  }
+
+  it('brings an older output\'s inputs up to the template version before applying them', async () => {
+    reopenOld(() =>
+      HttpResponse.json({ inputs: { params: { name: 'Migrated' }, v: 1 }, from_version: 0, to_version: 1 }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Migrated'),
+    )
+    expect(screen.queryByRole('alert', { name: /Saved inputs/ })).not.toBeInTheDocument()
+  })
+
+  it('shows inputs it cannot migrate read-only and keeps the current values', async () => {
+    reopenOld(() =>
+      HttpResponse.json(
+        { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+        { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+    expect(await screen.findByText(/could not be brought up to this template version: defines no migrate/)).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).not.toHaveValue('Kai')
+  })
 })

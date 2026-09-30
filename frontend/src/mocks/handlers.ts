@@ -2080,10 +2080,21 @@ export const handlers = [
       colors: job.colors ?? [],
       parts: [],
       warnings: [],
+      bom: [],
+      files: [],
+      record: null,
     }
     state.outputs = [output, ...state.outputs]
     await delay(120)
     return HttpResponse.json(output, { status: 201 })
+  }),
+
+  // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
+  // the inputs come back as they are, at the version they carry.
+  http.post(`${base}/models/:slug/inputs/migrate`, async ({ request }) => {
+    const body = (await request.json()) as { inputs: Record<string, unknown> }
+    const v = typeof body.inputs.v === 'number' ? body.inputs.v : 0
+    return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),
 
   http.get(`${base}/models/:slug/outputs`, ({ params }) =>

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, Output } from '../api/types'
+import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
@@ -364,6 +365,20 @@ function OutputRow({
           </dl>
         )}
       </div>
+
+      {/* A pipeline output's bill of materials and extra files (spec 2026-09-27 §5.2). */}
+      <BomTable bom={output.bom ?? []} />
+      {(output.files ?? []).length > 0 && (
+        <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
+          {(output.files ?? []).map((name) => (
+            <li key={name}>
+              <a className="text-accent underline" href={api.outputFileUrl(output.id, name)} download>
+                {name}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
     </li>
   )
 }

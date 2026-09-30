@@ -59,6 +59,8 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type BomEntry = Schemas['BomEntry']
+export type MigrateResult = Schemas['MigrateResult']
 export type LibraryCopy = Schemas['LibraryCopy']
 export type EditTarget = Schemas['EditTarget']
 
