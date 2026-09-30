@@ -249,7 +249,6 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
-  let gate = run.approvalGate
   let browserPlugin: string | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
