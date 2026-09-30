@@ -72,7 +72,10 @@ export const sourceFileTools: Tool[] = [
       content: z
         .string()
         .refine((text) => codePoints(text) <= MAX_SOURCE_CHARS, `at most ${MAX_SOURCE_CHARS} characters`),
-      message: z.string().max(MAX_MESSAGE_CHARS).optional().describe("What the revision is called in the history: the user's instruction, in short"),
+      message: z
+        .string()
+        .refine((text) => codePoints(text) <= MAX_MESSAGE_CHARS, `at most ${MAX_MESSAGE_CHARS} characters`)
+        .optional().describe("What the revision is called in the history: the user's instruction, in short"),
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/files/{name}'],

@@ -114,7 +114,9 @@ def test_the_file_count_is_capped(client: TestClient, paths: DataPaths) -> None:
 
 
 def test_a_built_in_is_read_only_and_an_unknown_model_is_a_404(client: TestClient) -> None:
-    assert put_to(client, "builtin:keychain").status_code in (403, 404)
+    # Refused as read-only before any lookup, so 403 whether or not it exists.
+    assert put_to(client, "builtin:keychain").status_code == 403
+    assert put_to(client, "builtin:no-such-model").status_code == 403
     assert put_to(client, "nope").status_code == 404
     assert client.get("/api/v1/models/nope/files").status_code == 404
 
@@ -123,8 +125,9 @@ def put_to(client: TestClient, slug: str) -> Any:
     return client.put(f"/api/v1/models/{slug}/files/parts.scad", json={"content": PARTS})
 
 
+@pytest.mark.parametrize("git", [True, False], ids=["with history", "without history"])
 def test_two_new_files_at_once_cannot_both_pass_the_cap(
-    client: TestClient, paths: DataPaths
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch, git: bool
 ) -> None:
     # The count is taken under the write lock (PR #752 review), so of two new files
     # racing for the last place exactly one lands.
@@ -132,6 +135,9 @@ def test_two_new_files_at_once_cannot_both_pass_the_cap(
     for index in range(MAX_SOURCE_FILES - 2):
         (paths.model_dir(SLUG) / f"f{index}.scad").write_text("x = 1;\n")
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    if not git:
+        # With no history there is no write lock; the catalogue's own still holds.
+        monkeypatch.setattr(state.catalogue, "history", None)
     barrier = threading.Barrier(2)
     outcomes: list[str] = []
 

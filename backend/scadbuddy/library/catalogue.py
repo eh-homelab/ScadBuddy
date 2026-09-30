@@ -368,6 +368,9 @@ class Catalogue:
     ) -> None:
         self.paths = paths
         self.history = history
+        #: Held while `write_file` counts a model's `.scad` files and adds one, so two
+        #: new files cannot both pass the cap, git history or not (PR #752 review).
+        self._source_files_lock = threading.Lock()
         #: Where a template of mine's media list is; None with no database, when
         #: only a legacy ``thumbnail.png`` is listed and media writes are refused.
         self.media_store = media_store
@@ -1701,7 +1704,8 @@ class Catalogue:
         bring a sibling's assignments into it. :class:`SidecarNotFoundError` for a
         removal of a file that is not there, with nothing committed.
         :class:`TooManySourceFilesError` for a new file when the model already holds
-        ``max_files``, counted under the write lock so two new files at once cannot
+        ``max_files``, counted and written under a lock of the catalogue's own (and
+        the history's write lock, when there is one), so two new files at once cannot
         both pass (PR #752 review).
         """
         self._require(slug)
@@ -1713,14 +1717,15 @@ class Catalogue:
                     raise SidecarNotFoundError(name)
                 path.unlink()
             else:
-                if max_files is not None and not path.is_file():
-                    count = len(self.source_files(slug))
-                    if count >= max_files:
-                        raise TooManySourceFilesError(count)
-                try:
-                    write_atomic(path, content.encode())
-                except FileNotFoundError:
-                    raise ModelNotFoundError(slug) from None
+                with self._source_files_lock:
+                    if max_files is not None and not path.is_file():
+                        count = len(self.source_files(slug))
+                        if count >= max_files:
+                            raise TooManySourceFilesError(count)
+                    try:
+                        write_atomic(path, content.encode())
+                    except FileNotFoundError:
+                        raise ModelNotFoundError(slug) from None
             self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
         verb = "Remove" if content is None else "Edit"

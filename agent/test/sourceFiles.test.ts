@@ -24,5 +24,8 @@ describe('write_source_file', () => {
     // within the backend's bound.
     expect(() => write.parse(args('\u{1F600}'.repeat(MAX_SOURCE_CHARS / 2 + 1)))).not.toThrow()
     expect(() => write.parse(args('x'.repeat(MAX_SOURCE_CHARS + 1)))).toThrow(/at most/)
+    const message = (text: string) => ({ ...args('x = 1;'), message: text })
+    expect(() => write.parse(message('\u{1F600}'.repeat(MAX_MESSAGE_CHARS)))).not.toThrow()
+    expect(() => write.parse(message('m'.repeat(MAX_MESSAGE_CHARS + 1)))).toThrow(/at most/)
   })
 })
