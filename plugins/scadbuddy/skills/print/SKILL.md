@@ -145,7 +145,10 @@ print again until they have, since another print would be a second one.
   Tell the user about the ones you can predict before they approve.
 
 Which AMS tray and extruder each spool feeds, and which rack nozzle is used,
-stay Bambuddy's and the printer's decisions (spool-first spec §6).
+stay Bambuddy's and the printer's decisions (spool-first spec §6). The run does
+not check the chosen size against the mounted nozzles, so do not warn that a
+multi-colour print needs the size on both sides: a two-colour print sliced for
+0.2 mm printed through the one 0.2 mm nozzle (spool-first spec §4.3, #768).
 
 The simpler **send** path, `POST /api/v1/outputs/{output_id}/send` with
 `{mode: "library"}`, only uploads the 3MF to the library folder and attaches the

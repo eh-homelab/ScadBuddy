@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ChoicesView, FilamentOptions, SlotChoice } from '../api/types'
-import { fitPlan, seedPlan } from './filaments'
+import { seedPlan } from './filaments'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
 import { useLatest } from './useLatest'
 
@@ -16,7 +16,6 @@ export function useFilamentPlan(
   source: PrintSource | undefined,
   choices: ChoicesView | null,
   plate: number | 'all',
-  size: string,
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
@@ -24,13 +23,6 @@ export function useFilamentPlan(
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
 
-  // #469 — a spool the chosen size rules out (its AMS wired to the other nozzle) is
-  // swapped for one that prints, both when the plan is seeded and when the size moves,
-  // so the dialog never sits on a selection the run would refuse.
-  useEffect(() => {
-    if (!filaments) return
-    setPlan((current) => fitPlan(filaments, current, size))
-  }, [filaments, size])
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
   // later plate uses still gets a row (spec §2 step 1).
