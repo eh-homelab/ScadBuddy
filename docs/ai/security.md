@@ -685,6 +685,35 @@ origins or files", as built. Details and measurements are in
   a seccomp profile that allows user namespaces, not `RuntimeDefault`
   ([headless-browser.md](headless-browser.md#sandbox)).
 
+## Browser bridge and pairing (#254)
+
+The `browser_*` tools act in the user's own tab. How they are built is
+[browser-bridge.md](browser-bridge.md); what protects the tab:
+
+- **Only a paired agent reaches a tab** (spec §8.5). A chat session reaches the tab it
+  is chatted from; any other principal only the tab the user paired it with by typing
+  the code `browser_pair` gave it, in that tab, in every MCP auth mode. The prompt is
+  user-only, so a paired agent's `click` and `fill` cannot accept another agent or keep
+  itself paired.
+- **Codes are short-lived, single-use and hashed**: 5 minutes, once, 5 tries, and only
+  the SHA-256 in `ai_browser_pairings`. One live pairing per principal, enforced by a
+  partial unique index. Requests are capped per principal and overall.
+- **Tiers.** Acting in the tab is at least `write`; `browser_open_print_dialog` is
+  `outward` and goes through the approval gate (§8.2). The confirmation controls stay
+  user-only (`data-agent-user-only`), so nothing an agent does in the tab sends,
+  prints, deletes or saves settings.
+- **The tab's socket** passes the chat socket's gate (HTTPS through the trusted ingress,
+  an allowlisted `Origin`, spec §8.4). A socket that passes is the browser user's tab,
+  which is what the UI's lack of a login already implies (spec §8.3, "Stated
+  plainly"): anyone who can open the UI can accept a pairing, as they can approve an
+  outward action.
+- **What comes back is untrusted.** Tab results carry page content (READMEs, source,
+  Bambuddy data), so they are in the untrusted-data envelope, and the tab's own error
+  messages too (#258).
+- **Limitation.** A tab id is a random 128-bit value, but anything already on the UI's
+  origin could open a socket claiming one it learned; the tab id is not a secret
+  against script in the page, which can drive the page anyway.
+
 ## Event-log scrubbing (#377)
 
 Each session's panel events go into `ai_session_events` and are replayed to every

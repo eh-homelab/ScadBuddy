@@ -441,6 +441,24 @@ WebSocket and awaits the result, with a timeout. If no tab is paired it returns 
 Unavailable handlers return an error instead of disappearing, so the session's tool list
 stays stable. Details are in #254.
 
+As built (#254; tab side PR #339, agent side its follow-up; `docs/ai/browser-bridge.md`):
+every tool of the tab's catalogue (`frontend/src/agent/catalog.ts`) is a registry tool
+`browser_<name>` (`agent/src/tools/browser.ts`), plus `browser_status` and
+`browser_pair`. They are in `ALL_TOOLS`, so both projections serve them and the two lists
+stay equal: the harness gets them bound to the turn's session, `/mcp` callers reach the
+tab they paired. A tool is never below the tab's tier, and anything that moves or changes
+the tab is at least `write` (`navigate` and `open_model` are raised from the tab's
+`read`); `browser_open_print_dialog` is `outward`, so it is gated like any outward tool,
+and the dialog's confirmation stays user-only in the tab. The tab opens
+`GET /api/v1/ai/bridge` (`agent/src/routes/bridge.ts`, same gate as the chat socket) while
+the assistant is available, says `hello` with its tab id (128 random bits per page load,
+in memory only), route and live tools, and `state` on every change; the agent sends
+`call`, the tab answers `result` from `AgentBridge.call()`. A call waits 30 s, or a
+tool's own `timeout_ms` plus 10 s; with no tab it answers "no browser attached: …" with
+the reason. Tabs are held per process: a call reaches a tab whose socket is on the same
+replica, and otherwise says it is not connected (follow-up). `screenshot()` stays out,
+as PR #339 decided.
+
 ### 5.3 Headless browser (#349)
 
 The #254 bridge acts **in the user's own tab**, inside the Bambuddy iframe, live in
@@ -842,6 +860,27 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 driving someone's open tab is more invasive than calling tools, so `disabled` mode does
 not skip pairing.
 
+As built (#254; `agent/src/bridge/`, `docs/ai/browser-bridge.md`):
+
+- **Chat sessions.** The panel names its tab on every chat-socket connection
+  (`tab.bind`), and each session it starts or sends to (or attaches to while it has no
+  connected tab) is paired with that tab, in memory (`TabHub.pairSession`). The last tab
+  the user sent from wins.
+- **External agents.** The token is a short code in the style of the device
+  authorization grant ([RFC 8628 §3.3][rfc8628]): `browser_pair` stores a pending row in
+  `ai_browser_pairings` (migration `20260929T1330Z_browser_pairings.sql`) and returns
+  the code once; only its SHA-256 is kept. Every connected tab shows the request, naming
+  the MCP token that asked, and the user types the code into the tab the agent should
+  drive. Typing it, rather than only clicking Allow, ties the acceptance to the agent
+  the user is talking to. The code is single-use, lives 5 minutes, and allows 5 tries;
+  requests are capped per principal (3) and overall (20). The accepted pairing binds the
+  principal to that tab, one tab per principal (a partial unique index), until the user
+  disconnects it in the tab, 8 hours pass, or the tab reloads (a new tab id). The prompt
+  is user-only, so a paired agent's own `click`/`fill` cannot accept another.
+- **Replicas.** Pairing rows are shared through Postgres, and every replica re-reads the
+  pending requests for its tabs every 3 s, so the prompt appears wherever the tab is
+  connected; a call itself reaches only a tab on the caller's replica (§5.2).
+
 ### 8.6 Threat model (summary)
 
 | Threat | Mitigation |
@@ -1003,6 +1042,7 @@ Each of these is in §3.2 until verified.
 [rfc8707]: https://www.rfc-editor.org/rfc/rfc8707
 [rfc6750]: https://www.rfc-editor.org/rfc/rfc6750
 [rfc9068]: https://www.rfc-editor.org/rfc/rfc9068
+[rfc8628]: https://www.rfc-editor.org/rfc/rfc8628#section-3.3
 [mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
 [mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject

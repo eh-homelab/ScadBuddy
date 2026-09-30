@@ -2,6 +2,7 @@ import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { ApprovalError } from '../approvals/service.js'
+import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
@@ -31,6 +32,13 @@ import { type RemoteAddress, uiRequestProblem } from './guard.js'
 //                            as POST /api/v1/ai/approvals/:id/approve|deny
 //   session.interrupt      → SessionManager.interrupt
 //   session.handoff        → SessionManager.handoff to the browser user (take over)
+//   tab.bind               → the tab this panel is in (#254): from then on each
+//                            session it starts or sends to is paired with that
+//                            tab, and one it attaches to when it has no
+//                            connected tab yet, so the session's browser_*
+//                            tools drive it (bridge/hub.ts `pairSession`,
+//                            spec §8.5: "The browser user's own chat sessions
+//                            pair with their tab automatically")
 //
 // A refused operation comes back as an `error` event naming the session and
 // the SessionError/ApprovalError code; the socket stays open.
@@ -84,6 +92,8 @@ export type ChatConnectionOptions = {
   limits?: Partial<ChatLimits>
   /** SNAPSHOT_MS when omitted. */
   snapshotMs?: number
+  /** The browser bridge's tabs (#254); without them `tab.bind` pairs nothing. */
+  tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
 }
 
 export type ChatRouteDeps = {
@@ -97,6 +107,8 @@ export type ChatRouteDeps = {
   log?: (message: string) => void
   /** SNAPSHOT_MS when omitted. */
   snapshotMs?: number
+  /** The browser bridge's tabs (#254, bridge/hub.ts). */
+  tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -136,6 +148,9 @@ export class ChatConnection {
   private readonly buffered: () => number
   private readonly overflow: () => void
   private readonly limits: ChatLimits
+  private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  /** The tab this panel is in, once it said (`tab.bind`). */
+  private tabId: string | undefined
 
   constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
@@ -145,6 +160,7 @@ export class ChatConnection {
     this.snapshotMs = options.snapshotMs ?? SNAPSHOT_MS
     this.buffered = options.buffered ?? (() => 0)
     this.overflow = options.overflow ?? (() => {})
+    this.tabs = options.tabs
     this.limits = {
       highWater: SEND_HIGH_WATER,
       bufferMax: SEND_BUFFER_MAX,
@@ -299,14 +315,19 @@ export class ChatConnection {
               prompt: message.text,
               context,
             })
+            this.pairTab(session.id)
             // From the start: session.started is what the panel adopts its new chat by.
             this.follow(session.id, 0)
             return
           }
+          // Ownership first, every time (get() refuses another owner's session):
+          // pairing this tab must never outrun the check that send() repeats.
+          await this.sessions.get(message.sessionId, this.principal)
           if (!this.follows.has(message.sessionId)) {
-            await this.sessions.get(message.sessionId, this.principal)
             this.follow(message.sessionId, await this.sessions.events.lastSeq(message.sessionId))
           }
+          // Before the turn starts, so its first browser_* call already finds this tab.
+          this.pairTab(message.sessionId)
           await this.sessions.send(message.sessionId, this.principal, message.text, { context })
           return
         }
@@ -314,6 +335,7 @@ export class ChatConnection {
           // The panel clears the session's feed when it attaches (state.ts
           // `select`), so this is always a full replay, even when followed already.
           await this.sessions.get(message.sessionId, this.principal)
+          if (!this.tabs?.sessionHasTab(message.sessionId)) this.pairTab(message.sessionId)
           this.follow(message.sessionId, 0)
           return
         case 'approval.decision':
@@ -325,10 +347,18 @@ export class ChatConnection {
         case 'session.handoff':
           await this.sessions.handoff(message.sessionId, this.principal, this.principal)
           return
+        case 'tab.bind':
+          this.tabId = message.tabId
+          return
       }
     } catch (err) {
       this.emit(errorEvent(err, sessionId, this.log))
     }
+  }
+
+  /** Pairs `sessionId` with this panel's tab, once the panel has named it. */
+  private pairTab(sessionId: string): void {
+    if (this.tabId !== undefined) this.tabs?.pairSession(sessionId, this.tabId)
   }
 
   /**
@@ -401,6 +431,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
+            ...(deps.tabs ? { tabs: deps.tabs } : {}),
             buffered: () => raw?.bufferedAmount ?? 0,
             // 1013 Try Again Later: the client is not reading what it is sent.
             overflow: () => ws.close(1013, 'client too slow'),

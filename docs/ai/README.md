@@ -16,7 +16,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 | [operating.md](operating.md) | Operators | Deploying the agent sidecar, its environment variables, the key-encryption key and its rotation, the credential routes, `/healthz`, the origin allowlist and trusted proxies |
 | [security.md](security.md) | Reviewers, operators | The threat model as built: risk tiers, the permission seam, envelope encryption, DNS-rebinding defence, egress checks, stderr redaction, plugin vetting, event-log scrubbing, known limitations and open §3.2 items |
 | [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's LISTEN on the event bus (#264) |
-| [browser-bridge.md](browser-bridge.md) | Contributors | The tab-side agent tools, `data-agent-user-only`, and the WebMCP opt-in |
+| [browser-bridge.md](browser-bridge.md) | Contributors | The browser tools (#254): the tab side, `data-agent-user-only`, the WebMCP opt-in, the agent's `browser_*` tools, the tab's socket, and pairing an agent with a tab (spec §8.5) |
 | [agent-sessions.md](agent-sessions.md) | MCP client authors, operators | Agent-to-agent control (#300): the `sessions_*` tools, the session resources, `session.*` events, and approvals under a per-token grant |
 | [headless-browser.md](headless-browser.md) | Contributors, reviewers | The headless Chromium for sessions with no tab (#349): the pinned Playwright plugin, its tiers and guards, the backend's agent-actor gate, and what was measured |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |
@@ -67,6 +67,7 @@ for that; **no AI feature is user-visible in a production build yet**:
 | [#406](https://github.com/eh-homelab/ScadBuddy/pull/406) | The UI's realtime socket `/api/v1/ws`, served by the backend from the event bus (spec §4.2) | `backend/scadbuddy/api/realtime.py`, `frontend/src/lib/realtime.ts` |
 | [#336](https://github.com/eh-homelab/ScadBuddy/pull/336) | The ScadBuddy Claude plugin and the repository marketplace | `plugins/scadbuddy/`, `.claude-plugin/marketplace.json`, `.github/scripts/lint-plugin.sh` |
 | [#339](https://github.com/eh-homelab/ScadBuddy/pull/339) | In-browser agent bridge: semantic tools, snapshot, user-only confirmations, WebMCP opt-in | `frontend/src/agent/` |
+| #254 (this PR's follow-up to #339) | The agent's `browser_*` tools over the tab's socket, in both projections, and pairing by code in Postgres (spec §5.2, §8.5) | `agent/src/tools/browser.ts`, `agent/src/bridge/`, `agent/src/routes/bridge.ts`, `frontend/src/agent/link.ts`, `frontend/src/components/PairingPrompt.tsx` |
 | [#340](https://github.com/eh-homelab/ScadBuddy/pull/340) | Assistant panel: chat stream, action feed, approvals, sessions (against the scripted mock agent) | `frontend/src/components/assistant/`, `frontend/src/agent/chat/` |
 | [#363](https://github.com/eh-homelab/ScadBuddy/pull/363) | Spec only: the headless Playwright browser for the harness (spec §5.3, D11). Nothing is implemented | spec §5.3, §3.2 |
 

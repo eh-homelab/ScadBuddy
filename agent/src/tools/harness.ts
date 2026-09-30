@@ -28,7 +28,7 @@ import type { Tool, ToolServices } from './registry.js'
 
 export type HarnessTools = {
   tierOf: TierResolver
-  mcpServers: (session: { owner: Owner }, turn?: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
+  mcpServers: (session: { id?: string; owner: Owner }, turn?: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
 }
 
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
@@ -38,7 +38,12 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
     mcpServers: (session, turn) => {
       const principal = turnPrincipal(session.owner, turn)
       const allowed = tools.filter((t) => hasTier(principal, t.risk))
-      return { [SERVER_NAME]: createHarnessServer(allowed, services, principal) }
+      // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).
+      const bound =
+        services.browser && session.id !== undefined
+          ? { ...services, browser: services.browser.forSession(session.id) }
+          : services
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal) }
     },
   }
 }
