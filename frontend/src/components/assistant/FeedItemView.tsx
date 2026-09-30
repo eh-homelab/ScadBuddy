@@ -24,13 +24,16 @@ function memoryHeadline(item: Memory): string {
 
 /**
  * #818: an automatic recall or retain, as a quiet line. Basic mode shows only that
- * line; Advanced shows the bank, what was sent and what came back, open. Memories are
+ * line, and nothing for a retain that worked; Advanced shows the bank, what was sent and what came back, open. Memories are
  * untrusted text, so they render as plain text, never Markdown.
  */
 function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
   const failed = item.outcome !== 'ok'
   const memories = item.memories ?? []
   if (!advanced) {
+    // A retain follows every turn, so a successful one is noise in Basic mode; a
+    // failed one still says so.
+    if (item.action === 'retain' && !failed) return null
     return (
       <p className={`text-[11.5px] ${failed ? 'text-warn' : 'text-faint'}`} data-testid="agent-memory">
         {memoryHeadline(item)}

@@ -54,7 +54,7 @@ describe('the memory line', () => {
   ]
 
   it('in basic mode says only what memory did, and why when it failed', () => {
-    for (const [item, headline] of cases) {
+    for (const [item, headline] of cases.filter(([c]) => !(c.action === 'retain' && (c.outcome ?? 'ok') === 'ok'))) {
       const { unmount } = memory({ ...item, input: 'make a box', memories: ['1. The user prints in PETG.'] })
       const line = screen.getByTestId('agent-memory')
       expect(line).toHaveTextContent(headline)
@@ -64,6 +64,11 @@ describe('the memory line', () => {
       expect(screen.queryByTestId('agent-memory-output')).toBeNull()
       unmount()
     }
+  })
+
+  it('in basic mode says nothing for a retain that worked', () => {
+    memory({ action: 'retain', input: 'user: a box' })
+    expect(screen.queryByTestId('agent-memory')).toBeNull()
   })
 
   it('in advanced mode shows the bank, the query and the memories, open', () => {
