@@ -10,6 +10,7 @@ import {
   DEFAULT_MEMORY_HOOK_CONFIG,
   HindsightClient,
   HindsightConfigError,
+  type MemoryActivity,
   type MemoryHooksOptions,
   hindsightTarget,
 } from '../src/memory/hindsight.js'
@@ -367,6 +368,120 @@ describe('memory hooks against a fake Hindsight', () => {
     expect(item.content).toBe(
       'Tool mcp__scadbuddy__render_model called with: {"slug":"box"}\nResult: {"ok":true,"note":"rendered with [redacted]"}',
     )
+  })
+
+  describe('onActivity (#818)', () => {
+    function reporting(overrides: Partial<MemoryHooksOptions> = {}) {
+      const seen: MemoryActivity[] = []
+      const h = hooks({ onActivity: (a) => void seen.push(a), ...overrides })
+      return { h, seen }
+    }
+
+    it('reports a recall: the bank and how many memories were injected, never the query or a memory', async () => {
+      fake.memories = ['The user prints in PETG.', 'x2', 'x3', 'x4', 'x5', 'x6']
+      const { h, seen } = reporting()
+      await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt(`secret plans ${CREDENTIAL}`))
+      await h.settled()
+      expect(seen).toEqual([
+        { action: 'recall', bank: BANK, outcome: 'ok', count: 5, startedAt: expect.any(Date), finishedAt: expect.any(Date) },
+      ])
+      expect(JSON.stringify(seen)).not.toMatch(/PETG|secret plans/)
+      expect(seen[0]!.finishedAt.getTime()).toBeGreaterThanOrEqual(seen[0]!.startedAt.getTime())
+    })
+
+    it('reports a recall that found nothing as ok with count 0', async () => {
+      const { h, seen } = reporting()
+      await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+      await h.settled()
+      expect(seen).toMatchObject([{ action: 'recall', outcome: 'ok', count: 0 }])
+    })
+
+    it('reports a recall that timed out', async () => {
+      fake.respond = () => ({ hang: true })
+      const { h, seen } = reporting({ recallTimeoutMs: 100 })
+      expect(await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))).toEqual({})
+      await h.settled()
+      expect(seen).toMatchObject([{ action: 'recall', outcome: 'timeout', reason: 'timed out after 100 ms' }])
+      expect(seen[0]).not.toHaveProperty('count')
+    })
+
+    it('reports a recall that failed, with its reason redacted', async () => {
+      fake.respond = () => ({ status: 500, text: `boom: bad token Bearer ${TOKEN}` })
+      const { h, seen } = reporting()
+      await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+      await h.settled()
+      expect(seen).toMatchObject([{ action: 'recall', outcome: 'error', reason: expect.stringMatching(/HTTP 500/) }])
+      expect(seen[0]!.reason).not.toContain(TOKEN)
+    })
+
+    it('reports a retain with its document id, after the Stop hook has returned', async () => {
+      fake.respond = (r) => (r.path.endsWith('/memories') ? { delayMs: 300, json: {} } : undefined)
+      const { h, seen } = reporting()
+      await call(h.hooks.Stop?.[0]?.hooks[0], stop(await transcript(conversation)))
+      expect(seen).toEqual([])
+      await h.settled()
+      expect(seen).toEqual([
+        {
+          action: 'retain',
+          bank: BANK,
+          outcome: 'ok',
+          documentId: `conversation:${SESSION}`,
+          startedAt: expect.any(Date),
+          finishedAt: expect.any(Date),
+        },
+      ])
+      expect(JSON.stringify(seen)).not.toContain('40 mm')
+    })
+
+    it('reports a failed retain, and a PostToolUse retain names its tool and call', async () => {
+      fake.respond = (r) => (r.path.endsWith('/memories') ? { status: 503, text: 'overloaded' } : undefined)
+      const { h, seen } = reporting({ hookConfig: { retainOnTools: ['mcp__scadbuddy__render_model'] } })
+      await call(h.hooks.Stop?.[0]?.hooks[0], stop(await transcript(conversation)))
+      await call(h.hooks.PostToolUse?.[0]?.hooks[0], {
+        ...base,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'mcp__scadbuddy__render_model',
+        tool_input: { slug: 'box' },
+        tool_response: { ok: true, note: 'rendered it just fine' },
+        tool_use_id: 't9',
+      })
+      await h.settled()
+      expect(seen).toHaveLength(2)
+      expect(seen).toContainEqual(
+        expect.objectContaining({ action: 'retain', outcome: 'error', documentId: `conversation:${SESSION}`, reason: expect.stringMatching(/HTTP 503/) }),
+      )
+      expect(seen).toContainEqual(
+        expect.objectContaining({ action: 'retain', outcome: 'error', tool: 'mcp__scadbuddy__render_model', toolUseId: 't9' }),
+      )
+    })
+
+    it('reports a transcript it could not read as a failed retain', async () => {
+      const { h, seen } = reporting()
+      await call(h.hooks.Stop?.[0]?.hooks[0], stop(dir))
+      await h.settled()
+      expect(seen).toMatchObject([{ action: 'retain', outcome: 'error', reason: expect.stringMatching(/cannot read its transcript/) }])
+    })
+
+    it('a failing or slow report neither fails nor delays the turn; the failure is logged', async () => {
+      fake.memories = ['m1']
+      const h = hooks({
+        onActivity: (a) =>
+          a.action === 'recall'
+            ? new Promise<void>((_, reject) => setTimeout(() => reject(new Error(`db down ${CREDENTIAL}`)), 300))
+            : Promise.reject(new Error('db down')),
+      })
+      const started = Date.now()
+      const out = await call(h.hooks.UserPromptSubmit?.[0]?.hooks[0], prompt('Make a box'))
+      expect(Date.now() - started).toBeLessThan(250)
+      expect(out).toHaveProperty('hookSpecificOutput')
+      expect(await call(h.hooks.Stop?.[0]?.hooks[0], stop(await transcript(conversation)))).toEqual({})
+      await h.settled()
+      expect(fake.retains()).toHaveLength(1)
+      expect(logs).toHaveLength(2)
+      expect(logs.join('')).toMatch(/the recall on bank scadbuddy was not recorded: db down \[redacted\]/)
+      expect(logs.join('')).toMatch(/the retain on bank scadbuddy was not recorded: db down/)
+      expect(logs.join('')).not.toContain(CREDENTIAL)
+    })
   })
 
   it('has neither hook when both are turned off', () => {
