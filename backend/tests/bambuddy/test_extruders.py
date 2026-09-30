@@ -206,6 +206,26 @@ def test_a_high_flow_nozzle_of_the_size_still_beats_another_size() -> None:
 
 
 @pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (_nozzles(("HH01", "0.2"), ("HS01", "0.6")), ONLY_RIGHT),
+        (_nozzles(("HS01", "0.6"), ("HH01", "0.2")), ONLY_LEFT),
+    ],
+)
+def test_a_high_flow_only_side_is_stated_as_standard(
+    status: PrinterStatus, expected: list[str]
+) -> None:
+    """ScadBuddy slices a Standard process, and the deployed slicer (bambu-studio-api
+    bambuddy-1.2.5.6, 2026-09-30) groups ["Standard#0", "High Flow#1"] and Studio's
+    ["Standard#0|High Flow#0", "Standard#0|High Flow#1"] exactly as ["Standard#0",
+    "Standard#1"], rewriting both to it. So the side is stated as Standard, never as
+    High Flow: the label would change nothing but the cache key."""
+    stats = slicer_nozzle_stats(status, "0.2")
+    assert stats == expected
+    assert not any("High Flow" in entry for entry in stats)
+
+
+@pytest.mark.parametrize(
     ("status", "size"),
     [
         # Both sides have it (the owner's case (a)): either may print, so the slicer

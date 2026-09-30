@@ -152,8 +152,12 @@ SLICER_ORDER = (LEFT, RIGHT)
 
 
 def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
-    """Whether each nozzle of ``size`` ``extruder`` can print with is High Flow: the one
-    mounted, and on the rack side every spare in the rack."""
+    """One bool per ``size`` nozzle that ``extruder`` can print with, True where that
+    nozzle is High Flow and False where it is standard.
+
+    The nozzles counted are the one mounted on ``extruder`` and, on the rack side, each
+    spare in the rack. An empty list means the side has no nozzle of ``size``.
+    """
     found = []
     if fitted_size(status, extruder) == size:
         found.append(fitted_high_flow(status, extruder))
@@ -180,10 +184,20 @@ def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | 
 
     A standard nozzle of the size is preferred, since ScadBuddy slices standard flow
     (#484); a High Flow one of the size still beats a side without the size, and #723
-    warns of it. When both sides or neither side has the size, or the status cannot be
-    read, this is ``None`` and the file is left as it was: the slicer keeps its own
-    choice, and nothing is refused on the mounted nozzles (#768). A side the printer
-    reports no size for counts as not having it; only the other side is then offered.
+    warns of it. That side is still stated as ``Standard#1``, never ``High Flow#1``:
+    the file is sliced with a Standard process, and the deployed slicer
+    (bambu-studio-api bambuddy-1.2.5.6, 2026-09-30) treats the label as a count only.
+    ["Standard#0", "High Flow#1"], Studio's ["Standard#0|High Flow#0",
+    "Standard#0|High Flow#1"] and ["Standard#0", "Standard#1"] all slice, all put every
+    filament in one group on the right with ``volume_type="Standard"``, and all come
+    back rewritten to ["Standard#0", "Standard#1"]; the G-code differs only in its time
+    estimates. The mirrored left case is the same. The flow mismatch is left to the
+    ``hf-unsupported`` warning from ``high_flow_warnings`` (#723).
+
+    When both sides or neither side has the size, or the status cannot be read, this
+    is ``None`` and the file is left as it was: the slicer keeps its own choice, and
+    nothing is refused on the mounted nozzles (#768). A side the printer reports no
+    size for counts as not having it; only the other side is then offered.
     """
     if status is None or not two_nozzles(status):
         return None

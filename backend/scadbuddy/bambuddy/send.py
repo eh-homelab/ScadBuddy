@@ -153,7 +153,9 @@ async def target_for(
     plate; a printer Bambuddy reports without a model falls back the same way. The
     nozzle is stated only when the caller chose one: the print run does (spec
     2026-09-27 §4), the send bar does not. ``colours`` are the chosen spools' (#476),
-    and only the print run has any, as it alone has ``nozzle_stats`` (#834).
+    and only the print run has any. ``nozzle_stats`` (#834) are not the print run's
+    alone: Generate's ``generate_target`` computes them too, so the file Generate lays
+    out is the one the project's next print reuses.
     """
     chosen = tuple(colours) if colours is not None else None
     stats = tuple(nozzle_stats) if nozzle_stats is not None else None
