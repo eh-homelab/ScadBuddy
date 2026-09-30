@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import os
+import signal
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,7 +19,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.lsp import frame, read_message
+from scadbuddy.library import lsp
+from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
 from tests.conftest import MODEL_SLUG
 
@@ -29,6 +33,7 @@ from .conftest import set_fake_env
 FAKE_LSP = """#!/usr/bin/env python3
 import json
 import os
+import signal
 import pathlib
 import sys
 import time
@@ -71,6 +76,12 @@ while True:
         os.close(0)
         send({"jsonrpc": "2.0", "id": message["id"], "result": None})
         time.sleep(60)
+    if method == "hang":
+        # Alive, but never answers again: a wedged server.
+        time.sleep(60)
+    if method == "delay":
+        # Answers, but only after a while.
+        time.sleep(message["params"]["seconds"])
     if method == "emit":
         # Writes raw bytes as its whole output, then stops writing without exiting.
         stdout.write(message["params"]["raw"].encode())
@@ -108,6 +119,15 @@ def pid_file(tmp_path: Path) -> Path:
     path = tmp_path / "lsp.pid"
     set_fake_env(tmp_path, "FAKE_LSP_PID", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def unreaped(monkeypatch: pytest.MonkeyPatch) -> dict[Any, Any]:
+    """Each test counts only its own unreaped servers: the module-level registry would
+    otherwise carry one test's never-reaped server (and its waiting task) into the next."""
+    fresh: dict[Any, Any] = {}
+    monkeypatch.setattr(lsp, "_unreaped", fresh)
+    return fresh
 
 
 @pytest.fixture
@@ -229,6 +249,45 @@ def test_a_client_that_names_no_root_is_given_the_server_one(
     assert json.loads(result["seen"])["rootUri"] == paths.model_dir(model).as_uri() + "/"
 
 
+def test_a_client_that_names_no_root_is_shown_no_server_path(
+    client: TestClient, model: str
+) -> None:
+    """Without a client root the server's paths still go out rewritten (#194)."""
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        result = _initialize(session, root=None)["result"]
+
+    assert result["location"]["uri"] == DEFAULT_CLIENT_ROOT + "helper.scad"
+    assert result["elsewhere"] == "file:///usr/share/openscad/libraries/MCAD/units.scad"
+
+
+def test_messages_before_initialize_are_rewritten(client: TestClient, model: str) -> None:
+    """A server that talks before `initialize` names no container path either (#194);
+    the client's own root, once named, takes over."""
+
+    def definition(request_id: int, root: str) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "textDocument/definition",
+            "params": {"textDocument": {"uri": root + "model.scad"}},
+        }
+
+    assert CLIENT_ROOT != DEFAULT_CLIENT_ROOT
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        session.send_json(definition(2, DEFAULT_CLIENT_ROOT))
+        early = session.receive_json()["result"]
+        _initialize(session)
+        session.send_json(definition(3, CLIENT_ROOT))
+        late = session.receive_json()["result"]
+
+    real = f"/data/models/{model}/model.scad"
+    assert early["location"]["uri"] == DEFAULT_CLIENT_ROOT + "helper.scad"
+    assert json.loads(early["seen"])["textDocument"]["uri"].endswith(real)
+    # After `initialize`, the client's own root is the one rewritten, both ways.
+    assert json.loads(late["seen"])["textDocument"]["uri"].endswith(real)
+    assert late["location"]["uri"] == CLIENT_ROOT + "helper.scad"
+
+
 def test_closing_the_editor_stops_the_server(
     client: TestClient, model: str, pid_file: Path
 ) -> None:
@@ -282,8 +341,11 @@ def test_a_server_that_crashes_is_logged(
         "Content-Length: -1\r\n\r\n{}",
         "Content-Length: 8\r\n\r\nnot json",
         "Content-Length: 100\r\n\r\n{}",
+        "Content-Length: 6\r\n\r\n[1, 2]",
+        'Content-Length: 6\r\n\r\n"text"',
+        "Content-Length: 1\r\n\r\n5",
     ],
-    ids=["bad-length", "negative-length", "not-json", "truncated"],
+    ids=["bad-length", "negative-length", "not-json", "truncated", "array", "string", "number"],
 )
 def test_an_unreadable_server_message_ends_the_session(
     client: TestClient, model: str, pid_file: Path, caplog: pytest.LogCaptureFixture, raw: str
@@ -349,6 +411,199 @@ def test_sessions_past_the_cap_are_refused(settings: Settings, model: str) -> No
         with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect(route):
             pass
         assert refused.value.code == 1013
+
+
+def test_a_wedged_server_is_killed_and_its_slot_freed(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that stops answering would hold its permit for as long as the editor
+    stays open (#201); an unanswered request ends the session instead."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client:
+        # The app's start reconfigures logging, dropping the handler caplog put there.
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(route) as session:
+            _initialize(session)
+            pid = int(pid_file.read_text())
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                session.receive_json()
+
+        assert closed.value.code == 1011
+        assert _wait_until(lambda: _gone(pid))
+        assert "left a request unanswered" in caplog.text
+        with client.websocket_connect(route) as again:
+            assert "result" in _initialize(again)
+
+
+def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    unreaped: dict[Any, Any],
+) -> None:
+    """A process stuck in the kernel outlives SIGKILL; waiting on it forever would
+    hold the permit all the same (#201), so cleanup gives up after KILL_WAIT."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    spawn = asyncio.create_subprocess_exec
+
+    async def unreapable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+
+        async def never() -> int:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process, "wait", never)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unreapable)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    with TestClient(app) as client:
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(route) as session:
+            _initialize(session)
+            pid = int(pid_file.read_text())
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect) as closed:
+                session.receive_json()
+
+        assert closed.value.code == 1011
+        assert "was not reaped within 0.2s" in caplog.text
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert len(unreaped) == 1
+        with client.websocket_connect(route) as again:
+            assert "result" in _initialize(again)
+
+    assert _wait_until(lambda: _gone(pid))
+
+
+def test_unreaped_servers_are_counted(
+    settings: Settings,
+    model: str,
+    pid_file: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that outlives its kill no longer holds a permit, so the log keeps
+    count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    spawn = asyncio.create_subprocess_exec
+
+    async def unkillable(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+
+        async def never() -> int:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(process, "kill", lambda: None)
+        monkeypatch.setattr(process, "wait", never)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unkillable)
+    app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
+    route = f"/api/v1/models/{model}/lsp"
+    pids: list[int] = []
+    try:
+        with TestClient(app) as client:
+            logging.getLogger().addHandler(caplog.handler)
+            for _ in range(2):
+                with client.websocket_connect(route) as session:
+                    _initialize(session)
+                    pids.append(int(pid_file.read_text()))
+                    session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+                    with pytest.raises(WebSocketDisconnect) as closed:
+                        session.receive_json()
+                assert closed.value.code == 1011
+
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert "2 killed server(s) not yet reaped" in caplog.text
+    finally:
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_late_reaped_server_is_no_longer_counted(
+    settings: Settings,
+    model: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    unreaped: dict[Any, Any],
+) -> None:
+    """A server that outlives KILL_WAIT but is reaped later drops out of the count on
+    its own, without waiting for another server to be left unreaped."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
+    spawn = asyncio.create_subprocess_exec
+
+    async def slow_to_reap(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await spawn(*args, **kwargs)
+        wait = process.wait
+
+        async def late() -> int:
+            await asyncio.sleep(0.5)
+            return await wait()
+
+        monkeypatch.setattr(process, "wait", late)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_to_reap)
+    app: FastAPI = create_app(settings)
+    with TestClient(app) as client:
+        logging.getLogger().addHandler(caplog.handler)
+        with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+            _initialize(session)
+            session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+            with pytest.raises(WebSocketDisconnect):
+                session.receive_json()
+
+        assert "1 killed server(s) not yet reaped" in caplog.text
+        assert _wait_until(lambda: not unreaped)
+
+
+def test_a_reused_request_id_is_still_watched(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two requests in flight under one id: the first reply leaves the second watched."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        session.send_json(
+            {"jsonrpc": "2.0", "id": 2, "method": "delay", "params": {"seconds": 0.3}}
+        )
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "hang"})
+        assert session.receive_json()["id"] == 2
+        with pytest.raises(WebSocketDisconnect) as closed:
+            session.receive_json()
+    assert closed.value.code == 1011
+
+
+def test_an_idle_session_is_not_ended(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an unanswered request counts: an editor left open with nothing to ask
+    keeps its server. The timeout stays above the fake server's start, which
+    ``initialize`` waits on, so only the idle stretch is judged."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        session.send_json({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        time.sleep(2.5)
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "shutdown"})
+        assert session.receive_json()["id"] == 2
 
 
 async def test_a_message_is_read_by_its_declared_length() -> None:

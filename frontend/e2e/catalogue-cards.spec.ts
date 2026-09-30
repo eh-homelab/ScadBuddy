@@ -26,7 +26,7 @@ test.describe('catalogue card mode (#277)', () => {
     await card.getByRole('button', { name: 'Next slide' }).click()
 
     await expect(position).toHaveText('2 of 4')
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
@@ -50,29 +50,47 @@ test.describe('catalogue card mode (#277)', () => {
     await page.keyboard.press('Enter')
     await expect(card.getByTestId('carousel-position')).toHaveText('3 of 4')
 
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
-  test('a click on the image opens the lightbox at it, and Esc closes it', async ({ page }) => {
+  test('a click on the image opens the template', async ({ page }) => {
     const card = coaster(page)
     await card.getByRole('button', { name: 'Next slide' }).click()
-    await card.getByRole('button', { name: 'Open The raised rim' }).click()
+    await card.getByRole('img', { name: 'The raised rim' }).click()
+    await expect(page).toHaveURL(/\/m\/creme-coaster$/)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+  })
+
+  test('the expand button opens the lightbox at the slide, and Esc closes it', async ({
+    page,
+  }) => {
+    const card = coaster(page)
+    await card.getByRole('button', { name: 'Next slide' }).click()
+    await card.getByRole('button', { name: 'View The raised rim full size' }).click()
 
     const lightbox = page.getByRole('dialog')
     await expect(lightbox).toBeVisible()
     await expect(lightbox).toContainText('The raised rim')
-    await expect(page).toHaveURL(/\/$/)
+    await expect(page).toHaveURL(/\/\?view=cards$/)
 
     await page.keyboard.press('Escape')
     await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
-  test('Enter on the focused media opens the lightbox', async ({ page }) => {
+  test('Enter on the focused expand button opens the lightbox', async ({ page }) => {
     const card = coaster(page)
-    await card.getByRole('button', { name: 'Open Printed in blue and orange' }).focus()
+    await card.getByRole('button', { name: 'View Printed in blue and orange full size' }).focus()
     await page.keyboard.press('Enter')
     await expect(page.getByRole('dialog')).toContainText('Printed in blue and orange')
+  })
+
+  test('the lightbox opens the template without being closed first', async ({ page }) => {
+    const card = coaster(page)
+    await card.getByRole('button', { name: 'View Printed in blue and orange full size' }).click()
+    await page.getByRole('dialog').getByRole('link', { name: 'Open template' }).click()
+    await expect(page).toHaveURL(/\/m\/creme-coaster$/)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
   })
 
   test('a click on the title opens the template', async ({ page }) => {

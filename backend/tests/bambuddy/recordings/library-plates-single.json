@@ -1,0 +1,23 @@
+{
+    "file_id": 89,
+    "filename": "bag-clip-3155628dc2bb43d4940fad6dba164efc.3mf",
+    "plates": [
+        {
+            "index": 1,
+            "name": "bag-clip",
+            "objects": [
+                "bag-clip"
+            ],
+            "object_count": 1,
+            "has_thumbnail": true,
+            "thumbnail_url": "/api/v1/library/files/89/plate-thumbnail/1",
+            "print_time_seconds": null,
+            "filament_used_grams": null,
+            "filaments": []
+        }
+    ],
+    "is_multi_plate": false,
+    "embedded_printer": "ScadBuddy",
+    "embedded_process": "ScadBuddy",
+    "design_overrides": []
+}

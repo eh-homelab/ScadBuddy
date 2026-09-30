@@ -1,7 +1,7 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
 
 // Settings → MCP access tokens (#251), against the msw stand-in for the agent
-// service's /api/v1/ai/mcp-tokens (src/mocks/mcpTokens.ts).
+// service's /api/v1/ai/mcp-tokens (src/mocks/features/mcpTokens.ts).
 
 type Scope = Page | FrameLocator
 

@@ -16,7 +16,7 @@ test.describe('catalogue filters (#276)', () => {
       .filter({ has: page.getByRole('heading', { name: 'Crème Coaster' }) })
     await coaster.getByRole('button', { name: 'Filter by Tea & Coffee' }).click()
 
-    await expect(page).toHaveURL(/\/\?tag=Tea\+%26\+Coffee$/)
+    await expect(page).toHaveURL(/\/\?tag=Tea\+%26\+Coffee&view=cards$/)
     await expect(count).toHaveText('1 of 6')
     await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Crème Coaster'])
 
@@ -42,7 +42,7 @@ test.describe('catalogue filters (#276)', () => {
     await expect(search).toBeFocused()
     await search.pressSequentially('creme')
 
-    await expect(page).toHaveURL(/\/\?q=creme$/)
+    await expect(page).toHaveURL(/\/\?q=creme&view=cards$/)
     await expect(page.getByTestId('result-count')).toHaveText('1 of 6')
   })
 })

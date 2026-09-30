@@ -13,7 +13,7 @@ export function editPath(outputId: string): string {
  * A model's page in the app. The id is one path segment, and a built-in's
  * (`builtin:<slug>`) carries a colon, so it is encoded like any other segment.
  */
-export function modelPath(slug: string, page?: 'source' | 'versions' | 'history'): string {
+export function modelPath(slug: string, page?: 'source' | 'versions' | 'history' | 'prints'): string {
   const path = `/m/${encodeURIComponent(slug)}`
   return page ? `${path}/${page}` : path
 }

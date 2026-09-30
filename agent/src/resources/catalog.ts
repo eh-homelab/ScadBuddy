@@ -22,10 +22,14 @@ import type { Tool } from '../tools/registry.js'
 // matched, so `builtin:gridfinity-bin` is `builtin%3Agridfinity-bin` in a URI.
 // `canonical()` is the one spelling subscriptions and notifications use.
 //
+// Sessions (#300) are backed by the `sessions_*` read tools, which answer
+// only for sessions the caller may see (tools/sessions.ts).
+//
 // Not here yet (each needs a backend route or event source that is not on
 // main): the Bambuddy printers, queue, inventory, history and stats resources
-// (the print watcher, #268), `scadbuddy://browser/{tab}/snapshot` (#254), and
-// `scadbuddy://docs/authoring` (#252).
+// (the print watcher, #268) and `scadbuddy://browser/{tab}/snapshot` (#254).
+// `scadbuddy://docs/authoring` (#252) needs no backend route: its tool reads
+// the authoring skill the agent ships with (tools/guide.ts).
 
 export type ResourceDef = {
   /** RFC 6570 template, or a fixed URI when it has no `{var}`. */
@@ -44,6 +48,12 @@ export type ResourceDef = {
    * the environment").
    */
   tier?: Tier
+  /**
+   * Subscribing reads the resource first and refuses one the caller cannot
+   * read: for resources whose tool also checks WHO may see them, beyond the
+   * tier (a session, #300), so nobody can follow what it may not see.
+   */
+  readToSubscribe?: boolean
 }
 
 const JSON_TYPE = 'application/json'
@@ -247,6 +257,37 @@ export const RESOURCES: readonly ResourceDef[] = [
     mimeType: JSON_TYPE,
     tool: 'get_settings',
     tier: 'write',
+  },
+  // ── agent sessions (#300; spec §6) ──────────────────────────────────────
+  {
+    template: 'scadbuddy://sessions',
+    name: 'sessions',
+    title: 'Agent sessions',
+    description: 'The agent sessions this caller may see, newest first: title, origin, owner and status.',
+    mimeType: JSON_TYPE,
+    tool: 'sessions_list',
+  },
+  {
+    template: 'scadbuddy://sessions/{session_id}',
+    name: 'session',
+    title: 'Agent session',
+    description:
+      "One agent session: status, owner, pending approvals and its transcript's first page. Subscribe for live " +
+      'updates; page the rest with sessions_get.',
+    mimeType: JSON_TYPE,
+    tool: 'sessions_get',
+    readToSubscribe: true,
+  },
+  // ── docs (#252) ─────────────────────────────────────────────────────────
+  {
+    template: 'scadbuddy://docs/authoring',
+    name: 'docs-authoring',
+    title: 'Authoring guide',
+    description:
+      "ScadBuddy's template conventions: customizer comments, colours per extruder, installed fonts, " +
+      'open preview parts, verify.sh, and the edit loop. Read it before writing a template.',
+    mimeType: 'text/markdown',
+    tool: 'get_authoring_guide',
   },
 ]
 

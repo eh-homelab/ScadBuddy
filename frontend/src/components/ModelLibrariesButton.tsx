@@ -2,7 +2,13 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ApiError, api } from '../api/client'
 import { useLatest } from '../lib/useLatest'
 import { useSubscription, type RealtimeSignal } from '../lib/realtime'
-import type { CatalogueLibrary, LibraryPinRequest, ModelLibrary, ModelSummary } from '../api/types'
+import type {
+  CatalogueLibrary,
+  InvalidLibraryEntry,
+  LibraryPinRequest,
+  ModelLibrary,
+  ModelSummary,
+} from '../api/types'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -29,6 +35,9 @@ function message(caught: unknown): string {
  */
 export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   const [pins, setPins] = useState<ModelLibrary[]>([])
+  // #217 — entries of model.json's `libraries` that are not pins: they stop the model
+  // rendering, so they are listed here to be removed (or pinned again from the catalogue).
+  const [invalid, setInvalid] = useState<InvalidLibraryEntry[]>([])
   const [open, setOpen] = useState(false)
   // null until this dialog has read the model: its pins decide what the catalogue offers.
   const [catalogue, setCatalogue] = useState<CatalogueLibrary[] | null>(null)
@@ -44,13 +53,18 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // or by a pin, would otherwise land late and put back what it replaced.
   const generation = useRef(0)
 
+  function showModel(model: ModelSummary) {
+    setPins(model.libraries ?? [])
+    setInvalid(model.invalid_libraries ?? [])
+  }
+
   useEffect(() => {
     let live = true
     const started = ++generation.current
     api
       .getModel(slug)
       .then((model) => {
-        if (live && generation.current === started) setPins(model.libraries ?? [])
+        if (live && generation.current === started) showModel(model)
       })
       .catch(() => {})
     return () => {
@@ -68,7 +82,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
       if (generation.current !== started) return
-      setPins(model.libraries ?? [])
+      showModel(model)
       setCatalogue(libraries)
     } catch (caught) {
       if (generation.current === started) setError(message(caught))
@@ -87,7 +101,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
       if (generation.current !== started) return
-      setPins(model.libraries ?? [])
+      showModel(model)
       setCatalogue(libraries)
     } catch (caught) {
       // Otherwise the dialog keeps what it shows; the next change or reopen reads again.
@@ -117,9 +131,22 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     try {
       const model = await action()
       generation.current += 1
-      setPins(model.libraries ?? [])
+      showModel(model)
       if (openRef.current) dirty.current = true
       else onSaved?.()
+    } catch (caught) {
+      // A 409: the model changed under the dialog, or cannot be read as it is. Read it
+      // again so the dialog shows what is there now; the row says why.
+      if (caught instanceof ApiError && caught.status === 409) {
+        const started = ++generation.current
+        void api
+          .getModel(slug)
+          .then((model) => {
+            if (generation.current === started) showModel(model)
+          })
+          .catch(() => {})
+      }
+      throw caught
     } finally {
       setRunning((n) => n - 1)
     }
@@ -136,7 +163,11 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
         className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
       >
         Libraries
-        {pins.length > 0 && <span className="sb-num ml-1.5 text-faint">{pins.length}</span>}
+        {pins.length + invalid.length > 0 && (
+          <span className={`sb-num ml-1.5 ${invalid.length > 0 ? 'text-warn' : 'text-faint'}`}>
+            {pins.length + invalid.length}
+          </span>
+        )}
       </button>
       <Dialog
         open={open}
@@ -161,7 +192,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
           <div className="space-y-5">
             <section>
               <h3 className="text-[13px] font-medium">Pinned</h3>
-              {pins.length === 0 ? (
+              {pins.length + invalid.length === 0 ? (
                 <p className="mt-1 text-[12px] text-muted">
                   None yet. Add one from the catalogue or by URL.
                 </p>
@@ -170,6 +201,17 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
                   aria-label="Pinned libraries"
                   className="mt-2 divide-y divide-line rounded-[6px] border border-line"
                 >
+                  {invalid.map((entry, index) => (
+                    <InvalidRow
+                      // Not the position alone: after a removal the next entry takes it,
+                      // and would inherit this row's error or busy state.
+                      key={`${entry.index}\u0000${entry.name}\u0000${entry.problem}`}
+                      slug={slug}
+                      entry={entry}
+                      position={index + 1}
+                      apply={apply}
+                    />
+                  ))}
                   {pins.map((pin) => (
                     <PinnedRow key={pin.name} slug={slug} pin={pin} apply={apply} />
                   ))}
@@ -284,6 +326,60 @@ function PinnedRow({ slug, pin, apply }: { slug: string; pin: ModelLibrary; appl
             Remove
           </Button>
         </div>
+      </div>
+      <RowError error={error} />
+    </li>
+  )
+}
+
+function InvalidRow({
+  slug,
+  entry,
+  position,
+  apply,
+}: {
+  slug: string
+  entry: InvalidLibraryEntry
+  /** 1-based among the invalid entries: names repeat, or are missing, so the row's
+   * accessible name carries it to stay unique. */
+  position: number
+  apply: Apply
+}) {
+  const { busy, error, run } = useAction(apply)
+  const { name } = entry
+
+  return (
+    <li aria-label={`Invalid entry ${position}: ${name ?? 'unnamed'}`} className="px-3 py-2.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
+          <span className="text-[13px] font-medium">{name ?? 'Unnamed entry'}</span>
+          <span className="ml-2 text-[11px] text-warn">Invalid</span>
+          <p className="mt-0.5 text-[12px] text-muted">{entry.problem}</p>
+          {name === null && (
+            <p className="mt-0.5 text-[12px] text-muted">
+              Remove it from this model's model.json to render the model.
+            </p>
+          )}
+        </div>
+        {name !== null && (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              // By its position as well: a pin or another entry may share its name.
+              onClick={() =>
+                void run('remove', () =>
+                  api.unpinModelLibrary(slug, name, entry.index ?? undefined),
+                )
+              }
+              disabled={busy !== null}
+              aria-busy={busy === 'remove'}
+            >
+              {busy === 'remove' && <Spinner />}
+              Remove
+            </Button>
+          </div>
+        )}
       </div>
       <RowError error={error} />
     </li>

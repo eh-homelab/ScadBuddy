@@ -17,7 +17,7 @@ The table is ``output_bambuddy_prints`` (migration ``*_output_bambuddy_prints.sq
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Literal
 
@@ -39,6 +39,25 @@ class PrintLink(BaseModel):
     printer_id: int | None = None
     #: When ScadBuddy first saw the link; set by the database.
     first_seen: datetime | None = None
+
+
+class LinkedPrint(PrintLink):
+    """A link with the output it belongs to: one print of the prints API (#308)."""
+
+    output_id: str
+
+
+#: Which of an archive's links owns it: the first seen, the lower output id on a tie.
+#: Every lookup of an owner orders by this, so the proxy's gate, the list and the
+#: detail can never name different outputs (#609 review).
+_OWNER_ORDER = "first_seen, output_id"
+
+#: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
+_LINKED = (
+    "SELECT DISTINCT ON (archive_id)"
+    " output_id, archive_id, matched_by, queue_item_id, plate_id, printer_id, first_seen"
+    " FROM output_bambuddy_prints"
+)
 
 
 class PrintLinkStore:
@@ -73,6 +92,22 @@ class PrintLinkStore:
     async def output_for(self, archive_id: int) -> str | None:
         """The output that printed ``archive_id``, or ``None`` if none of ScadBuddy's did."""
         return await asyncio.to_thread(self._output_for, archive_id)
+
+    async def linked(self, archive_id: int) -> LinkedPrint | None:
+        """``archive_id``'s link, with the output that printed it."""
+        return await asyncio.to_thread(self._linked, archive_id)
+
+    async def page(
+        self,
+        *,
+        limit: int,
+        before: int | None = None,
+        output_ids: Sequence[str] | None = None,
+    ) -> list[LinkedPrint]:
+        """Up to ``limit`` linked archives below ``before``, newest archive first, each
+        once; only those of ``output_ids`` when it is given. Bambuddy numbers archives
+        as it creates them, so a higher id is a later print."""
+        return await asyncio.to_thread(self._page, limit, before, output_ids)
 
     async def linked_queue_items(self, output_id: str) -> set[int]:
         """The queue items whose archive is already recorded, so a poll can skip them."""
@@ -123,10 +158,39 @@ class PrintLinkStore:
         with self._require().connection() as conn:
             row = conn.execute(
                 "SELECT output_id FROM output_bambuddy_prints WHERE archive_id = %s"
-                " ORDER BY first_seen LIMIT 1",
+                f" ORDER BY {_OWNER_ORDER} LIMIT 1",
                 (archive_id,),
             ).fetchone()
         return str(row["output_id"]) if row is not None else None
+
+    def _linked(self, archive_id: int) -> LinkedPrint | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
+                (archive_id,),
+            ).fetchone()
+        return LinkedPrint.model_validate(dict(row)) if row is not None else None
+
+    def _page(
+        self, limit: int, before: int | None, output_ids: Sequence[str] | None
+    ) -> list[LinkedPrint]:
+        with self._require().connection() as conn:
+            rows = conn.execute(
+                # Each archive's owner is chosen over all its rows first, as `_linked`
+                # does, and only then kept or dropped by output: filtering first would
+                # hand an archive to whichever filtered output saw it (#609 review).
+                f"SELECT * FROM ({_LINKED}"
+                " WHERE (%(before)s::bigint IS NULL OR archive_id < %(before)s)"
+                f" ORDER BY archive_id DESC, {_OWNER_ORDER}) AS owners"
+                " WHERE (%(outputs)s::text[] IS NULL OR output_id = ANY(%(outputs)s))"
+                " ORDER BY archive_id DESC LIMIT %(limit)s",
+                {
+                    "before": before,
+                    "outputs": list(output_ids) if output_ids is not None else None,
+                    "limit": limit,
+                },
+            ).fetchall()
+        return [LinkedPrint.model_validate(dict(row)) for row in rows]
 
     def _delete_outputs(self, ids: list[str]) -> None:
         with self._require().connection() as conn:

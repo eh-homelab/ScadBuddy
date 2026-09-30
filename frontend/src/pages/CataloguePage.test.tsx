@@ -1,11 +1,13 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useLocation } from 'react-router'
+import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { BUILTIN_SLUG, GALLERY_SLUG, models } from '../mocks/fixtures'
+import { toSlides } from '../components/media/slides'
+import { BUILTIN_SLUG, GALLERY_SLUG, media, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
+import { intersect } from '../test/intersection'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
@@ -15,11 +17,41 @@ function Search() {
   return <p data-testid="search">{search}</p>
 }
 
+/** The browser's Back and Forward buttons. */
+function History() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <button type="button" onClick={() => void navigate(-1)}>
+        Back
+      </button>
+      <button type="button" onClick={() => void navigate(1)}>
+        Forward
+      </button>
+    </>
+  )
+}
+
+/** In-app navigation to the catalogue while it stays mounted: the Models tab, the agent. */
+function AppNav() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <Link to="/">Models</Link>
+      <button type="button" onClick={() => void navigate('/?tag=keychain')}>
+        Agent navigate
+      </button>
+    </>
+  )
+}
+
 function renderCatalogue(route = '/') {
   return renderPage(
     <>
       <CataloguePage />
       <Search />
+      <History />
+      <AppNav />
     </>,
     { route },
   )
@@ -452,10 +484,13 @@ describe('CataloguePage cards (#277)', () => {
     )
   }
 
+  /** The coaster's card, scrolled near enough to have mounted its carousel. */
   async function coasterCard() {
-    return (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+    const card = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
       'li',
     ) as HTMLElement
+    intersect(card)
+    return card
   }
 
   it('browses a card inline: next changes the slide, stays here and opens nothing', async () => {
@@ -470,19 +505,31 @@ describe('CataloguePage cards (#277)', () => {
     expect(within(carousel).getByTestId('carousel-position')).toHaveTextContent('3 of 4')
     // An uncaptioned slide is named after the template.
     expect(
-      within(card).getByRole('button', { name: 'Open Crème Coaster, image 3 of 4' }),
-    ).toHaveAttribute('tabindex', '0')
+      within(card).getByRole('button', { name: 'View Crème Coaster, image 3 of 4 full size' }),
+    ).toBeInTheDocument()
     expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
-    expect(screen.getByTestId('search')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
-  it('opens the lightbox at the media clicked', async () => {
+  it('opens the template from a click on the media', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    await user.click(
+      within(card).getByRole('img', { name: 'Printed in blue and orange' }),
+    )
+
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('opens the lightbox at the slide shown from its expand button', async () => {
     const { user } = renderWithRoutes()
     const card = await coasterCard()
 
     await user.click(within(card).getByRole('button', { name: 'Next slide' }))
-    await user.click(within(card).getByRole('button', { name: 'Open The raised rim' }))
+    await user.click(within(card).getByRole('button', { name: 'View The raised rim full size' }))
 
     const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
     await waitFor(() =>
@@ -493,6 +540,22 @@ describe('CataloguePage cards (#277)', () => {
     )
     expect(dialog).toHaveTextContent('The raised rim')
     expect(screen.queryByText('Customizer')).not.toBeInTheDocument()
+  })
+
+  it('opens the template from the lightbox without closing it first', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+
+    await user.click(
+      within(card).getByRole('button', { name: 'View Printed in blue and orange full size' }),
+    )
+    const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const open = within(dialog).getByRole('link', { name: 'Open template' })
+    expect(open).toHaveAttribute('href', `/m/${GALLERY_SLUG}`)
+
+    await user.click(open)
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
   it('links the title, with the media outside the link', async () => {
@@ -527,7 +590,7 @@ describe('CataloguePage cards (#277)', () => {
     // not one stop per slide.
     expect(stops).toEqual([
       'Crème Coaster',
-      'Open Printed in blue and orange',
+      'View Printed in blue and orange full size',
       'Next slide',
       'Go to slide 1',
       'Crème Coaster',
@@ -548,7 +611,9 @@ describe('CataloguePage cards (#277)', () => {
       within(bin).getByRole('img', { name: 'Gridfinity Bin — not generated yet' }),
     ).toBeInTheDocument()
     expect(within(bin).queryByRole('region')).not.toBeInTheDocument()
-    expect(within(bin).queryByRole('button', { name: /slide|^Open / })).not.toBeInTheDocument()
+    expect(
+      within(bin).queryByRole('button', { name: /slide|^View .* full size$/ }),
+    ).not.toBeInTheDocument()
 
     // The built-in has no media, so its default-render preview stands in.
     const builtin = screen.getByRole('heading', { name: 'Keychain Template' }).closest(
@@ -560,14 +625,14 @@ describe('CataloguePage cards (#277)', () => {
     )
   })
 
-  it('shows a legacy thumbnail as the one slide, which opens the lightbox', async () => {
+  it('shows a legacy thumbnail as the one slide, which expands into the lightbox', async () => {
     const { user } = renderWithRoutes()
     const keychain = (await screen.findByRole('heading', { name: 'Name Keychain' })).closest(
       'li',
     ) as HTMLElement
     expect(within(keychain).queryByRole('button', { name: 'Next slide' })).not.toBeInTheDocument()
 
-    await user.click(within(keychain).getByRole('button', { name: 'Open Name Keychain' }))
+    await user.click(within(keychain).getByRole('button', { name: 'View Name Keychain full size' }))
     expect(await screen.findByRole('dialog', {}, { timeout: 3000 })).toBeInTheDocument()
   })
 })
@@ -591,5 +656,365 @@ describe('CataloguePage, live (#269)', () => {
     await waitFor(() =>
       expect(screen.queryByRole('heading', { name: 'Made By An Agent' })).not.toBeInTheDocument(),
     )
+  })
+})
+
+describe('CataloguePage list mode (#278)', () => {
+  function rows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>('[data-model-row]')]
+  }
+
+  function rowOf(name: string): HTMLElement {
+    return screen.getByRole('heading', { name }).closest('[data-model-row]') as HTMLElement
+  }
+
+  it('shows cards for a URL with no view, and writes the view into it', async () => {
+    const { user } = renderCatalogue('/?tag=keychain')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    const view = screen.getByRole('group', { name: 'View' })
+    expect(within(view).getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(rows()).toHaveLength(0)
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
+
+    // Replaced, not pushed: List then Back returns to the normalized entry.
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=list$/)
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/)
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('treats an unknown view as cards and rewrites it', async () => {
+    renderCatalogue('/?view=grid')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('switches between List and Cards, naming each in the URL', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
+    expect(rows()).toHaveLength(6)
+
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('shows what the URL says on in-app navigation to the catalogue', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(6)
+
+    // The agent's `navigate` and the Models tab name no view, so they show Cards.
+    await user.click(screen.getByRole('button', { name: 'Agent navigate' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('search')).toHaveTextContent(/^\?tag=keychain&view=cards$/),
+    )
+    expect(rows()).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    await user.click(screen.getByRole('link', { name: 'Models' }))
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/))
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('keeps List on Back from a model', async () => {
+    // The real route topology: the catalogue and the customizer are sibling routes, so
+    // leaving for a model unmounts the catalogue and Back mounts a fresh one.
+    const user = renderPage(
+      <Routes>
+        <Route
+          path="/"
+          element={
+            <>
+              <CataloguePage />
+              <Search />
+              <History />
+            </>
+          }
+        />
+        <Route
+          path="/m/:slug"
+          element={
+            <>
+              <p>Customizer</p>
+              <History />
+            </>
+          }
+        />
+      </Routes>,
+      { route: '/?view=list' },
+    ).user
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(6)
+
+    await user.click(screen.getByRole('link', { name: 'Crème Coaster' }))
+    await screen.findByText('Customizer')
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
+    expect(rows()).toHaveLength(6)
+  })
+
+  it('undoes and redoes a view toggle with back and forward', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(6)
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=cards$/)
+    expect(rows()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByRole('button', { name: 'Forward' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^\?view=list$/)
+    expect(rows()).toHaveLength(6)
+  })
+
+  it('keeps the filters and sort when the view changes', async () => {
+    const { user } = renderCatalogue('/?tag=keychain&sort=name')
+    await screen.findByRole('heading', { name: 'Keychain Template' })
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&sort=name&view=list')
+    expect(names()).toEqual(['Keychain Template', 'Name Keychain'])
+  })
+
+  it('gives each row its name link, built-in badge, description, tags, time and Duplicate', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    const coaster = rowOf('Crème Coaster')
+    expect(within(coaster).getByRole('link', { name: 'Crème Coaster' })).toHaveAttribute(
+      'href',
+      `/m/${GALLERY_SLUG}`,
+    )
+    expect(within(coaster).getByText('A drinks coaster with a raised rim.')).toBeInTheDocument()
+    expect(within(coaster).getByRole('button', { name: 'Filter by Tea & Coffee' })).toBeInTheDocument()
+    expect(within(coaster).getByText(/^Updated /)).toBeInTheDocument()
+    expect(within(coaster).getByRole('button', { name: /Duplicate/ })).toBeInTheDocument()
+    expect(within(coaster).queryByTestId('builtin-badge')).not.toBeInTheDocument()
+
+    expect(within(rowOf('Keychain Template')).getByTestId('builtin-badge')).toBeInTheDocument()
+  })
+
+  it('says on a row what it was duplicated from, linked by name, as a card does', async () => {
+    await api.duplicateModel(BUILTIN_SLUG, 'My Keychain')
+    renderCatalogue('/?view=list')
+
+    await screen.findByRole('heading', { name: 'My Keychain' })
+    const copy = rowOf('My Keychain')
+    expect(within(copy).getByTestId('duplicated-from')).toHaveTextContent(
+      'Duplicated from Keychain Template',
+    )
+    expect(within(copy).getByRole('link', { name: 'Keychain Template' })).toHaveAttribute(
+      'href',
+      `/m/${encodeURIComponent(BUILTIN_SLUG)}`,
+    )
+    expect(within(rowOf('Crème Coaster')).queryByTestId('duplicated-from')).not.toBeInTheDocument()
+  })
+
+  it('links a row back to where an imported model came from, and nothing else', async () => {
+    const origin = 'https://raw.githubusercontent.com/someone/models/main/bin.scad'
+    const list = models.map((model) =>
+      model.slug === GALLERY_SLUG
+        ? { ...model, origin_url: origin }
+        : model.slug === 'gridfinity-bin'
+          ? { ...model, origin_url: 'javascript:alert(1)' }
+          : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    const link = within(rowOf('Crème Coaster')).getByRole('link', { name: 'raw.githubusercontent.com' })
+    expect(link).toHaveAttribute('href', origin)
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.closest('p')).toHaveTextContent('From raw.githubusercontent.com')
+    expect(within(rowOf('Gridfinity Bin')).queryByText(/^From/)).not.toBeInTheDocument()
+    // With no upstream either, the row leaves no empty line for the unlinked origin.
+    expect(within(rowOf('Crème Coaster')).getByTestId('row-provenance')).toBeInTheDocument()
+    expect(within(rowOf('Gridfinity Bin')).queryByTestId('row-provenance')).not.toBeInTheDocument()
+  })
+
+  it('adds a row tag to the filter', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(
+      within(rowOf('Crème Coaster')).getByRole('button', { name: 'Filter by Tea & Coffee' }),
+    )
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=Tea+%26+Coffee&view=list')
+    expect(names()).toEqual(['Crème Coaster'])
+  })
+
+  it('badges the media count and opens the lightbox at the cover from the thumbnail', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    const coaster = rowOf('Crème Coaster')
+
+    const thumbnail = within(coaster).getByRole('button', { name: 'View media of Crème Coaster (4)' })
+    expect(within(thumbnail).getByTestId('media-count')).toHaveTextContent('4')
+    await user.click(thumbnail)
+
+    const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const slides = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        slides[0]!.src,
+      ),
+    )
+    expect(dialog).toHaveTextContent('Printed in blue and orange')
+    // Opening the media is not a navigation.
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+  })
+
+  it('skips a video with no poster when picking the cover, as the backend does', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    const list = models.map((model) =>
+      model.slug === GALLERY_SLUG ? { ...model, media: [posterless, ...media[GALLERY_SLUG]!] } : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(
+      within(rowOf('Crème Coaster')).getByRole('button', { name: 'View media of Crème Coaster (5)' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const slides = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        slides[0]!.src,
+      ),
+    )
+  })
+
+  it('opens a template whose only media is a video with no poster', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    const list = models.map((model) =>
+      model.slug === 'gridfinity-bin' ? { ...model, media: [posterless] } : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    const thumbnail = within(rowOf('Gridfinity Bin')).getByRole('button', {
+      name: 'View media of Gridfinity Bin',
+    })
+    expect(within(thumbnail).queryByTestId('media-count')).not.toBeInTheDocument()
+    await user.click(thumbnail)
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current video source')).toHaveAttribute(
+        'src',
+        api.mediaUrl('gridfinity-bin', posterless),
+      ),
+    )
+  })
+
+  it('shows what it opens on when the media has no picture, never the output thumbnail', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    // A thumbnail from an output, but media with nothing the backend would take as cover.
+    const list = models.map((model) =>
+      model.slug === 'gridfinity-bin'
+        ? { ...model, has_thumbnail: true, thumbnail_source: 'output' as const, media: [posterless] }
+        : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+
+    const thumbnail = within(rowOf('Gridfinity Bin')).getByRole('button', {
+      name: 'View media of Gridfinity Bin',
+    })
+    const bin = list.find((model) => model.slug === 'gridfinity-bin')!
+    expect(thumbnail.querySelector(`img[src="${api.modelThumbnailUrl(bin)}"]`)).toBeNull()
+    expect(thumbnail.querySelector('img')).toBeNull()
+    // A neutral video tile, as a card shows, not the never-generated placeholder.
+    expect(within(thumbnail).getByTestId('video-tile')).toBeInTheDocument()
+    expect(within(thumbnail).queryByRole('img', { name: /not generated yet/ })).not.toBeInTheDocument()
+    expect(thumbnail).toHaveAccessibleName('View media of Gridfinity Bin')
+  })
+
+  it('names the models list the same in both views', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(6)
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(6)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(6)
+  })
+
+  it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    await user.click(
+      within(rowOf('Name Keychain')).getByRole('button', { name: 'View media of Name Keychain' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'alt',
+        'Name Keychain',
+      ),
+    )
+  })
+
+  it('gives a single cover no count badge', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    const thumbnail = within(rowOf('Name Keychain')).getByRole('button', {
+      name: 'View media of Name Keychain',
+    })
+    expect(within(thumbnail).queryByTestId('media-count')).not.toBeInTheDocument()
+  })
+
+  it('shows a template with no media by its placeholder, with nothing to open', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+    const bin = rowOf('Gridfinity Bin')
+    expect(within(bin).getByRole('img', { name: 'Gridfinity Bin — not generated yet' })).toBeInTheDocument()
+    expect(within(bin).queryByRole('button', { name: /^View media/ })).not.toBeInTheDocument()
+
+    // The built-in has no media either; its default-render preview stands in, unopenable.
+    const builtin = rowOf('Keychain Template')
+    expect(within(builtin).getByRole('img', { name: 'Keychain Template' })).toBeInTheDocument()
+    expect(within(builtin).queryByRole('button', { name: /^View media/ })).not.toBeInTheDocument()
   })
 })

@@ -2,7 +2,7 @@
 
 Pure helpers shared by the choices route and the run: the rack's nozzles, the plate the
 last print used, and the warnings that compare a choice against either. Kept apart from
-``choices.py`` because that module imports ``pipelines`` and the run in ``pipelines``
+``choices.py`` because that module imports ``print_run`` and the run in ``print_run``
 needs these, which would otherwise be an import cycle.
 """
 
@@ -36,7 +36,7 @@ def installed_nozzles(status: PrinterStatus | None) -> list[InstalledNozzle]:
     for slot in status.nozzle_rack:
         if not slot.nozzle_diameter or len(slot.nozzle_type) < 2:
             continue
-        flow: FlowType = "high_flow" if slot.nozzle_type[1] == "H" else "standard"
+        flow: FlowType = "high_flow" if slot.high_flow else "standard"
         counts[(slot.nozzle_diameter, flow)] += 1
     return [
         InstalledNozzle(size=size, flow=flow, count=count)

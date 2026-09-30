@@ -5,10 +5,17 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 - ``settings``: one row per setting, ``name -> value`` (jsonb). No row is "never set":
   the environment's value for an :data:`ENV_SEEDED` field, else the default. A JSON
   ``null`` row is an env-seeded field the UI cleared, which must outlast the
-  environment's value. Map-valued settings (``model_pipelines`` and the per-printer and
-  per-model print options) change one key at a time inside that row's upsert.
+  environment's value; a reset (#322) deletes the row, so the field follows the
+  environment again. Every runtime field of ``Settings`` is env-seeded, so the row's
+  presence alone is each field's source (:data:`SettingSource`). Map-valued settings
+  (the per-printer and per-model print options) change one key at a time inside that
+  row's upsert.
 - ``model_print_choices``: what the print dialog last chose, one row per model.
 - ``printer_bed_types``: the plate last printed on, one row per printer.
+
+A fourth, ``library_print_choices`` (``migrations/20260928T1522Z_library_print_choices.sql``,
+#313), is the same shape as ``model_print_choices`` but keyed by Bambuddy's own library
+file id, for a library file that has no ScadBuddy slug.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
@@ -18,19 +25,29 @@ statement on its own row, so neither can drop the other's change.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+import types
+from dataclasses import dataclass
+from typing import Any, Literal, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
-from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
+from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
-from scadbuddy.core.settings import Settings
+from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
 from scadbuddy.render.pg_store import migrate
 
 logger = logging.getLogger(__name__)
@@ -39,15 +56,11 @@ logger = logging.getLogger(__name__)
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
-#: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
-ENV_SEEDED = (
-    "bambuddy_url",
-    "bambuddy_api_key",
-    "bambuddy_render_api_key",
-    "public_url",
-    "default_plate",
-    "store_backend",
-)
+#: Where an env-seeded field's value comes from (#322): a value saved in the UI, the
+#: deployment's ``SCADBUDDY_<FIELD>``, the built-in default, or a clear saved in the UI,
+#: which the environment's value does not override.
+SettingSource = Literal["stored", "env", "default", "cleared"]
+
 #: The fields a render worker reads (spec §9): the store and the key it uses. The full
 #: key only when no render key is stored, as the fallback.
 RENDER_FIELDS = (
@@ -59,6 +72,34 @@ RENDER_FIELDS = (
 )
 #: The fields kept in tables of their own rather than as ``settings`` rows.
 OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
+#: Settings rows #312 retired with the slicer pipeline. A load already ignores them, as
+#: it does any name it does not know; :meth:`SettingsStore.save` deletes them, so they do
+#: not outlive the first write.
+RETIRED = (
+    "pipeline_id",
+    "printer_preset",
+    "process_preset",
+    "filament_presets",
+    "bed_type",
+    "model_pipelines",
+)
+
+#: The ``settings`` rows that are remembered choices (#322), which "Forget all" drops.
+REMEMBERED_ROWS = (
+    "print_options",
+    "printer_print_options",
+    "model_print_options",
+)
+
+
+def _nullable(name: str) -> bool:
+    annotation = Settings.model_fields[name].annotation
+    return get_origin(annotation) in (Union, types.UnionType) and type(None) in get_args(annotation)
+
+
+#: The env-seeded fields a clear can hold (a JSON ``null`` row). The rest are numbers,
+#: switches or a level, which only a reset puts back.
+NULLABLE = frozenset(name for name in ENV_SEEDED if _nullable(name))
 
 
 class StoreNotReadyError(ValueError):
@@ -68,21 +109,17 @@ class StoreNotReadyError(ValueError):
 class BambuddyIds(BaseModel):
     """The Bambuddy object ids ScadBuddy points at.
 
-    Integers, because that is what Bambuddy's own OpenAPI declares for
-    ``folder_id``, ``pipeline_id`` and ``printer_id`` — an earlier draft of this
-    file typed them as strings.
+    Integers, because that is what Bambuddy's own OpenAPI declares for ``folder_id``
+    and ``printer_id`` — an earlier draft of this file typed them as strings.
     """
 
     library_folder_id: int | None = None
-    pipeline_id: int | None = None
     printer_id: int | None = None
 
 
 class ModelPrintChoices(BaseModel):
-    """What the print picker last chose for one model, beyond its pipeline (#78).
-
-    ``printer_id`` is only the printer picked for a class-targeted pipeline, which is the
-    one case the picker asks. ``filament_plan`` is only a plan the user moved off the
+    """What the print dialog last chose for one model (#78). ``printer_id`` is the
+    printer it printed on. ``filament_plan`` is only a plan the user moved off the
     auto-match: a spool no longer in the inventory is dropped by the picker, which then
     falls back to the auto-match for that slot.
 
@@ -105,10 +142,16 @@ class ModelPrintChoices(BaseModel):
 
 
 class StoredSettings(BambuddyIds):
-    """Bambuddy connection details. The API key never leaves the server."""
+    """Bambuddy connection details. The API key never leaves the server.
+
+    A store from before #312 may still hold ``pipeline_id``, the four raw-preset keys or
+    ``model_pipelines`` (:data:`RETIRED`); a load ignores them, and the next
+    :meth:`SettingsStore.save` drops them.
+    """
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     #: The Manage-Library-only key render workers hold (spec 2026-09-27 §9). Stored
     #: exactly as `bambuddy_api_key` is (the backend has no secret store; see
     #: tests/api/test_settings.py), written from Settings, never sent to the browser.
@@ -122,18 +165,8 @@ class StoredSettings(BambuddyIds):
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
 
-    # Used by "Slice and queue" when no pipeline is configured.
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] = Field(default_factory=list)
-    bed_type: str | None = None
-
-    #: Model slug -> the pipeline that model once printed with (#86). No longer read:
-    #: its routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here
-    #: can be neither seen nor changed and must not override the Settings pipeline.
-    model_pipelines: dict[str, int] = Field(default_factory=dict)
-    #: Model slug -> the rest of what the picker chose, set one model at a time for the
-    #: same reason (:meth:`SettingsStore.set_model_choices`).
+    #: Model slug -> what the picker chose, set one model at a time
+    #: (:meth:`SettingsStore.set_model_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
     #: printer, not per model: the plate is a property of the machine. Set one printer at
@@ -146,14 +179,6 @@ class StoredSettings(BambuddyIds):
     #: belong to which project — that question is Bambuddy's to answer.
     last_project_id: int | None = None
 
-    def pipeline_for(self, slug: str) -> int | None:
-        """The pipeline the send bar runs for ``slug``: the Settings one, for every model.
-
-        ``model_pipelines`` is deliberately not consulted — see its note.
-        """
-        del slug
-        return self.pipeline_id
-
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
     # defaults. The dict keys are strings because JSON has no integer keys: the printer
@@ -162,12 +187,6 @@ class StoredSettings(BambuddyIds):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
-
-    @field_validator("store_backend", mode="before")
-    @classmethod
-    def _cleared_backend_is_local(cls, value: object) -> object:
-        # A JSON null row is an env-seeded field the UI cleared: back to the default.
-        return "local" if value is None else value
 
     def render_bambuddy_key(self) -> tuple[str | None, bool]:
         """The key render workers use, and whether it is the full key by fallback. With
@@ -179,24 +198,118 @@ class StoredSettings(BambuddyIds):
 
 
 class SettingsPatch(BaseModel):
-    """An omitted field is left alone; an explicit ``null`` clears it."""
+    """An omitted field is left alone; an explicit ``null`` clears it; ``reset`` names
+    env-seeded fields to put back on the deployment's value (#322).
+
+    A clear and a reset differ only for an env-seeded field: a clear is stored and beats
+    ``SCADBUDDY_<FIELD>``, a reset deletes what is stored so the environment, then the
+    default, applies again. Numbers and switches cannot be cleared, only reset. Every
+    value is checked against the bounds a ``SCADBUDDY_<FIELD>`` meets
+    (:func:`~scadbuddy.core.settings.check_value`), so a bad one is a 422 naming it. An
+    unknown field, such as a bootstrap one, is refused rather than ignored; only a
+    :data:`RETIRED` one, such as an older client's ``pipeline_id``, is dropped instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    bambuddy_web_urls: str | None = None
     bambuddy_render_api_key: str | None = None
     public_url: str | None = None
     library_folder_id: int | None = None
-    pipeline_id: int | None = None
     printer_id: int | None = None
-    printer_preset: PresetRef | None = None
-    process_preset: PresetRef | None = None
-    filament_presets: list[PresetRef] | None = None
-    bed_type: str | None = None
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
-    #: ``null`` puts it back to ``local``.
+    #: The project a send without one goes to, and where the project picker opens.
+    last_project_id: int | None = None
+
+    # -- the runtime settings (#322), each env-seeded ---------------------------------
+    render_timeout: float | None = None
+    render_concurrency: int | None = None
+    solid_concurrency: int | None = None
+    render_queue_max: int | None = None
+    render_queue_depth_slo: int | None = None
+    render_latency_slo: float | None = None
+    check_concurrency: int | None = None
+    job_ttl: float | None = None
+    preview_renders: bool | None = None
+    lsp_sessions: int | None = None
+    realtime_sockets: int | None = None
+    library_max_bytes: int | None = None
+    asset_max_total_bytes: int | None = None
+    asset_max_count: int | None = None
+    asset_sweep_grace: float | None = None
+    asset_sweep_interval: float | None = None
+    duplicate_staging_max_age: float | None = None
+    media_upload_max_bytes: int | None = None
+    #: Write-only, like the Bambuddy key; ``""`` clears it.
+    google_fonts_api_key: str | None = None
+    fonts_catalogue_ttl: float | None = None
+    event_log_retention_seconds: float | None = None
+    event_log_retention_rows: int | None = None
+    log_level: str | None = None
+
+    #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
+    #: change applies at the next one; a reset puts one back on the deployment's value.
     store_backend: StoreBackend | None = None
+    store_max_total_bytes: int | None = None
+    store_max_count: int | None = None
+    worker_cache_max_bytes: int | None = None
+
+    #: Env-seeded fields to put back on the deployment's value.
+    reset: list[str] = Field(default_factory=list)
+
+    @field_validator(*ENV_SEEDED, mode="after")
+    @classmethod
+    def _in_bounds(cls, value: Any, info: ValidationInfo) -> Any:
+        name = info.field_name or ""
+        if value is None:
+            if name in NULLABLE:
+                return None
+            raise ValueError(
+                f"{env_var(name)} cannot be cleared; reset it to follow the deployment's value"
+            )
+        return check_value(name, value)
+
+    @field_validator("reset")
+    @classmethod
+    def _resettable(cls, names: list[str]) -> list[str]:
+        unknown = [name for name in names if name not in ENV_SEEDED]
+        if unknown:
+            raise ValueError(
+                f"{', '.join(unknown)}: not an env-seeded setting, so nothing to reset"
+            )
+        return list(dict.fromkeys(names))
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired(cls, data: Any) -> Any:
+        """An older client may still send a field #312 retired; that is not a mistake
+        worth a 422, so it is dropped rather than refused."""
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if key not in RETIRED}
+        return data
+
+    @model_validator(mode="after")
+    def _set_or_reset(self) -> Self:
+        both = sorted(set(self.reset) & (self.model_fields_set - {"reset"}))
+        if both:
+            raise ValueError(f"{', '.join(both)}: both set and reset in one save")
+        return self
+
+
+@dataclass(frozen=True)
+class SettingsSnapshot:
+    """One read of every setting (:meth:`SettingsStore.snapshot`)."""
+
+    stored: StoredSettings
+    #: Every field of :class:`Settings` as the store resolves it: the stored value, else
+    #: the environment's, else the default. Bootstrap fields are the process's own.
+    runtime: Settings
+    #: Each env-seeded field's source.
+    sources: dict[str, SettingSource]
 
 
 class SettingsStore:
@@ -245,14 +358,14 @@ class SettingsStore:
     def close(self) -> None:
         self._pool.close()
 
+    def _source(self, name: str) -> SettingSource:
+        return "env" if name in self.defaults.model_fields_set else "default"
+
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
 
-    def _from_env(self) -> dict[str, Any]:
-        return {name: getattr(self.defaults, name) for name in ENV_SEEDED}
-
-    def load(self) -> StoredSettings:
+    def snapshot(self) -> SettingsSnapshot:
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
         with self._pool.connection() as conn, conn.transaction():
@@ -260,14 +373,47 @@ class SettingsStore:
             rows = conn.execute("SELECT name, value FROM settings").fetchall()
             choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
             beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
-        values = self._from_env()
-        for row in rows:
+        stored_rows = {row["name"]: row["value"] for row in rows}
+        runtime = self.defaults.model_copy()
+        sources: dict[str, SettingSource] = {}
+        for name in ENV_SEEDED:
+            if name not in stored_rows:
+                sources[name] = self._source(name)
+                continue
+            value = stored_rows[name]
+            try:
+                coerced = check_value(name, value)
+            except ValueError:
+                # Written by a version with other bounds, or by hand: the environment's
+                # value is a better answer than a process that will not start.
+                logger.warning(
+                    "ignoring a stored setting this version refuses", extra={"setting": name}
+                )
+                sources[name] = self._source(name)
+                continue
+            Settings.__pydantic_validator__.validate_assignment(runtime, name, coerced)
+            sources[name] = "cleared" if value is None else "stored"
+        values: dict[str, Any] = {
+            name: getattr(runtime, name)
+            for name in ENV_SEEDED
+            if name in StoredSettings.model_fields
+        }
+        for name, value in stored_rows.items():
             # A name this version does not know (a newer one wrote it) is left alone.
-            if row["name"] in StoredSettings.model_fields and row["name"] not in OWN_TABLES:
-                values[row["name"]] = row["value"]
+            if (
+                name in StoredSettings.model_fields
+                and name not in OWN_TABLES
+                and name not in ENV_SEEDED
+            ):
+                values[name] = value
         values["model_print_choices"] = {row["model_id"]: row["choices"] for row in choices}
         values["printer_bed_types"] = {str(row["printer_id"]): row["bed_type"] for row in beds}
-        return StoredSettings.model_validate(values)
+        return SettingsSnapshot(
+            stored=StoredSettings.model_validate(values), runtime=runtime, sources=sources
+        )
+
+    def load(self) -> StoredSettings:
+        return self.snapshot().stored
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
@@ -279,7 +425,8 @@ class SettingsStore:
         # alone, while an explicit null clears it. Without that an id could be set
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
-        for secret in ("bambuddy_api_key", "bambuddy_render_api_key"):
+        reset = changes.pop("reset", [])
+        for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
         # The merged result, not the patch: clearing the URL or the inbox while on the
@@ -295,6 +442,10 @@ class SettingsStore:
                     " saved first"
                 )
         with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(RETIRED),))
+            for name in reset:
+                # Back to following the environment, then the default.
+                conn.execute("DELETE FROM settings WHERE name = %s", (name,))
             for name, value in changes.items():
                 if value is not None:
                     _put(conn, name, value)
@@ -302,19 +453,9 @@ class SettingsStore:
                     # Cleared, which must beat the environment: a JSON null row.
                     _put(conn, name, None)
                 else:
-                    # Back to the default, or to following the environment.
+                    # Back to the default.
                     conn.execute("DELETE FROM settings WHERE name = %s", (name,))
         return self._written("connection")
-
-    def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
-        """Point one model at a pipeline, or clear it back to the global fallback.
-
-        One slug at a time rather than through :class:`SettingsPatch`, which would make
-        the browser send the whole map back and lose any entry it had not loaded.
-        """
-        with self._pool.connection() as conn:
-            _put_entry(conn, "model_pipelines", slug, pipeline_id)
-        return self._written("model_pipeline")
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
@@ -344,6 +485,38 @@ class SettingsStore:
                 )
         return self._written("printer_bed_type")
 
+    def library_choices(self, file_id: int) -> ModelPrintChoices:
+        """What the dialog last chose for one Bambuddy library file (#313); nothing
+        remembered is the empty choice. A row this version cannot read is nothing
+        remembered too, rather than a dialog that will not open."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT choices FROM library_print_choices WHERE file_id = %s", (file_id,)
+            ).fetchone()
+        if row is None:
+            return ModelPrintChoices()
+        try:
+            return ModelPrintChoices.model_validate(row["choices"])
+        except ValidationError:
+            logger.warning("unreadable library print choices", extra={"file_id": file_id})
+            return ModelPrintChoices()
+
+    def set_library_choices(self, file_id: int, choices: ModelPrintChoices) -> ModelPrintChoices:
+        """Remember one library file's choices; an empty ``choices`` forgets them."""
+        with self._pool.connection() as conn:
+            if choices == ModelPrintChoices():
+                conn.execute("DELETE FROM library_print_choices WHERE file_id = %s", (file_id,))
+            else:
+                conn.execute(
+                    "INSERT INTO library_print_choices (file_id, choices) VALUES (%s, %s)"
+                    " ON CONFLICT (file_id) DO UPDATE"
+                    " SET choices = EXCLUDED.choices, updated_at = now()",
+                    (file_id, Jsonb(choices.model_dump(mode="json"))),
+                )
+        # The dialog's remembered choices, as for a model: no new section is needed.
+        emit(self.events, SettingsChanged(section="model_choices"))
+        return self.library_choices(file_id)
+
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
         with self._pool.connection() as conn:
@@ -359,7 +532,7 @@ class SettingsStore:
         """Replace one scope's print-option overrides.
 
         Deliberately not part of :class:`SettingsPatch`, for the same reason
-        :meth:`set_model_pipeline` is not: a patch replaces a whole value, so the browser
+        :meth:`set_model_choices` is not: a patch replaces a whole value, so the browser
         would have to send every printer and model back and would lose any it had not
         loaded. An all-unset ``options`` **removes** the scope rather than storing an
         empty object, so the settings do not accumulate an entry per printer someone
@@ -378,6 +551,17 @@ class SettingsStore:
                 field = "printer_print_options" if scope == "printer" else "model_print_options"
                 _put_entry(conn, field, key, value)
         return self._written("print_options")
+
+    def forget_remembered(self) -> StoredSettings:
+        """Forget every remembered choice (#322): the per-model and per-library-file
+        (#313) print-dialog choices, the per-printer plates, and the print options at
+        every scope. The settings themselves are left alone."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM model_print_choices")
+            conn.execute("DELETE FROM library_print_choices")
+            conn.execute("DELETE FROM printer_bed_types")
+            conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(REMEMBERED_ROWS),))
+        return self._written("remembered")
 
 
 def _put(conn: Connection[DictRow], name: str, value: object) -> None:

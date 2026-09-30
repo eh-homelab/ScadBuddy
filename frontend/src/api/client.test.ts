@@ -2,7 +2,15 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { server } from '../mocks/server'
-import { ApiError, BAMBUDDY_UNAVAILABLE, api, mayHaveRun } from './client'
+import {
+  ApiError,
+  BAMBUDDY_UNAVAILABLE,
+  UNANSWERED,
+  api,
+  mayHaveRun,
+  newRequestId,
+  printRunPoll,
+} from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -155,6 +163,239 @@ describe('media writes against the mock API (#274)', () => {
 
     const deleted = await api.deleteMedia(copy.slug, third!)
     expect(deleted.media?.map((item) => item.id)).toEqual([fourth, second, first])
+  })
+})
+
+describe('runPrint follows the run the server answers with 202 (#470)', () => {
+  const body = { choices: { nozzles: [], tier: 'standard' } } as unknown as Parameters<
+    typeof api.runPrint
+  >[1]
+  const started = {
+    id: 'run-1',
+    output_id: 'out-1',
+    status: 'running',
+    created_at: '2026-09-28T10:00:00Z',
+    finished_at: null,
+    result: null,
+    error: null,
+  }
+
+  afterEach(() => {
+    server.resetHandlers()
+    printRunPoll.intervalMs = 1000
+    printRunPoll.reattempts = 3
+  })
+
+  it('reads the run until it succeeds and returns its result', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        return HttpResponse.json(
+          reads < 2 ? started : { ...started, status: 'succeeded', result },
+        )
+      }),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(reads).toBe(2)
+  })
+
+  it("throws the failed run's problem, as the route used to answer it", async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          error: {
+            status: 502,
+            title: 'Bad Gateway',
+            detail: 'Bambuddy failed to slice the plate: no support',
+            extensions: { slice_job_id: 9 },
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(502)
+    expect((error as ApiError).message).toBe('Bambuddy failed to slice the plate: no support')
+    expect((error as ApiError).problem).toMatchObject({ slice_job_id: 9 })
+  })
+
+  it('says a failed run that had tried to queue may be on the queue anyway', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: true,
+          error: {
+            type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+            status: 504,
+            title: 'Gateway Timeout',
+            detail: 'Bambuddy did not answer in time.',
+            extensions: {},
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(504)
+    // The dialog adds the queue advice; the detail is the backend's own.
+    expect((error as ApiError).detail).toBe('Bambuddy did not answer in time.')
+    expect((error as ApiError).problem).toMatchObject({
+      type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
+      status: 504,
+      may_have_queued: true,
+    })
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('does not count a failed run that never tried to queue, whatever its type', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: false,
+          error: {
+            type: BAMBUDDY_UNAVAILABLE,
+            status: 504,
+            title: 'Gateway Timeout',
+            detail: 'could not reach Bambuddy to slice the plate: ReadTimeout',
+            extensions: {},
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).status).toBe(504)
+    expect(mayHaveRun(error)).toBe(false)
+  })
+
+  it('counts a run lost while queueing as maybe queued, from the flag', async () => {
+    const lost =
+      'ScadBuddy restarted while it was preparing this print, after it had started queueing it, ' +
+      'so it cannot tell whether the print was queued.'
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: true,
+          repeated: true,
+          error: { status: 500, title: 'Internal Server Error', detail: lost, extensions: {} },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).detail).toBe(lost)
+    expect(mayHaveRun(error)).toBe(true)
+  })
+
+  it('re-sends the same request when its answer never arrived, and re-attaches to the run', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: unknown[] = []
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push(await request.json())
+        return sent.length === 1 ? HttpResponse.error() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        // A proxy's own 504 page: not ScadBuddy's answer, so read again.
+        if (reads === 1) return new HttpResponse('<html>504</html>', { status: 504 })
+        return HttpResponse.json({ ...started, status: 'succeeded', result })
+      }),
+    )
+
+    const press = { ...body, request_id: 'press-1' }
+    await expect(api.runPrint('out-1', press)).resolves.toEqual(result)
+    expect(sent).toEqual([press, press])
+    expect(reads).toBe(2)
+  })
+
+  it("does not re-send a request ScadBuddy's server refused", async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused the API key' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).detail).toBe('Bambuddy refused the API key')
+    expect(posts).toBe(1)
+  })
+
+  it('stops reading the run once its signal is aborted', async () => {
+    printRunPoll.intervalMs = 5
+    const controller = new AbortController()
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        if (reads === 2) controller.abort()
+        return HttpResponse.json(started)
+      }),
+    )
+
+    const error = await api
+      .runPrint('out-1', body, controller.signal)
+      .catch((caught: unknown) => caught)
+    expect(controller.signal.aborted).toBe(true)
+    expect(error).toBe(controller.signal.reason)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(reads).toBe(2)
+  })
+
+  it('gives up re-attaching after a few unanswered tries', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.reattempts = 2
+    let posts = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => {
+        posts += 1
+        return HttpResponse.error()
+      }),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).problem).toMatchObject({ type: UNANSWERED, status: 0 })
+    expect(mayHaveRun(error)).toBe(true)
+    expect(posts).toBe(3)
+  })
+})
+
+describe('newRequestId', () => {
+  it('is a new 128-bit hex id each time', () => {
+    const one = newRequestId()
+    expect(one).toMatch(/^[0-9a-f]{32}$/)
+    expect(newRequestId()).not.toBe(one)
   })
 })
 
@@ -333,6 +574,48 @@ describe('failures the server did not describe (#470)', () => {
     await expect(pending).rejects.toMatchObject({
       status: 413,
       detail: 'That is too large for the server to accept (HTTP 413).',
+    })
+  })
+})
+
+describe('definition files (#185)', () => {
+  it('reads a file beside the model and one in a pinned library', async () => {
+    await expect(api.getDefinitionFile('name-keychain', { path: 'helper.scad' })).resolves.toContain(
+      'module rounded_plate',
+    )
+    await expect(
+      api.getDefinitionFile('name-keychain', { library: 'BOSL2', path: 'shapes3d.scad' }),
+    ).resolves.toContain('module cuboid')
+  })
+
+  it('encodes each segment of the path, and keeps its slashes', async () => {
+    let asked = ''
+    server.use(
+      http.get('/api/v1/models/:slug/files/*', ({ request }) => {
+        asked = new URL(request.url).pathname
+        return new HttpResponse('x', { headers: { 'Content-Type': 'text/plain' } })
+      }),
+    )
+    await api.getDefinitionFile('builtin:keychain', { path: 'my parts/a#b.scad' })
+    expect(asked).toBe('/api/v1/models/builtin%3Akeychain/files/my%20parts/a%23b.scad')
+  })
+
+  it('names the pinned commit a library file is from', async () => {
+    let asked = ''
+    server.use(
+      http.get('/api/v1/models/:slug/libraries/:name/files/*', ({ request }) => {
+        const url = new URL(request.url)
+        asked = url.pathname + url.search
+        return new HttpResponse('x', { headers: { 'Content-Type': 'text/plain' } })
+      }),
+    )
+    await api.getDefinitionFile('name-keychain', { library: 'BOSL2', commit: 'ab12', path: 'std.scad' })
+    expect(asked).toBe('/api/v1/models/name-keychain/libraries/BOSL2/files/std.scad?commit=ab12')
+  })
+
+  it('is an ApiError for a file that is not there', async () => {
+    await expect(api.getDefinitionFile('name-keychain', { path: 'nope.scad' })).rejects.toMatchObject({
+      status: 404,
     })
   })
 })
