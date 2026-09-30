@@ -150,6 +150,25 @@ describe('CustomizePage with a template UI', () => {
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
 
+  it('a write right after a preset load starts from the preset', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined())
+    const initial = (host?.inputs.get()['params'] as Record<string, unknown>)['name']
+    const saved = await host!.presets.save('at defaults')
+    host?.inputs.set({ params: { name: 'Changed' } })
+    await host!.presets.load(saved.id)
+    // No render between the load and the write: the write must start from the preset.
+    host?.inputs.set({ picked: 'x' })
+    await waitFor(() => expect(host?.inputs.get()['picked']).toBe('x'))
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({
