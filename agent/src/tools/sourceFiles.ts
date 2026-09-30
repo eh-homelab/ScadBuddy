@@ -3,6 +3,11 @@ import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
 
+/** The backend's MAX_SOURCE_CHARS (`SourceFileUpdate.content` in
+ * backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks the two
+ * against the OpenAPI spec (PR #752 review). */
+export const MAX_SOURCE_CHARS = 1_000_000
+
 // Multi-file models (issue #252: "Multi-file models are supported (includes
 // inside the model folder)"): the `.scad` files beside model.scad that it
 // `include`s or `use`s. Each write or removal is one revision in the model's
@@ -55,9 +60,7 @@ export const sourceFileTools: Tool[] = [
     input: z.object({
       slug,
       name: fileName,
-      // MAX_SOURCE_CHARS in backend/scadbuddy/api/models.py (SourceFileUpdate in
-      // model_files.py); change both together (PR #752 review).
-      content: z.string().max(1_000_000),
+      content: z.string().max(MAX_SOURCE_CHARS),
       message: z.string().max(200).optional().describe("What the revision is called in the history: the user's instruction, in short"),
     }),
     risk: 'write',

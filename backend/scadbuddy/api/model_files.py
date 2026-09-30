@@ -58,8 +58,8 @@ class SourceFile(BaseModel):
 
 
 class SourceFileUpdate(BaseModel):
-    # MAX_SOURCE_CHARS is also the agent's bound, in agent/src/tools/sourceFiles.ts
-    # (`content`'s Zod max); change both together (PR #752 review).
+    # MAX_SOURCE_CHARS is also the agent's bound (agent/src/tools/sourceFiles.ts);
+    # agent/test/sourceFiles.test.ts fails if the two differ (PR #752 review).
     content: str = Field(max_length=MAX_SOURCE_CHARS, description="The file's OpenSCAD text")
     message: str | None = Field(
         default=None,
