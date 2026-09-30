@@ -176,6 +176,18 @@ class ModelExistsError(ValueError):
     pass
 
 
+class StaleVersionError(RuntimeError):
+    """An edit made against a revision the model has since moved past (#252): the
+    caller read ``expected`` and the model is at ``current`` now."""
+
+    def __init__(self, slug: str, expected: str, current: str | None) -> None:
+        super().__init__(
+            f"{slug!r} is at {current[:7] if current else 'no revision'}, not {expected[:7]}"
+        )
+        self.expected = expected
+        self.current = current
+
+
 class LibraryNotDeclaredError(KeyError):
     """The model has no library of that name to remove."""
 
@@ -1580,8 +1592,15 @@ class Catalogue:
         *,
         message: str | None = None,
         merge_base: str | None = None,
+        expected_version: str | None = None,
     ) -> ModelRecord:
         """Replace a model's ``.scad`` as one revision.
+
+        ``expected_version`` is the revision the caller based the edit on (#252's
+        ``apply_patch``): unless the model is still at it (a full id, or a prefix of
+        one), :class:`StaleVersionError` with nothing written. Checked under the
+        history's write lock, so no other write can land between the check and this
+        one. Not with ``merge_base``, whose own check is the upstream's.
 
         The hook the paste/edit path (#92) calls: everything that rewrites model
         source goes through here so it is versioned exactly once. The derived
@@ -1602,7 +1621,9 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._write_edit(slug, source, message or f"Edit {slug} source")
+            self._write_edit(
+                slug, source, message or f"Edit {slug} source", expected_version=expected_version
+            )
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -1616,31 +1637,58 @@ class Catalogue:
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
 
-    def _write_edit(self, slug: str, source: str, message: str) -> None:
+    def _write_edit(
+        self, slug: str, source: str, message: str, *, expected_version: str | None = None
+    ) -> None:
         """A plain edit: written under the history's write lock, with its commit (#370),
         so it cannot land between another write's check and its write -- a merge's
         ``still_applies``, say -- nor be overwritten by one before it is committed.
 
         Failures as :meth:`_commit`: a failed commit after the write is logged, not
         raised. When the lock itself cannot be had, the edit is written without it
-        and only its revision is lost, as it always was.
+        and only its revision is lost, as it always was -- except an edit with an
+        ``expected_version``, which is only ever written once that has been checked.
+        Such an edit is only ever written WITH its revision, too: when the commit
+        fails, the old source is put back under the same lock and the error raised,
+        since a base check against a revision that never moved would pass a second
+        edit over this one unseen (review of #741).
         """
-        if self.history is None or not self.history.available:
+        history = self.history
+        if history is None or not history.available:
+            if expected_version is not None:
+                raise GitUnavailableError("model history is unavailable, so no base can be checked")
             self._replace_source(slug, source)
             self.notify_change(slug)
             return
         started = written = False
+        previous: str | None = None
 
         def write() -> None:
-            nonlocal started, written
+            nonlocal started, written, previous
+            if expected_version is not None:
+                current = history.last_commit(model_path(slug))
+                if current is None or not current.startswith(expected_version):
+                    raise StaleVersionError(slug, expected_version, current)
+                try:
+                    previous = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    raise ModelNotFoundError(slug) from None
             started = True
             self._replace_source(slug, source)
             written = True
 
+        def undo() -> None:
+            nonlocal written
+            if written and previous is not None:
+                self._replace_source(slug, previous)
+                written = False
+
         try:
-            self.history.commit(message, slug, prepare=write)
+            history.commit(message, slug, prepare=write, rollback=undo)
         except (GitError, OSError):
             if started and not written:
+                raise
+            if expected_version is not None:
                 raise
             if not started:
                 self._replace_source(slug, source)
