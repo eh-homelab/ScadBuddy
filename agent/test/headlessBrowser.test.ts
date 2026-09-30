@@ -9,17 +9,24 @@ import {
   assertHeadlessPlugin,
   AUTHORIZE_TOOL_NAME,
   BROWSER_TOOL_TIERS,
-  browserInputProblem,
+  browserInputGuard,
   browserTierOf,
   DISALLOWED_BROWSER_TOOLS,
   disallowedBrowserTools,
   materializeHeadlessBrowser,
+  originToApprove,
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
   redirectGuardSource,
   TOOL_PREFIX,
   VENDORED_PLUGIN_DIR,
 } from '../src/harness/headlessBrowser.js'
+import {
+  type BrowserOrigins,
+  browserOrigins,
+  BrowserOriginsError,
+  parseBrowserAllowedOrigins,
+} from '../src/harness/browserOrigins.js'
 import { probeChromiumSandbox } from '../src/harness/headlessSandbox.js'
 import { decide } from '../src/harness/permissions.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
@@ -95,10 +102,15 @@ describe('tiers (spec §5.3)', () => {
   })
 })
 
-describe('the navigation allow-list and file names', () => {
+describe('the navigation guard and file names', () => {
+  const only = browserOrigins({ backendUrl: ORIGIN })
+  const none = new Set<string>()
+  const check = (name: string, input: unknown, origins: BrowserOrigins = only, approved: ReadonlySet<string> = none) =>
+    browserInputGuard(t(name), input, origins, approved)
+
   it('allows the backend origin, with any path, and default ports normalised', () => {
-    expect(browserInputProblem(t('browser_navigate'), { url: `${ORIGIN}/models/box?x=1` }, ORIGIN)).toBeUndefined()
-    expect(browserInputProblem(t('browser_navigate'), { url: 'https://ui.example:443/' }, 'https://ui.example')).toBeUndefined()
+    expect(check('browser_navigate', { url: `${ORIGIN}/models/box?x=1` })).toBeUndefined()
+    expect(check('browser_navigate', { url: 'https://ui.example:443/' }, browserOrigins({ backendUrl: 'https://ui.example' }))).toBeUndefined()
   })
 
   it.each([
@@ -112,37 +124,122 @@ describe('the navigation allow-list and file names', () => {
     ['userinfo that looks like the origin', 'http://127.0.0.1:8000@evil.example/'],
     ['not a URL', 'nonsense'],
     ['not a string', 42],
-  ])('refuses %s', (_label, url) => {
-    expect(browserInputProblem(t('browser_navigate'), { url }, ORIGIN)).toMatch(/may only open ScadBuddy's own UI/)
+  ])('refuses %s when nothing else is allowed (the default)', (_label, url) => {
+    expect(check('browser_navigate', { url })).toEqual({ deny: expect.stringMatching(/may only open ScadBuddy's own UI/) })
   })
 
   it('applies the same check to a new tab, and lets tab listing through', () => {
-    expect(browserInputProblem(t('browser_tabs'), { action: 'new', url: 'http://evil.example/' }, ORIGIN)).toMatch(/own UI/)
-    expect(browserInputProblem(t('browser_tabs'), { action: 'list' }, ORIGIN)).toBeUndefined()
+    expect(check('browser_tabs', { action: 'new', url: 'http://evil.example/' })).toEqual({ deny: expect.stringMatching(/own UI/) })
+    expect(check('browser_tabs', { action: 'list' })).toBeUndefined()
   })
 
   it.each(['../escape.png', '/tmp/x.png', 'sub/dir.png', '.mcp.json', '..', 'a\\b.png', ''])('refuses the file name %j', (filename) => {
-    expect(browserInputProblem(t('browser_take_screenshot'), { filename }, ORIGIN)).toMatch(/plain file name/)
+    expect(check('browser_take_screenshot', { filename })).toEqual({ deny: expect.stringMatching(/plain file name/) })
   })
 
   it('accepts a plain file name, and leaves other servers’ tools alone', () => {
-    expect(browserInputProblem(t('browser_take_screenshot'), { filename: 'preview.png' }, ORIGIN)).toBeUndefined()
-    expect(browserInputProblem('mcp__scadbuddy__render_model', { url: 'http://evil.example/' }, ORIGIN)).toBeUndefined()
+    expect(check('browser_take_screenshot', { filename: 'preview.png' })).toBeUndefined()
+    expect(browserInputGuard('mcp__scadbuddy__render_model', { url: 'http://evil.example/' }, only, none)).toBeUndefined()
   })
 
   it('denies through the permission seam whatever the tier', () => {
-    const guard = (name: string, input: unknown) => browserInputProblem(name, input, ORIGIN)
+    const guard = (name: string, input: unknown) => browserInputGuard(name, input, only, none)
     expect(decide(t('browser_navigate'), browserTierOf, { url: 'http://evil.example/' }, guard)).toMatchObject({
       decision: 'deny',
       tier: 'read',
     })
     expect(decide(t('browser_navigate'), browserTierOf, { url: `${ORIGIN}/` }, guard)).toEqual({ decision: 'allow', tier: 'read' })
   })
+
+  describe('aliases of the backend (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)', () => {
+    const origins = browserOrigins({
+      backendUrl: ORIGIN,
+      publicUrl: 'https://scadbuddy.internal.example/',
+      uiOrigins: 'https://scadbuddy.lan:8443, http://127.0.0.1:8000',
+    })
+
+    it('are the UI origins other than the backend', () => {
+      expect(origins).toEqual({
+        backend: ORIGIN,
+        aliases: ['https://scadbuddy.internal.example', 'https://scadbuddy.lan:8443'],
+        allowed: [],
+      })
+    })
+
+    it('rewrites a URL on one to the same path, query and fragment on the backend', () => {
+      const url = 'https://scadbuddy.internal.example/m/builtin%3Aspinning-top-pip?tab=params#preview'
+      expect(check('browser_navigate', { url }, origins)).toEqual({
+        input: { url: `${ORIGIN}/m/builtin%3Aspinning-top-pip?tab=params#preview` },
+      })
+      expect(check('browser_tabs', { action: 'new', url: 'https://scadbuddy.lan:8443/' }, origins)).toEqual({
+        input: { action: 'new', url: `${ORIGIN}/` },
+      })
+      // Allowed at the tool's tier, with the new input.
+      const guard = (name: string, input: unknown) => browserInputGuard(name, input, origins, none)
+      expect(decide(t('browser_navigate'), browserTierOf, { url }, guard)).toEqual({
+        decision: 'allow',
+        tier: 'read',
+        input: { url: `${ORIGIN}/m/builtin%3Aspinning-top-pip?tab=params#preview` },
+      })
+    })
+
+    it('still refuses the alias host on another scheme or port', () => {
+      expect(check('browser_navigate', { url: 'http://scadbuddy.internal.example/' }, origins)).toHaveProperty('deny')
+      expect(check('browser_navigate', { url: 'https://scadbuddy.lan/' }, origins)).toHaveProperty('deny')
+    })
+  })
+
+  describe('off-origin navigation (SCADBUDDY_BROWSER_ALLOWED_ORIGINS)', () => {
+    const listed = browserOrigins({ backendUrl: ORIGIN, browserAllowed: 'https://docs.example, http://printer.lan:8080/' })
+    const any = browserOrigins({ backendUrl: ORIGIN, browserAllowed: '*' })
+
+    it('makes a listed origin outward until it is approved, then lets it run at the tool’s tier', () => {
+      const url = 'https://docs.example/openscad/manual'
+      expect(check('browser_navigate', { url }, listed)).toEqual({ outward: expect.stringMatching(/https:\/\/docs\.example/) })
+      expect(originToApprove(t('browser_navigate'), { url }, listed, none)).toBe('https://docs.example')
+      const approved = new Set(['https://docs.example'])
+      expect(check('browser_navigate', { url }, listed, approved)).toBeUndefined()
+      expect(originToApprove(t('browser_navigate'), { url }, listed, approved)).toBeUndefined()
+      const guard = (name: string, input: unknown) => browserInputGuard(name, input, listed, none)
+      expect(decide(t('browser_navigate'), browserTierOf, { url }, guard)).toMatchObject({ decision: 'needs_approval', tier: 'outward' })
+    })
+
+    it('still refuses an origin the list does not name, saying what it does allow', () => {
+      expect(check('browser_navigate', { url: 'https://evil.example/' }, listed)).toEqual({
+        deny: expect.stringMatching(/with a human's approval, https:\/\/docs\.example, http:\/\/printer\.lan:8080; "https:\/\/evil\.example\/" is none of them/),
+      })
+      // Approval of something not on the list does not count.
+      expect(check('browser_navigate', { url: 'https://evil.example/' }, listed, new Set(['https://evil.example']))).toHaveProperty('deny')
+    })
+
+    it('under `*` allows any http(s) origin, each still behind its approval, and nothing else', () => {
+      expect(check('browser_navigate', { url: 'http://192.168.1.20:1234/v1/models' }, any)).toHaveProperty('outward')
+      expect(check('browser_tabs', { action: 'new', url: 'https://example.com/' }, any)).toHaveProperty('outward')
+      for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,x', 'chrome://settings']) {
+        expect(check('browser_navigate', { url }, any)).toHaveProperty('deny')
+      }
+    })
+
+    it('never treats the backend or an alias as off-origin', () => {
+      const both = browserOrigins({ backendUrl: ORIGIN, publicUrl: 'https://ui.example', browserAllowed: `${ORIGIN}, https://ui.example` })
+      expect(both.allowed).toEqual([])
+      expect(check('browser_navigate', { url: 'https://ui.example/x' }, both)).toEqual({ input: { url: `${ORIGIN}/x` } })
+    })
+
+    it.each([
+      ['a path', 'https://docs.example/manual'],
+      ['not an origin', 'docs.example'],
+      ['`*` with others', '*, https://docs.example'],
+      ['a file URL', 'file:///tmp'],
+    ])('refuses a variable with %s', (_label, raw) => {
+      expect(() => parseBrowserAllowedOrigins(raw)).toThrow(BrowserOriginsError)
+    })
+  })
 })
 
 describe('the per-session plugin', () => {
   it('writes the server config spec §5.3 asks for', async () => {
-    const { sessionId, configFile, outputDir, allowedOrigin } = await materialized()
+    const { configFile, outputDir, allowedOrigin } = await materialized()
     type Config = {
       network: unknown
       outputDir: string
@@ -153,7 +250,7 @@ describe('the per-session plugin', () => {
         isolated: boolean
         userDataDir?: string
         launchOptions: { headless: boolean }
-        contextOptions: { extraHTTPHeaders: Record<string, string> }
+        contextOptions: { extraHTTPHeaders?: Record<string, string> }
       }
     }
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as Config
@@ -162,21 +259,59 @@ describe('the per-session plugin', () => {
     expect(config.browser.isolated).toBe(true)
     expect(config.browser.userDataDir).toBeUndefined()
     expect(config.browser.launchOptions.headless).toBe(true)
-    expect(config.browser.contextOptions.extraHTTPHeaders).toEqual({ [AGENT_ACTOR_HEADER]: sessionId })
+    // The marker goes to the backend only, added by the request guard: the
+    // context's extraHTTPHeaders would reach every origin.
+    expect(config.browser.contextOptions.extraHTTPHeaders).toBeUndefined()
     expect(config.outputDir).toBe(outputDir)
     expect(config.allowUnrestrictedFileAccess).toBe(false)
     expect(config.webmcp).toBe(false)
     expect(config.capabilities).toBeUndefined()
   })
 
-  it('loads the redirect guard on every page, for this origin only', async () => {
-    const { configFile } = await materialized()
+  it('loads the request guard on every page, with the backend, the session and its approved origins', async () => {
+    const { configFile, sessionId, dir } = await materialized()
     const config = JSON.parse(readFileSync(configFile, 'utf8')) as { browser: { initPage?: string[] } }
     expect(config.browser.initPage).toHaveLength(1)
     const guard = readFileSync(config.browser.initPage![0]!, 'utf8')
-    expect(guard).toContain(`const ALLOWED = ${JSON.stringify(ORIGIN)}`)
+    expect(guard).toContain(`const BACKEND = ${JSON.stringify(ORIGIN)}`)
+    expect(guard).toContain(`const MARKER = ${JSON.stringify(AGENT_ACTOR_HEADER.toLowerCase())}`)
     expect(guard).toContain('maxRedirects: 0')
-    expect(guard).toBe(redirectGuardSource(ORIGIN))
+    const approvedFile = path.join(dir, 'approved-origins.json')
+    expect(guard).toBe(redirectGuardSource({ backend: ORIGIN, aliases: [], sessionId, approvedFile }))
+    expect(JSON.parse(readFileSync(approvedFile, 'utf8'))).toEqual([])
+  })
+
+  it('widens the server allow-list to the aliases and the listed origins, and drops it under `*`', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const network = (file: string) => (JSON.parse(readFileSync(file, 'utf8')) as { network?: unknown }).network
+    const listed = materializeHeadlessBrowser({
+      sessionId: randomUUID(),
+      backendUrl: ORIGIN,
+      publicUrl: 'https://ui.example',
+      browserAllowedOrigins: 'https://docs.example',
+      dir: path.join(dir, 'a'),
+    })
+    expect(network(listed.configFile)).toEqual({ allowedOrigins: [ORIGIN, 'https://ui.example', 'https://docs.example'] })
+    // "Default is to allow all" (config.d.ts): the hook and the request guard are the gate.
+    const any = materializeHeadlessBrowser({ sessionId: randomUUID(), backendUrl: ORIGIN, browserAllowedOrigins: '*', dir: path.join(dir, 'b') })
+    expect(network(any.configFile)).toBeUndefined()
+  })
+
+  it('writes the approved origins the variable still allows, and each new approval, for the request guard', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const plugin = materializeHeadlessBrowser({
+      sessionId: randomUUID(),
+      backendUrl: ORIGIN,
+      browserAllowedOrigins: 'https://docs.example, https://wiki.example',
+      // Approved in an earlier turn, and since dropped from the list: not any more.
+      approvedOrigins: ['https://docs.example', 'https://old.example'],
+      dir,
+    })
+    const file = path.join(dir, 'approved-origins.json')
+    expect([...plugin.approved]).toEqual(['https://docs.example'])
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(['https://docs.example'])
+    plugin.approve('https://wiki.example')
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(['https://docs.example', 'https://wiki.example'])
   })
 
   it('asks for the Chromium sandbox only when told it works', async () => {
@@ -284,6 +419,158 @@ describe('buildHarnessOptions with the headless browser', () => {
       behavior: 'allow',
     })
     await expect(options.canUseTool!(t('browser_click'), { target: 'e3' }, ctx)).resolves.toMatchObject({ behavior: 'allow' })
+  })
+
+  it('hands the tool an alias URL rewritten onto the backend', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const options = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      headlessBrowser: {
+        sessionId: randomUUID(),
+        backendUrl: ORIGIN,
+        publicUrl: 'https://scadbuddy.internal.example',
+        dir: path.join(stateDir, 'b'),
+      },
+    })
+    const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
+    await expect(
+      options.canUseTool!(t('browser_navigate'), { url: 'https://scadbuddy.internal.example/m/builtin%3Abox?x=1' }, ctx),
+    ).resolves.toEqual({ behavior: 'allow', updatedInput: { url: `${ORIGIN}/m/builtin%3Abox?x=1` } })
+  })
+
+  it('parks the first navigation to an allowed origin, then remembers the origin for the session', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const dir = path.join(stateDir, 'b')
+    const asked: string[] = []
+    const remembered: [string, string | undefined][] = []
+    const options = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      approvalGate: (request) => {
+        asked.push(JSON.stringify(request.input))
+        return Promise.resolve({ approved: true, input: request.input, approvalId: `a${asked.length}`, decision: 'approved' })
+      },
+      headlessBrowser: {
+        sessionId: randomUUID(),
+        backendUrl: ORIGIN,
+        browserAllowedOrigins: 'https://docs.example',
+        rememberOrigin: (origin, approvalId) => {
+          remembered.push([origin, approvalId])
+          return Promise.resolve()
+        },
+        dir,
+      },
+    })
+    const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
+    const hook = options.hooks!.PreToolUse![0]!.hooks[0]!
+    const pre = (url: string) =>
+      hook(
+        { hook_event_name: 'PreToolUse', tool_name: t('browser_navigate'), tool_input: { url } } as never,
+        'tu',
+        { signal: new AbortController().signal },
+      )
+    // The hook forces the prompt, so no allow rule can skip the gate.
+    await expect(pre('https://docs.example/a')).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
+    await expect(options.canUseTool!(t('browser_navigate'), { url: 'https://docs.example/a' }, ctx)).resolves.toEqual({
+      behavior: 'allow',
+      updatedInput: { url: 'https://docs.example/a' },
+    })
+    expect(remembered).toEqual([['https://docs.example', 'a1']])
+    expect(JSON.parse(readFileSync(path.join(dir, 'approved-origins.json'), 'utf8'))).toEqual(['https://docs.example'])
+    // The same origin again: no hook verdict, no approval.
+    await expect(pre('https://docs.example/b')).resolves.toEqual({})
+    await expect(options.canUseTool!(t('browser_navigate'), { url: 'https://docs.example/b' }, ctx)).resolves.toMatchObject({
+      behavior: 'allow',
+    })
+    expect(asked).toHaveLength(1)
+  })
+
+  it('asks once for an origin that several calls in flight want to open', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const asked: string[] = []
+    const decisions: ((approved: boolean) => void)[] = []
+    const options = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      approvalGate: (request) => {
+        asked.push((request.input as { url: string }).url)
+        return new Promise((resolve) =>
+          decisions.push((approved) =>
+            resolve(
+              approved
+                ? { approved: true, input: request.input, approvalId: `a${asked.length}`, decision: 'approved' }
+                : { approved: false, message: 'The user denied it.', decision: 'denied' },
+            ),
+          ),
+        )
+      },
+      headlessBrowser: {
+        sessionId: randomUUID(),
+        backendUrl: ORIGIN,
+        browserAllowedOrigins: 'https://docs.example,https://wiki.example',
+        rememberOrigin: () => Promise.resolve(),
+        dir: path.join(stateDir, 'b'),
+      },
+    })
+    const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
+    const go = (url: string) => options.canUseTool!(t('browser_navigate'), { url }, ctx)
+    const settle = () => new Promise((resolve) => setImmediate(resolve))
+
+    const approvedCalls = [go('https://docs.example/a'), go('https://docs.example/b'), go('https://docs.example/c')]
+    await settle()
+    expect(asked).toEqual(['https://docs.example/a'])
+    decisions[0]!(true)
+    await expect(Promise.all(approvedCalls)).resolves.toEqual([
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/a' } },
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/b' } },
+      { behavior: 'allow', updatedInput: { url: 'https://docs.example/c' } },
+    ])
+
+    const deniedCalls = [go('https://wiki.example/a'), go('https://wiki.example/b')]
+    await settle()
+    expect(asked).toEqual(['https://docs.example/a', 'https://wiki.example/a'])
+    decisions[1]!(false)
+    await expect(Promise.all(deniedCalls)).resolves.toEqual([
+      { behavior: 'deny', message: 'The user denied it.' },
+      { behavior: 'deny', message: expect.stringMatching(/wiki\.example.*The user denied it\./s) },
+    ])
+    expect(asked).toHaveLength(2)
+  })
+
+  it('denies the navigation when the origin cannot be recorded, and without a gate', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'hb-'))
+    const ctx = { signal: new AbortController().signal, toolUseID: 'tu', suggestions: [] } as never
+    const failing = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      approvalGate: (request) => Promise.resolve({ approved: true, input: request.input, approvalId: 'a1' }),
+      headlessBrowser: {
+        sessionId: randomUUID(),
+        backendUrl: ORIGIN,
+        browserAllowedOrigins: '*',
+        rememberOrigin: () => Promise.reject(new Error('database down')),
+        dir: path.join(stateDir, 'a'),
+      },
+    })
+    await expect(failing.canUseTool!(t('browser_navigate'), { url: 'https://docs.example/' }, ctx)).resolves.toMatchObject({
+      behavior: 'deny',
+      message: expect.stringMatching(/database down/),
+    })
+    const ungated = buildHarnessOptions({
+      paths: { stateDir },
+      credential,
+      prompt: 'x',
+      headlessBrowser: { sessionId: randomUUID(), backendUrl: ORIGIN, browserAllowedOrigins: '*', dir: path.join(stateDir, 'b') },
+    })
+    await expect(ungated.canUseTool!(t('browser_navigate'), { url: 'https://docs.example/' }, ctx)).resolves.toMatchObject({
+      behavior: 'deny',
+      message: expect.stringMatching(/no approval surface/),
+    })
   })
 })
 
