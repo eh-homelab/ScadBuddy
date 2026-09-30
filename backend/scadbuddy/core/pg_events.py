@@ -21,8 +21,9 @@ rare and each transaction is short, so serialising them costs nothing noticeable
 Two paths lead there:
 
 - :meth:`PgNotifyEventBus.publish_in` writes the event **inside the caller's
-  transaction** -- the render queue's submit, reap and finish (`pg_store`) -- so the
-  event commits, or is rolled back, with the change it describes. It runs in a
+  transaction** -- the projection's submit, start and finish
+  (`render/projection.py`) -- so the event commits, or is rolled back, with the
+  change it describes. It runs in a
   savepoint: a failing log write is logged and never fails the change.
 - :meth:`PgNotifyEventBus.publish` is for changes that are not in the database (the
   git-backed catalogue, outputs, settings, fonts). It never blocks and is safe from

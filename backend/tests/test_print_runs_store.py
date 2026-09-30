@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
@@ -18,8 +17,7 @@ from scadbuddy.bambuddy.runs import (
     PrintRunStore,
 )
 from scadbuddy.core.events import InProcessEventBus
-from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.projection import JobProjection
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -28,8 +26,9 @@ RESULT = PrintRunResult(library_file_id=1, copies=1, bambuddy_url="http://b/queu
 
 
 @pytest.fixture
-def jobs(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path / "data"), pool_size=2)
+def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
+    """The pool the runs share with the render projection, as the app builds it."""
+    store = JobProjection(pg_conninfo, pool_size=2)
     store.open()
     try:
         yield store
@@ -37,14 +36,14 @@ def jobs(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
         store.close()
 
 
-async def test_two_claims_of_one_key_racing_get_one_run(jobs: PostgresJobStore) -> None:
+async def test_two_claims_of_one_key_racing_get_one_run(jobs: JobProjection) -> None:
     store = PrintRunStore(jobs.pool)
     claims = await asyncio.gather(*(store.claim(OUTPUT, "k") for _ in range(8)))
     assert len({run.id for run, _ in claims}) == 1
     assert sum(created for _, created in claims) == 1
 
 
-async def test_a_success_is_repeated_only_within_the_window(jobs: PostgresJobStore) -> None:
+async def test_a_success_is_repeated_only_within_the_window(jobs: JobProjection) -> None:
     store = PrintRunStore(jobs.pool, repeat_window=timedelta(0))
     run, _ = await store.claim(OUTPUT, "k")
     await store.succeed(run.id, RESULT)
@@ -56,7 +55,7 @@ async def test_a_success_is_repeated_only_within_the_window(jobs: PostgresJobSto
 
 
 async def test_a_run_this_process_is_still_running_at_shutdown_is_failed(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     store = PrintRunStore(jobs.pool)
     runs = PrintRuns(store, InProcessEventBus())
@@ -81,7 +80,7 @@ async def test_a_run_this_process_is_still_running_at_shutdown_is_failed(
     assert runs.running == frozenset()
 
 
-async def test_a_live_run_keeps_its_heartbeat(jobs: PostgresJobStore) -> None:
+async def test_a_live_run_keeps_its_heartbeat(jobs: JobProjection) -> None:
     store = PrintRunStore(jobs.pool, lost_after=timedelta(milliseconds=300))
     runs = PrintRuns(store, None, heartbeat_interval=0.05)
     run, _ = await store.claim(OUTPUT, "k")
@@ -106,7 +105,7 @@ async def _until_ended(runs: PrintRuns, run_id: str) -> None:
 
 
 async def test_a_run_whose_heartbeat_lapsed_is_not_expired_by_its_own_process(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     """A database blip or a saturated thread pool stops the beats; the process that is
     running the run knows it is alive and does not fail it."""
@@ -131,7 +130,7 @@ async def test_a_run_whose_heartbeat_lapsed_is_not_expired_by_its_own_process(
 
 
 async def test_a_lapsed_run_expired_by_another_replica_before_it_queues_never_queues(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     """Another replica cannot tell a slow run from a dead one and fails it, freeing the
     key for a retry. The slow run then finds itself failed at its ``before_enqueue`` and
@@ -162,7 +161,7 @@ async def test_a_lapsed_run_expired_by_another_replica_before_it_queues_never_qu
 
 
 async def test_a_lapsed_run_expired_after_it_started_queueing_keeps_its_key(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     """Expired once it had begun queueing: the print may be on the queue, so a retry
     on the other replica answers with this run, and the slow run's end stays out."""
@@ -192,7 +191,7 @@ async def test_a_lapsed_run_expired_after_it_started_queueing_keeps_its_key(
 
 
 async def test_a_run_expired_after_it_started_queueing_holds_its_key_from_its_real_end(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     """Expired as lost while it queues, the slow run goes on: each beat and its end
     move ``finished_at``, so the key is held for the repeat window after the run
@@ -226,7 +225,7 @@ async def test_a_run_expired_after_it_started_queueing_holds_its_key_from_its_re
 
 
 async def test_a_run_expired_before_it_queued_is_not_held_by_its_beats(
-    jobs: PostgresJobStore,
+    jobs: JobProjection,
 ) -> None:
     store = PrintRunStore(jobs.pool, lost_after=timedelta(0))
     other = PrintRunStore(jobs.pool, lost_after=timedelta(0))

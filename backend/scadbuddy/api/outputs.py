@@ -18,7 +18,7 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    QueueDep,
+    RenderDep,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
@@ -137,12 +137,12 @@ def create_output(
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
     outputs: OutputsDep,
-    queue: QueueDep,
+    render: RenderDep,
     store: SettingsStoreDep,
     events: EventsDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
-    job = require_job(queue, body.job_id)
+    job = require_job(render, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"

@@ -4,12 +4,13 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import get_fonts
+from scadbuddy.api.deps import STATE_ATTR, get_fonts
 from scadbuddy.api.params import InstalledFamilies, require_installed_fonts
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.fonts import (
@@ -370,3 +371,37 @@ def test_a_render_or_preset_naming_a_family_that_is_not_installed_is_refused(
 
 async def test_without_fontconfig_nothing_is_refused() -> None:
     await require_installed_fonts(FONT_SCHEMA, {"font": "Pacifico"}, Resolving(None))
+
+
+class _Mirror:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.published: list[str] = []
+
+    async def publish(self, family: str) -> None:
+        if self.fail:
+            raise RuntimeError("Bambuddy is unreachable")
+        self.published.append(family)
+
+
+def _with_store(app: FastAPI, mirror: _Mirror) -> None:
+    # Task 8's StoreBundle, as far as `install_font` reads it.
+    getattr(app.state, STATE_ATTR).store = SimpleNamespace(fonts=mirror)
+
+
+def test_an_installed_family_is_published_to_the_store(
+    app: FastAPI, client: TestClient, fonts: FakeBackedService
+) -> None:
+    mirror = _Mirror()
+    _with_store(app, mirror)
+    assert client.post("/api/v1/fonts/install", json={"family": "Pacifico"}).status_code == 200
+    assert mirror.published == ["Pacifico"]
+
+
+def test_a_failed_publish_still_answers_the_install(
+    app: FastAPI, client: TestClient, fonts: FakeBackedService, caplog: pytest.LogCaptureFixture
+) -> None:
+    _with_store(app, _Mirror(fail=True))
+    response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"})
+    assert response.status_code == 200 and response.json()["family"] == "Pacifico"
+    assert "could not publish an installed font family" in caplog.text

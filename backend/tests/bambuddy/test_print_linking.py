@@ -10,7 +10,6 @@ archives with that one hash.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -31,10 +30,9 @@ from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.projection import JobProjection
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -53,8 +51,8 @@ def _no_recent_scans() -> Iterator[None]:
 
 
 @pytest.fixture
-def pool_store(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path / "data"), pool_size=2)
+def pool_store(pg_conninfo: str) -> Iterator[JobProjection]:
+    store = JobProjection(pg_conninfo, pool_size=2)
     store.open()
     try:
         yield store
@@ -63,12 +61,12 @@ def pool_store(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
 
 
 @pytest.fixture
-def links(pool_store: PostgresJobStore) -> PrintLinkStore:
+def links(pool_store: JobProjection) -> PrintLinkStore:
     return PrintLinkStore(pool_store.pool)
 
 
 @pytest.fixture
-def uploads(pool_store: PostgresJobStore) -> BambuddyUploadStore:
+def uploads(pool_store: JobProjection) -> BambuddyUploadStore:
     return BambuddyUploadStore(pool_store.pool)
 
 

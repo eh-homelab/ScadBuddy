@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
 
 import psycopg
 import pytest
 
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
-from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.pg_store import PostgresJobStore
+from scadbuddy.render.projection import JobProjection
 
 OUTPUT = "a" * 32
 OTHER = "b" * 32
@@ -20,8 +18,8 @@ pytestmark = pytest.mark.requires_postgres
 
 
 @pytest.fixture
-def jobs(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path / "data"), pool_size=2)
+def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
+    store = JobProjection(pg_conninfo, pool_size=2)
     store.open()
     try:
         yield store
@@ -30,7 +28,7 @@ def jobs(pg_conninfo: str, tmp_path: Path) -> Iterator[PostgresJobStore]:
 
 
 @pytest.fixture
-def links(jobs: PostgresJobStore) -> PrintLinkStore:
+def links(jobs: JobProjection) -> PrintLinkStore:
     return PrintLinkStore(jobs.pool)
 
 
@@ -38,7 +36,7 @@ def link(archive_id: int, **fields: object) -> PrintLink:
     return PrintLink(archive_id=archive_id, matched_by="queue_item", **fields)  # type: ignore[arg-type]
 
 
-def test_the_table_is_created_on_a_fresh_database(jobs: PostgresJobStore, pg_conninfo: str) -> None:
+def test_the_table_is_created_on_a_fresh_database(jobs: JobProjection, pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         columns = {
             row[0]
@@ -96,7 +94,7 @@ async def test_deleting_outputs_deletes_their_links(links: PrintLinkStore) -> No
     assert await links.output_for(40) == OTHER
 
 
-async def test_a_slice_keeps_the_hash_of_its_file(jobs: PostgresJobStore) -> None:
+async def test_a_slice_keeps_the_hash_of_its_file(jobs: JobProjection) -> None:
     uploads = BambuddyUploadStore(jobs.pool)
     await uploads.record(OUTPUT, LibraryCopy(id=11, folder_id=2, target_key="H2C"))
     await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
@@ -169,7 +167,7 @@ async def test_a_filtered_page_keeps_each_archive_with_the_output_that_saw_it_fi
 
 
 async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
-    links: PrintLinkStore, jobs: PostgresJobStore
+    links: PrintLinkStore, jobs: JobProjection
 ) -> None:
     # #609 review: `output_for`, `linked` and `page` break a first_seen tie the same
     # way (the lower output id), so the proxy and the prints API name one owner.
@@ -188,9 +186,7 @@ async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
     assert row.output_id == OUTPUT
 
 
-def test_the_owner_lookup_has_an_index_in_its_order(
-    jobs: PostgresJobStore, pg_conninfo: str
-) -> None:
+def test_the_owner_lookup_has_an_index_in_its_order(jobs: JobProjection, pg_conninfo: str) -> None:
     # #609 review: the page's DISTINCT ON walks (archive_id DESC, first_seen,
     # output_id); an index in that order spares it a sort of the whole table.
     with psycopg.connect(pg_conninfo) as conn:
