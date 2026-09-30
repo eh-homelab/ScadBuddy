@@ -235,8 +235,16 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It may open only this origin, which serves the SPA.
-        headlessBrowser: { backendUrl: config.backendUrl, sandbox: chromiumSandbox },
+        // It opens the backend, which serves the SPA; the UI's public origins
+        // are rewritten onto it, and SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what
+        // else a human may let it open (harness/browserOrigins.ts).
+        headlessBrowser: {
+          backendUrl: config.backendUrl,
+          ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
+          ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
+          ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
+          sandbox: chromiumSandbox,
+        },
         credential: async () => {
           if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
           const credential = await credentials.reveal(kek.kek)
@@ -338,12 +346,16 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     }, 2_000).unref()
     // Running turns stop; their pending approvals stay pending (approvals/service.ts).
     sessions?.abortAll()
+    const turnsEnded = sessions?.settled()
     void shutdown({
       // End the /mcp sessions and the session event streams first: their
       // standing SSE responses would otherwise hold server.close() until the deadline.
       closeSessions: async () => {
         // Memory retains started by the last turns (memory/hindsight.ts), within the same deadline.
         await drainRetains()
+        // The aborted turns append their final session.status/session.done, and
+        // publish them, before closeDatabase runs; within the same deadline (#802).
+        await turnsEnded
         await app.close()
         resources.close()
         await events?.close()
@@ -352,10 +364,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
         await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
         await pluginForwarder.close()
       },
-      // The session-event publisher closes only now, after the drain: turns
-      // aborted above append their final session.status/session.done while they
-      // wind down, and closing it first would swallow that NOTIFY, so another
-      // replica's followers would never wake (#715 review; busEvents.ts).
+      // The session-event publisher closes only now, after the drain, which
+      // waited for the turns aborted above to append their final
+      // session.status/session.done (settled(), up to the deadline): closing it
+      // first would swallow that NOTIFY, so another replica's followers would
+      // never wake (#715 review; busEvents.ts).
       closeDatabase: database
         ? async () => {
             sessionEvents?.close()
