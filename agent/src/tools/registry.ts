@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import type { BrowserTabs } from '../bridge/hub.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -47,6 +48,8 @@ export type ToolServices = {
   maxInlineBytes?: number
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
+  /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
+  browser?: BrowserTabs | undefined
 }
 
 export type ToolContext = ToolServices & {

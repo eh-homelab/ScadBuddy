@@ -260,6 +260,84 @@ async def _spool_sides(
     return slot_sides(own, assignments or [], printer_status, printer_id=printer_id), assignments
 
 
+async def _extruder_plan(
+    client: BambuddyClient,
+    source: PrintSource,
+    request: PrintRunRequest,
+    printer_id: int,
+    plate_ids: list[int],
+) -> tuple[ExtruderPlan, PrinterStatus | None, list[SpoolAssignment] | None]:
+    """:func:`plan_extruders` for ``request`` on ``printer_id``, with the printer status
+    and spool assignments read for it, so the run reuses them. Reads nothing that
+    uploads: the source's used slots come from its own 3MF or Bambuddy's plate read."""
+    printer_status = await _read_status(client, printer_id)
+    used = await source.used_slots(client, plate_ids)
+    sides, assignments = await _spool_sides(
+        client, request.filament_plan, used, printer_id, printer_status
+    )
+    size = request.choices.nozzles[0].size
+    return (
+        plan_extruders(sides, printer_status, size=size, used_slots=used),
+        printer_status,
+        assignments,
+    )
+
+
+def _refusal(plan: ExtruderPlan) -> str:
+    """The one detail the run refuses ``plan``'s errors with, and the check repeats."""
+    return " ".join(plan.errors)
+
+
+class PrintCheck(BaseModel):
+    """What the nozzles make of the dialog's choices before Print (#755): the run's own
+    :func:`plan_extruders` verdict. ``errors`` holds the run's 422 detail word for word,
+    the reasons joined as the run joins them (#758 review); ``warnings`` what it would
+    carry back as advisories."""
+
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+
+
+async def check_print(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+) -> PrintCheck:
+    """The run's nozzle verdict for ``request``, with nothing uploaded, sliced or queued.
+
+    Only :func:`plan_extruders`' verdict: the other refusals need the catalogue or the
+    uploaded file, and the run still states them. With no plate or no printer there is
+    nothing to judge here, and the run says why."""
+    plate_ids = await source.plate_ids(client) if request.all_plates else [request.plate_id]
+    printer_id = request.printer_id or settings.printer_id
+    if not plate_ids or printer_id is None:
+        return PrintCheck()
+    plan, _, _ = await _extruder_plan(client, source, request, printer_id, plate_ids)
+    return PrintCheck(errors=[_refusal(plan)] if plan.errors else [], warnings=plan.warnings)
+
+
+async def check_for_output(
+    client: BambuddyClient,
+    store: OutputStore,
+    uploads: BambuddyUploadStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+) -> PrintCheck:
+    """:func:`check_print` for an output ScadBuddy rendered."""
+    return await check_print(
+        client, OutputSource(store, uploads, meta, settings), settings, request
+    )
+
+
+async def check_for_library(
+    client: BambuddyClient, settings: StoredSettings, file_id: int, request: PrintRunRequest
+) -> PrintCheck:
+    """:func:`check_print` for a file already in Bambuddy's library."""
+    return await check_print(client, await LibrarySource.load(client, file_id), settings, request)
+
+
 @dataclass(frozen=True)
 class PreparedRun:
     """What :func:`prepare_run` checked, handed on to :func:`execute_run`."""
@@ -335,16 +413,11 @@ async def prepare_run(
         )
     # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
     # another size pauses the printer at the first layer, so such a run is refused.
-    printer_status = await _read_status(client, printer_id)
-    used = await source.used_slots(client, plate_ids)
-    sides, assignments = await _spool_sides(
-        client, request.filament_plan, used, printer_id, printer_status
-    )
-    extruders = plan_extruders(
-        sides, printer_status, size=request.choices.nozzles[0].size, used_slots=used
+    extruders, printer_status, assignments = await _extruder_plan(
+        client, source, request, printer_id, plate_ids
     )
     if extruders.errors:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(extruders))
     return PreparedRun(
         plate_ids=plate_ids,
         printer_id=printer_id,

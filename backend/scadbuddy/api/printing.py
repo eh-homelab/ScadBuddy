@@ -31,8 +31,10 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.print_run import (
+    PrintCheck,
     PrintRunRequest,
     PrintRunResult,
+    check_for_output,
     chosen_project,
     execute_run,
     filament_options_for_output,
@@ -229,6 +231,30 @@ async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no print run {run_id}")
     return run
+
+
+@router.post(
+    "/outputs/{output_id}/check",
+    response_model=PrintCheck,
+    summary="What the nozzles make of the dialog's choices, before Print",
+)
+async def post_check(
+    output_id: OutputIdPath,
+    body: PrintRunRequest,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    store: SettingsStoreDep,
+) -> PrintCheck:
+    """The run's own nozzle verdict for the body the run would take (#755), so the
+    dialog can say before Print what the run would refuse. ``errors`` are exactly the
+    run's 422 for the nozzles; ``warnings`` the advisories it would carry back.
+
+    Nothing is uploaded, sliced or queued; the used slots are read from the local 3MF.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await check_for_output(client, outputs, uploads, meta, settings, body)
 
 
 @router.get(
