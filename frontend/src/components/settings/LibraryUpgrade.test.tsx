@@ -138,6 +138,53 @@ describe('LibraryUpgrade', () => {
     ])
   })
 
+  it('marks a check stale once the candidate ref changes, and current again when it changes back', async () => {
+    const { user } = await open()
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    await within(row('Name Keychain')).findByTestId('library-check')
+
+    const input = screen.getByLabelText('Candidate ref')
+    await user.clear(input)
+    await user.type(input, 'v2.0.800')
+    expect(within(row('Name Keychain')).queryByTestId('library-check')).toBeNull()
+    expect(within(row('Name Keychain')).queryByText(/Parses/)).toBeNull()
+    expect(within(row('Name Keychain')).getByTestId('library-check-stale')).toHaveTextContent(
+      'Checked at v2.0.761, not v2.0.800; check again.',
+    )
+
+    await user.clear(input)
+    await user.type(input, 'v2.0.761')
+    expect(within(row('Name Keychain')).getByTestId('library-check')).toHaveTextContent('Parses at v2.0.761')
+    expect(within(row('Name Keychain')).queryByTestId('library-check-stale')).toBeNull()
+  })
+
+  it('lets rows be ticked while a check runs, but not during a move', async () => {
+    server.use(
+      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
+        await delay(300)
+        return undefined
+      }),
+      http.patch('/api/v1/models/:slug/libraries/:name', async () => {
+        await delay(300)
+        return undefined
+      }),
+    )
+    const { user } = await open()
+    await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
+    const gridfinity = screen.getByRole('checkbox', { name: 'Move Gridfinity Bin' })
+    expect(gridfinity).toBeEnabled()
+    await user.click(gridfinity)
+    expect(gridfinity).toBeChecked()
+    // Moving waits for the check: both hold the server's checkout gate.
+    expect(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' })).toBeDisabled()
+    await within(row('Name Keychain')).findByTestId('library-check')
+
+    await user.click(screen.getByRole('button', { name: 'Move 1 model to v2.0.761' }))
+    expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeDisabled()
+    expect(await within(row('Gridfinity Bin')).findByTestId('library-moved')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Move Name Keychain' })).toBeEnabled()
+  })
+
   it('shows a failing check with its diagnostics and log tail', async () => {
     const { user } = await open(BREAKING_REF)
     await user.click(within(row('Gridfinity Bin')).getByRole('button', { name: 'Check' }))

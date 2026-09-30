@@ -25,7 +25,8 @@ function short(commit: string): string {
   return commit.slice(0, 7)
 }
 
-type CheckState = { running: true } | { running: false; result?: LibraryCheck; error?: string }
+/** `ref` is the candidate the check was asked for: a result for another ref is stale. */
+type CheckState = { ref: string } & ({ running: true } | { running: false; result?: LibraryCheck; error?: string })
 type MoveState =
   | { running: true }
   | { running: false; moved?: { ref: string; commit: string }; error?: string }
@@ -137,12 +138,13 @@ function LibraryUsers({
 
   async function check(slug: string) {
     if (busy || !candidate) return
-    setChecks((all) => ({ ...all, [slug]: { running: true } }))
+    const ref = candidate
+    setChecks((all) => ({ ...all, [slug]: { ref, running: true } }))
     try {
-      const result = await api.checkModelLibrary(slug, library, { ref: candidate })
-      setChecks((all) => ({ ...all, [slug]: { running: false, result } }))
+      const result = await api.checkModelLibrary(slug, library, { ref })
+      setChecks((all) => ({ ...all, [slug]: { ref, running: false, result } }))
     } catch (caught) {
-      setChecks((all) => ({ ...all, [slug]: { running: false, error: message(caught) } }))
+      setChecks((all) => ({ ...all, [slug]: { ref, running: false, error: message(caught) } }))
     }
   }
 
@@ -215,6 +217,7 @@ function LibraryUsers({
             move={moves[user.slug]}
             ticked={ticked.has(user.slug)}
             busy={busy}
+            moving={moving}
             onCheck={() => void check(user.slug)}
             onTick={(on) => tick(user.slug, on)}
           />
@@ -245,6 +248,7 @@ function UserRow({
   move,
   ticked,
   busy,
+  moving,
   onCheck,
   onTick,
 }: {
@@ -255,6 +259,8 @@ function UserRow({
   move: MoveState | undefined
   ticked: boolean
   busy: boolean
+  /** Ticks stay open during a check; a move reads them once, as it starts. */
+  moving: boolean
   onCheck: () => void
   onTick: (on: boolean) => void
 }) {
@@ -275,7 +281,7 @@ function UserRow({
               type="checkbox"
               checked={ticked}
               onChange={(event) => onTick(event.target.checked)}
-              disabled={busy}
+              disabled={moving}
               aria-label={`Move ${name}`}
               className="mt-1"
             />
@@ -312,7 +318,13 @@ function UserRow({
           </Button>
         )}
       </div>
-      {check && !check.running && <CheckResult check={check} />}
+      {check && !check.running && check.ref === candidate && <CheckResult check={check} />}
+      {check && !check.running && check.ref !== candidate && (
+        <p className="mt-2 text-[12px] text-muted" data-testid="library-check-stale">
+          Checked at <span className="sb-num">{check.ref}</span>, not{' '}
+          {candidate ? <span className="sb-num">{candidate}</span> : 'the candidate'}; check again.
+        </p>
+      )}
       {move?.running && (
         <p className="mt-2 flex items-center gap-2 text-[12px] text-muted">
           <Spinner /> Re-pinning
