@@ -133,6 +133,12 @@ export function headerSecretVariants(value: string): string[] {
 
 export const DEFAULT_AUTH_HEADER = 'Authorization'
 
+/**
+ * The remote plugin whose endpoint and bank the assistant's automatic memory
+ * uses (memory/hindsight.ts): a Hindsight MCP URL, `…/mcp/<bank_id>/`.
+ */
+export const HINDSIGHT_PLUGIN = 'hindsight'
+
 /** A request the registry refuses; `status` is the HTTP status the route answers with. */
 export class PluginError extends Error {
   override name = 'PluginError'

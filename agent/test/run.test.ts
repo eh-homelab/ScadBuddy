@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -11,7 +12,10 @@ import { PluginRefusedError } from '../src/harness/plugins.js'
 import { buildHarnessOptions, credentialEnv, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { testConnection } from '../src/harness/testConnection.js'
+import { createMemoryHooks, HindsightClient } from '../src/memory/hindsight.js'
+import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { startFakeHindsight } from './support/fakeHindsight.js'
 
 const API_KEY = 'sk-ant-api03-unit-test-key-000011112222'
 const GATEWAY_TOKEN = 'gw-unit-test-token-3333444455556666'
@@ -210,6 +214,48 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)
+  })
+
+  it('recalls into the model’s context at the prompt and retains the transcript at the end (memory hooks)', async () => {
+    const hindsight = await startFakeHindsight()
+    try {
+      hindsight.memories = ['The user prints boxes in PETG.']
+      script = () => ({ text: 'Hello from the fake.' })
+      const stderrLines: string[] = []
+      const memory = createMemoryHooks({
+        client: new HindsightClient({ apiBase: `http://hindsight.invalid:${hindsight.port}`, bankId: 'b', address: '127.0.0.1' }),
+        secrets: [GATEWAY_TOKEN],
+        log: (line) => stderrLines.push(line),
+      })
+      const sessionId = randomUUID()
+      const { result } = await collect({
+        paths: { stateDir },
+        credential: gateway(),
+        prompt: 'Say hello',
+        model: 'claude-sonnet-4-5',
+        maxTurns: 1,
+        sessionId,
+        memoryHooks: memory.hooks,
+      })
+      expect(result).toMatchObject({ subtype: 'success' })
+      await memory.settled()
+      expect(stderrLines).toEqual([])
+      // Recall ran against the prompt, and the model saw the memory, inside the envelope.
+      expect(hindsight.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['Say hello'])
+      const sent = JSON.stringify(fake.messageCalls().at(-1)?.body?.messages)
+      expect(sent).toContain('The user prints boxes in PETG.')
+      expect(sent).toContain(UNTRUSTED_KEY)
+      // Retain upserted the conversation, without the injected memories.
+      const [retain] = hindsight.retains()
+      const item = (retain!.body as { items: { document_id: string; content: string }[] }).items[0]!
+      expect(item.document_id).toBe(`conversation:${sessionId}`)
+      expect(item.content).toContain('{"role":"user","content":"Say hello"')
+      expect(item.content).toContain('{"role":"assistant","content":"Hello from the fake."}')
+      expect(item.content).not.toContain('PETG')
+      expect(item.content).not.toContain(GATEWAY_TOKEN)
+    } finally {
+      await hindsight.close()
+    }
   })
 
   it('routes an in-process MCP tool call through the permission seam and runs it', async () => {
