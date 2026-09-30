@@ -423,6 +423,7 @@ async def get_job_colours(
     render: RenderDep,
     paths: PathsDep,
     config: ConfigDep,
+    state: StateDep,
     view: ViewName = "iso",
     size: Annotated[
         int,
@@ -434,6 +435,7 @@ async def get_job_colours(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
+    await materialize_result(state.store.blobs, job.result)
     glb = paths.root / job.result.preview_glb
     if not glb.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
