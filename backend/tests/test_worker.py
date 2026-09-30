@@ -736,7 +736,10 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
     loops: list[asyncio.AbstractEventLoop | None] = []
 
     def build(_settings: Settings) -> NoReturn:
-        loops.append(asyncio._get_running_loop())
+        try:
+            loops.append(asyncio.get_running_loop())
+        except RuntimeError:
+            loops.append(None)  # no loop in this thread: off the loop, as it should be
         raise StoreNotReadyError("stop here")
 
     monkeypatch.setattr(worker_module, "build_worker_deps", build)
