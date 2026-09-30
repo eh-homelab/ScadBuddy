@@ -79,7 +79,7 @@ describe('catalogue filters through navigate (#276)', () => {
 
     expect(await bridge.call('navigate', { route: '/?tag=keychain&sort=name' })).toEqual({
       ok: true,
-      result: { route: '/?tag=keychain&sort=name' },
+      result: { route: '/?tag=keychain&sort=name&view=cards' },
     })
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Gridfinity Bin' })).toBeNull())
     expect(
@@ -177,6 +177,10 @@ describe('settings tools', () => {
     // The API key is not a field at all.
     const key = await bridge.call('set_field', { field: 'bambuddy_api_key', value: 'x' })
     expect(!key.ok && key.error.code).toBe('invalid_args')
+    // #312: the pipeline is not a field any more, and the form does not report one.
+    const pipeline = await bridge.call('set_field', { field: 'pipeline_id', value: '1' })
+    expect(!pipeline.ok && pipeline.error.code).toBe('invalid_args')
+    expect(JSON.stringify(form)).not.toContain('pipeline_id')
   })
 
   it('tests the stored connection, and refuses while the form is unsaved', async () => {
@@ -191,7 +195,7 @@ describe('settings tools', () => {
     expect(put).not.toHaveBeenCalled()
 
     // Save is the user's: the fallback click will not press it either.
-    const save = await bridge.call('click', { role: 'button', name: 'Save changes' })
+    const save = await bridge.call('click', { role: 'button', name: 'Save Connection' })
     expect(!save.ok && save.error.code).toBe('refused')
     const key = await bridge.call('fill', { label: 'API key', value: 'secret' })
     expect(!key.ok && key.error.code).toBe('refused')

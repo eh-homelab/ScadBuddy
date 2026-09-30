@@ -1,5 +1,7 @@
 import path from 'node:path'
 import {
+  type HookCallbackMatcher,
+  type HookEvent,
   type McpHttpServerConfig,
   type McpSdkServerConfigWithInstance,
   type Options,
@@ -12,14 +14,18 @@ import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
   assertHeadlessPlugin,
-  browserInputProblem,
+  browserInputGuard,
   browserTierOf,
   disallowedBrowserTools,
   type HeadlessBrowserOptions,
   materializeHeadlessBrowser,
+  originToApprove,
 } from './headlessBrowser.js'
 import {
   type ApprovalGate,
+  type ApprovalRequest,
+  type ApprovalVerdict,
+  decide,
   type DecisionListener,
   type InputGuard,
   makeCanUseTool,
@@ -67,6 +73,13 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //   - the headless browser (#349, headlessBrowser.ts) when the session has it
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
 //     tier map, its disallowed tools and its origin/file-name guard;
+//   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
+//     `Stop` and optionally `PostToolUse` callbacks that recall from and
+//     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
+//     this process, so they are not the command hooks plugins.ts refuses;
+//     they sit beside the permission seam's `PreToolUse` hook;  
+//     a human's approval of an off-origin navigation also approves
+//     that origin for the session (browserOrigins.ts).
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -138,8 +151,25 @@ export type HarnessRun = {
   cwd?: string
   /** Yield `stream_event` messages (text deltas) as well as complete messages. */
   includePartialMessages?: boolean
+  /**
+   * SDK callback hooks for automatic memory (memory/hindsight.ts
+   * `createMemoryHooks`), added beside the permission seam's `PreToolUse`.
+   */
+  memoryHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+}
+
+/** The permission seam's PreToolUse hook first, then the memory hooks, by event. */
+function mergeHooks(
+  base: Partial<Record<HookEvent, HookCallbackMatcher[]>>,
+  extra: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined,
+): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  const out = { ...base }
+  for (const [event, matchers] of Object.entries(extra ?? {}) as [HookEvent, HookCallbackMatcher[]][]) {
+    out[event] = [...(out[event] ?? []), ...matchers]
+  }
+  return out
 }
 
 /** The credential's environment variables, and nothing else. */
@@ -199,7 +229,20 @@ export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>)
   const base = run.tierOf ?? (() => undefined)
   if (!run.remotePlugins?.length) return base
   const plugins = pluginTierResolver(run.remotePlugins)
-  return (toolName) => plugins(toolName) ?? base(toolName)
+  return (toolName, input) => plugins(toolName) ?? base(toolName, input)
+}
+
+/** `promise`'s value, or undefined once `signal` aborts first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) return Promise.resolve(undefined)
+  return new Promise((resolve) => {
+    const onAbort = () => resolve(undefined)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void promise.then((value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(value)
+    })
+  })
 }
 
 function linkedController(signal: AbortSignal | undefined): AbortController {
@@ -222,13 +265,65 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(run.mcpServers ?? {})))
   let tierOf: TierResolver = ownTiers
   let guard: InputGuard | undefined
+  let gate = run.approvalGate
   let browserPlugin: string | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
+    const remember = run.headlessBrowser.rememberOrigin
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
-    tierOf = (name) => browserTierOf(name) ?? ownTiers(name)
-    guard = (name, input) => browserInputProblem(name, input, browser.allowedOrigin)
+    tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
+    guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
+    const inner = gate
+    if (inner) {
+      // The approval of the first navigation to an origin approves the origin
+      // for the session: recorded durably first (a failure denies the call),
+      // then in the set the guard and the request guard read, before the
+      // navigation runs.
+      // Calls in flight for an origin already waiting on a human wait on
+      // that one decision instead of each asking: approved, they are decided
+      // again (and now allowed); refused, they are refused with it.
+      const asking = new Map<string, Promise<ApprovalVerdict>>()
+      const approveOrigin = async (request: ApprovalRequest): Promise<ApprovalVerdict> => {
+        const verdict = await inner(request)
+        if (!verdict.approved) return verdict
+        const origin = originToApprove(request.toolName, verdict.input, browser.origins, browser.approved)
+        if (origin !== undefined) {
+          await remember?.(origin, verdict.approvalId)
+          browser.approve(origin)
+        }
+        return verdict
+      }
+      gate = async (request) => {
+        const origin = originToApprove(request.toolName, request.input, browser.origins, browser.approved)
+        if (origin === undefined) return approveOrigin(request)
+        const pending = asking.get(origin)
+        if (pending === undefined) {
+          const own = approveOrigin(request)
+          asking.set(origin, own)
+          try {
+            return await own
+          } finally {
+            asking.delete(origin)
+          }
+        }
+        const first = await untilAborted(
+          pending.catch((err: unknown): ApprovalVerdict => ({
+            approved: false,
+            message: err instanceof Error ? err.message : String(err),
+          })),
+          request.signal,
+        )
+        if (first === undefined) return { approved: false, message: `The call stopped while ${origin} awaited approval.` }
+        if (browser.approved.has(origin)) {
+          const decision = decide(request.toolName, tierOf, request.input, guard)
+          if (decision.decision === 'allow') return { approved: true, input: decision.input ?? request.input }
+          return inner(request)
+        }
+        const why = first.approved ? '' : ` ${first.message}`
+        return { approved: false, message: `Opening ${origin} was not approved for this session.${why}` }
+      }
+    }
   }
   const options: Options = {
     ...base,
@@ -241,15 +336,29 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate, guard),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate, guard)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, gate, guard),
+    hooks: mergeHooks(
+      { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, gate, guard)] },
+      run.memoryHooks,
+    ),
     permissionMode: 'default',
   }
   if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
-  if (run.sessionStore !== undefined) options.sessionStore = run.sessionStore
+  if (run.sessionStore !== undefined) {
+    options.sessionStore = run.sessionStore
+    // 'eager': every transcript frame is appended as it is written, not at the
+    // turn's end ('batched', the default: "flush at end-of-turn or when pending
+    // thresholds are exceeded", sdk.d.ts 0.3.283 SessionStoreFlush). An aborted
+    // query still flushes its batch as it ends, if the process lives that long
+    // (SessionManager.stopTurns waits for it; test/sessions.e2e.test.ts). One
+    // that dies first (a SIGKILL, an OOM, the grace period running out) would
+    // otherwise leave nothing of its turn in Postgres, not even the user's
+    // message, and the next turn would resume without it, as on 2026-09-30.
+    options.sessionStoreFlush = 'eager'
+  }
   if (run.cwd !== undefined) options.cwd = run.cwd
   if (run.includePartialMessages) options.includePartialMessages = true
   const plugins = (run.pluginPaths ?? []).map((p) => {

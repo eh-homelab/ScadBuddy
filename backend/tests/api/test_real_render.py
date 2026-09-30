@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import time
+import uuid
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,7 +21,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
-from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.support.temporal import WorkflowReaper
 
 pytestmark = pytest.mark.requires_openscad
 
@@ -32,10 +33,22 @@ color("#0000FF") translate([size, 0, 0]) cube(size);
 
 
 @pytest.fixture
-def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestClient]:
+def client(
+    data_dir: Path,
+    seed_dir: Path,
+    pg_conninfo: str,
+    temporal_address: str,
+    workflow_reaper: WorkflowReaper,
+) -> Iterator[TestClient]:
+    """The app renders on the session's Temporal with its own in-process worker on a
+    task queue of its own, as the ``settings`` fixture does, but with the real openscad."""
+    queue = f"real-{uuid.uuid4().hex[:12]}"
     settings = Settings(
         database_url=pg_conninfo,
-        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        temporal_address=temporal_address,
+        temporal_namespace="default",
+        temporal_task_queue_render=queue,
+        temporal_worker_inprocess=True,
         openscad=load_config().openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
@@ -45,6 +58,7 @@ def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestCli
     )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+    workflow_reaper.terminate(queue)
 
 
 def test_upload_render_and_persist_against_a_real_openscad(client: TestClient) -> None:
@@ -230,9 +244,12 @@ def test_a_sample_the_template_ships_is_rendered_into_every_part(
     ]
 
 
-def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None:
-    """#267: `job.progress` names each step as it starts, between `job.running` and
-    `job.done`, so the preview can say what a slow render is doing."""
+def test_a_real_render_announces_its_states_in_order(client: TestClient) -> None:
+    """#267 asked for `job.progress` per stage; on Temporal (#424) the projection announces
+    the job's states, `job.running` when the workflow starts and `job.done` when it
+    finishes, and the stage names live in the job's `steps`. The model and the source
+    are unique to this test: the same source and parameters would be answered by the
+    piece another test already rendered on the session's Temporal, without a run."""
     app = client.app
     assert isinstance(app, FastAPI)
     bus = getattr(app.state, STATE_ATTR).events
@@ -242,11 +259,15 @@ def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None
     assert isinstance(local, InProcessEventBus)
     seen: list[Event] = []
     local.add_listener(seen.append)
-    client.post(
+    token = uuid.uuid4().hex[:8]
+    source = f"// stages {token}\n{TWO_COLOUR}"
+    created = client.post(
         "/api/v1/models",
-        files={"file": ("Stages.scad", TWO_COLOUR.encode(), "application/octet-stream")},
+        files={"file": (f"Stages {token}.scad", source.encode(), "application/octet-stream")},
     )
-    accepted = client.post("/api/v1/models/stages/render", json={"params": {"size": 6}})
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    accepted = client.post(f"/api/v1/models/{slug}/render", json={"params": {"size": 6}})
     job = wait_for_job(client, accepted.json()["job_id"])
     assert job["status"] == "done", job["error"]
     deadline = time.monotonic() + 5
@@ -254,17 +275,8 @@ def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None
         time.sleep(0.05)
 
     mine = [event for event in seen if isinstance(event, JobEvent | JobProgress)]
-    assert [event.stage if isinstance(event, JobProgress) else event.kind for event in mine] == [
-        "job.pending",
-        "job.running",
-        "source",
-        "render",
-        "split",
-        "solids",
-        "thumbnail",
-        "write",
-        "job.done",
-    ]
+    assert [event.kind for event in mine] == ["job.pending", "job.running", "job.done"]
+    assert all(event.job_id == job["id"] for event in mine)
 
 
 # #289: the plate convention (spec §6.4) against the real binary: `$plate` is set per
