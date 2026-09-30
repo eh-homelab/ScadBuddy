@@ -6,6 +6,7 @@ import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Customizer (issue #251): the schema (with the `// color` and `// font`
 // overlays), validating a parameter set, rendering and waiting with progress,
@@ -285,14 +286,21 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'list_presets',
-    description: "A model's saved parameter presets, including read-only ones a template ships.",
-    input: z.object({ slug }),
+    description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
       'preset names and values written by model authors or users',
     routes: ['GET /api/v1/models/{slug}/presets'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`)),
+    handler: async ({ slug, ...args }, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`),
+          args,
+          (p) => p.id,
+          'list_presets',
+        ),
+      ),
   }),
 
   defineTool({

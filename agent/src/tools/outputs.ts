@@ -3,6 +3,7 @@ import { ok } from './call.js'
 import { binary } from './binary.js'
 import { outputId, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Outputs & plates (issue #251): list and get outputs, their plates and plate
 // images, plate fit, and the 3MF. Routes: backend/scadbuddy/api/{outputs,plates}.py.
@@ -10,12 +11,19 @@ import { blob, defineTool, image, json, type Tool } from './registry.js'
 export const outputTools: Tool[] = [
   defineTool({
     name: 'list_outputs',
-    description: "A model's saved outputs (finished renders kept as 3MFs), newest first.",
-    input: z.object({ slug }),
+    description: "A model's saved outputs (finished renders kept as 3MFs), newest first." + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     routes: ['GET /api/v1/models/{slug}/outputs'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug } } }), `list outputs of ${slug}`)),
+    handler: async ({ slug, ...args }, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/models/{slug}/outputs', { params: { path: { slug } } }), `list outputs of ${slug}`),
+          args,
+          (o) => o.id,
+          'list_outputs',
+        ),
+      ),
   }),
 
   defineTool({
@@ -193,11 +201,15 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'list_plates',
-    description: 'Every build plate ScadBuddy knows, by printer model.',
-    input: z.object({}),
+    description: 'The build plates ScadBuddy knows, by printer model, and the configured default.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     routes: ['GET /api/v1/plates'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/plates'), 'list plates')),
+    handler: async (args, { backend }) => {
+      const { default: fallback, plates } = await ok(backend.GET('/api/v1/plates'), 'list plates')
+      const { items, ...rest } = page(plates, args, (p) => `${p.model ?? ''}:${p.name}`, 'list_plates')
+      return json({ default: fallback, plates: items, ...rest })
+    },
   }),
 
   defineTool({

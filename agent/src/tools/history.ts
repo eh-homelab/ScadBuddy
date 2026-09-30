@@ -2,26 +2,37 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { commit, slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // History (issue #251): versions, diff, source at a commit, restore, and a
 // duplicate's upstream status/merge/dismiss/detach. Every write here is itself
 // a revision, so it is `write`, reversible through history (spec §8.1).
 // Routes: backend/scadbuddy/api/{versions,upstream}.py over library/history.py.
 
+/** The backend's cap on one versions read (`limit` ≤ 500 in backend/openapi.json). */
+const HISTORY_WINDOW = 500
+
 export const historyTools: Tool[] = [
   defineTool({
     name: 'list_versions',
-    description: "A model's revision history, newest first: commit id, message and time.",
-    input: z.object({ slug, limit: z.number().int().min(1).max(500).optional() }),
+    description:
+      "A model's revision history, newest first: commit id, message and time. Covers the newest " +
+      `${HISTORY_WINDOW} revisions.` + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
       'revision messages written by model authors or upstreams',
     routes: ['GET /api/v1/models/{slug}/versions'],
-    handler: async ({ slug, limit }, { backend }) =>
+    handler: async ({ slug, ...args }, { backend }) =>
       json(
-        await ok(
-          backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit } } }),
-          `list versions of ${slug}`,
+        page(
+          await ok(
+            backend.GET('/api/v1/models/{slug}/versions', { params: { path: { slug }, query: { limit: HISTORY_WINDOW } } }),
+            `list versions of ${slug}`,
+          ),
+          args,
+          (v) => v.commit,
+          'list_versions',
         ),
       ),
   }),

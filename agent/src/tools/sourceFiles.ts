@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, text, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 /** The backend's MAX_SOURCE_CHARS and MAX_SUBJECT (`SourceFileUpdate.content` and
  * `.message` in backend/scadbuddy/api/model_files.py); test/sourceFiles.test.ts checks
@@ -34,13 +35,20 @@ export const sourceFileTools: Tool[] = [
   defineTool({
     name: 'list_source_files',
     description:
-      "A model's .scad files, model.scad first: the files it can `include <name.scad>` or `use <name.scad>`.",
-    input: z.object({ slug }),
+      "A model's .scad files, model.scad first: the files it can `include <name.scad>` or `use <name.scad>`." + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source: 'file names in a model directory, chosen by its author',
     routes: ['GET /api/v1/models/{slug}/files'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/models/{slug}/files', { params: { path: { slug } } }), `list files of ${slug}`)),
+    handler: async ({ slug, ...args }, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/models/{slug}/files', { params: { path: { slug } } }), `list files of ${slug}`),
+          args,
+          (f) => f.name,
+          'list_source_files',
+        ),
+      ),
   }),
 
   defineTool({

@@ -762,7 +762,7 @@ describe("tools for #324's routes", () => {
       http.get(`${BACKEND}/api/v1/assets/usage`, () => HttpResponse.json({ count: 1, bytes: 2, max_count: 0, max_total_bytes: 0 })),
     )
     expect(firstText(await runTool(tool('get_render_diagnostics'), { slug: 'box' }, ctx()))).toEqual({ warnings: [{ line: 3 }] })
-    expect(firstText(await runTool(tool('list_installed_libraries'), {}, ctx()))).toEqual([{ name: 'BOSL2', commit: 'c', used_by: ['box'] }])
+    expect(firstText(await runTool(tool('list_installed_libraries'), {}, ctx()))).toEqual({ items: [{ name: 'BOSL2', commit: 'c', used_by: ['box'] }], next_cursor: null, total: 1 })
     expect(firstText(await runTool(tool('get_asset_usage'), {}, ctx()))).toMatchObject({ count: 1 })
   })
 

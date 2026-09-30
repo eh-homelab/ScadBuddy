@@ -77,7 +77,7 @@ describe('/mcp: oidc mode, tokens', () => {
     const { app } = oidcApp()
     const client = await open(app, { headers: { authorization: `Bearer ${await idp.sign({ scope: 'scadbuddy:read' })}` } })
     expect((await client.listTools()).tools.length).toBeGreaterThan(0)
-    expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual([])
+    expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual({ items: [], next_cursor: null, total: 0 })
     const write = await client.callTool({ name: 'install_font', arguments: { family: 'Lobster Two' } })
     expect(write.isError).toBe(true)
     expect(firstText(write)).toContain('needs the "write" tier')
