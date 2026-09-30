@@ -301,9 +301,7 @@ def test_the_last_prints_plate_says_nothing_about_the_plate(client: TestClient, 
 
 @respx.mock
 def test_a_nozzle_size_the_rack_lacks_is_warned_about(client: TestClient, model: str) -> None:
-    """The recorded rack holds a 0.2 and 0.4s, but no 0.6. With both mounted nozzles
-    reported, a 0.6 run is refused outright (#469), so this is the case where the
-    printer reports its rack but not what is mounted."""
+    """The recorded rack holds a 0.2 and 0.4s, but no 0.6: the run warns, never refuses."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -900,13 +898,16 @@ def test_a_printer_that_is_not_an_h2c_is_a_422_before_anything_is_sliced(
     assert not sliced.called
 
 
-# --- #469: a print the mounted nozzles would pause is refused before upload -----------
+# --- #768: the run does not check the mounted nozzles ------------------------------------
+#
+# Measured by the maintainer's test print, 2026-09-29: a two-colour print sliced for
+# 0.2 mm printed through the one 0.2 mm nozzle while the other extruder had a different
+# size fitted. #538's refusals (#469) are gone.
 #
 # printer-status-rack.json is printer 1 with the Filament Track Switch: the right 0.2
 # HS00, the left 0.4 HH01, AMS 0/1 resting on inlet B (right) and AMS 2 and the HT on
-# inlet A (left). With the switch any AMS reaches either nozzle. Spool 9 is in AMS 0
-# tray 1, spool 10 in AMS 2 tray 0, and spool 5 is on the shelf
-# (inventory-assignments.json).
+# inlet A (left). Spools 9 and 14 are in AMS 0 (right), spool 10 in AMS 2 (left), and
+# spool 5 is on the shelf (inventory-assignments.json).
 
 
 def _uploaded_settings(route: respx.Route) -> dict[str, Any]:
@@ -949,8 +950,10 @@ def two_colour_output(
     return output_id
 
 
-TWO_SPOOLS = {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]}
-BOTH_02 = [{"nozzle_type": "HS00", "nozzle_diameter": "0.2"}] * 2
+#: Both slots on spools in AMS 0, which feeds (or rests on) the right, the 0.2.
+BOTH_ON_RIGHT = {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 14}]}
+#: Slot 2 on spool 10, in AMS 2, which feeds (or rests on) the left, the 0.4.
+ONE_ON_LEFT = {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]}
 #: Printer 1 as if it had no switch: each AMS wired to one side.
 WIRED = {
     "ams_extruder_map": {"0": 0, "1": 0, "2": 1, "128": 1},
@@ -965,208 +968,151 @@ NO_LEFT = {
     "ams_switch_inlet": {},
     "fila_switch": {"installed": False},
 }
+#: Printer 1 with a 0.4 on each side, the left High Flow (queue item 149's printer).
+BOTH_04_LEFT_HF = {
+    "nozzles": [
+        {"nozzle_type": "HS01", "nozzle_diameter": "0.4"},
+        {"nozzle_type": "HH01", "nozzle_diameter": "0.4"},
+    ]
+}
+#: The kinds the removed nozzle checks warned with; none may come back.
+NOZZLE_KINDS = {"side-unknown", "hf-unsupported"}
 
 
-@respx.mock
-def test_with_the_switch_a_spool_resting_on_the_left_prints_in_one_color(
-    client: TestClient, model: str
-) -> None:
-    """Queue item 108's spool under the user's ruling: AMS 2 rests on the left's 0.4, but
-    the switch can feed it to the right, so a one-color 0.2 run is not refused. The 3MF
-    is not pinned (the slicer ignores that), so the run says the slicer picks the side."""
-    output_id = prepared(client, model)
+def _two_colour_run(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    plan: dict[str, Any],
+    **choices: Any,
+) -> tuple[httpx.Response, respx.Route]:
+    output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
     slice_routes()
     queue_route()
+    return run_print(client, output_id, json={**body(**choices), "filament_plan": plan}), upload
 
-    response = run_print(client, output_id, json=on_spool(10))
 
-    assert response.status_code == 200, response.text
-    assert "filament_map" not in _uploaded_settings(upload)
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
-    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")
+def _kinds(response: httpx.Response) -> set[str]:
+    return {warning["kind"] for warning in response.json()["warnings"]}
 
 
 @respx.mock
-def test_a_multi_color_print_on_differing_nozzles_is_a_422_before_upload(
+def test_one_matching_nozzle_prints_two_colours_whose_spools_are_on_its_side(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """Queue item 108 itself: two colors, a 0.2 on the right and a 0.4 on the left. The
-    slicer spreads the colors across both nozzles and nothing ScadBuddy writes stops it."""
-    output_id = two_colour_output(client, model, paths)
-    upload = upload_route()
-    run_routes()
-    sliced = slice_routes()
+    """The maintainer's test print: two colours at 0.2, only the right nozzle 0.2, both
+    spools on the right. It prints, with no nozzle warning."""
+    _status(**WIRED)
+    response, upload = _two_colour_run(client, model, paths, BOTH_ON_RIGHT)
 
-    response = run_print(
-        client,
-        output_id,
-        json={
-            **body(),
-            "filament_plan": {
-                "slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]
-            },
-        },
-    )
-
-    assert response.status_code == 422, response.text
-    assert "The slicer spreads a multi-color print across both" in response.json()["detail"]
-    assert not upload.called
-    assert not sliced.called
+    assert response.status_code == 200, response.text
+    assert upload.called
+    # Every filament on one extruder, as Bambu Studio saved the test print (#768).
+    assert _uploaded_settings(upload)["filament_map"] == ["1", "1"]
+    assert not NOZZLE_KINDS & _kinds(response)
 
 
 @respx.mock
-def test_a_size_neither_nozzle_has_is_a_422_before_anything_is_uploaded(
-    client: TestClient, model: str
+def test_without_the_switch_a_spool_on_the_other_nozzle_is_not_refused(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    output_id = prepared(client, model)
-    upload = upload_route()
-    run_routes()
-    sliced = slice_routes()
+    """Refused before #768 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle"). The
+    run no longer judges a spool by the nozzle mounted on its side."""
+    _status(**WIRED)
+    response, upload = _two_colour_run(client, model, paths, ONE_ON_LEFT)
 
-    response = run_print(
-        client,
-        output_id,
-        json=on_spool(9, nozzles=[{"size": "0.6"}], tier="standard"),
-    )
-
-    assert response.status_code == 422, response.text
-    assert response.json()["detail"] == (
-        "Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm. Choose 0.2 or "
-        "0.4, or fit a 0.6 mm nozzle."
-    )
-    assert not upload.called
-    assert not sliced.called
+    assert response.status_code == 200, response.text
+    assert upload.called
+    assert not NOZZLE_KINDS & _kinds(response)
 
 
 @respx.mock
-def test_a_single_nozzle_printers_known_wrong_size_is_a_422_before_upload(
-    client: TestClient, model: str
+def test_with_the_switch_a_spool_on_the_other_nozzle_is_not_refused(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """Review of #538: a single-nozzle printer's one mounted nozzle is known and the
-    wrong size — the printer has no left side at all, so this must refuse the same way
-    a two-nozzle mismatch does, not just warn and let the doomed print through."""
+    """Queue item 108's plan, which #538 refused as a multi-colour print on differing
+    nozzles; with the switch any AMS reaches either nozzle."""
+    response, upload = _two_colour_run(client, model, paths, ONE_ON_LEFT)
+
+    assert response.status_code == 200, response.text
+    assert upload.called
+    assert not NOZZLE_KINDS & _kinds(response)
+
+
+@respx.mock
+def test_a_size_neither_mounted_nozzle_has_is_not_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Refused before #768 ("Neither nozzle is 0.6 mm"). The printer swaps what it needs
+    from its rack; the rack-wide ``not-installed`` warning still says when it has none."""
+    _status()
+    response, _ = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.6"}], tier="standard"
+    )
+
+    assert response.status_code == 200, response.text
+    assert not NOZZLE_KINDS & _kinds(response)
+
+
+@respx.mock
+def test_a_single_nozzle_printers_other_size_is_not_refused(client: TestClient, model: str) -> None:
+    """Refused before #768 ("The nozzle is 0.4 mm, not 0.2 mm")."""
     output_id = prepared(client, model)
     upload = upload_route()
     run_routes()
     _status(**NO_LEFT)
-    sliced = slice_routes()
-
-    response = run_print(
-        client,
-        output_id,
-        json=on_spool(9, nozzles=[{"size": "0.2"}], tier="standard"),
-    )
-
-    assert response.status_code == 422, response.text
-    assert response.json()["detail"] == (
-        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
-    )
-    assert not upload.called
-    assert not sliced.called
-
-
-@respx.mock
-def test_with_both_sides_matching_nothing_is_refused_or_warned(
-    client: TestClient, model: str
-) -> None:
-    output_id = prepared(client, model)
-    upload_route()
-    run_routes()
-    _status(nozzles=BOTH_02)
     slice_routes()
     queue_route()
 
-    response = run_print(client, output_id, json=on_spool(10))
+    response = run_print(client, output_id, json=on_spool(9))
 
     assert response.status_code == 200, response.text
-    assert "side-unknown" not in {warning["kind"] for warning in response.json()["warnings"]}
+    assert upload.called
+
+
+HF_LEFT = (
+    "The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow "
+    "slicing is supported (#484), so if the print uses the left, the printer pauses at the "
+    'first layer ("the left nozzle is not matched with slicing file"). Fit a standard '
+    "nozzle there before it starts."
+)
 
 
 @respx.mock
-def test_without_the_switch_a_spool_on_the_other_nozzle_is_a_422_before_upload(
-    client: TestClient, model: str
+def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_not_refused(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """Without the switch AMS 2 really is wired to the left, where the 0.4 is."""
-    output_id = prepared(client, model)
-    upload = upload_route()
-    run_routes()
-    _status(**WIRED)
-    sliced = slice_routes()
-
-    response = run_print(client, output_id, json=on_spool(10))
-
-    assert response.status_code == 422, response.text
-    assert response.json()["detail"] == (
-        "Slot 1's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for "
-        "0.2 mm. Pick a spool on the right, or choose 0.4."
+    """#723, kept by the owner's ruling on #772: queue item 149 paused on a High Flow
+    left sliced as standard. A print may be set up before its nozzle is fitted, so it is
+    a warning, and the only mounted-nozzle one left."""
+    _status(**BOTH_04_LEFT_HF)
+    response, _ = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
     )
-    assert not upload.called
-    assert not sliced.called
-
-
-@respx.mock
-def test_a_nozzle_refusal_is_the_posts_own_answer_with_no_run_started(
-    client: TestClient, model: str
-) -> None:
-    """#469's refusals run in ``prepare_run`` (#470), so the 422 answers the POST
-    itself: no 202, no run to follow, nothing uploaded or sliced."""
-    output_id = prepared(client, model)
-    upload = upload_route()
-    run_routes()
-    _status(**WIRED)
-    sliced = slice_routes()
-
-    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=on_spool(10))
-
-    assert response.status_code == 422, response.text
-    assert "is on the 0.4 mm nozzle" in response.json()["detail"]
-    assert not upload.called
-    assert not sliced.called
-
-
-@respx.mock
-def test_without_the_switch_a_shelf_spool_prints_with_the_slicers_side_warned(
-    client: TestClient, model: str
-) -> None:
-    output_id = prepared(client, model)
-    upload = upload_route()
-    run_routes()
-    _status(**WIRED)
-    slice_routes()
-    queue_route()
-
-    response = run_print(client, output_id, json=on_spool(5))
 
     assert response.status_code == 200, response.text
-    assert "filament_map" not in _uploaded_settings(upload)
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
-    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")
+    warnings = [(w["kind"], w["message"]) for w in response.json()["warnings"]]
+    assert ("hf-unsupported", HF_LEFT) in warnings
+    assert "side-unknown" not in _kinds(response)
 
 
 @respx.mock
-def test_an_unreadable_status_refuses_nothing_and_leaves_the_slicer_to_choose(
-    client: TestClient, model: str
+def test_a_mounted_high_flow_nozzle_of_another_size_says_nothing(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    output_id = prepared(client, model)
-    upload = upload_route()
-    run_routes()
-    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
-    slice_routes()
-    queue_route()
-
-    response = run_print(client, output_id, json=on_spool(10))
+    """The recorded left is a 0.4 High Flow; a 0.2 print raises no type warning."""
+    _status()
+    response, _ = _two_colour_run(client, model, paths, BOTH_ON_RIGHT)
 
     assert response.status_code == 200, response.text
-    assert "filament_map" not in _uploaded_settings(upload)
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
-    assert "couldn't read which nozzles" in warning["message"]
+    assert not NOZZLE_KINDS & _kinds(response)
 
 
 @respx.mock
 def test_the_run_reads_the_printer_status_once(client: TestClient, model: str) -> None:
-    """Review #8: the refusals and the nozzle warnings come from one snapshot."""
+    """Review #8: the hardware warnings come from one snapshot."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -1183,108 +1129,13 @@ def test_the_run_reads_the_printer_status_once(client: TestClient, model: str) -
 
 
 @respx.mock
-def test_a_single_nozzle_printer_prints_a_multi_color_model(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """Review of #538: an X1C, P1S or A1 with an AMS prints every colour through its one
-    nozzle; Bambuddy reports an empty second nozzle for it."""
-    output_id = two_colour_output(client, model, paths)
-    upload = upload_route()
-    run_routes()
-    _status(
-        nozzles=[
-            {"nozzle_type": "HS00", "nozzle_diameter": "0.2"},
-            {"nozzle_type": "", "nozzle_diameter": ""},
-        ],
-        ams_extruder_map={"0": 0, "1": 0},
-        ams_switch_inlet={},
-        fila_switch=None,
-    )
-    slice_routes()
-    queue_route()
-
-    response = run_print(client, output_id, json={**body(), "filament_plan": TWO_SPOOLS})
-
-    assert response.status_code == 200, response.text
-    assert upload.called
-    assert "side-unknown" not in {warning["kind"] for warning in response.json()["warnings"]}
-
-
-@respx.mock
-def test_a_dual_printer_with_one_nozzle_unreported_warns_rather_than_refuses(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    output_id = two_colour_output(client, model, paths)
-    upload_route()
-    run_routes()
-    _status(
-        nozzles=[
-            {"nozzle_type": "HS00", "nozzle_diameter": "0.2"},
-            {"nozzle_type": "HH01", "nozzle_diameter": ""},
-        ]
-    )
-    slice_routes()
-    queue_route()
-
-    response = run_print(client, output_id, json={**body(), "filament_plan": TWO_SPOOLS})
-
-    assert response.status_code == 200, response.text
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
-    assert "didn't report the left one" in warning["message"]
-
-
-@respx.mock
-def test_a_one_color_plate_of_a_multi_color_model_prints_on_differing_nozzles(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """Review of #538: the plate printed decides, not the model. Its one filament goes
-    to either nozzle, so the run warns that the slicer picks rather than refusing."""
-    output_id = two_colour_output(client, model, paths, (1,))
-    upload_route()
-    run_routes()
-    slice_routes()
-    queue_route()
-
-    response = run_print(client, output_id, json={**body(), "filament_plan": TWO_SPOOLS})
-
-    assert response.status_code == 200, response.text
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
-    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")
-
-
-@respx.mock
-def test_unreadable_spool_assignments_leave_the_sides_unknown_rather_than_fail(
+def test_the_spool_assignments_are_read_only_for_the_plates_filaments(
     client: TestClient, model: str
 ) -> None:
-    """Review of #538: the pre-upload read tolerates ``/inventory/assignments`` failing
-    as it does the status; the filament read after the upload still gets it."""
+    """Nothing reads a spool's side before the upload any more (#768)."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
-    _status(**WIRED)
-    assignments = respx.get(f"{API}/inventory/assignments").mock(
-        side_effect=[
-            httpx.Response(503),
-            *[httpx.Response(200, json=recording("inventory-assignments.json"))] * 4,
-        ]
-    )
-    slice_routes()
-    queue_route()
-
-    # Spool 10 is wired to the left's 0.4, which a readable assignment would refuse.
-    response = run_print(client, output_id, json=on_spool(10))
-
-    assert response.status_code == 200, response.text
-    assert assignments.call_count >= 2
-
-
-@respx.mock
-def test_an_unreadable_status_skips_the_spool_assignments(client: TestClient, model: str) -> None:
-    """No status, no side can be told, so the pre-upload read isn't made."""
-    output_id = prepared(client, model)
-    upload_route()
-    run_routes()
-    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
     assignments = respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
@@ -1294,108 +1145,54 @@ def test_an_unreadable_status_skips_the_spool_assignments(client: TestClient, mo
     response = run_print(client, output_id, json=on_spool(10))
 
     assert response.status_code == 200, response.text
-    # Only the plate's filament read after the upload.
     assert assignments.call_count == 1
 
 
 @respx.mock
-def test_all_plates_with_a_later_plates_spool_on_the_wrong_side_is_a_422_before_upload(
-    client: TestClient, model: str, paths: DataPaths
+@pytest.mark.parametrize(
+    "status", [WIRED, NO_LEFT, BOTH_04_LEFT_HF], ids=["wired", "single", "high-flow"]
+)
+def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
+    client: TestClient, model: str, paths: DataPaths, status: dict[str, Any]
 ) -> None:
-    """claude-review on #538: slot 2 is used only by plate 2, and its spool is wired to
-    the left's 0.4. Printing every plate checks it before anything is uploaded."""
-    output_id = two_colour_output(client, model, paths, (1,), (2,))
+    """#755's check repeated the nozzle verdict; with no verdict it says nothing, and
+    uploads nothing."""
+    output_id = two_colour_output(client, model, paths)
     upload = upload_route()
-    printers_route()
-    h2c_presets()
-    spool_preset_routes()
-    hardware_routes()
-    split_plates_routes()
-    _status(**WIRED)
-    sliced = slice_routes()
+    run_routes()
+    _status(**status)
 
-    response = run_print(
-        client,
-        output_id,
-        json=run_request(all_plates=True, filament_plan=TWO_SPOOLS),
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(), "filament_plan": ONE_ON_LEFT},
     )
 
-    assert response.status_code == 422, response.text
-    assert response.json()["detail"].startswith("Slot 2's spool (AMS 2, left) is on the 0.4 mm")
+    assert check.status_code == 200, check.text
+    assert check.json() == {"errors": [], "warnings": []}
     assert not upload.called
-    assert not sliced.called
 
 
-def _both_04_one_spare_02() -> dict[str, Any]:
-    """#755's printer: a 0.4 on both sides and a single spare 0.2 in the rack."""
-    rack = recording("printer-status-rack.json")["nozzle_rack"]
-    return {
-        "nozzles": [
-            {"nozzle_type": "HS01", "nozzle_diameter": "0.4"},
-            {"nozzle_type": "HH01", "nozzle_diameter": "0.4"},
-        ],
-        "nozzle_rack": [
-            {**rack[0], "nozzle_type": "HS01", "nozzle_diameter": "0.4"},
-            rack[1],
-            {**rack[2], "nozzle_type": "HS00", "nozzle_diameter": "0.2"},
-        ],
+@respx.mock
+def test_the_check_carries_the_high_flow_warning(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#723: the run's one mounted-nozzle advisory is said before Print too."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(**BOTH_04_LEFT_HF)
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "filament_plan": ONE_ON_LEFT},
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json() == {
+        "errors": [],
+        "warnings": [{"kind": "hf-unsupported", "slot_id": None, "message": HF_LEFT}],
     }
-
-
-@respx.mock
-def test_the_check_gives_the_runs_nozzle_refusal_before_anything_is_uploaded(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """#755: two colors at 0.2 on a 0.4/0.4 printer with one spare 0.2. The dialog's
-    check says what the run would refuse, word for word, and uploads nothing."""
-    output_id = two_colour_output(client, model, paths)
-    upload = upload_route()
-    run_routes()
-    _status(**_both_04_one_spare_02())
-    slice_routes()
-    request = {**body(), "filament_plan": TWO_SPOOLS}
-
-    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
-
-    assert check.status_code == 200, check.text
     assert not upload.called
-    run = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
-    assert run.status_code == 422, run.text
-    assert check.json()["errors"] == [run.json()["detail"]]
-    assert check.json()["errors"][0].startswith(
-        "This printer has a 0.4 mm nozzle on the right and 0.4 mm on the left, and one "
-        "spare 0.2 mm hotend in the rack. The slicer spreads a multi-color print across both"
-    )
-
-
-@respx.mock
-def test_the_check_gives_several_nozzle_refusals_as_the_runs_one_422(
-    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#758 review: when the nozzles refuse for more than one reason, the run's 422 joins
-    the reasons into one detail. The check says exactly that detail, not the reasons one
-    by one, so the dialog's verdict and the run's refusal cannot read differently."""
-    from scadbuddy.bambuddy import print_run
-    from scadbuddy.bambuddy.extruders import ExtruderPlan
-
-    reasons = ["The right nozzle is 0.4 mm.", "The left nozzle is High Flow."]
-    monkeypatch.setattr(
-        print_run, "plan_extruders", lambda *args, **kwargs: ExtruderPlan(errors=list(reasons))
-    )
-    output_id = two_colour_output(client, model, paths)
-    upload = upload_route()
-    run_routes()
-    _status(**_both_04_one_spare_02())
-    slice_routes()
-    request = {**body(), "filament_plan": TWO_SPOOLS}
-
-    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
-    run = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
-
-    assert check.status_code == 200, check.text
-    assert run.status_code == 422, run.text
-    assert not upload.called
-    assert check.json()["errors"] == [run.json()["detail"]] == [" ".join(reasons)]
 
 
 @respx.mock
@@ -1467,36 +1264,3 @@ def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
     # Bambuddy's own 422, passed through by errors.py, not a 200 carrying a verdict.
     assert check.status_code == 422, check.text
     assert "errors" not in check.json()
-
-
-@respx.mock
-def test_the_check_refuses_nothing_when_both_nozzles_match(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    output_id = two_colour_output(client, model, paths)
-    run_routes()
-    _status(nozzles=BOTH_02)
-
-    check = client.post(
-        f"/api/v1/print/outputs/{output_id}/check",
-        json={**body(), "filament_plan": TWO_SPOOLS},
-    )
-
-    assert check.status_code == 200, check.text
-    assert check.json() == {"errors": [], "warnings": []}
-
-
-@respx.mock
-def test_the_check_carries_the_nozzle_advisories(client: TestClient, model: str) -> None:
-    """One color at 0.2 with only the right nozzle 0.2: not refused, but the run warns
-    that the slicer picks the side, and the check says so first."""
-    output_id = prepared(client, model)
-    run_routes()
-
-    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=on_spool(10))
-
-    assert check.status_code == 200, check.text
-    assert check.json()["errors"] == []
-    [warning] = check.json()["warnings"]
-    assert warning["kind"] == "side-unknown"
-    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")

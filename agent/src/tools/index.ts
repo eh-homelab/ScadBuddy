@@ -2,32 +2,38 @@ import { approvalTools } from './approvals.js'
 import { browserTools } from './browser.js'
 import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
+import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
+import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
 import { printMediaTools } from './prints.js'
 import type { Tier } from '../auth/principal.js'
 import type { Tool } from './registry.js'
+import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
-// Not here yet: session tools (#300) and the tools in coverage.ts
-// `PENDING_ROUTES`. The browser_* tools (#254, browser.ts) are in both
-// projections: /mcp callers reach the tab they paired, the harness the tab
-// its session is paired with.
+// Not here yet: the tools in coverage.ts `PENDING_ROUTES`. The browser_*
+// tools (#254, browser.ts) are in both projections: /mcp callers reach the
+// tab they paired, the harness the tab its session is paired with. The
+// session tools (#300) are sessions.ts.
 
 export const ALL_TOOLS: readonly Tool[] = [
   ...catalogueTools,
   ...customizerTools,
   ...outputTools,
   ...historyTools,
+  ...inspectTools,
+  ...guideTools,
   ...libraryTools,
   ...settingsTools,
   ...printTools,
   ...printMediaTools,
   ...browserTools,
   ...approvalTools,
+  ...sessionTools,
 ]
 
 const byName = new Map<string, Tool>()

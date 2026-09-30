@@ -1,5 +1,7 @@
 import path from 'node:path'
 import {
+  type HookCallbackMatcher,
+  type HookEvent,
   type McpHttpServerConfig,
   type McpSdkServerConfigWithInstance,
   type Options,
@@ -67,9 +69,14 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - the headless browser (#349, headlessBrowser.ts) when the session has it
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
-//     tier map, its disallowed tools and its origin/file-name guard, and the
-//     approval gate wrapped so that a human's approval of an off-origin
-//     navigation also approves that origin for the session (browserOrigins.ts);
+//     tier map, its disallowed tools and its origin/file-name guard;
+//   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
+//     `Stop` and optionally `PostToolUse` callbacks that recall from and
+//     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
+//     this process, so they are not the command hooks plugins.ts refuses;
+//     they sit beside the permission seam's `PreToolUse` hook;  
+//     a human's approval of an off-origin navigation also approves
+//     that origin for the session (browserOrigins.ts).
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
 
@@ -141,8 +148,25 @@ export type HarnessRun = {
   cwd?: string
   /** Yield `stream_event` messages (text deltas) as well as complete messages. */
   includePartialMessages?: boolean
+  /**
+   * SDK callback hooks for automatic memory (memory/hindsight.ts
+   * `createMemoryHooks`), added beside the permission seam's `PreToolUse`.
+   */
+  memoryHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+}
+
+/** The permission seam's PreToolUse hook first, then the memory hooks, by event. */
+function mergeHooks(
+  base: Partial<Record<HookEvent, HookCallbackMatcher[]>>,
+  extra: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined,
+): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  const out = { ...base }
+  for (const [event, matchers] of Object.entries(extra ?? {}) as [HookEvent, HookCallbackMatcher[]][]) {
+    out[event] = [...(out[event] ?? []), ...matchers]
+  }
+  return out
 }
 
 /** The credential's environment variables, and nothing else. */
@@ -263,8 +287,11 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
     maxBudgetUsd: run.maxBudgetUsd ?? DEFAULT_MAX_BUDGET_USD,
     abortController: linkedController(run.signal),
-    canUseTool: makeCanUseTool(tierOf, run.onDecision, gate, guard),
-    hooks: { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, gate, guard)] },
+    canUseTool: makeCanUseTool(tierOf, run.onDecision, run.approvalGate, guard),
+    hooks: mergeHooks(
+      { PreToolUse: [makePreToolUseHook(tierOf, run.onDecision, run.approvalGate, guard)] },
+      run.memoryHooks,
+    ),
     permissionMode: 'default',
   }
   if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools

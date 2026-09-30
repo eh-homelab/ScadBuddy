@@ -1,13 +1,16 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { createApp } from '../src/app.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
+import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, tempPaths } from './support/sessions.js'
 
@@ -114,6 +117,51 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.result',
       'session.status',
     ])
+  })
+
+  it('continues a spent session in a new chat from the panel: POST …/fork, a fresh budget, the transcript', async () => {
+    script = (r) => ({ text: conversation(r).includes('go on') ? 'carrying on' : 'a box, 20 mm' })
+    const m = await replica({ newSessions: { max: 3, windowMs: 60_000 } })
+    const { session: parent, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box', title: 'box' })
+    await turn!.done
+    // Spent, as the panel finds it (manager.ts whyNotClaimed).
+    await db.sql`UPDATE ai_sessions SET cost_usd = budget_usd + 0.016 WHERE id = ${parent.id}`
+    await expect(m.send(parent.id, browser, 'more')).rejects.toMatchObject({ code: 'budget_exhausted' })
+
+    const app = createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'unused' },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      sessions: m,
+    })
+    const ui = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
+    const res = await app.request(`/api/v1/ai/sessions/${parent.id}/fork`, { method: 'POST', headers: ui })
+    expect(res.status).toBe(201)
+    const { session: child } = (await res.json()) as {
+      session: { id: string; parent_id: string; owner: { kind: string }; budget_usd: number; cost_usd: number; title: string }
+    }
+    expect(child).toMatchObject({ parent_id: parent.id, owner: { kind: 'browser' }, budget_usd: 1, cost_usd: 0, title: 'box (fork)' })
+    const events = (await allEvents(m, child.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events[0]).toMatchObject({ type: 'session.started', sessionId: child.id, budgetUsd: 1 })
+    expect(events.find((e) => e.type === 'user.turn')).toMatchObject({ text: 'make a box' })
+
+    await (await m.send(child.id, browser, 'go on')).done
+    expect(conversation(fake.messageCalls().at(-1))).toContain('make a box')
+
+    // The fork is a new session: it counts against the owner's limit (3 here, with the parent and child).
+    const named = await app.request(`/api/v1/ai/sessions/${parent.id}/fork`, {
+      method: 'POST',
+      headers: { ...ui, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'box, part 2' }),
+    })
+    expect(((await named.json()) as { session: { title: string } }).session.title).toBe('box, part 2')
+    const limited = await app.request(`/api/v1/ai/sessions/${parent.id}/fork`, { method: 'POST', headers: ui })
+    expect(limited.status).toBe(429)
   })
 
   it('forks a session: the child records its parent, has the history, and diverges', async () => {
