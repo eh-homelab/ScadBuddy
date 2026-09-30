@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
@@ -28,6 +29,7 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
+from scadbuddy.library.catalogue import meta_from_raw
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -37,6 +39,7 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
+    BomEntry,
     Job,
     JobNotFoundError,
     JobState,
@@ -89,6 +92,16 @@ class RenderAccepted(BaseModel):
     status_url: str
 
 
+class JobOutputSummary(BaseModel):
+    """One `ctx.output` of a pipeline job (spec 2026-09-27 §5.2): what Generate saves by
+    its ``index``."""
+
+    index: int
+    name: str | None
+    bom: list[BomEntry] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+
+
 class JobStatus(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -122,6 +135,8 @@ class JobStatus(BaseModel):
     #: A factory default, as the lists have, so the generated client reads it as
     #: optional: an older mock or cached response without it still type-checks.
     diagnostics_dropped: int = Field(default_factory=int)
+    #: A pipeline job's outputs, in order; empty for a job that wrote none.
+    outputs: list[JobOutputSummary] = Field(default_factory=list)
 
 
 class ModelDiagnostics(BaseModel):
@@ -162,7 +177,23 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         plates=result.plates if result else None,
         diagnostics=job.diagnostics,
         diagnostics_dropped=job.diagnostics_dropped,
+        outputs=[
+            JobOutputSummary(index=i, name=o.name, bom=o.bom, files=o.files)
+            for i, o in enumerate(job.outputs)
+        ],
     )
+
+
+def _declares_pipeline(directory: Path, slug: str) -> bool:
+    """Whether the template's model.json at this revision declares a pipeline (§5.1),
+    read as the catalogue reads it. An unreadable or invalid one declares none: the
+    job then renders `model.scad`'s parameters, and `load_pipeline` says what is wrong."""
+    try:
+        raw = json.loads((directory / "model.json").read_text(encoding="utf-8"))
+        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return False
+    return meta.pipeline is not None
 
 
 async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
@@ -229,7 +260,11 @@ async def render_model(
     except InputsError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     params = inputs["params"]
-    require_valid_params(schema, params)
+    # A pipeline passes params to the pieces it renders, each of which checks its own
+    # (§5.2); only the built-in pipeline renders `model.scad` with them.
+    pipeline = await asyncio.to_thread(_declares_pipeline, source.scad.parent, slug)
+    if not pipeline:
+        require_valid_params(schema, params)
     try:
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
@@ -247,6 +282,7 @@ async def render_model(
             inputs=inputs,
             model_version=source.version,
             supersedes=body.supersedes,
+            whole_inputs=pipeline,
         )
     except QueueFullError as error:
         raise ApiError(

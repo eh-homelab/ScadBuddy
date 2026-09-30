@@ -8,6 +8,7 @@ is the template UI's own state: stored with presets and outputs, never rendered.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -62,3 +63,12 @@ def normalize_inputs(
     if size > MAX_INPUTS_BYTES:
         raise InputsError(f"inputs are {size} bytes; at most {MAX_INPUTS_BYTES}")
     return result
+
+
+def inputs_key(slug: str, inputs: Mapping[str, Any], model_version: str | None) -> str:
+    """The job key of a pipeline template (§3.4): its whole inputs, which the pipeline
+    reads, not only ``params``."""
+    raw = json.dumps(
+        ["inputs", slug, model_version, dict(inputs)], sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

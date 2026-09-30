@@ -1,0 +1,110 @@
+"""The pipeline API (spec 2026-09-27 §8.2, §10)."""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.paths import DataPaths
+
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
+
+PIPELINE = (
+    "INPUTS_VERSION = 1\n\ndef migrate(inputs, v):\n    return {**inputs, 'house': {}}\n\n"
+    "async def run(ctx, inputs):\n    part = await ctx.render('model.scad', **inputs['params'])\n"
+    "    await ctx.output(plates=await ctx.pack([part]),"
+    " bom=[{'piece': 'p', 'label': 'P', 'count': 1}], files={'a.txt': 'hi'})\n"
+)
+
+
+def with_pipeline(paths: DataPaths, slug: str, source: str = PIPELINE) -> None:
+    directory = paths.model_dir(slug)
+    (directory / "pipeline").mkdir(exist_ok=True)
+    (directory / "pipeline" / "pipeline.py").write_text(source, encoding="utf-8")
+    meta = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    meta["pipeline"] = {"module": "pipeline/pipeline.py", "api": 1}
+    paths.model_meta(slug).write_text(json.dumps(meta), encoding="utf-8")
+
+
+def _done(client: TestClient, model: str, inputs: dict[str, object]) -> dict[str, object]:
+    accepted = client.post(f"/api/v1/models/{model}/render", json={"inputs": inputs})
+    assert accepted.status_code == 202, accepted.text
+    url = accepted.json()["status_url"]
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        job = client.get(url).json()
+        if job["status"] in {"done", "failed"}:
+            assert job["status"] == "done", job
+            return dict(job)
+        time.sleep(0.05)
+    raise AssertionError("the render did not finish")
+
+
+def test_inputs_beyond_params_make_a_different_pipeline_job(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Coalescing joins only a *pending* row, so hold every row pending: refuse the
+    workflow starts, as `tests/api/test_temporal_path.py` does."""
+    with_pipeline(paths, model)
+    service = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+
+    async def unavailable(*_: object, **__: object) -> None:
+        raise RuntimeError("temporal is down")
+
+    def submit(inputs: dict[str, object]) -> str:
+        accepted = client.post(f"/api/v1/models/{model}/render", json={"inputs": inputs})
+        assert accepted.status_code == 202, accepted.text
+        return str(accepted.json()["job_id"])
+
+    with monkeypatch.context() as patched:
+        patched.setattr(service.client, "start_workflow", unavailable)
+        one = submit({"params": {}, "v": 1, "house": {"cols": 1}})
+        same = submit({"params": {}, "v": 1, "house": {"cols": 1}})
+        other = submit({"params": {}, "v": 1, "house": {"cols": 2}})
+    assert same == one  # coalescing is on: the test can fail
+    assert other != one
+
+
+def test_a_pipeline_template_takes_params_its_model_scad_lacks(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    with_pipeline(paths, model, PIPELINE.replace("**inputs['params']", ""))
+    job = _done(client, model, {"params": {"not_in_model_scad": 1}, "v": 1})
+    outputs = job["outputs"]
+    assert isinstance(outputs, list)
+    assert outputs[0]["bom"][0]["piece"] == "p"
+
+
+def test_an_output_saves_its_bom_record_and_files(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    with_pipeline(paths, model)
+    job = _done(client, model, {"params": {}, "v": 1})
+    created = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0})
+    assert created.status_code in (200, 201), created.text
+    detail = client.get(f"/api/v1/outputs/{created.json()['id']}").json()
+    assert detail["bom"] == [{"piece": "p", "label": "P", "count": 1, "plates": [], "part": None}]
+    assert detail["files"] == ["a.txt"]
+    assert detail["record"]["pipeline_api"] == 1 and len(detail["record"]["pipeline_version"]) == 64
+    assert detail["record"]["inputs_v"] == 1
+    body = client.get(f"/api/v1/outputs/{created.json()['id']}/files/a.txt")
+    assert body.status_code == 200 and body.text == "hi"
+    assert (
+        client.get(f"/api/v1/outputs/{created.json()['id']}/files/..%2Fmeta.json").status_code
+        == 404
+    )
+
+
+def test_an_output_index_the_job_does_not_have_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    with_pipeline(paths, model)
+    job = _done(client, model, {"params": {}, "v": 1})
+    response = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 3}
+    )
+    assert response.status_code == 422

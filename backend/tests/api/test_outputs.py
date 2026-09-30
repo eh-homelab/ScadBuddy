@@ -53,6 +53,7 @@ def test_persisting_a_job_writes_the_documented_layout(
         "model.3mf",
         "params.json",
         "preview.glb",
+        "record.json",
     ]
     assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {"width": 12}
 

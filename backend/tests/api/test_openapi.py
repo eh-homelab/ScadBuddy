@@ -43,6 +43,7 @@ EXPECTED_PATHS = {
     "/api/v1/outputs/{output_id}/geometry",
     "/api/v1/outputs/{output_id}/model.3mf",
     "/api/v1/outputs/{output_id}/thumbnail",
+    "/api/v1/outputs/{output_id}/files/{name}",
     "/api/v1/outputs/{output_id}/plates",
     "/api/v1/outputs/{output_id}/plates/{index}/thumbnail",
     "/api/v1/outputs/{output_id}/send",

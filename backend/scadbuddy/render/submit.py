@@ -31,7 +31,7 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.render.inputs import legacy_inputs
+from scadbuddy.render.inputs import inputs_key, legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, prune_revision_exports
 from scadbuddy.render.projection import JobProjection, workflow_id_for
@@ -124,8 +124,10 @@ class RenderService:
         model_version: str | None = None,
         supersedes: str | None = None,
         inputs: Mapping[str, Any] | None = None,
+        whole_inputs: bool = False,
     ) -> Job:
-        """Record the job (or join the waiting one it matches) and start its workflow."""
+        """Record the job (or join the waiting one it matches) and start its workflow.
+        ``whole_inputs``: a pipeline template's job, keyed on all of its inputs (§3.4)."""
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
@@ -145,7 +147,11 @@ class RenderService:
                 f"these parameters make a render request of {size} bytes; the most a render"
                 f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
             )
-        key = render_key(slug, params, model_version)
+        key = (
+            inputs_key(slug, job.inputs, model_version)
+            if whole_inputs
+            else render_key(slug, params, model_version)
+        )
         try:
             submitted = await asyncio.to_thread(
                 self.store.submit,
