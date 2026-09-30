@@ -79,6 +79,12 @@ export type ModelLibrary = Schemas['ModelLibrary']
 /** #217 — a `libraries` entry in model.json that is not a pin, and why. */
 export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
 export type LibraryPinRequest = Schemas['LibraryPinRequest']
+/** #169 — the upgrade flow: who pins a library, a candidate ref's check, and a re-pin. */
+export type LibraryUser = Schemas['LibraryUser']
+export type LibraryCheck = Schemas['LibraryCheck']
+export type LibraryCheckRequest = Schemas['LibraryCheckRequest']
+export type LibraryRepinRequest = Schemas['LibraryRepinRequest']
+export type InstalledLibrary = Schemas['InstalledLibrary']
 export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']
