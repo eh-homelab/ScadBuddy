@@ -353,8 +353,47 @@ export class SettingsStore {
    * (readers are not blocked), `check` reads the current values inside the
    * transaction, and nothing is written unless it returns true. Answers
    * whether the values were written.
+   *
+   * Each key written gets its own audit row, as `set` writes one; `context`
+   * says who wrote them, ScadBuddy itself when omitted. A check that refuses
+   * writes nothing and records nothing.
    */
   async setMany(
+    values: Record<string, unknown>,
+    check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
+    context?: AuditContext,
+  ): Promise<boolean> {
+    const startedAt = new Date()
+    let written: boolean
+    try {
+      written = await this.#setMany(values, check)
+    } catch (err) {
+      await this.#recordMany(values, context, startedAt, err)
+      throw err
+    }
+    if (written) await this.#recordMany(values, context, startedAt, undefined)
+    return written
+  }
+
+  async #recordMany(values: Record<string, unknown>, context: AuditContext | undefined, startedAt: Date, failure: unknown): Promise<void> {
+    if (!this.audit) return
+    const finishedAt = new Date()
+    for (const [key, value] of Object.entries(values)) {
+      await this.audit.record({
+        kind: 'settings',
+        action: key,
+        surface: context?.surface ?? 'system',
+        actor: context?.actor ?? SYSTEM_ACTOR,
+        clientIp: context?.clientIp,
+        outcome: failure === undefined ? 'ok' : 'error',
+        detail: `${key} = ${JSON.stringify(value) ?? 'undefined'}${failure === undefined ? '' : ` (failed: ${failure instanceof Error ? failure.message : String(failure)})`}`,
+        startedAt,
+        finishedAt,
+      })
+    }
+  }
+
+  async #setMany(
     values: Record<string, unknown>,
     check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
   ): Promise<boolean> {

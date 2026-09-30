@@ -237,6 +237,31 @@ describe('cap', () => {
 })
 
 describe('SettingsStore', () => {
+  /** A `sql` whose transactions run and write nothing. */
+  const quietSql = () =>
+    Object.assign(() => Promise.resolve([]), {
+      json: (value: unknown) => value,
+      begin: (fn: (tx: unknown) => Promise<unknown>) => fn(Object.assign(() => Promise.resolve([]), { json: (v: unknown) => v })),
+    }) as unknown as Sql
+
+  it('audits each key setMany writes, as whoever the context names (#831)', async () => {
+    const audit = new MemoryAudit()
+    const settings = new SettingsStore(quietSql(), audit)
+    const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: '10.0.0.7' }
+    expect(await settings.setMany({ mcp_auth_mode: 'disabled', mcp_anonymous_cap: 'read' }, async () => true, context)).toBe(true)
+    expect(audit.entries).toEqual([
+      expect.objectContaining({ kind: 'settings', action: 'mcp_auth_mode', surface: 'http', actor: UI_ACTOR, clientIp: '10.0.0.7', outcome: 'ok' }),
+      expect.objectContaining({ kind: 'settings', action: 'mcp_anonymous_cap', surface: 'http', actor: UI_ACTOR, outcome: 'ok' }),
+    ])
+  })
+
+  it('records nothing when the setMany check refuses the write', async () => {
+    const audit = new MemoryAudit()
+    const settings = new SettingsStore(quietSql(), audit)
+    expect(await settings.setMany({ mcp_auth_mode: 'disabled' }, async () => false)).toBe(false)
+    expect(audit.entries).toEqual([])
+  })
+
   it('audits a failed write whose rejection is not an Error, and rethrows it as it was', async () => {
     const audit = new MemoryAudit()
     const sql = Object.assign(() => Promise.reject('connection reset'), { json: (value: unknown) => value }) as unknown as Sql
