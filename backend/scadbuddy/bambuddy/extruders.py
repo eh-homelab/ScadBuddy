@@ -218,7 +218,51 @@ class ExtruderPlan:
     warnings: list[FilamentWarning] = field(default_factory=list)
 
 
+def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
+    """Whether the nozzle mounted on ``extruder`` is High Flow (``HH01``; ``HS01`` is
+    standard), the same reading as :mod:`scadbuddy.bambuddy.hardware`."""
+    if status is None or extruder >= len(status.nozzles):
+        return False
+    nozzle_type = status.nozzles[extruder].nozzle_type or ""
+    return len(nozzle_type) > 1 and nozzle_type[1] == "H"
+
+
 def plan_extruders(
+    sides: Sequence[SlotSide],
+    status: PrinterStatus | None,
+    *,
+    size: str,
+    used_slots: Collection[int],
+) -> ExtruderPlan:
+    """The size decision (:func:`_plan_sizes`), plus a warning for each mounted High
+    Flow nozzle of ``size`` (#723).
+
+    ScadBuddy slices for standard nozzles until High Flow slicing works (#484), and the
+    printer pauses a print at the first layer on a side whose nozzle type the slice
+    doesn't match (queue item 149). That is a warning, never a refusal: a print may be
+    set up before its nozzle is fitted.
+    """
+    plan = _plan_sizes(sides, status, size=size, used_slots=used_slots)
+    if plan.errors:
+        return plan
+    high_flow = [
+        FilamentWarning(
+            kind="hf-unsupported",
+            message=(
+                f"The {_side_word(extruder)} nozzle is High Flow. ScadBuddy slices for "
+                "standard nozzles until High Flow slicing is supported (#484), so if the "
+                f"print uses the {_side_word(extruder)}, the printer pauses at the first "
+                f'layer ("the {_side_word(extruder)} nozzle is not matched with slicing '
+                f'file"). Fit a standard nozzle there before it starts.'
+            ),
+        )
+        for extruder in (RIGHT, LEFT)
+        if fitted_size(status, extruder) == size and fitted_high_flow(status, extruder)
+    ]
+    return ExtruderPlan(errors=[], warnings=[*plan.warnings, *high_flow])
+
+
+def _plan_sizes(
     sides: Sequence[SlotSide],
     status: PrinterStatus | None,
     *,

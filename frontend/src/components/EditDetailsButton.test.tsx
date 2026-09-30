@@ -275,6 +275,7 @@ describe('EditDetailsButton', () => {
         caption: '',
         poster: null,
         missing: false,
+        readonly: false,
         content_type: 'image/png',
         size: file.size,
       }

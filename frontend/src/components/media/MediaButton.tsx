@@ -8,7 +8,7 @@ interface Props {
   onChanged?: (model: ModelSummary) => void
 }
 
-/** #279 — opens a template's media: to manage on one of mine, to look at on a built-in. */
+/** #279 — opens a template's media to manage; on a built-in, what was added to it (#722). */
 export function MediaButton({ model, onChanged }: Props) {
   const [open, setOpen] = useState(false)
   // Stable, because `Dialog` refocuses its panel whenever `onClose` changes.
@@ -28,7 +28,7 @@ export function MediaButton({ model, onChanged }: Props) {
         title="Media"
         description={
           model.origin === 'builtin'
-            ? 'The images and videos this template ships with.'
+            ? 'What the template ships, then the images and videos added to it. Each change is saved as it is made.'
             : 'Images and videos, in order: the first is the cover. Each change is saved as it is made.'
         }
         onClose={close}

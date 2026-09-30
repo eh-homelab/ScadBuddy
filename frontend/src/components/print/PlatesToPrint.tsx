@@ -1,15 +1,15 @@
-import { api } from '../../api/client'
 import type { OutputPlate } from '../../api/types'
 
 type Props = {
-  outputId: string
   plates: OutputPlate[]
   value: number | 'all'
   onChange: (next: number | 'all') => void
+  /** #313 — the plate's image, from whichever source is being printed. */
+  thumbnailUrl: (index: number) => string
 }
 
 /** #83 — which plate of a multi-plate 3MF to print, or all of them. */
-export function PlatesToPrint({ outputId, plates, value, onChange }: Props) {
+export function PlatesToPrint({ plates, value, onChange, thumbnailUrl }: Props) {
   return (
     <fieldset data-testid="plate-choice">
       <legend className="text-[13px]">Plates to print</legend>
@@ -32,7 +32,7 @@ export function PlatesToPrint({ outputId, plates, value, onChange }: Props) {
             />
             {entry.has_thumbnail && (
               <img
-                src={api.outputPlateThumbnailUrl(outputId, entry.index)}
+                src={thumbnailUrl(entry.index)}
                 alt={`Plate ${entry.index}`}
                 className="h-12 w-12 rounded-[4px] object-contain"
               />

@@ -27,6 +27,8 @@ import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
+import { TabHub } from './bridge/hub.js'
+import { PostgresPairingStore } from './bridge/pairings.js'
 import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
@@ -155,6 +157,11 @@ const toolServices: ToolServices = {
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
 }
+// The browser bridge (#254, bridge/hub.ts): the tabs connected over
+// /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
+// one through `ai_browser_pairings` (spec §8.5).
+const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined })
+toolServices.browser = tabs
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -258,6 +265,7 @@ const app = createApp({
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
+  tabs,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -301,6 +309,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     stopSweeper?.()
     stopRetention?.()
     stopHeartbeat()
+    tabs.close()
     // 1001 "going away": the panel reconnects to another replica or after the restart.
     for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
     // A peer that never answers the close frame would hold server.close() for
