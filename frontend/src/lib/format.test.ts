@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
-import { formatBbox, formatDuration, formatValue, inkOn, normalizeHex, timeAgo } from './format'
+import { formatBbox, formatBytes, formatDuration, formatValue, inkOn, normalizeHex, timeAgo } from './format'
 
 describe('formatBbox', () => {
   it('prints the size, one decimal, in millimetres', () => {
@@ -61,5 +61,15 @@ describe('formatDuration', () => {
     expect(formatDuration(2590)).toBe('43m')
     expect(formatDuration(42)).toBe('42s')
     expect(formatDuration(7200)).toBe('2h 0m')
+  })
+})
+
+describe('formatBytes', () => {
+  it('uses decimal units up to terabytes', () => {
+    expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(48213)).toBe('48 kB')
+    expect(formatBytes(2091667)).toBe('2.1 MB')
+    expect(formatBytes(1846000000)).toBe('1.8 GB')
+    expect(formatBytes(3e12)).toBe('3.0 TB')
   })
 })

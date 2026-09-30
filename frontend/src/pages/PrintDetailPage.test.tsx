@@ -65,7 +65,7 @@ describe('PrintDetailPage (#311)', () => {
     render(35)
     const outcome = await section('Outcome')
     const facts = within(outcome.querySelector('dl') as HTMLElement)
-    expect(facts.getByText('Completed')).toBeInTheDocument()
+    expect(facts.getByText('Succeeded')).toBeInTheDocument() // as the list's badge says it
     expect(facts.getByText('3DP-31B-598')).toBeInTheDocument()
     expect(facts.getByText('1h 47m')).toBeInTheDocument() // actual 6437 s
     expect(facts.getByText('1h 34m')).toBeInTheDocument() // estimate 5647 s
@@ -155,9 +155,9 @@ describe('PrintDetailPage (#311)', () => {
     // The ScadBuddy 3MF, its preview mesh, the sliced file and the parameters.
     expect(rows).toHaveLength(4)
     expect(rows[0]).toHaveTextContent('ScadBuddy 3MF')
-    expect(rows[0]).toHaveTextContent('47.1 KB')
+    expect(rows[0]).toHaveTextContent('48 kB')
     expect(rows[2]).toHaveTextContent('Sliced file')
-    expect(rows[2]).toHaveTextContent('2.0 MB')
+    expect(rows[2]).toHaveTextContent('2.1 MB')
 
     await user.click(within(rows[2]!).getByRole('button', { name: /Download/ }))
     await waitFor(() =>

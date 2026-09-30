@@ -6,13 +6,13 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
+import { DELETED_STATUS, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
 import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
-import { formatValue } from '../lib/format'
-import { DELETED, formatBytes, formatDuration, statusLabel } from '../lib/prints'
+import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
@@ -136,7 +136,7 @@ export function PrintDetailPage() {
 }
 
 function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }) {
-  const deleted = print.status === DELETED
+  const deleted = print.status === DELETED_STATUS
   const [reprinting, setReprinting] = useState(false)
   const title = print.output_name ?? `Print ${print.archive_id}`
 
@@ -204,7 +204,7 @@ function StatusBadge({ status }: { status: string }) {
   const tone =
     status === 'completed'
       ? 'bg-ok/12 text-ok'
-      : status === 'failed' || status === DELETED
+      : status === 'failed' || status === DELETED_STATUS
         ? 'bg-warn/12 text-warn'
         : 'bg-surface-2 text-muted'
   return <span className={`rounded-[6px] px-1.5 py-0.5 text-[11px] ${tone}`}>{statusLabel(status)}</span>
@@ -401,6 +401,11 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   )
 }
 
+/** A duration Bambuddy may not have reported, as the list's print cards write it. */
+function duration(seconds: number | null | undefined): string | null {
+  return seconds === null || seconds === undefined ? null : formatDuration(seconds)
+}
+
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   if (value === null || value === undefined || value === '') return null
   return (
@@ -429,8 +434,8 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
         />
         <Fact label="Started" value={formatWhen(print.started_at)} />
         <Fact label="Finished" value={formatWhen(print.completed_at)} />
-        <Fact label="Took" value={formatDuration(outcome.actual_time_seconds)} />
-        <Fact label="Estimated" value={formatDuration(outcome.estimated_time_seconds)} />
+        <Fact label="Took" value={duration(outcome.actual_time_seconds)} />
+        <Fact label="Estimated" value={duration(outcome.estimated_time_seconds)} />
         <Fact label="Filament" value={filament} />
         {colours.length > 0 && (
           <Fact
@@ -471,7 +476,7 @@ function RunRow({ run }: { run: Run }) {
       <span className="text-ink">{statusLabel(run.status)}</span>
       <span className="sb-num text-faint">{formatWhen(run.started_at)}</span>
       {run.duration_seconds != null && (
-        <span className="sb-num text-faint">{formatDuration(run.duration_seconds)}</span>
+        <span className="sb-num text-faint">{duration(run.duration_seconds)}</span>
       )}
       {run.filament_used_grams != null && (
         <span className="sb-num text-faint">{run.filament_used_grams} g</span>
