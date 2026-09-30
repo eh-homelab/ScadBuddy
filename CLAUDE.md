@@ -147,7 +147,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
   `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
-  renders* across jobs. Never swap them.
+  renders* across jobs. Never swap them. Template pipelines (#427): `TemplatePipeline`
+  runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
+  workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
+  `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,
+  `run_template_activity`, `migrate_inputs`), `template_process.py`/`template_runner.py`
+  (template Python in its own process group, env allowlisted), `verify_pipeline.py`
+  (for `verify.sh`). `scadbuddy/template.py` is the surface a template's
+  `activities.py` imports.
 - `backend/scadbuddy/store/` — the blob store (spec 2026-09-27 §6):
   - phase 1's directory-shaped `BlobStore` Protocol, `LocalBlobStore` (a piece in
     `data/blobs/<piece_key>/`), `BlobRefs` (the `blob_refs` table that keeps a blob

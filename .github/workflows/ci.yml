@@ -888,6 +888,20 @@ jobs:
           tags: scadbuddy-verify:ci
           cache-from: type=gha
 
+      # The backend and its pinned `temporal` CLI, for a template's pipeline check
+      # (`SCADBUDDY_PIPELINE_IMAGE`; spec 2026-09-27 §5.5): `base` has no Python.
+      # Read-only from the same cache, which the `backend` job's test-image build
+      # writes.
+      - name: Build the pipeline image (Dockerfile `test` stage)
+        if: ${{ steps.select.outputs.count != '0' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:test
+          cache-from: type=gha
+
       # `base` sits BELOW the Dockerfile's OPENSCAD_VERSION assertion (that is
       # in the `app` stage), so assert it here too: a template check against an
       # OpenSCAD the rest of the repo has not been verified on proves nothing.
@@ -916,6 +930,7 @@ jobs:
         env:
           SCADBUDDY_OPENSCAD_IMAGE: scadbuddy-verify:ci
           SCADBUDDY_FONTS_IMAGE: scadbuddy-verify:ci
+          SCADBUDDY_PIPELINE_IMAGE: scadbuddy:test
         run: .github/scripts/verify-models.sh <"$RUNNER_TEMP/models.txt"
 
       - name: Nothing to verify
