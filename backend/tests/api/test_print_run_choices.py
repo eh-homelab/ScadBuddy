@@ -1464,7 +1464,8 @@ def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
 
     check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
 
-    assert check.status_code != 200, check.text
+    # Bambuddy's own 422, passed through by errors.py, not a 200 carrying a verdict.
+    assert check.status_code == 422, check.text
     assert "errors" not in check.json()
 
 
