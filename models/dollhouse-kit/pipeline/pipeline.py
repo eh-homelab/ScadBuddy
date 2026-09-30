@@ -28,7 +28,8 @@ LABELS = {
 #: Walls and corner posts come in a lower and an upper course (the model renders them
 #: differently), so each course is its own entry. A window wall is always upper.
 COURSED = {"wall", "corner_post"}
-#: A piece's key holds only what shapes it (§5.4: new wallpaper re-renders walls, not floors).
+#: Wall, window and door style stay off the pieces they do not shape (§5.4: new wallpaper
+#: re-renders walls, not floors). Every other parameter reaches every piece.
 WALL_STYLE = {
     "exterior",
     "texture_size",
@@ -49,11 +50,22 @@ WINDOW = {
     "glass",
     "shutters",
     "flower_box",
-    "trim",
 }
 DOOR = {"door_style", "door_width", "door_height", "door_panels"}
+#: The model's own `DOOR_PIECE` (model.scad): the door walls, the leaves and the
+#: connectors (hinge pins double for French doors and are sized from the door).
+DOOR_PIECES = {
+    "wall_door_lower",
+    "wall_door_upper",
+    "door_leaf_lower",
+    "door_leaf_upper",
+    "connectors",
+}
+#: `trim` sets the door opening (`LIN`/`FW` in `dr_w`) and frames the window.
+TRIM_PIECES = {"wall_window", *DOOR_PIECES}
 WALLS = {"wall", "wall_window", "wall_door_lower", "wall_door_upper", "corner_post"}
-SHAPE = {"piece", "course", "width_units", "depth_units"}
+#: The pipeline sets these; `preview` (hidden) would render the room scene instead.
+SHAPE = {"piece", "course", "width_units", "depth_units", "preview"}
 
 
 def clamp_house(house):
@@ -131,8 +143,10 @@ def piece_params(entry, style):
         keep = {k: v for k, v in keep.items() if k not in WALL_STYLE}
     if piece != "wall_window":
         keep = {k: v for k, v in keep.items() if k not in WINDOW}
-    if not piece.startswith(("wall_door", "door_leaf")):
+    if piece not in DOOR_PIECES:
         keep = {k: v for k, v in keep.items() if k not in DOOR}
+    if piece not in TRIM_PIECES:
+        keep.pop("trim", None)
     params = {**keep, "piece": piece, "width_units": 1, "depth_units": 1}
     if entry["course"]:
         params["course"] = entry["course"]

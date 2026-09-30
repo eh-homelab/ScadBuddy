@@ -65,6 +65,47 @@ def test_each_coursed_piece_renders_its_own_course() -> None:
     assert "course" not in m.piece_params(entries["floor_tile"], {})
 
 
+#: Every style parameter set away from its default (model.scad), and the hidden preview.
+EVERY_STYLE = {
+    "trim": False,
+    "door_style": "french",
+    "door_width": 120,
+    "door_height": 350,
+    "connector_type": "hinge_pins",
+    "preview": "room",
+}
+DOOR_READERS = {"door_style", "door_width", "door_height"}
+#: Which of trim and the door's shape each piece's geometry reads (model.scad: `LIN`/`FW`
+#: in `dr_w` and the opening's architrave; `DOOR_PIECE`, whose hinge pins double for
+#: French doors and are sized from the door).
+READS = {
+    "wall": set(),
+    "corner_post": set(),
+    "wall_window": {"trim"},
+    "wall_door_lower": {"trim", *DOOR_READERS},
+    "wall_door_upper": {"trim", *DOOR_READERS},
+    "door_leaf_lower": {"trim", *DOOR_READERS},
+    "door_leaf_upper": {"trim", *DOOR_READERS},
+    "connectors": {"trim", *DOOR_READERS},
+    "floor_tile": set(),
+    "roof_panel": set(),
+    "stairs_lower": set(),
+    "stairs_upper": set(),
+    "railing": set(),
+}
+
+
+def test_each_piece_carries_the_trim_and_door_style_it_reads() -> None:
+    module = _module()
+    entries = module.house_pieces({"cols": 2, "rows": 2, "storeys": 2, "windows": 2})
+    assert {e["piece"] for e in entries} == set(READS)
+    for entry in entries:
+        params = module.piece_params(entry, EVERY_STYLE)
+        carried = {"trim", *DOOR_READERS} & set(params)
+        assert carried == READS[entry["piece"]], entry["id"]
+        assert "preview" not in params, entry["id"]
+
+
 @pytest.mark.parametrize(("value", "expected"), [(None, 1), ("", 1), ("3", 3), ("x", 2)])
 def test_a_null_or_empty_value_counts_as_zero_like_the_designer(
     value: object, expected: int
