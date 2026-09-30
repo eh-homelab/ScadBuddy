@@ -26,6 +26,7 @@ import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
+import { bambuddyLink } from '../lib/bambuddyLinks'
 
 interface Props {
   slug: string
@@ -239,7 +240,7 @@ export function ActionBar({
               <span className="truncate text-ok">Saved to {filed.name}</span>
               <button
                 type="button"
-                onClick={() => openExternal(filed.file.bambuddy_url)}
+                onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
                 className="shrink-0 text-accent underline"
               >
                 Open in Bambuddy
