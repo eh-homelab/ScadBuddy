@@ -123,9 +123,13 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
     )
 
 
-def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
-    """Where the piece's blob goes: its template's folder, named by `model.json`."""
-    return BlobScope(slug=req.slug, title=template_title(Path(prepared.scad).parent, req.slug))
+async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
+    """Where the piece's blob goes: its template's folder, named by `model.json`.
+
+    Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
+    """
+    title = await asyncio.to_thread(template_title, Path(prepared.scad).parent, req.slug)
+    return BlobScope(slug=req.slug, title=title)
 
 
 async def _checkout(blobs: BlobStore, key: str) -> str | None:
@@ -268,7 +272,9 @@ class RenderActivities:
             raise _failure(error) from None
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
         return _main_result(output)
@@ -300,7 +306,9 @@ class RenderActivities:
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
 
@@ -338,7 +346,9 @@ class RenderActivities:
         await asyncio.to_thread(_write_piece, work, piece)
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
         return piece
