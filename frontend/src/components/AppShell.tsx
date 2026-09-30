@@ -19,6 +19,7 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
 
@@ -50,6 +51,7 @@ interface Props {
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   useLoadDisplayUnit()
+  useLoadBambuddyLinks()
   // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
   useGlobalAgentTools()
   const ai = useAiAvailability()
