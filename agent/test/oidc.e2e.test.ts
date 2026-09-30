@@ -116,7 +116,7 @@ describe('MCP authorization end to end: discovery → 401 → login → token �
     await client.connect(new StreamableHTTPClientTransport(SERVER_URL, { authProvider: provider, fetch: fetchFn }))
     try {
       expect((await client.listTools()).tools.length).toBeGreaterThan(0)
-      expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual([])
+      expect(firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))).toEqual({ items: [], next_cursor: null, total: 0 })
     } finally {
       await client.close()
     }

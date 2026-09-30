@@ -45,3 +45,25 @@ export function inkOn(hex: string): string {
   const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
   return luminance > 0.55 ? '#12161d' : '#f2f5fa'
 }
+
+/** A print's length: `1h 47m`, `43m`, or `42s` under a minute. */
+export function formatDuration(seconds: number): string {
+  const total = Math.round(seconds)
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`
+  const units = ['kB', 'MB', 'GB', 'TB']
+  let value = bytes / 1000
+  let unit = 0
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
+}

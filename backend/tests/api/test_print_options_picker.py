@@ -8,15 +8,34 @@ Assertions are on the request bodies, because that is all Bambuddy sees.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import slice_routes
-from tests.api.test_print_run_choices import body, run_request, run_routes
-from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route, remember
+from tests.api.test_print_run_choices import body, run_print, run_request, run_routes
+from tests.api.test_send import API, configure, make_output, upload_route
+from tests.bambuddy.conftest import recording
+
+OPTIONS_ROUTE = "/api/v1/settings/print-options"
+
+
+def remember(
+    client: TestClient, scope: str, options: dict[str, Any], key: str | None = None
+) -> None:
+    body: dict[str, Any] = {"scope": scope, "options": options}
+    if key is not None:
+        body["key"] = key
+    assert client.put(OPTIONS_ROUTE, json=body).status_code == 200
+
+
+def queue_route() -> respx.Route:
+    return respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
 
 
 def _prepared(client: TestClient, model: str, *, printer_id: int = 1) -> str:
@@ -35,9 +54,7 @@ def test_remembered_options_ride_on_the_queue_item(client: TestClient, model: st
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    result = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(copies=3)
-    ).json()
+    result = run_print(client, output_id, json=run_request(copies=3)).json()
 
     queued = json.loads(queue.calls.last.request.read())
     assert (queued["timelapse"], queued["bed_levelling"]) == (False, "off")
@@ -59,9 +76,44 @@ def test_a_per_printer_option_applies_to_the_chosen_printer(client: TestClient, 
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+    run_print(client, output_id, json=body())
 
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_per_printer_override_for_another_printer_is_ignored(
+    client: TestClient, model: str
+) -> None:
+    """Printer 7's override must not leak onto a print on printer 1: the global value
+    stands. Applying every remembered printer's options would queue ``False``."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "printer", {"timelapse": False}, key="7")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    run_print(client, output_id, json=run_request(printer_id=1))
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert queued["printer_id"] == 1
+    assert queued["timelapse"] is True
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, model: str) -> None:
+    """Another model's override must not leak onto this one: the global value stands."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "model", {"timelapse": False}, key="some-other-model")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    run_print(client, output_id, json=body())
+
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is True
 
 
 @pytest.mark.requires_postgres
@@ -77,9 +129,7 @@ def test_with_no_printer_named_the_configured_one_prints_with_its_options(
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    result = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(printer_id=None, copies=2)
-    ).json()
+    result = run_print(client, output_id, json=run_request(printer_id=None, copies=2)).json()
 
     queued = json.loads(queue.calls.last.request.read())
     assert queued["printer_id"] == 1
@@ -98,7 +148,7 @@ def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+    run_print(client, output_id, json=body())
 
     # The model's own choice beats the global one.
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
@@ -114,9 +164,7 @@ def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     output_id = _prepared(client, model, printer_id=7)
     queue = queue_route()
 
-    result = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(printer_id=7)
-    ).json()
+    result = run_print(client, output_id, json=run_request(printer_id=7)).json()
 
     queued = json.loads(queue.calls.last.request.read())
     # Printer 7's remembered option applies, and the item goes to printer 7 rather
@@ -139,15 +187,11 @@ def test_a_remembered_quantity_is_queued_unless_copies_is_set(
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    remembered = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(copies=None)
-    ).json()
+    remembered = run_print(client, output_id, json=run_request(copies=None)).json()
     assert json.loads(queue.calls.last.request.read())["quantity"] == 4
     assert remembered["copies"] == 4
 
-    explicit = client.post(
-        f"/api/v1/print/outputs/{output_id}/run", json=run_request(copies=2)
-    ).json()
+    explicit = run_print(client, output_id, json=run_request(copies=2)).json()
     assert json.loads(queue.calls.last.request.read())["quantity"] == 2
     assert explicit["copies"] == 2
 
@@ -162,7 +206,7 @@ def test_a_remembered_project_is_not_filed_on_the_item(client: TestClient, model
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    result = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body()).json()
+    result = run_print(client, output_id, json=body()).json()
 
     assert json.loads(queue.calls.last.request.read()).get("project_id") is None
     assert result["project_id"] is None
@@ -179,8 +223,9 @@ def test_the_pickers_own_options_ride_on_this_print_only(client: TestClient, mod
     output_id = _prepared(client, model)
     queue = queue_route()
 
-    client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
+    run_print(
+        client,
+        output_id,
         json=run_request(copies=2, options={"timelapse": True, "quantity": 5}),
     )
 

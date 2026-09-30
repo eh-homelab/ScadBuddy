@@ -19,13 +19,11 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print import run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import body, run_routes
+from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
@@ -68,6 +66,8 @@ def deletes() -> respx.Route:
 
 
 def project_routes() -> None:
+    # A project folder's copy is named uniquely among the files already in it (#317).
+    respx.get(f"{API}/library/files").mock(return_value=httpx.Response(200, json=[]))
     for project_id, folder_id in PROJECT_FOLDERS.items():
         respx.get(f"{API}/library/folders/by-project/{project_id}").mock(
             return_value=httpx.Response(
@@ -89,7 +89,7 @@ def run(
     request = body(**choices)
     if project_id is not None:
         request["project_id"] = project_id
-    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=request)
+    response = run_print(client, output_id, json=request)
     assert response.status_code == 200, response.text
     result: dict[str, Any] = response.json()
     return result
@@ -115,6 +115,7 @@ def set_up(client: TestClient, model: str) -> str:
     project_routes()
     slice_routes()
     queue_route()
+    allow_reprints(client)
     return make_output(client, model)
 
 
@@ -366,28 +367,6 @@ def test_each_run_records_its_sliced_file_against_its_copy(client: TestClient, m
     [[row]] = sliced(client, output_id)
     assert row["id"] == 77
     assert row["preset_key"]
-
-
-@respx.mock
-def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """Outputs sent before the spool-first run still follow their pipeline run; its
-    sliced file appears only on a later read, and is recorded then."""
-    output_id = set_up(client, model)
-    asyncio.run(
-        upload_store(client).record(
-            output_id, LibraryCopy(id=41, folder_id=INBOX, target_key=DEFAULT_PLATE.key)
-        )
-    )
-    OutputStore(paths).record_send(output_id, pipeline_run_id=12, print_route="pipeline")
-    assert sliced(client, output_id) == [[]]
-
-    respx.get(f"{API}/pipeline-runs/12").mock(return_value=httpx.Response(200, json=run_body()))
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-    client.get(f"/api/v1/print/outputs/{output_id}/progress")
-
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1", "file_hash": None}]]
 
 
 # --- deleting an output --------------------------------------------------------------

@@ -349,7 +349,7 @@ describe('configuration', () => {
       (d) => problems.push(d),
     )
     expect(await repo.get()).toBeUndefined()
-    await repo.put(config)
+    await repo.put(config, { actor: { kind: 'system', id: 'test', label: 'test' }, surface: 'system' as const })
     expect(await repo.get()).toEqual(config)
     rows.set('mcp_oidc', { enabled: true, issuer: 'not a url' })
     expect(await repo.get()).toBeUndefined()

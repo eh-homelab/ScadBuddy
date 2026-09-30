@@ -3,11 +3,12 @@ import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { slug } from './common.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { compositeKey, page, PAGED, pageInput } from './pagination.js'
 
 // Libraries & fonts (issue #251): the library catalogue, pinning a library to a
 // model (a revision of the model's `libraries` list), installed fonts, the
-// Google Fonts catalogue, and installing a family. Routes:
-// backend/scadbuddy/api/{libraries,models,fonts}.py.
+// Google Fonts catalogue, and installing a family; include/use resolution and
+// the font checks are #253. Routes: backend/scadbuddy/api/{libraries,models,fonts}.py.
 
 const libraryName = z.string().min(1).describe('Library name, as list_libraries returns it')
 
@@ -38,11 +39,14 @@ function repin(backend: BackendClient, slug: string, name: string, ref: string |
 export const libraryTools: Tool[] = [
   defineTool({
     name: 'list_libraries',
-    description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.',
-    input: z.object({}),
+    description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
+    source:
+      'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/libraries'), 'list libraries')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/libraries'), 'list libraries'), args, (l) => l.name, 'list_libraries')),
   }),
 
   // Pinning is split by WHAT THE BACKEND FETCHES, because a tool's tier is static:
@@ -136,14 +140,27 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'unpin_library',
-    description: 'Remove a library from a model, as a revision in its history.',
-    input: z.object({ slug, name: libraryName }),
+    description:
+      'Remove a library from a model, as a revision in its history: every entry of that name, or with ' +
+      "`index` only the invalid entry at that position (the model record's `invalid_libraries[].index`).",
+    input: z.object({
+      slug,
+      name: libraryName,
+      index: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe('Only the invalid entry at this position of `libraries`; a 409 if it is no longer one of that name'),
+    }),
     risk: 'write',
     routes: ['DELETE /api/v1/models/{slug}/libraries/{name}'],
-    handler: async ({ slug, name }, { backend }) =>
+    handler: async ({ slug, name, index }, { backend }) =>
       json(
         await ok(
-          backend.DELETE('/api/v1/models/{slug}/libraries/{name}', { params: { path: { slug, name } } }),
+          backend.DELETE('/api/v1/models/{slug}/libraries/{name}', {
+            params: { path: { slug, name }, ...(index === undefined ? {} : { query: { index } }) },
+          }),
           `unpin ${name} from ${slug}`,
         ),
       ),
@@ -199,12 +216,21 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'list_installed_libraries',
-    description: 'Every library checkout on the data volume, with the models whose live pins read it.',
-    input: z.object({}),
+    description: 'The library checkouts on the data volume, with the models whose live pins read them.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
+    source:
+      'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries/installed'],
-    handler: async (_args, { backend }) =>
-      json(await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries')),
+    handler: async (args, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/libraries/installed'), 'list installed libraries'),
+          args,
+          (l) => compositeKey(l.name, l.commit),
+          'list_installed_libraries',
+        ),
+      ),
   }),
 
   defineTool({
@@ -230,15 +256,55 @@ export const libraryTools: Tool[] = [
     },
   }),
 
+  // Include/use resolution (#253): the backend resolves each target the way
+  // OpenSCAD's find_valid_path does (beside the file, then each pinned checkout
+  // on OPENSCADPATH), in backend/scadbuddy/library/includes.py. Read-only; the
+  // route is a POST only because it takes an unsaved source.
+  defineTool({
+    name: 'check_dependencies',
+    description:
+      "Resolve a model's `include <…>`/`use <…>` targets against its own files and pinned libraries, as a " +
+      'render would, without rendering or fetching anything. Each target is `resolved` (with the file and ' +
+      'library it resolved to) or `unresolved` with the reason and, when one exists, a `suggestion`: the ' +
+      'catalogue library to pin (pin_library), or one another model pins from its own URL ' +
+      '(pin_library_from_url). Also lists every `font = "…"` literal with the families not installed. Pass ' +
+      '`source` to check an unsaved edit. OpenSCAD only warns on a missing include and renders without it.',
+    input: z.object({
+      slug,
+      source: z
+        .string()
+        .max(1_000_000)
+        .optional()
+        .describe("Unsaved OpenSCAD source to check in place of the model's saved model.scad"),
+    }),
+    risk: 'read',
+    source: "the model's own source and file names, and library data fetched from third-party git repositories",
+    routes: ['POST /api/v1/models/{slug}/dependencies'],
+    handler: async ({ slug, source }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/models/{slug}/dependencies', {
+            params: { path: { slug } },
+            body: { source: source ?? null },
+          }),
+          `check the dependencies of ${slug}`,
+        ),
+      ),
+  }),
+
   defineTool({
     name: 'list_fonts',
     description:
-      'Font families installed for rendering. A `// font` parameter must name one exactly: a missing family ' +
-      'silently falls back to DejaVu and changes the geometry.',
-    input: z.object({}),
+      'Font families installed for rendering. A `// font` value must name one of them (case and spaces do not ' +
+      'matter): OpenSCAD itself would silently draw a missing family in DejaVu Sans with other geometry, so ' +
+      'render_model and save_preset refuse one with an error naming it. install_font adds a family.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
+    source:
+      'installed font names, some fetched from the web',
     routes: ['GET /api/v1/fonts'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/fonts'), 'list fonts')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/fonts'), 'list fonts'), args, (f) => f.family, 'list_fonts')),
   }),
 
   defineTool({
@@ -250,6 +316,8 @@ export const libraryTools: Tool[] = [
       limit: z.number().int().min(1).max(200).optional(),
     }),
     risk: 'read',
+    source:
+      'font metadata from the Google Fonts catalogue on the web',
     routes: ['GET /api/v1/fonts/catalogue'],
     handler: async ({ q, category, limit }, { backend }) =>
       json(await ok(backend.GET('/api/v1/fonts/catalogue', { params: { query: { q, category, limit } } }), 'search fonts')),
@@ -257,7 +325,10 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'install_font',
-    description: 'Install a Google Fonts family onto the data volume so renders can use it.',
+    description:
+      'Install a Google Fonts family onto the data volume so renders can use it. The backend then checks that ' +
+      'fontconfig resolves the family where renders run, and answers an error if it does not (the files may ' +
+      'name another family: see list_fonts).',
     input: z.object({ family: z.string().min(1).max(100), force: z.boolean().default(false) }),
     risk: 'write',
     routes: ['POST /api/v1/fonts/install'],

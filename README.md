@@ -27,18 +27,23 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own. Saved presets are kept in the
-  database.
+  saved preset, to an editable preset of your own. Any preset can carry a short
+  Markdown `description` and `tags`, shown under the picker; **Edit details** renames a
+  saved one and sets them. Saved presets are kept in the database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
   plate cover images and a layout sized for the target printer's plate.
-- **Send to Bambuddy**: upload to a library folder, or slice and queue it.
+- **Send to Bambuddy**: upload to a library folder; printing is the print picker's job.
 - **Print picker**: spool-first — pick spools, nozzle size, a quality tier and a plate,
   and ScadBuddy derives the printer, process and filament presets and slices and queues
   through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
+- **Library**: print any file already in Bambuddy's library through the same print
+  picker, printed exactly as its author left it — never replated, recolored or
+  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
@@ -113,7 +118,10 @@ on shutdown.
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL` and
   `SCADBUDDY_TEMPORAL_ADDRESS`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`,
+  `SCADBUDDY_BAMBUDDY_WEB_URLS` (comma-separated URLs browsers reach Bambuddy at, when
+  `SCADBUDDY_BAMBUDDY_URL` is one only the server can; the first is where links point),
+  `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
   1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
   from the UI it wins; a field the UI never saved keeps following the variable,
@@ -123,6 +131,8 @@ on shutdown.
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
   `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
+  `SCADBUDDY_ALLOWED_ORIGINS` (comma-separated origins the UI is also served
+  under, see "Realtime" below);
   `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
@@ -223,16 +233,26 @@ on shutdown.
 
 **Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
 backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
-origin (Settings, seeded from `SCADBUDDY_PUBLIC_URL`) or a loopback origin;
-anything else is refused, which stops DNS rebinding. If the socket can't
-connect, the header shows "Live updates unavailable" and views poll instead.
+origin (Settings, seeded from `SCADBUDDY_PUBLIC_URL`), one of
+`SCADBUDDY_ALLOWED_ORIGINS`, or a loopback origin; anything else is refused,
+which stops DNS rebinding. If the socket can't connect, the header shows "Live
+updates unavailable" and views poll instead. A deployment reached under more
+than one hostname (a LAN host and an SSO proxy, say) lists every hostname that
+is not the public URL in `SCADBUDDY_ALLOWED_ORIGINS`
+(`https://scadbuddy.internal.example,https://scadbuddy.sso.example`); otherwise
+the pages on the other hostname show "Live updates unavailable" while the same
+pages on the public URL work, and the backend log says
+`refused a realtime socket from origin ...`. REST calls carry no `Origin`, so
+they are not affected; only the socket is. The agent reads the same variable
+for its own origin check (below).
 
 ## Deploying
 
 ScadBuddy runs on the homelab cluster from
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters)
-(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD). That manifest
-pins the image **by digest**; this repo's workflows are what move the pin.
+(`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, and the render
+worker's `applications/scadbuddy/scadbuddy-render.yaml`). Those manifests pin the
+image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
 The backend needs its database (#401): the manifest must set
@@ -278,7 +298,11 @@ Both call `deploy.reusable.yml`, which:
    (contents + pull requests) — never `GITHUB_TOKEN`, which cannot write to
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
-   annotations (`version`, `revision`, `source`) in the manifest;
+   annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
+   `scadbuddy-render.yaml` when that file exists in clusters (#547; until
+   clusters#1454 adds it, the run notes its absence and pins the API alone). Each
+   file must have exactly one such image line and one of each annotation, before
+   and after the rewrite, or the deploy stops;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
@@ -322,7 +346,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   timeouts from the same values.
 - **Versioning:** workflows are pinned to the build that started them. At start
   the worker makes its own build the deployment's current version, so a new build
-  receives new workflows once it is polling.
+  receives new workflows once it is polling. It retries that for a minute after it
+  starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
   running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
@@ -468,8 +493,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - It reads only infrastructure variables (`agent/src/config.ts`; spec §9):
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
-  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL` and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each described below. With no database
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and
+  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
@@ -521,13 +547,24 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     `X-Forwarded-*` from any other peer is ignored; unset, it is ignored from
     everyone.
   - The UI's origin: `Origin` and the request's host (`X-Forwarded-Host` from a
-    trusted proxy, else `Host`) must both be the origin of
-    **`SCADBUDDY_PUBLIC_URL`**, the same variable the backend reads for
-    Bambuddy's sidebar link (set it to the `https://` URL users open). Default
-    ports are normalised. Unset, only `localhost`/`127.0.0.1`/`[::1]` with the
-    matching Origin, from a loopback peer, is accepted. This is what stops DNS
-    rebinding: an attacker's page re-pointed at the agent sends its own name
-    in both `Host` and `Origin`, which is not on the list.
+    trusted proxy, else `Host`) must both be the same origin from the list:
+    the origin of **`SCADBUDDY_PUBLIC_URL`**, the same variable the backend
+    reads for Bambuddy's sidebar link (set it to the `https://` URL users
+    open), plus any in **`SCADBUDDY_ALLOWED_ORIGINS`** (comma-separated; the
+    other hostnames the same deployment answers on, which the backend also
+    reads for its realtime socket). Default ports are normalised. Unset, only
+    `localhost`/`127.0.0.1`/`[::1]` with the matching Origin, from a loopback
+    peer, is accepted. This is what stops DNS rebinding: an attacker's page
+    re-pointed at the agent sends its own name in both `Host` and `Origin`,
+    which is not on the list.
+- **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It always opens the
+  backend (`SCADBUDDY_BACKEND_URL`), and a URL on `SCADBUDDY_PUBLIC_URL` or
+  `SCADBUDDY_ALLOWED_ORIGINS` is rewritten onto it. **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
+  (comma-separated origins, or `*` for any) lets it open other origins too, each only
+  after a human approves it once per session in the ScadBuddy UI. Unset, it opens
+  nothing else. `*` plus that approval is the intended setting for full use; it also
+  lets the model ask to open services on your LAN, so read the risks in that doc first.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -563,9 +600,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Streamable HTTP MCP servers named after the plugin, so their tools reach
   the model as `mcp__<name>__<tool>` (`main.ts` passes
   `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
-  plugin tool parks for approval like any other, #258). Nothing starts a
-  session over HTTP yet, so for now the connection test is what reaches a
-  plugin. Rules (`agent/src/plugins/registry.ts`):
+  plugin tool parks for approval like any other, #258). Sessions start from
+  the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
     host resolves to is loopback. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
@@ -638,15 +674,48 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   them; `recall` is the obvious candidate. Not yet verified against a running
   Hindsight: the tool names and annotations a real server lists, and whether
   `reflect` writes anything.
+- **Sessions and the assistant's chat** (#300, #256; `agent/src/routes/chat.ts`,
+  `agent/src/routes/sessions.ts`). The browser never holds a Claude credential:
+  every model call is the agent's own, and every route below acts as the browser
+  user behind the same guards as the credential routes.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
+  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
+  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
+  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
+
+  A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
+  script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`
+  before it is read; the socket caps a frame at 256 KiB. New sessions, from the
+  socket or `POST`, are limited per owner (`MAX_NEW_SESSIONS` in
+  `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
+  another replica does not reset it); the socket answers an `error` frame with
+  code `rate_limited`. Approvals
+  are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
+  their tiers), plus enabled plugins. Every agent response carries
+  `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
   Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
-- Nothing deploys it yet. The clusters manifest, and the ingress routes for
-  `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories
-  that give it routes. Until then the image's publish job is
+- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
+  agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
+  backend, the agent and the assistant's WebSocket on one origin, which is what
+  works inside Bambuddy's iframe. The rules, an example `Ingress` and a
+  `curl` check per path (every agent response carries
+  `X-ScadBuddy-Service: agent`) are in `docs/ai/operating.md` §1.1.
+  `frontend/vite.config.ts` routes the same way for `pnpm dev` and
+  `pnpm preview`. The clusters manifest is in eh-homelab/clusters, and until it
+  deploys the sidecar the image's publish job is
   `continue-on-error`, so it cannot hold back a backend deploy, and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
@@ -678,8 +747,10 @@ deploy PR link into the release notes. There is no human step after
   reports `revision` (commit) and `version` — the same label the manifest
   pins (`X.Y.Z` for a release, `sha-<short>` for a main build), so the two
   should match the Deployment's annotations exactly.
-- **What is pinned:** the annotations on the Deployment in
-  `applications/scadbuddy/scadbuddy.yaml`.
+- **What is pinned:** the annotations on the Deployments in
+  `applications/scadbuddy/scadbuddy.yaml` and
+  `applications/scadbuddy/scadbuddy-render.yaml`; one deploy pins both to the
+  same digest.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR
   first — a red required check there means the merge never happened and
   nothing reports until it does. Failed *verification* (merged, but the pod
@@ -689,7 +760,8 @@ deploy PR link into the release notes. There is no human step after
 ### Manual fallback
 
 There should be no reason for one; but the mechanism is only a PR. Editing the
-image line and annotations in the clusters manifest by hand and merging does
+image line and annotations in the clusters manifests (both, once the render
+worker's exists) by hand and merging does
 exactly what the pipeline does. Do not `kubectl rollout restart` — the pin is
 what makes the running image knowable.
 

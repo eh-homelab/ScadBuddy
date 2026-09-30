@@ -171,9 +171,12 @@ export class PgEventListener implements EventSource {
       try {
         await this.#sql.unsafe(`LISTEN "${PG_CHANNEL}"`)
         this.#listening = true
-        if (this.#everListened) await this.#replayGap()
+        const reconnected = this.#everListened
+        if (reconnected) await this.#replayGap()
         else this.#adopt(await this.#maxSeq())
         this.#everListened = true
+        // After the replay: NOTIFY-only kinds (bus.ts `onReconnect`) are re-read now.
+        if (reconnected) this.#followers.reconnected()
         return
       } catch (err) {
         this.#listening = false

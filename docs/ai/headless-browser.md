@@ -6,7 +6,9 @@ agent container**, through the official `playwright` Claude plugin (issue
 for sessions that have no user tab: sessions started over `/mcp` or by another agent
 (#300), visual checks while authoring (#252, #253), and evals (#259). The
 [browser bridge](browser-bridge.md) is still the only way to act in the user's own tab;
-the headless browser never sees that tab.
+the headless browser never sees that tab. With `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` set
+it may also open other sites, each only once a human approves it for the session
+("Beyond the backend", below).
 
 It is **off by default**. Settings has a switch for it ("AI headless browser"), which
 stores `headless_browser_enabled` through `PUT /api/v1/ai/settings/headless-browser`;
@@ -19,7 +21,8 @@ from the next turn on, every session turn gets the browser (`main.ts` gives the
 |---|---|
 | The pinned server, `@playwright/mcp` **0.0.82** (Apache-2.0, [npm](https://www.npmjs.com/package/@playwright/mcp/v/0.0.82), [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp)) | exact dependency in [`agent/package.json`](../../agent/package.json) |
 | The official plugin's manifest, vendored byte for byte from [`anthropics/claude-plugins-official` at `fa59bc9`](https://github.com/anthropics/claude-plugins-official/tree/fa59bc9037741ecfa131aa27938272605710d7b2/external_plugins/playwright) (Apache-2.0, the repository's root `LICENSE`) | [`agent/plugins/playwright/`](../../agent/plugins/playwright/README.md) |
-| Per-session plugin copy, server config, tier map, disallowed tools, input guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
+| Per-session plugin copy, server config, tier map, disallowed tools, input guard, request guard | [`agent/src/harness/headlessBrowser.ts`](../../agent/src/harness/headlessBrowser.ts) |
+| Where it may go: the backend, its aliases, and origins a human approved per session | [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts), table `ai_browser_origins` ([migration](../../agent/src/db/migrations/20260930T0342Z_browser_origins.sql)), `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` in [`agent/src/config.ts`](../../agent/src/config.ts) |
 | Loading it into a query | `buildHarness()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts) (`HarnessRun.headlessBrowser`) |
 | Turning it on per turn | `runTurn()` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts): `deps.headlessBrowser` **and** the `ai_settings` key `headless_browser_enabled` = `true` |
 | Its directory | `sessionBrowserDir()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts): `<state dir>/browser/<session id>` |
@@ -41,12 +44,18 @@ rejects that, so it is not vendored. Instead, for each turn with the browser on,
   --config playwright-mcp.json --headless --isolated --no-webmcp --block-service-workers`;
 - `playwright-mcp.json`, the server config:
   - `browser.browserName: chromium`, `isolated: true`, `launchOptions.headless: true`;
-  - `contextOptions.extraHTTPHeaders: { "X-ScadBuddy-Agent-Session": <session id> }`
-    (the agent-actor marker);
-  - `acceptDownloads: false`, `serviceWorkers: "block"`;
-  - `network.allowedOrigins: [<origin of SCADBUDDY_BACKEND_URL>]`;
+  - `browser.initPage: [redirect-guard.cjs]`, the request guard (Guards, 3);
+  - `acceptDownloads: false`, `serviceWorkers: "block"`, and **no**
+    `extraHTTPHeaders`: the request guard adds the agent-actor marker
+    (`X-ScadBuddy-Agent-Session: <session id>`) to requests to the backend only;
+  - `network.allowedOrigins`: the backend's origin, its aliases and the origins
+    `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` lists; left out under `*` (the server then
+    allows all, and the guards below are the gate);
   - `outputDir: <browser dir>/output`, `allowUnrestrictedFileAccess: false`,
-    `webmcp: false`, no `capabilities` (the core tool set only).
+    `webmcp: false`, no `capabilities` (the core tool set only);
+- `redirect-guard.cjs`, the request guard, and `approved-origins.json`, the origins
+  approved in this session so far, which the guard reads on every request and the
+  harness rewrites when a human approves another.
 
 `assertHeadlessPlugin()` then checks the written `.mcp.json` (one server, under
 `env -i`, the pinned `cli.js`, the required flags, none of the forbidden ones) and
@@ -83,32 +92,125 @@ measured on Claude Code 2.1.283).
 
 In order, from the model outwards:
 
-1. **The input guard** (`browserInputProblem()`, run in both the `PreToolUse` hook and
-   `canUseTool`, see `permissions.ts` `InputGuard`) denies, at any tier:
-   - a `url` (`browser_navigate`, `browser_tabs`) whose origin is not the backend's,
-     compared with `normaliseOrigin()` from
-     [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts). `file:`,
-     `data:`, `javascript:`, other ports, hosts and schemes, and
-     `http://backend@evil.example/` are all refused;
-   - a `filename` that is not a plain file name (no directory part, no leading dot).
-2. **The server's allow-list** (`network.allowedOrigins`): a navigation, subresource or
-   page `fetch` to another origin fails with `net::ERR_BLOCKED_BY_CLIENT`. The README
-   says it "does not serve as a security boundary and does not affect redirects", and
-   the redirect half is measured (below), so:
-3. **The redirect guard** (`redirectGuardSource()`, loaded on every page through the
-   server's `browser.initPage`) routes every request itself: another origin is refused;
-   a same-origin request is made with `maxRedirects: 0`, a 3xx off the origin is
-   refused, a same-origin 3xx on a GET navigation becomes a new navigation (which the
-   guard sees again), and any other 3xx is refused. No request and no redirect hop
-   leaves the origin, whatever sits in front of the backend (measured, below).
-4. **The backend's agent-actor gate.** Every request from the headless context carries
-   `X-ScadBuddy-Agent-Session`. `AgentActorGate` lets such a request through for
-   `GET`/`HEAD`/`OPTIONS`, and for the non-safe routes in `AGENT_ALLOWED_WRITES` (the
-   read/write tools' routes that no outward tool shares; `agent/test/agentActor.test.ts`
-   derives the same list from the tool registry and fails on drift). Everything else,
-   i.e. send, print, delete, settings writes, library pins from a URL, and any route
-   added later, gets `403 Needs approval`, unless a grant authorises exactly that
-   request (next section).
+1. **The input guard** (`browserInputGuard()`, run in both the `PreToolUse` hook and
+   `canUseTool`, see `permissions.ts` `InputGuard`) judges every `url`
+   (`browser_navigate`, `browser_tabs` new) with `classifyNavigation()`
+   ([`browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts)), comparing origins
+   with `normaliseOrigin()` from [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts):
+   - the backend's origin: runs at the tool's tier;
+   - an **alias** (the origin of `SCADBUDDY_PUBLIC_URL`, or one in
+     `SCADBUDDY_ALLOWED_ORIGINS`): runs with the URL **rewritten** to the same path,
+     query and fragment on the backend (`canUseTool`'s `updatedInput`);
+   - an origin `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` allows: **outward** until a human
+     approves it for the session, then runs at the tool's tier (next section);
+   - anything else is **denied** at any tier: `file:`, `data:`, `javascript:`, other
+     ports, hosts and schemes, and `http://backend@evil.example/`.
+
+   It also denies a `filename` that is not a plain file name (no directory part, no
+   leading dot).
+2. **The server's allow-list** (`network.allowedOrigins`): the README says it "does not
+   serve as a security boundary and does not affect redirects", and the redirect half is
+   measured (below). The request guard answers every request before the allow-list's
+   own routes would, so the allow-list only matters if the guard is not loaded.
+3. **The request guard** (`redirectGuardSource()`, loaded through the server's
+   `browser.initPage` and installed once on the browser context, so popups are covered
+   from their first request) routes every request itself. A request may go to the
+   backend; to an alias, which is never fetched (a GET navigation becomes one to the
+   same path on the backend, anything else is refused); or to an origin approved in
+   this session. Anything else is refused. A request that may go is made with
+   `maxRedirects: 0`; a 3xx to a place the session may not go is refused, an allowed
+   3xx on a GET navigation becomes a new navigation (which the guard sees again), and
+   any other 3xx is refused. So neither a backend page redirecting off-origin nor an
+   approved origin redirecting to an unapproved one gets through, whatever sits in
+   front of the backend (measured, below). The guard adds the marker to requests to the
+   backend, replacing any copy the page set, and removes it from every other request.
+   A WebSocket is connected only to the backend or an approved origin
+   (`routeWebSocket`); others are closed.
+4. **The backend's agent-actor gate.** Every request from the headless context to the
+   backend carries `X-ScadBuddy-Agent-Session`. `AgentActorGate` lets such a request
+   through for `GET`/`HEAD`/`OPTIONS`, and for the non-safe routes in
+   `AGENT_ALLOWED_WRITES` (the read/write tools' routes that no outward tool shares;
+   `agent/test/agentActor.test.ts` derives the same list from the tool registry and
+   fails on drift). Everything else, i.e. send, print, delete, settings writes, library
+   pins from a URL, and any route added later, gets `403 Needs approval`, unless a grant
+   authorises exactly that request (below). A page on an approved origin that sends
+   requests to the backend gets the same treatment: they carry the marker too.
+
+## Beyond the backend: `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`
+
+By default the browser opens ScadBuddy and nothing else. Two things widen that.
+
+**Aliases, always on.** ScadBuddy's own public URL (`SCADBUDDY_PUBLIC_URL`) and the
+other names it is served under (`SCADBUDDY_ALLOWED_ORIGINS`, the same list the agent
+accepts credential writes and `/mcp` from) are aliases of the backend. The model sees
+them in links, READMEs and what the user pastes; in production it navigated to
+`https://scadbuddy.internal.nullreference.io/m/builtin%3Aspinning-top-pip` and was
+refused. Now such a URL is rewritten to the same path on `SCADBUDDY_BACKEND_URL`
+before the tool runs, and the request guard does the same for a link or redirect to an
+alias inside a page. The browser never talks to the public URL itself, which would go
+out through the ingress and back.
+
+**Other origins, opt-in**, with the infrastructure variable
+`SCADBUDDY_BROWSER_ALLOWED_ORIGINS` (read by `config.ts`, so the operator decides it; no
+request can change it):
+
+| Value | Meaning |
+|---|---|
+| unset (default) | Only the backend and its aliases, exactly as before. |
+| `https://docs.example, http://printer.lan:8080` | Those origins too (scheme, host and port; no path), each after its approval. |
+| `*` | Any `http(s)` origin, each after its approval. |
+
+**Approval, once per origin per session.** The first `browser_navigate` (or
+`browser_tabs` new) to an allowed origin that is not the backend's is an **outward**
+call whatever the tool's tier: it parks for the user's approval in the ScadBuddy UI
+through the normal approval flow (`approvals/service.ts`, `ai_approvals`), bound to that
+exact URL. When the user approves it, the harness (`run.ts`) first records the origin
+in `ai_browser_origins` (session, origin, and the approval it ran under;
+`rememberApprovedOrigin` refuses an approval that is not this session's, approved and
+used), then adds it to `approved-origins.json`, and only then lets the navigation run. A
+failure to record it denies the navigation. From then on, every navigation to that
+origin in that session, in this turn and later ones (on any replica), runs without
+asking, and the request guard lets pages reach it. A denied or expired approval opens
+nothing. An origin approved before the variable was narrowed stops counting at the next
+turn. Approvals belong to the session, so they survive a handoff to a new owner; start
+a new session to start from none.
+
+Page subresources and `fetch`es to an origin that is not approved are refused, even
+under `*`: a page that loads scripts or images from a CDN renders without them until
+that origin is approved too (navigate to it once), and a subresource that redirects is
+refused.
+
+**`*` plus approval is the intended "full usage" setting**: the model can read the
+OpenSCAD manual, a library's docs or a vendor's page when it needs to, and the user
+decides, origin by origin, what it may open. A list is for a deployment that wants a
+narrower menu to approve from.
+
+### Risks, and what limits them
+
+- **SSRF to your LAN.** The browser runs inside the agent container, so with `*` it
+  can be asked to open anything the pod can reach: an unauthenticated LLM server on
+  `:1234`, Bambuddy's own UI and API, a printer's web page, a router, a Kubernetes
+  service, cloud metadata at `169.254.169.254`. Many of those trust any caller on the
+  network. What limits it: each origin needs a human's approval, whose card shows the
+  exact URL (read the host and port, not only the path); pages can reach only origins
+  already approved, so a page cannot quietly fetch `http://192.168.1.20:1234` behind the
+  user's back; and a redirect to an unapproved origin is refused. A list instead of
+  `*`, or a NetworkPolicy on the agent pod's egress, narrows it further. Do not approve
+  a LAN origin you would not open from the pod yourself.
+- **Prompt injection from page content.** Everything a page shows (text, titles, alt
+  text, what a snapshot lists) is untrusted data. Every session turn carries the
+  untrusted-content policy (`UNTRUSTED_CONTENT_POLICY`,
+  [`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)): only the
+  user's messages are instructions, and "anything fetched from the web" is data to
+  report, not commands. The policy is defence in depth, not the boundary. The boundary
+  is that outward actions still park for a human (`approvals/service.ts`), including
+  each new origin, and that requests to ScadBuddy from any page carry the marker, so
+  the backend refuses outward ones without a grant. A page can still steer the model
+  toward read and write actions within the session, and toward asking you to approve
+  things: approve only what you asked for.
+- **What a third party sees.** A request to an approved origin carries no agent-actor
+  marker and no ScadBuddy credential. Chromium may send a `Referer` naming the page it
+  came from, which can be a backend URL (`http://127.0.0.1:8080/...` in the pod layout).
 
 ## Approving one outward request
 
@@ -172,13 +274,34 @@ headless shell before the tests.
 - **`disallowedTools` removes plugin tools** exactly as it removes built-ins: the four
   (five) are absent from the init message and the API request, and a model that names
   one gets `No such tool available`.
-- **The marker reaches every request**, including a page `fetch` that sets the same
-  header itself: the context's value arrives, not the page's.
-- **Page JavaScript cannot reach another origin**: a `fetch` to it never arrives.
+- **The marker reaches every request to the backend and none elsewhere**, including a
+  page `fetch` that sets the same header itself: the session's value arrives at the
+  backend, not the page's; an approved origin receives no marker at all, from a
+  navigation or from a backend page's `fetch`. It is added by the request guard, not
+  `extraHTTPHeaders`: the context's `APIRequestContext` adds `extraHTTPHeaders` to every
+  `route.fetch` whatever headers it is given (playwright-core 1.64), so they could not be
+  kept off other origins.
+- **Page JavaScript cannot reach another origin**: a `fetch` to it never arrives, and a
+  `WebSocket` is closed by the guard before Chromium tries to connect. To an approved
+  origin the socket is handed to Chromium, which then refused it itself in the test
+  (`net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS`: the target is loopback, and a page
+  the guard fulfilled presumably has no address space of its own). Not measured for the
+  backend's own sockets.
+- **Approved origins** (server test and session e2e test): not approved, an allowed
+  origin is refused by the guard; approved mid-session, it opens, a backend redirect to
+  it lands, and a redirect from it to an allowed-but-unapproved origin is refused. In a
+  real session turn (SDK, Claude Code, Chromium, Postgres) the first navigation parks,
+  nothing reaches the origin until the approval, the second navigation and a second
+  turn's run without asking, and `ai_browser_origins` holds one row naming the one
+  approval.
+- **Aliases**: a navigation to the public URL runs as one to the backend: the server's
+  own record of the call (`await page.goto(...)`) names the backend URL, so Claude Code
+  2.1.283 ran the plugin tool with `canUseTool`'s `updatedInput` (e2e test); inside a
+  page the guard moves an alias navigation onto the backend.
 - **A direct navigation off the origin** fails with `net::ERR_BLOCKED_BY_CLIENT` (and the
   harness refuses it before that). **The allow-list alone follows a redirect off the
   origin**: the tool usually reports an interrupted navigation, but the other origin has
-  already received the request, marker included. With the redirect guard (Guards, 3)
+  already received the request, marker included. With the request guard (Guards, 3)
   it is refused and the other origin receives nothing, a same-origin redirect still
   lands, and a chain that stays on the origin for one hop and then leaves it is refused
   at the second hop. Two things measured on the way, which shaped the guard: handing a
@@ -237,7 +360,7 @@ unprivileged user namespaces). No capability and no privileged container is need
 
 ## Redirects: guarded in the browser, and none from the backend
 
-The redirect guard (Guards, 3) is what stops an off-origin redirect, including one
+The request guard (Guards, 3) is what stops an off-origin redirect, including one
 added by an ingress, auth proxy or CDN in front of `SCADBUDDY_BACKEND_URL`. The backend
 also serves none of its own, as defence in depth: `backend/tests/api/test_no_open_redirect.py` sends paths
 shaped to provoke a redirect (`//evil.example/`, `/%2F%2Fevil.example/`, trailing
@@ -257,6 +380,8 @@ refused. In the pod layout of spec §4.1 `SCADBUDDY_BACKEND_URL` is
   are tested: the gate and `GRANT_SQL` against Postgres (pytest and the agent's pg
   test), the marker on a page's own `fetch` (server test), and a real session turn
   driving a stand-in UI through the whole approve-and-click flow (session e2e test).
+- **Pages on approved origins lose cross-origin subresources** from origins that are
+  not approved, and every redirected subresource (Beyond the backend).
 - **The model has to find the request's path itself** (the `403` detail and
   `browser_network_requests`); an approval card shows that method and path.
 
