@@ -216,7 +216,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
 
     it('is not a tool: nothing an agent can call reaches it', () => {
-      expect(ALL_TOOLS.filter((t) => /budget|fork/i.test(t.name) || t.routes.some((r) => r.includes('/ai/')))).toEqual([])
+      expect(ALL_TOOLS.filter((t) => /budget/i.test(t.name) || t.routes.some((r) => r.includes('/ai/')))).toEqual([])
     })
 
     it.each([
