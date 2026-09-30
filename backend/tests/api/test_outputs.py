@@ -439,19 +439,27 @@ def test_saving_a_job_whose_result_is_gone_is_a_404(
     assert response.headers["content-type"] == "application/problem+json"
     assert "is gone" in response.json()["detail"]
     assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())
 
 
+@pytest.mark.parametrize("swept", ["model_3mf", "preview_glb"])
 def test_a_result_swept_while_it_is_copied_is_a_404(
-    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    swept: str,
 ) -> None:
-    """#672 gate: eviction or the sweep can take the files after the route's check."""
+    """#672 gate: eviction or the sweep can take the files after the route's check. The
+    output's directory goes too, whichever file was taken, so nothing is left behind."""
     job_id = _finished_job(client, model)
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     result = state.render.store.read(job_id).result
     create = state.outputs.create
 
     def swept_first(*args: Any, **kwargs: Any) -> Any:
-        (paths.root / result.model_3mf).unlink()
+        (paths.root / getattr(result, swept)).unlink()
         return create(*args, **kwargs)
 
     monkeypatch.setattr(state.outputs, "create", swept_first)
@@ -459,3 +467,5 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     assert response.status_code == 404
     assert "is gone" in response.json()["detail"]
     assert str(paths.root) not in response.text
+    outputs = paths.output_dir(model, "x").parent
+    assert not outputs.exists() or not any(outputs.iterdir())
