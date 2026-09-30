@@ -133,7 +133,8 @@ async def install_font(body: InstallRequest, fonts: FontsDep, events: EventsDep)
             500,
             f"{exc.family!r} was downloaded ({', '.join(exc.files)}), but fontconfig does "
             "not resolve that family afterwards, so a render naming it would fall back to "
-            "the default font; its files may name another family, see GET /fonts",
+            "the default font; its files may name another family, see GET /fonts. A repeat "
+            "install answers this again without a download; force=true fetches it anew",
             family=exc.family,
             files=exc.files,
         ) from exc

@@ -383,6 +383,27 @@ async def test_an_install_fontconfig_does_not_resolve_is_an_error(
     assert raised.value.files == ["Pacifico-Regular.ttf"]
 
 
+async def test_a_repeat_install_that_did_not_resolve_is_refused_without_a_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #740: a retry after the 500 does not fetch again; force does."""
+    monkeypatch.setattr(FontService, "resolvable", lambda self: set())
+    client = FakeClient()
+    fonts = service(tmp_path, client)
+    with pytest.raises(FontNotResolvedError):
+        await fonts.install("Pacifico")
+    downloads = len(client.downloads)
+
+    with pytest.raises(FontNotResolvedError) as again:
+        await fonts.install("Pacifico")
+    assert again.value.files == ["Pacifico-Regular.ttf"]
+    assert len(client.downloads) == downloads
+
+    with pytest.raises(FontNotResolvedError):
+        await fonts.install("Pacifico", force=True)
+    assert len(client.downloads) == 2 * downloads
+
+
 async def test_without_fontconfig_an_install_is_not_judged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

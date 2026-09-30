@@ -377,12 +377,17 @@ class FontService:
         """Download every face of ``family`` onto the data volume and refresh the cache.
 
         A family fontconfig already resolves is returned as-is and nothing is fetched,
-        so picking one of the image's own faces works with no network at all.
+        so picking one of the image's own faces works with no network at all. One an
+        earlier install downloaded that did not resolve is refused again from its
+        manifest, without a second download; ``force`` fetches it anew (review of #740).
         """
         if not force:
             existing = await asyncio.to_thread(self.installed_family, family)
             if existing is not None:
                 return existing
+            unresolved = await asyncio.to_thread(self._unresolved_files, family)
+            if unresolved is not None:
+                raise FontNotResolvedError(family, unresolved)
         catalogue = await self.catalogue()
         font = catalogue.find(family)
         if font is None:
@@ -400,6 +405,7 @@ class FontService:
         # checked, and no render could use the family either.
         missing = await asyncio.to_thread(self.missing_families, [font.family])
         if missing:
+            self._write_manifest(font, written, licence, unresolved=True)
             raise FontNotResolvedError(font.family, written)
         return InstalledFamily(
             family=font.family,
@@ -435,7 +441,22 @@ class FontService:
         )
         return FALLBACK_LICENCE_NAME
 
-    def _write_manifest(self, font: CatalogueFont, files: list[str], licence: str) -> None:
+    def _unresolved_files(self, family: str) -> list[str] | None:
+        """The files of an earlier install of ``family`` that fontconfig did not
+        resolve, from its manifest; None when there was no such install."""
+        manifest = self.family_dir(family) / MANIFEST_NAME
+        try:
+            recorded = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(recorded, dict) or recorded.get("unresolved") is not True:
+            return None
+        files = recorded.get("files")
+        return [str(f) for f in files] if isinstance(files, list) else []
+
+    def _write_manifest(
+        self, font: CatalogueFont, files: list[str], licence: str, *, unresolved: bool = False
+    ) -> None:
         (self.family_dir(font.family) / MANIFEST_NAME).write_text(
             json.dumps(
                 {
@@ -445,6 +466,7 @@ class FontService:
                     "licence": licence,
                     "source": "https://fonts.google.com/specimen/" + font.family.replace(" ", "+"),
                     "installed_at": datetime.now(UTC).isoformat(),
+                    **({"unresolved": True} if unresolved else {}),
                 },
                 indent=2,
             )

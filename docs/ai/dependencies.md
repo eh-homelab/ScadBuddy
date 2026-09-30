@@ -94,7 +94,9 @@ default font (DejaVu Sans in this image) with other geometry and no warning
   cache, `POST /api/v1/fonts/install` runs `fc-list :outline=true:scalable=true family`
   under the render's own environment (`backend/scadbuddy/core/fontconfig.py`
   `env_for`) and answers 500, naming the files, when the family does not resolve
-  (`backend/scadbuddy/library/fonts.py` `FontService.install`). Outline, scalable faces
+  (`backend/scadbuddy/library/fonts.py` `FontService.install`). The manifest records
+  that outcome, so a repeat install answers the same 500 without a second download;
+  `force: true` fetches the family anew (review of #740). Outline, scalable faces
   are the ones OpenSCAD's `FontCache::init_pattern` asks for. A family counts as already
   installed, so the install fetches nothing, only when it has such a face
   (`FontService.renderable`); one fontconfig lists only as a bitmap face is downloaded
