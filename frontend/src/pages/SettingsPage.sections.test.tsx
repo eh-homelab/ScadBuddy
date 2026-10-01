@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Settings } from '../api/types'
 import { restartMockBackend } from '../mocks/features/settings'
-import { mockSettings, setMockRemembered } from '../mocks/handlers'
+import { mockSettings, setMockRemembered, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
@@ -627,5 +627,43 @@ describe('SettingsPage blob store (#426)', () => {
     expect(usage).toHaveTextContent('This server’s volume')
     expect(usage).toHaveTextContent('2 (no limit)')
     expect(usage).toHaveTextContent('640 B (no limit)')
+  })
+})
+
+describe('SettingsPage Administration (#668)', () => {
+  it('shows no Temporal UI link while its URL is empty', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const administration = region('Administration')
+    expect(within(administration).getByLabelText('Temporal UI URL')).toHaveValue('')
+    expect(within(administration).queryByRole('link', { name: /Temporal UI/ })).toBeNull()
+  })
+
+  it('links to the Temporal UI in a new tab once its URL is saved', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const administration = region('Administration')
+    await user.type(within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
+    await user.click(screen.getByRole('button', { name: 'Save Administration' }))
+    const link = await within(administration).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.lan')
+    // A page that is not ScadBuddy's: a new tab, which also escapes Bambuddy's sandbox.
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+    expect(mockSettings().temporal_ui_url).toBe('https://temporal.lan')
+    expect(mockSettings().sources?.['temporal_ui_url']).toBe('stored')
+  })
+
+  it('links to a Temporal UI the deployment set', async () => {
+    setMockSettings({
+      ...mockSettings(),
+      temporal_ui_url: 'https://temporal.env',
+      sources: { ...mockSettings().sources, temporal_ui_url: 'env' },
+    })
+    renderPage(<SettingsPage />)
+    await seeded()
+    const link = await within(region('Administration')).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.env')
+    expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
   })
 })

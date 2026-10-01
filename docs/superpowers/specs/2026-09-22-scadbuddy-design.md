@@ -1162,6 +1162,15 @@ the file and the print picker's numbered swatches agree.
 
 All under `/api/v1`. Errors are RFC 9457 problem details.
 
+This table records the design of the routes it names and is no longer extended
+(#508): the complete, current list is the OpenAPI spec the backend serves at
+`/openapi.json` (`cd backend && uv run python -m scadbuddy.tools.export_openapi`
+writes it), and `tests/api/test_openapi.py` checks that it publishes every mounted
+route. A new route documents itself in its handler's docstring and response models,
+not with a row here. The same holds for settings: the full list is
+`uv run python -m scadbuddy.tools.settings_reference`, and the variables named in
+this document are the ones its design depends on.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |

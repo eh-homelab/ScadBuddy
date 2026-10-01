@@ -21,6 +21,8 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
+import { NEW_TAB } from '../lib/embed'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
 import { formatBytes } from '../lib/format'
@@ -238,6 +240,8 @@ export function SettingsPage() {
       return false
     })
   })
+
+  const temporalUi = safeHttpUrl(settings?.temporal_ui_url)
 
   function patchFor(id: SectionId): SettingsUpdate | null {
     if (!settings) return null
@@ -1127,6 +1131,19 @@ export function SettingsPage() {
           </Section>
 
           {saved('diagnostics', runtimeRows('diagnostics'))}
+
+          {saved(
+            'administration',
+            <>
+              {runtimeRows('administration')}
+              {temporalUi && (
+                // Not ScadBuddy's page: a new tab, which also escapes Bambuddy's sandbox.
+                <a href={temporalUi} {...NEW_TAB} className="text-[13px] text-accent underline">
+                  Temporal UI ↗
+                </a>
+              )}
+            </>,
+          )}
 
           <Section id="about" title={sectionTitle('about')}>
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="about">

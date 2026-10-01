@@ -135,6 +135,7 @@ def _prepared(result: PrepareResult) -> Prepared:
         result.version,
         tuple(Path(path) for path in result.library_path),
         Path(result.schema_cache),
+        tuple(result.libraries),
     )
 
 
@@ -300,6 +301,7 @@ class RenderActivities:
             scad=str(prepared.scad),
             library_path=[str(path) for path in prepared.library_path],
             schema_cache=str(prepared.schema_cache),
+            libraries=list(prepared.libraries),
         )
 
     @activity.defn(name="render_main")

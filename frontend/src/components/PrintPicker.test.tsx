@@ -375,16 +375,16 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     expect(screen.queryByTestId('print-verdict-error')).toBeNull()
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
-  it('shows the High Flow warning in Advanced only, and never holds Print on it (#772)', async () => {
+  it('shows the mounted High Flow warning in Simple and Advanced, and never holds Print on it (#797)', async () => {
     const highFlow =
-      'The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow ' +
-      'slicing is supported (#484).'
+      'The left nozzle is High Flow and this print is sliced for Standard flow, so if it ' +
+      'prints on the left, the printer pauses at the first layer.'
     server.use(
       http.post('/api/v1/print/outputs/:id/check', () =>
         HttpResponse.json({
           errors: [],
           warnings: [
-            { kind: 'hf-unsupported', message: highFlow },
+            { kind: 'hf-mounted', message: highFlow },
             { kind: 'not-installed', message: 'No 0.6 mm nozzle is installed. Install one before this prints.' },
           ],
         }),
@@ -392,14 +392,17 @@ describe('PrintPicker · Nozzle verdict (#755)', () => {
     )
     renderPicker()
     await loaded()
+    // Simple mode: the mounted High Flow warning, and no nozzle-step note.
+    const simple = await screen.findAllByTestId('print-verdict-warning')
+    expect(simple).toHaveLength(1)
+    expect(simple[0]).toHaveTextContent('The left nozzle is High Flow')
+    expect(screen.queryByText(/No 0.6 mm nozzle is installed/)).toBeNull()
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
-    // Simple mode: no nozzle message at all.
-    expect(screen.queryByTestId('print-verdict-warning')).toBeNull()
-    expect(screen.queryByText(/High Flow/)).toBeNull()
 
     await showAdvanced()
-    const shown = await screen.findAllByTestId('print-verdict-warning')
-    expect(shown[0]).toHaveTextContent('The left nozzle is High Flow.')
+    const advanced = await screen.findAllByTestId('print-verdict-warning')
+    expect(advanced[0]).toHaveTextContent('The left nozzle is High Flow')
+    expect(advanced).toHaveLength(2)
     expect(screen.getByTestId('run-print')).toBeEnabled()
   })
 
