@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import assets, health, libraries, media, metrics, models
+from scadbuddy.api import assets, health, libraries, media, metrics, models, outputs
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
@@ -587,7 +587,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

@@ -58,7 +58,7 @@ from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import LibraryError, model_search_path
@@ -82,7 +82,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
     normalize_inputs,
 )
-from scadbuddy.render.job_models import BomEntry, ManifestObject, OutputRecord
+from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -313,6 +313,21 @@ assert get_args(Goal) == GOALS
 #: Arrange's refusal of outputs saved before manifests (#902): the UI offers to
 #: re-render them (`output_ids`) and arranges once they have one.
 NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
+
+
+class NeedsBackfillProblem(BaseModel):
+    """Arrange's 409 for outputs saved before manifests (RFC 9457, #902)."""
+
+    type: str = Field(examples=[NEEDS_BACKFILL_PROBLEM])
+    title: str
+    status: int
+    detail: str
+    instance: str | None = None
+    code: Literal["needs_backfill"]
+    #: Every chosen output that needs POST /outputs/{id}/backfill, in request order.
+    output_ids: list[str]
+
+
 #: The most copies one arrange places, summed over its objects.
 MAX_ARRANGE_COPIES = 2000
 
@@ -433,6 +448,18 @@ def arrange_inputs(
     response_model=JobStatus,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Arrange objects onto plates",
+    responses={
+        status.HTTP_409_CONFLICT: {
+            # Named in components by main's `_name_in_openapi`.
+            "content": {
+                PROBLEM_MEDIA_TYPE: {
+                    "schema": {"$ref": "#/components/schemas/NeedsBackfillProblem"}
+                }
+            },
+            "description": "Outputs saved before Arrange existed: re-render each of"
+            " `output_ids` with POST /outputs/{id}/backfill, then arrange again",
+        }
+    },
     description="Lay out objects from saved outputs again for a goal, printer and spool plan"
     " (spec §7). No re-render. Poll the job with GET /jobs/{id}, then save it as an output.",
 )
@@ -484,6 +511,16 @@ async def backfill_output(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"output {output_id} was arranged, not rendered: there is nothing to render again",
         )
+    # A second POST (History and Print both offer it, and double clicks) while the
+    # re-render is still in flight answers that one rather than queueing another.
+    pending = await asyncio.to_thread(outputs.backfill, output_id)
+    if pending is not None and pending.error is None:
+        try:
+            inflight = await asyncio.to_thread(render.store.read, pending.job_id)
+        except JobNotFoundError:
+            inflight = None
+        if inflight is not None and inflight.state in ("pending", "running"):
+            return _job_status(inflight, None)
     version = meta.model_version
     if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):
         raise ApiError(

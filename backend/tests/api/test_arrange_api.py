@@ -23,6 +23,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.render.job_models import Job, now
+from scadbuddy.tools.export_openapi import export
 from scadbuddy.workflows.models import ArrangeInputs
 from tests.support.arrange import saved_output
 
@@ -223,3 +224,14 @@ def test_an_output_id_that_is_not_an_id_is_a_422_before_any_job(
     )
     assert response.status_code == 422, response.text
     assert state.render.store.counts() == before
+
+
+def test_the_needs_backfill_refusal_is_typed_in_the_spec(tmp_path: Path) -> None:
+    """#902: the frontend's generated client types the 409's body, not a hand copy."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    conflict = schema["paths"]["/api/v1/outputs/arrange"]["post"]["responses"]["409"]
+    body = conflict["content"]["application/problem+json"]["schema"]
+    assert body == {"$ref": "#/components/schemas/NeedsBackfillProblem"}
+    problem = schema["components"]["schemas"]["NeedsBackfillProblem"]
+    assert {"type", "title", "status", "detail", "code", "output_ids"} <= set(problem["required"])
+    assert problem["properties"]["code"]["const"] == "needs_backfill"
