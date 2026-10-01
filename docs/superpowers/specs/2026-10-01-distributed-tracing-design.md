@@ -223,6 +223,16 @@ path except `/api/v1/ai/*` to the backend.
     directly, which is far worse.
 
   The dashboard's trace panels filter on server-side services by default.
+- **Error bodies.** Every refusal is an RFC 9457 problem document
+  (`application/problem+json`), like the rest of the API's errors, though the
+  route is outside `/api/v1`.
+  - 403, 415 and 429 are raised as `ApiError` and rendered by
+    `core/problems.py`'s `problem_response`. They are not hand-built here.
+  - 429 also carries `Retry-After`, the seconds until the bucket that refused
+    it refills one batch.
+  - 413 is `BodySizeGate`'s own problem document, also RFC 9457.
+  - A refusal's `detail` names the rule ("Origin not allowed", "the relay
+    accepts application/json only"), never the request's own values.
 - **Tracing off** (no endpoint): `204` with `X-ScadBuddy-Tracing: off`. The
   frontend's exporter (§5.3) sees it on its first flush and stops exporting for
   the rest of the page's life. No new config endpoint.
@@ -450,7 +460,8 @@ The uid never changes after that, so the check is needed once.
   the workflow, every activity and every `openscad.export`. A coalesced second
   submit's span links to the `traceparent` stored on the row. A stale row the
   reconciler starts lands in that same trace. A row without one gets no link.
-  Relay tests: 403 for a missing or foreign `Origin` and for a
+  Relay tests (each refusal asserting its status, `application/problem+json`
+  body and, for 429, `Retry-After`): 403 for a missing or foreign `Origin` and for a
   `Sec-Fetch-Site` other than `same-origin`, with no CORS headers on any
   response; 415; 413 from the `RouteLimit` with and without `Content-Length`
   and past 512 spans; 429 from the per-client bucket and from the per-process one;
