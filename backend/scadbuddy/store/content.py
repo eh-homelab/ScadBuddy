@@ -197,6 +197,8 @@ class ContentStore:
         if previous.backend != self.name:
             # The key now names this backend's object, so no row names the old one: it
             # is left untracked on the other backend rather than deleted from here.
+            # Nothing reclaims it later; that is a known gap, deferred (#811; the
+            # crash-window orphan beside it is #701).
             logger.warning(
                 "left a replaced blob on another backend",
                 extra={"key": key, "backend": previous.backend},
