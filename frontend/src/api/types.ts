@@ -63,6 +63,8 @@ export type RenderAccepted = Schemas['RenderAccepted']
 export type Output = Schemas['OutputDetail']
 export type ArrangeRequest = Schemas['ArrangeRequest']
 export type ManifestObject = Schemas['ManifestObject']
+/** #902 — the re-render queued to give an output saved before Arrange its objects. */
+export type BackfillState = Schemas['BackfillState']
 export type BomEntry = Schemas['BomEntry']
 export type MigrateResult = Schemas['MigrateResult']
 export type LibraryCopy = Schemas['LibraryCopy']

@@ -2,6 +2,7 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   ArrangeRequest,
   Asset,
+  BackfillState,
   AssetUsage,
   RenderAccepted,
   StoreUsage,
@@ -231,6 +232,28 @@ function runJob(jobId: string): void {
       announce('job.done')
     }, MOCK_JOB_STEP_MS)
   }, MOCK_JOB_STEP_MS)
+}
+
+/** Arrange's refusal of outputs saved before it existed (`api/outputs.py`). */
+const NEEDS_BACKFILL_PROBLEM = 'https://scadbuddy.dev/problems/needs-backfill'
+
+/**
+ * #902 — a read of an output whose re-render has ended: done, it gains the objects the
+ * render recorded and drops the marker; failed or cancelled, the marker says why.
+ */
+function settleBackfill(output: Output): Output {
+  const pending = output.backfill
+  if (!pending || pending.error) return output
+  const job = state.jobs.get(pending.job_id)
+  if (!job) {
+    output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
+  } else if (job.status === 'done') {
+    output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
+    output.backfill = null
+  } else if (job.status === 'failed' || job.status === 'cancelled') {
+    output.backfill = { ...pending, error: job.error ?? `the re-render was ${job.status}` }
+  }
+  return output
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -2470,17 +2493,25 @@ export const handlers = [
   http.post(`${base}/outputs/arrange`, async ({ request }) => {
     const body = (await request.json()) as ArrangeRequest
     state.lastArrange = body
+    // #902 — every output saved before Arrange, named at once, as the API does.
+    const chosen = [...new Set(body.objects.map((o) => o.output_id))]
+    const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
+    if (missing) return problem(404, 'Not Found', `no output with id '${missing}'`)
+    const unrecorded = chosen.filter(
+      (id) => (state.outputs.find((o) => o.id === id)?.manifest ?? []).length === 0,
+    )
+    if (unrecorded.length > 0) {
+      return problem(
+        409,
+        'Conflict',
+        `${unrecorded.length} output(s) were saved before Arrange existed, so nothing records their objects; re-render them (POST /outputs/{id}/backfill) to arrange them`,
+        { type: NEEDS_BACKFILL_PROBLEM, code: 'needs_backfill', output_ids: unrecorded },
+      )
+    }
     const manifest: ManifestObject[] = []
     for (const object of body.objects) {
       const source = state.outputs.find((o) => o.id === object.output_id)
       if (!source) return problem(404, 'Not Found', `no output with id '${object.output_id}'`)
-      if ((source.manifest ?? []).length === 0) {
-        return problem(
-          409,
-          'Conflict',
-          `output ${source.id} was saved before outputs recorded their objects; generate it again to arrange it`,
-        )
-      }
       const entry = (source.manifest ?? []).find((m) => m.part === object.part)
       if (!entry) {
         return problem(422, 'Unprocessable Content', `output ${source.id} has no object ${object.part}`)
@@ -2591,12 +2622,42 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug/outputs`, ({ params }) =>
-    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug'])),
+    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug']).map(settleBackfill)),
   ),
 
   http.get(`${base}/outputs/:id`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
-    return output ? HttpResponse.json(output) : problem(404, 'Output not found')
+    return output ? HttpResponse.json(settleBackfill(output)) : problem(404, 'Output not found')
+  }),
+
+  // #902 — an ordinary render of the output's own params; the output gains its objects
+  // when a read finds the job done (the API's attach loop), or records why it failed.
+  http.post(`${base}/outputs/:id/backfill`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if ((output.manifest ?? []).length > 0) {
+      return problem(409, 'Conflict', `output ${output.id} already records its objects`)
+    }
+    if ((output.arranged_from ?? []).length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `output ${output.id} was arranged, not rendered: there is nothing to render again`,
+      )
+    }
+    const jobId = nextHexId()
+    const job: Job = {
+      id: jobId,
+      slug: output.slug,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      params: output.params ?? {},
+      log_tail: [],
+    }
+    state.jobs.set(jobId, job)
+    runJob(jobId)
+    output.backfill = { job_id: jobId, error: null } satisfies BackfillState
+    return HttpResponse.json(job, { status: 202 })
   }),
 
   http.get(`${base}/outputs/:id/edit`, ({ params }) => {

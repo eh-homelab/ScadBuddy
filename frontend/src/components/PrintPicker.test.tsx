@@ -591,17 +591,80 @@ describe('PrintPicker', () => {
     expect(lastArrangeRequest()?.name).toBe('Reagan (arranged)')
   })
 
-  it('offers no re-arrange for an output saved before manifests', async () => {
-    renderPage(
-      <PrintPicker
-        open
-        source={{ kind: 'output', output: { ...output, manifest: [] } }}
-        onClose={vi.fn()}
-        onRan={vi.fn()}
-      />,
+  describe('an output saved before Arrange (#902)', () => {
+    const nova = fixtures.outputs[1] as Output
+    const picker = (open = true) => (
+      <PrintPicker open={open} source={{ kind: 'output', output: nova }} onClose={vi.fn()} onRan={vi.fn()} />
     )
-    await loaded()
-    expect(screen.queryByLabelText('Arrange for')).not.toBeInTheDocument()
+
+    it('asks before re-rendering, and Cancel queues nothing', async () => {
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(picker())
+      await loaded()
+      expect(screen.getByText('Nova was saved before Arrange existed; re-render to get its layout.')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      const prompt = screen.getByRole('group', { name: 'Re-render first' })
+      expect(prompt).toHaveTextContent('Re-render Nova, then arrange?')
+      await user.click(within(prompt).getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(backfill).not.toHaveBeenCalled()
+      expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('re-renders it, then re-arranges', async () => {
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      const { user } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
+      expect(backfill).toHaveBeenCalledExactlyOnceWith(nova.id)
+      expect(lastArrangeRequest()).toMatchObject({
+        objects: [{ output_id: nova.id, part: 'piece-body', count: 1 }],
+        name: 'Nova (arranged)',
+      })
+    })
+
+    it('says why a re-render failed and arranges nothing', async () => {
+      server.use(
+        http.post(`/api/v1/outputs/${nova.id}/backfill`, () =>
+          HttpResponse.json(
+            { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'revision abc is gone' },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const { user } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+      expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('stops polling when it is closed mid-re-render', async () => {
+      server.use(
+        http.get('/api/v1/jobs/:id', ({ params }) =>
+          HttpResponse.json({
+            id: String(params['id']),
+            slug: 'name-keychain',
+            status: 'running',
+            created_at: '2026-09-28T12:00:00Z',
+          }),
+        ),
+      )
+      const read = vi.spyOn(api, 'getJob')
+      const { user, rerender } = renderPage(picker())
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(read).toHaveBeenCalled())
+      rerender(picker(false))
+      const polls = read.mock.calls.length
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      expect(read.mock.calls.length).toBe(polls)
+      expect(lastArrangeRequest()).toBeNull()
+    })
   })
 })
 

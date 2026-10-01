@@ -10,6 +10,7 @@ import type {
   CustomizerSchema,
   FontFamily,
   CatalogueLibrary,
+  ManifestObject,
   MediaView,
   ModelSummary,
   ModelVersion,
@@ -721,8 +722,38 @@ const outputsSeed: Output[] = [
   },
 ]
 
-/** Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null. */
-export const outputs: Output[] = outputsSeed.map((entry) => ({ bom: [], files: [], record: null, ...entry }))
+/** #902 — what a re-render records for an output saved before Arrange: one object. */
+export function backfilledManifest(slug: string, colours: string[]): ManifestObject[] {
+  return [
+    {
+      part: 'piece-body',
+      file: 'model.scad',
+      slug,
+      revision: null,
+      bbox: { min: [0, 0, 0], max: [70, 30, 5], size: [70, 30, 5] },
+      footprint: [70, 30],
+      colours,
+      count: 1,
+      plates: 1,
+      bom_piece: 'body',
+      source_output: null,
+      notes: [],
+    } satisfies ManifestObject,
+  ]
+}
+
+/**
+ * Phase 4 fields (spec 2026-09-27): bom: [], files: [], record: null; and phase 5's
+ * manifest: [], arranged_from: [], as the API sends them for an output saved before Arrange.
+ */
+export const outputs: Output[] = outputsSeed.map((entry) => ({
+  bom: [],
+  files: [],
+  record: null,
+  manifest: [],
+  arranged_from: [],
+  ...entry,
+}))
 
 /**
  * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what

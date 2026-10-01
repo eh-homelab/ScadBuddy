@@ -10,7 +10,19 @@ import type {
   PrintRunRequest,
   PrintRunResult,
 } from '../api/types'
-import { arrangedName, arrangedNote, GOAL_LABELS, runArrange, type ArrangeGoal } from '../lib/arrange'
+import {
+  arrangedName,
+  arrangedNote,
+  backfillFailures,
+  backfillIds,
+  backfillNote,
+  backfillOutputs,
+  GOAL_LABELS,
+  needsBackfill,
+  runArrange,
+  type ArrangeGoal,
+} from '../lib/arrange'
+import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
@@ -104,6 +116,12 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   const [arranging, setArranging] = useState(false)
   const [arrangeNote, setArrangeNote] = useState<string | null>(null)
   const [arrangeError, setArrangeError] = useState<string | null>(null)
+  /** #902 — the output in view, read back after a re-render gave it its objects. */
+  const [backfilled, setBackfilled] = useState<Output | null>(null)
+  /** Asking whether to re-render it first; Arrange said so, though it showed objects. */
+  const [askBackfill, setAskBackfill] = useState(false)
+  const [flagged, setFlagged] = useState(false)
+  const [backfillProgress, setBackfillProgress] = useState<Record<string, string>>({})
   /**
    * What a re-arrange was made for, carried across the switch to its output: the new
    * file's slot N is the old one's colour (`colours` pins the order), so the plan and
@@ -130,7 +148,11 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   }, [givenKey, carry])
   const source: PrintSource | undefined = arranged ? { kind: 'output', output: arranged } : given
   /** The output in view, with what Re-arrange needs of it (a library file has none). */
-  const target = source?.kind === 'output' ? source.output : undefined
+  const inView = source?.kind === 'output' ? source.output : undefined
+  const target = inView && backfilled?.id === inView.id ? backfilled : inView
+  /** Its objects, when the caller knows them; an unknown list offers no Re-arrange. */
+  const known = target?.manifest !== undefined
+  const stale = known && (flagged || needsBackfill(target))
 
   /**
    * The model, for its print-options scope — the same slug its choices are remembered
@@ -224,27 +246,44 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     setOptions({})
   }, [currentKey, carry])
 
-  async function rearrange() {
+  /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
+  async function rearrange(backfill: boolean) {
     if (!target?.slug) return
+    setAskBackfill(false)
     setArranging(true)
     setArrangeNote(null)
     setArrangeError(null)
     const controller = new AbortController()
     arrangeRun.current = controller
     try {
+      let from = target
+      if (backfill) {
+        const { ready, failed } = await backfillOutputs([target], {
+          signal: controller.signal,
+          onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
+        })
+        const read = ready[0]
+        if (!read) {
+          setArrangeError(backfillFailures(failed))
+          return
+        }
+        from = read
+        setBackfilled(read)
+        setFlagged(false)
+      }
       const next = await runArrange(
-        target.slug,
+        from.slug,
         {
-          objects: (target.manifest ?? []).map((object) => ({
-            output_id: target.id,
+          objects: (from.manifest ?? []).map((object) => ({
+            output_id: from.id,
             part: object.part,
             count: object.count,
           })),
           goal: arrangeGoal,
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
-          colours: target.colors ?? [],
-          name: arrangedName(target.name),
+          colours: from.colors ?? [],
+          name: arrangedName(from.name),
         },
         { signal: controller.signal },
       )
@@ -256,10 +295,16 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
       setArrangeNote(arrangedNote(next.plates))
     } catch (cause) {
       if (controller.signal.aborted) return
+      if (backfillIds(cause)) {
+        setFlagged(true)
+        setAskBackfill(true)
+        return
+      }
       setArrangeError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
     } finally {
       if (arrangeRun.current === controller) arrangeRun.current = null
       setArranging(false)
+      setBackfillProgress({})
     }
   }
 
@@ -493,9 +538,10 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                   copies={effectiveCopies}
                 />
               )}
-              {(target?.manifest ?? []).length > 0 && (
+              {target && known && (
                 <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                   <legend className="px-1 text-[13px] text-ink">Arrange</legend>
+                  {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
                   <label htmlFor="arrange-for" className="text-[12px] text-muted">
                     Arrange for
                   </label>
@@ -516,11 +562,21 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                   <Button
                     size="sm"
                     className="mt-1.5"
-                    disabled={arranging}
-                    onClick={() => void rearrange()}
+                    disabled={arranging || askBackfill}
+                    onClick={() => (stale ? setAskBackfill(true) : void rearrange(false))}
                   >
                     Re-arrange for these spools
                   </Button>
+                  {askBackfill && (
+                    <div className="mt-1.5">
+                      <BackfillPrompt
+                        outputs={[target]}
+                        onConfirm={() => void rearrange(true)}
+                        onCancel={() => setAskBackfill(false)}
+                      />
+                    </div>
+                  )}
+                  <BackfillProgress outputs={[target]} progress={backfillProgress} />
                   {arrangeNote && (
                     <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
                       {arrangeNote}

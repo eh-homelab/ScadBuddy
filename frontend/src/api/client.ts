@@ -179,6 +179,11 @@ export const OFFLINE = 'urn:scadbuddy:offline'
  * enqueue, and Bambuddy may have done it.
  */
 export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+/**
+ * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
+ * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
+ */
+export const NEEDS_BACKFILL = 'needs_backfill'
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
@@ -701,6 +706,10 @@ export const api = {
   /** spec 2026-09-27 §7 — objects from saved outputs onto plates again; poll the job. */
   arrangeOutputs: (body: ArrangeRequest) =>
     request<Job>('/outputs/arrange', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #902 — re-render an output saved before Arrange; poll the job, then the output's `backfill`. */
+  backfillOutput: (outputId: string) =>
+    request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
 
   /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
   createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
