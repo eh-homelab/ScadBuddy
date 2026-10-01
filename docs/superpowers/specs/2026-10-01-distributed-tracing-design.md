@@ -17,6 +17,8 @@ Spaces bucket, clusters#1596), never app config.
 
 - **Metrics.** `core/metrics.py` stays on `prometheus_client`. Moving it to the
   OTel metrics API is a later change; metric names must not move when it does.
+  The one addition here is the relay's own outcome counter (§5.2), a
+  `prometheus_client` counter like the rest.
 - **Log correlation** (trace IDs in log lines). Later.
 - **Tracing Claude Code itself.** The bundled CLI runs with
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and the credential in its
