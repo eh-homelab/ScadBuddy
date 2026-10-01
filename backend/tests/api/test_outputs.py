@@ -265,6 +265,7 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
+        "arranged_from": [],
     }
 
 
@@ -289,6 +290,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "inputs": {"params": {"width": 12}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
+        "arranged_from": [],
     }
 
 
