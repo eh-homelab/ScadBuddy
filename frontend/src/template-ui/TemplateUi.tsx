@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { api } from '../api/client'
 import type { JsonObject } from '../lib/inputs'
 import { useLatest } from '../lib/useLatest'
-import { createHost, type HostDeps, type HostHandle } from './host'
+import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './host'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
 import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
@@ -57,7 +57,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
     let cleanup: (() => void) | void
     void (async () => {
       try {
-        const module = await loadUiModule(api.uiFileUrl(slug, version, ui.module.replace(/^ui\//, '')))
+        const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
         const mount = mountOf(module)
         if (!mount) throw new Error(`${ui.module} does not export a mount function`)
         if (!active) return
