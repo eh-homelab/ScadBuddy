@@ -50,6 +50,7 @@ from scadbuddy.bambuddy.resolver import (
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.library.outputs import OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -109,7 +110,7 @@ class PrintRunRequest(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
     #: Bambu's ``print_sequence`` for this print (#907), a process override over the
     #: template's ``print_settings``. Omitted means whatever those and the process say.
-    print_sequence: Literal["by layer", "by object"] | None = None
+    print_sequence: PrintSequence | None = None
 
 
 class PrintRunResult(BaseModel):

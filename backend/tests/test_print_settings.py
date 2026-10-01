@@ -5,15 +5,19 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.catalogue import (
     PRINT_SETTING_KEYS,
+    PRINT_SETTING_VALUES,
     Catalogue,
     InvalidModelMetaError,
+    PrintSequence,
     meta_from_raw,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -177,3 +181,10 @@ def test_name_keychain_declares_its_print_defaults() -> None:
 @pytest.mark.parametrize("meta", sorted(MODELS.glob(f"*/{MODEL_META_NAME}")), ids=str)
 def test_every_bundled_model_json_reads(meta: Path) -> None:
     meta_from_raw(json.loads(meta.read_text(encoding="utf-8")), meta.parent.name)
+
+
+def test_a_prints_own_sequence_takes_exactly_what_a_template_may_declare() -> None:
+    """#907: the per-print ``print_sequence`` and the template's allowlist are one type."""
+    annotation: object = PrintRunRequest.model_fields["print_sequence"].annotation
+    assert annotation == PrintSequence | None
+    assert get_args(PrintSequence) == PRINT_SETTING_VALUES["print_sequence"]

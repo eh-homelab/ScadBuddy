@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 import psycopg
 from pydantic import (
@@ -240,6 +240,10 @@ class UiDeclaration(BaseModel):
 
 _BOOLEAN = ("0", "1")
 
+#: Bambu's ``print_sequence`` (#907): the one list a template's ``print_settings`` and a
+#: print's own override both take.
+PrintSequence = Literal["by layer", "by object"]
+
 #: The process settings a template may declare in ``print_settings`` (#770), in the
 #: order a download lists them as edits, each with the values it takes. Each is a
 #: Bambu Studio process key, and its value the string a Bambu config stores; the
@@ -262,7 +266,7 @@ PRINT_SETTING_VALUES: dict[str, tuple[str, ...] | None] = {
         "outer_and_inner",
         "no_brim",
     ),
-    "print_sequence": ("by layer", "by object"),
+    "print_sequence": get_args(PrintSequence),
 }
 PRINT_SETTING_KEYS: tuple[str, ...] = tuple(PRINT_SETTING_VALUES)
 

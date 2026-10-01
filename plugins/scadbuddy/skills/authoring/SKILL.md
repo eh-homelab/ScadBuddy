@@ -56,8 +56,8 @@ A template that prints best with a process setting changed says so in `model.jso
 ```
 
 - Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
-  `support_type`, `brim_width`, `brim_type` and `print_sequence`. Any other key makes the template fail
-  to load, and the error names the key.
+  `support_type`, `brim_width`, `brim_type` and `print_sequence`. Any other key makes
+  the template fail to load, and the error names the key.
 - Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`),
   and each must be one its key takes (`PRINT_SETTING_VALUES`, from Bambu Studio's
   [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp)):
