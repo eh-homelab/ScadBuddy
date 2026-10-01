@@ -42,6 +42,7 @@ const NULLABLE = new Set([
   'public_url',
   'default_plate',
   'google_fonts_api_key',
+  'temporal_ui_url',
 ])
 const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
 const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'media_upload_max_bytes'])
@@ -80,6 +81,9 @@ function putSettings(body: Record<string, unknown>) {
     }
     if (value === null && !NULLABLE.has(name)) {
       return refused(name, `Value error, ${envName(name)} cannot be cleared; reset it to follow the deployment's value`)
+    }
+    if (name === 'temporal_ui_url' && typeof value === 'string' && !/^https?:\/\//.test(value)) {
+      return refused(name, `Value error, ${envName(name)} must be an http(s) URL, not '${value}'`)
     }
     if (typeof value === 'number') {
       if (AT_LEAST_ONE.has(name) && value < 1) return refused(name, `Value error, ${envName(name)} must be at least 1, not ${value}`)
