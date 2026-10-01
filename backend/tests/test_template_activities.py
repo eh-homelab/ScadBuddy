@@ -79,6 +79,11 @@ def slow(seconds):
     time.sleep(seconds)
     return "slept"
 
+def helper_value():
+    import helper
+
+    return helper.VALUE
+
 def chatty():
     for i in range(3000):
         print(f"line {i} " + "x" * 1000)
@@ -276,6 +281,8 @@ async def test_identical_calls_at_once_on_one_worker_run_once(tmp_path: Path) ->
     )
     assert first == second
     assert count.read_text() == "x"
+    # The lock went with the last call: the map holds only calls in flight.
+    assert acts._calls == {}
 
 
 @pytest.mark.parametrize(
@@ -346,3 +353,16 @@ async def test_a_call_longer_than_its_heartbeat_timeout_survives(tmp_path: Path)
                 60,
             )
     assert result == "slept"
+
+
+async def test_editing_a_module_activities_imports_changes_the_call(tmp_path: Path) -> None:
+    """A live template's `act-` key covers every `*.py` under `pipeline/`, not
+    `activities.py` alone: an edited sibling it imports is never answered from the
+    store with the old result."""
+    acts, paths = _world(tmp_path)
+    helper = paths.model_dir("demo") / "pipeline" / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    env = ActivityEnvironment()
+    assert await env.run(acts.run_template_activity, _call("helper_value")) == 1
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+    assert await env.run(acts.run_template_activity, _call("helper_value")) == 2

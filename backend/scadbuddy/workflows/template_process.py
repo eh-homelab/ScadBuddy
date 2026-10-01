@@ -29,9 +29,10 @@ class TemplateError(RuntimeError):
 
 
 def template_out_key(call: Any, source_sha: str) -> str:
-    """Where a call's emitted files go. ``source_sha`` is `activities.py`'s own sha256,
-    so a live template (revision None) edited between two calls never reuses the
-    first call's directory; identical calls on one source write identical bytes."""
+    """Where a call's emitted files go. ``source_sha`` is what the call's code is
+    (`pipeline_activities._pipeline_sha`: for a live template, revision None, every
+    `*.py` under `pipeline/`), so an edit between two calls never reuses the first
+    call's directory; identical calls on one source write identical bytes."""
     raw = json.dumps(
         [call.slug, call.revision, source_sha, call.name, call.args, call.kwargs],
         sort_keys=True,
