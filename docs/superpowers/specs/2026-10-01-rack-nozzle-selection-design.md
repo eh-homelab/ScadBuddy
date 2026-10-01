@@ -30,11 +30,12 @@ Out of scope:
 - the slice itself (#840 already decides which side prints);
 - full per-print telemetry (#912; this spec takes only the usage counter it
   needs);
-- prints dispatched through Bambuddy's `run` (pipeline) path. Like
-  `filament_overrides`, `nozzle_rack_choice` exists only on `QueueItemCreate`
-  (see `dispatch.py`'s module docstring), so those prints keep Bambuddy's own
-  pick. Covering them needs a rack field on the pipeline request, which
-  Bambuddy does not have.
+- prints dispatched through Bambuddy's `run` (pipeline) path. `dispatch.py`'s
+  module docstring says `filament_overrides` and `required_filament_types` exist
+  only on `QueueItemCreate`; `nozzle_rack_choice` is the same: Bambuddy's
+  `PipelineRunCreateRequest` has no rack field (read on the deployed image
+  2026-10-01). Those prints keep Bambuddy's own pick, and this change adds
+  `nozzle_rack_choice` to that docstring (§6).
 
 ## 2. What the printer and Bambuddy give us (measured 2026-10-01)
 
@@ -131,9 +132,11 @@ that had several. Among the eligible positions:
 | Newest first | Latest `first_seen_at` | |
 | Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
 
-The algorithm is remembered per printer, like `printer_bed_types`
-(`printer_rack_algorithms: dict[str, Algorithm]` in stored settings). It is shown
-and cleared in Settings' remembered choices.
+The algorithm is remembered per printer as `printer_rack_algorithms:
+dict[str, Algorithm]`, a new `StoredSettings` field stored in the existing
+jsonb `settings` row like `printer_print_options` (`library/settings_store.py`),
+so it needs no migration and is not added to `OWN_TABLES`. It is shown and
+cleared in Settings' remembered choices, like `printer_bed_types`.
 
 **Usage counter.** Three new tables. Use is counted per Bambuddy archive, which
 is one physical print: a queue item with `quantity` N produces N archives, and
@@ -370,12 +373,17 @@ so the trade is accepted.
   `rack_nozzle_prints` rows from its linked archives.
 - Migration: `rack_nozzle_seen`, `rack_nozzle_picks` and `rack_nozzle_prints`.
 - `bambuddy/rack_usage.py` (new): `RackUsageStore`, the one store that owns all
-  three tables, on the `PrintLinkStore` pattern (`print_links.py`): `seen()`,
-  `record_picks()`, `record_prints()` and `usage(printer_id)`. `print_run.py`,
-  `choices.py` and `watcher.py` call it; none of them holds SQL.
+  three tables: `seen()`, `record_picks()`, `record_prints()` and
+  `usage(printer_id)`. It is a `Component` (`core/components.py`), registered in
+  `bambuddy/component.py` beside `ARCHIVE_CACHE`, never a new `AppState` field;
+  routes read it through `api/components.py` `component_dep`. `PrintLinkStore`
+  is on the older `AppState` wiring and is not the pattern to copy.
+  `print_run.py`, `choices.py` and `watcher.py` call it; none of them holds SQL.
+- `bambuddy/dispatch.py` module docstring: name `nozzle_rack_choice` beside
+  `filament_overrides` as a queue-only field.
 - `api/printing.py` / `/check`: rack options and picks per side.
-- Settings: `printer_rack_algorithms`, remembered and cleared like
-  `printer_bed_types`.
+- Settings: `printer_rack_algorithms` on `StoredSettings` (jsonb, no
+  migration), shown and cleared in remembered choices.
 - Frontend print dialog: the Simple line and warning, plus Advanced's Algorithm
   and Nozzle selects.
 
