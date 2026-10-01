@@ -1,5 +1,5 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
-import type { ArrangeRequest, Output } from '../api/types'
+import type { ArrangeRequest, NeedsBackfillProblem, Output } from '../api/types'
 
 export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
 
@@ -82,9 +82,10 @@ export function needsBackfill(output: Partial<Pick<Output, 'manifest'>>): boolea
 
 /** The outputs Arrange's `needs_backfill` refusal names, or null for any other failure. */
 export function backfillIds(cause: unknown): string[] | null {
-  if (!(cause instanceof ApiError) || cause.problem['code'] !== NEEDS_BACKFILL) return null
-  const ids = cause.problem['output_ids']
-  return Array.isArray(ids) ? ids.map(String) : []
+  if (!(cause instanceof ApiError)) return null
+  const problem = cause.problem as Partial<NeedsBackfillProblem>
+  if (problem.code !== NEEDS_BACKFILL) return null
+  return Array.isArray(problem.output_ids) ? problem.output_ids.map(String) : []
 }
 
 /** "A", "A and B", "A, B and C". */

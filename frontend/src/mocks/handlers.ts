@@ -19,6 +19,7 @@ import type {
   InvalidLibraryEntry,
   ManifestObject,
   MediaView,
+  NeedsBackfillProblem,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -2501,11 +2502,17 @@ export const handlers = [
       (id) => (state.outputs.find((o) => o.id === id)?.manifest ?? []).length === 0,
     )
     if (unrecorded.length > 0) {
-      return problem(
-        409,
-        'Conflict',
-        `${unrecorded.length} output(s) were saved before Arrange existed, so nothing records their objects; re-render them (POST /outputs/{id}/backfill) to arrange them`,
-        { type: NEEDS_BACKFILL_PROBLEM, code: 'needs_backfill', output_ids: unrecorded },
+      return HttpResponse.json(
+        {
+          type: NEEDS_BACKFILL_PROBLEM,
+          title: 'Conflict',
+          status: 409,
+          detail: `${unrecorded.length} output(s) were saved before Arrange existed, so nothing records their objects; re-render them (POST /outputs/{id}/backfill) to arrange them`,
+          instance: null,
+          code: 'needs_backfill',
+          output_ids: unrecorded,
+        } satisfies NeedsBackfillProblem,
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
       )
     }
     const manifest: ManifestObject[] = []
