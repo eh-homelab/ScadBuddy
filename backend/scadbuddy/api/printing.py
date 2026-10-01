@@ -153,8 +153,8 @@ async def post_run(
     slices and queues in the background (#470): the slices alone can take minutes,
     longer than the proxies in front wait. Follow ``GET /print/runs/{id}`` (or the
     ``print.run`` event on the ``print:<output id>`` topic, or ``print:library:<file id>``
-    for a library file's) to ``succeeded``, whose ``result`` is what this route used to answer, or ``failed``, whose ``error`` is
-    the problem it used to answer with.
+    for a library file's) to ``succeeded``, whose ``result`` is what this route used to
+    answer, or ``failed``, whose ``error`` is the problem it used to answer with.
 
     Refused before any run starts, with nothing uploaded: an output with no plates, no
     printer, a printer the resolver cannot serve, and choices the resolver refuses —
