@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
+from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -101,6 +102,10 @@ class OutputMeta(BaseModel):
     #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on
     #: records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
+    #: The library pins the render read (#169): each checkout's name, ref and exact
+    #: commit, so an output names what it was built from beyond ``model_version``.
+    #: Empty for a model with none, and on records written before the field existed.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -182,10 +187,14 @@ class OutputStore:
         loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
         return loaded
 
-    def inputs(self, output_id: str) -> dict[str, Any]:
+    def inputs(
+        self, output_id: str, params: Mapping[str, ParamValue] | None = None
+    ) -> dict[str, Any]:
+        """The output's inputs; one from before them reads as its params at ``v`` 0.
+        A caller that already read :meth:`params` passes them, so they are read once."""
         path = self._find_dir(output_id) / INPUTS_NAME
         if not path.is_file():
-            return legacy_inputs(self.params(output_id))
+            return legacy_inputs(self.params(output_id) if params is None else params)
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -194,7 +203,7 @@ class OutputStore:
             # The record itself (meta, files, params) is intact: read it as one from
             # before inputs rather than lose it to a damaged side file.
             logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
-            return legacy_inputs(self.params(output_id))
+            return legacy_inputs(self.params(output_id) if params is None else params)
         checked: dict[str, Any] = loaded
         return checked
 
@@ -280,6 +289,7 @@ class OutputStore:
             colors=list(job.result.colors),
             parts=list(job.result.parts),
             warnings=list(job.result.warnings),
+            libraries=list(job.result.libraries),
         )
         self._write_meta(directory, meta)
         # After the record is complete: a lookup racing the writes above may have

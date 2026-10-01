@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.schema import ParamValue
@@ -73,6 +74,10 @@ class JobResult(BaseModel):
     #: Every plate of a template that asks for more than one (spec §6.4). Empty for
     #: the ordinary one-plate render, whose plate is ``bbox_mm`` and ``colors``.
     plates: list[PlateInfo] = Field(default_factory=list)
+    #: The library pins this render read (#169): the name, ref and exact commit of each
+    #: checkout on its OPENSCADPATH. Empty for a model with none, and on a result
+    #: stored before the field existed.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
 
 
 class Job(BaseModel):
