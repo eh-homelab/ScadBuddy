@@ -282,6 +282,34 @@ async def test_a_reuse_that_loses_to_a_release_uploads_its_own_copy(
         store.index.put("c", gone, slug="demo", meta={}, reuse=True)
 
 
+async def test_a_sweep_racing_a_put_of_the_same_bytes_under_another_key_loses_nothing(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """The sweep takes a stale key while a put of another key reuses its object: the
+    put stores its own copy, so the new key stays readable."""
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    await store.put("piece", b"same", name="a", scope=SCOPE, key="a")
+    _age(pool, "a")
+    released = asyncio.Event()
+    backend = _ReleasedWhileReused(root, released)
+    store.backend = backend
+
+    async def sweep() -> list[str]:
+        await backend.gate.wait()  # the put found `a`'s object and means to reuse it
+        removed = await sweep_content(store, BlobRefs(pool), grace=3600, now=time.time())
+        released.set()
+        return removed
+
+    ref, removed = await asyncio.gather(
+        store.put("piece", b"same", name="b", scope=SCOPE, key="b"), sweep()
+    )
+    assert removed == ["a"]
+    assert await store.read(ref) == b"same"
+    named = store.index.get("b")
+    assert named is not None and named.ref == ref
+
+
 async def test_a_lost_reuse_at_the_cap_is_still_stored(
     tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,6 +572,46 @@ async def test_a_release_cancelled_midway_keeps_the_row(tmp_path: Path, pool: Po
     store.backend = _CancelledRemove(tmp_path / "remote")
     with pytest.raises(asyncio.CancelledError):
         await store.delete("k")
+    assert store.index.get("k") is not None
+
+
+class _SlowRemove(LocalContentBackend):
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.removing = asyncio.Event()
+
+    async def remove(self, backend_id: str) -> None:
+        self.removing.set()
+        await asyncio.Event().wait()
+
+
+async def test_a_release_cancelled_twice_still_puts_the_row_back(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The case the shield is for: a second cancellation lands while the row is going
+    back. The re-insert finishes on its own, and `aclose` waits for it."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"p", name="p", scope=SCOPE, key="k")
+    backend = _SlowRemove(tmp_path / "remote")
+    store.backend = backend
+    swapping, go = threading.Event(), threading.Event()
+    swap = store.index.swap
+
+    def slow_swap(*args: Any, **kwargs: Any) -> Any:
+        swapping.set()
+        go.wait(10)
+        return swap(*args, **kwargs)
+
+    monkeypatch.setattr(store.index, "swap", slow_swap)
+    delete = asyncio.create_task(store.delete("k"))
+    await backend.removing.wait()
+    delete.cancel()  # mid-remove: the row starts going back
+    assert await asyncio.to_thread(swapping.wait, 10)
+    delete.cancel()  # mid-re-insert
+    with pytest.raises(asyncio.CancelledError):
+        await delete
+    go.set()
+    await store.aclose()
     assert store.index.get("k") is not None
 
 

@@ -141,6 +141,7 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
                             "configured_backend": "local",
                             "render_key_fallback": False,
                             "multi_worker": False,
+                            "settings_current": True,
                         },
                     }
 
@@ -667,6 +668,8 @@ async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
 
 
 class _Source:
+    fresh = True
+
     async def current(self) -> RenderStoreSettings:
         return RenderStoreSettings(
             store_backend="bambuddy",

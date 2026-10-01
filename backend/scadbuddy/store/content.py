@@ -329,6 +329,11 @@ class ContentStore:
                 extra={"key": stat.key, "backend_id": stat.ref.backend_id},
             )
 
+    async def aclose(self) -> None:
+        """Wait for the rows still going back: one dropped at shutdown orphans its object."""
+        if self._keeping:
+            await asyncio.gather(*self._keeping, return_exceptions=True)
+
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
         for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):
             yield stat
