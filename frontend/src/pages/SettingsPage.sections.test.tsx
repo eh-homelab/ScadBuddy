@@ -136,6 +136,37 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('keeps that edit when another section saves while the first is in flight (#767)', async () => {
+    // Rendering's save is held; Preview's goes straight through. Preview's request must
+    // not erase the edit Rendering's answer has to leave alone.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if ('render_timeout' in body) await held
+      return saved
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    await user.clear(timeout)
+    await user.type(timeout, '50')
+    await user.selectOptions(screen.getByLabelText('Show dimensions in'), 'in')
+    await user.click(screen.getByRole('button', { name: 'Save Preview' }))
+    await waitFor(() => expect(within(region('Preview')).queryByText('Unsaved')).toBeNull())
+
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+    expect(timeout).toHaveValue(50)
+    put.mockRestore()
+  })
+
   it('discards one section’s edits', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)
