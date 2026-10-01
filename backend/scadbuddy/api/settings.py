@@ -107,6 +107,8 @@ class SettingsView(BaseModel):
     event_log_retention_seconds: float
     event_log_retention_rows: int
     log_level: str
+    #: The Temporal web UI, which Settings → Administration links to (#668).
+    temporal_ui_url: str | None = None
 
     #: Where each env-seeded field's value comes from.
     sources: dict[str, SettingSource] = Field(default_factory=dict)

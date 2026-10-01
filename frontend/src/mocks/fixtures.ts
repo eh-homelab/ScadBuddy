@@ -660,6 +660,7 @@ export const settingsDefaults = {
   event_log_retention_seconds: 86400,
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
+  temporal_ui_url: null,
 } as const satisfies Partial<Settings>
 
 export const settingsDeployment: Record<string, unknown> = {
