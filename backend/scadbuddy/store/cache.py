@@ -71,6 +71,8 @@ class CachedBlobStore:
         self._fetching: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
+        #: An eviction pass after a write is running: the next write skips its own.
+        self._trimming = False
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
 
@@ -146,6 +148,7 @@ class CachedBlobStore:
                 await self.content.forget(key)
                 return None
             await asyncio.to_thread(unpack_dir, data, directory, sha256=stat.ref.sha256)
+            await self._trim()
         # Claimed: the sweep's `delete_if_stale` now skips it (see `sweep_content`).
         await self.content.touch(key)
         return stat.ref.sha256
@@ -170,6 +173,23 @@ class CachedBlobStore:
         if ref is None:
             raise StaleBlobError(f"piece {key} was published by a later attempt")
         await asyncio.to_thread(write_marker, directory, ref.sha256)
+        await self._trim()
+
+    async def _trim(self) -> None:
+        """After a write grew the cache: evict down to `max_bytes` now, in a thread and
+        one pass at a time, so the cap holds between the periodic passes (#689), which
+        stay as a backstop."""
+        if self._trimming:
+            return
+        self._trimming = True
+        try:
+            removed = await asyncio.to_thread(self.evict)
+            if removed:
+                logger.info("evicted cached pieces", extra={"count": len(removed)})
+        except Exception:
+            logger.exception("could not evict the piece cache")
+        finally:
+            self._trimming = False
 
     def cached_bytes(self) -> int:
         cached = self.local.keys()  # a list of blob keys, not a dict view

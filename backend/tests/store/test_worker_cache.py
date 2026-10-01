@@ -158,6 +158,31 @@ async def test_eviction_keeps_recent_pieces_and_reclaims_abandoned_ones(
     assert a.local.exists("recent") and a.local.exists("rendering")
 
 
+async def test_a_publish_or_a_download_over_the_cap_trims_the_cache(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#689: the cap holds between the periodic passes, keeping what is in flight."""
+    a = worker(tmp_path / "a", content, max_bytes=25, min_age=60.0)
+    b = worker(tmp_path / "b", content, max_bytes=1 << 30, min_age=60.0)
+    (b.dir_for("k") / "m").write_bytes(b"x" * 10)
+    await b.publish("k", scope=SCOPE)
+    past = time.time() - 3600
+
+    def abandoned(key: str) -> None:
+        (a.dir_for(key) / "m").write_bytes(b"x" * 10)
+        os.utime(a.local.root / key, (past, past))
+
+    abandoned("old-1")
+    (a.dir_for("rendering") / "m").write_bytes(b"x" * 10)  # in flight, never published
+    (a.dir_for("new") / "m").write_bytes(b"x" * 10)
+    await a.publish("new", scope=SCOPE)
+    assert sorted(a.local.keys()) == ["new", "rendering"]
+
+    abandoned("old-2")
+    assert await a.fetch("k")  # a miss, downloaded
+    assert sorted(a.local.keys()) == ["k", "new", "rendering"]
+
+
 async def test_eviction_skips_a_directory_touched_after_the_scan(
     tmp_path: Path, content: ContentStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
