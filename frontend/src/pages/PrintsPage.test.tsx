@@ -372,6 +372,26 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     queue_item_id: queueItemId,
   })
 
+  it('says a print that finished, but whose queue entry is gone, completed', async () => {
+    const done = sent('3', 'Bang', 106)
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([done, ...outputs])),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({
+          ...queuedSliceProgress,
+          stage: 'done',
+          settled: true,
+          queue_item_id: 106,
+          copies_completed: 1,
+        } satisfies PrintProgress),
+      ),
+    )
+    render('/m/name-keychain/prints')
+    const list = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(await within(list).findByText('Completed in Bambuddy')).toBeInTheDocument()
+    expect(list).not.toHaveTextContent('No longer in Bambuddy')
+  })
+
   it('stops waiting once its progress has settled, and says why', async () => {
     const expired = sent('1', 'Acceptance', 104)
     const pending = sent('2', 'Luna', 4500)

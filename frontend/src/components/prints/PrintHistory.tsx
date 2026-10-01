@@ -350,6 +350,7 @@ function Waiting({ slug, prints, complete }: { slug: string; prints: PrintSummar
 
 /** What a settled print with no print linked to it says instead of waiting (#898). */
 const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
+  done: 'Completed in Bambuddy',
   failed: 'Failed in Bambuddy',
   cancelled: 'Cancelled in Bambuddy',
 }

@@ -121,7 +121,7 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
     respx.get(f"{API}/queue/51").mock(
         return_value=httpx.Response(200, json={"id": 51, "status": "completed"})
     )
-    respx.get(f"{API}/slice-jobs/9").mock(
+    slice_job = respx.get(f"{API}/slice-jobs/9").mock(
         return_value=httpx.Response(200, json={"id": 9, "status": "completed"})
     )
     progress = await progress_for(
@@ -135,6 +135,8 @@ async def test_the_route_is_taken_from_the_record_not_guessed(
     assert progress is not None
     assert progress.route == "slice_queue"
     assert progress.queue_item_id == 51
+    # With a queue item, its slice job has finished and is not read again (#898).
+    assert not slice_job.called
 
 
 @respx.mock
