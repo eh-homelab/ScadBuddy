@@ -43,11 +43,13 @@ from scadbuddy.library.outputs import (
     OutputNotFoundError,
     OutputStore,
     download_filename,
+    hold_parts,
+    release_parts,
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
-from scadbuddy.render.job_models import BomEntry, OutputRecord
+from scadbuddy.render.job_models import BomEntry, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -76,6 +78,11 @@ class OutputDetail(OutputSummary):
     bom: list[BomEntry] = Field(default_factory=list)
     record: OutputRecord | None = None
     files: list[str] = Field(default_factory=list)
+    #: The output's objects (spec 2026-09-27 §7); empty for one saved before phase 5,
+    #: which therefore cannot be arranged.
+    manifest: list[ManifestObject] = Field(default_factory=list)
+    #: For an arranged output, the outputs its objects came from (Task 5).
+    arranged_from: list[str] = Field(default_factory=list)
 
 
 class OutputPlate(BaseModel):
@@ -121,6 +128,8 @@ def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCop
         bom=store.bom(meta.id),
         record=store.record(meta.id),
         files=store.files(meta.id),
+        manifest=store.manifest(meta.id),
+        arranged_from=store.arranged_from(meta.id),
         library_files=library_files,
     )
 
@@ -215,6 +224,9 @@ async def create_output(
         index=body.index,
         files_dir=files_dir,
     )
+    # The Parts outlive the job that rendered them: Arrange reads them later (§7).
+    manifest = await asyncio.to_thread(outputs.manifest, meta.id)
+    await asyncio.to_thread(hold_parts, state.refs, meta.id, manifest)
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])
@@ -298,6 +310,7 @@ async def delete_output(
     links: PrintLinksDep,
     events: EventsDep,
     store: SettingsStoreDep,
+    state: StateDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
 ) -> Response:
     """Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's
@@ -327,6 +340,11 @@ async def delete_output(
         await links.delete_outputs([output_id])
     except (DatabaseRequiredError, psycopg.Error):
         logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
+    # Its Parts go with it, or no sweep ever removes them (blob_refs, §7).
+    try:
+        await asyncio.to_thread(release_parts, state.refs, output_id)
+    except psycopg.Error:
+        logger.exception("could not release a deleted output's Parts", extra={"id": output_id})
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

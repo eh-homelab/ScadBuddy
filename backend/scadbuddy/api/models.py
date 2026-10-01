@@ -42,6 +42,7 @@ from scadbuddy.api.deps import (
     PrintLinksDep,
     RenderDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
@@ -80,7 +81,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
-from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.outputs import OutputStore, release_parts
 from scadbuddy.library.presets import PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
@@ -954,6 +955,7 @@ async def delete_model(
     uploads: UploadsDep,
     links: PrintLinksDep,
     events: EventsDep,
+    state: StateDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
@@ -975,6 +977,15 @@ async def delete_model(
             await links.delete_outputs(output_ids)
         except (DatabaseRequiredError, psycopg.Error):
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
+        # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
+        # Best effort, like the records above: the model is gone either way.
+        try:
+            for output_id in output_ids:
+                await asyncio.to_thread(release_parts, state.refs, output_id)
+        except psycopg.Error:
+            logger.exception(
+                "could not release a deleted model's output Parts", extra={"slug": slug}
+            )
     emit(events, ModelEvent(kind="model.deleted", slug=slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

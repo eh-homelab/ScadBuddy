@@ -13,7 +13,14 @@ from pydantic import BaseModel, Field, model_validator
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
-from scadbuddy.render.job_models import BomEntry, JobResult, OutputRecord, PipelineOutput, StepInfo
+from scadbuddy.render.job_models import (
+    BomEntry,
+    JobResult,
+    ManifestObject,
+    OutputRecord,
+    PipelineOutput,
+    StepInfo,
+)
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.template import Blob as Blob
 from scadbuddy.template import Part as Part
@@ -195,6 +202,8 @@ class OutputRequest(BaseModel):
     files: dict[str, str | Blob]
     plate_model: str | None = None
     record: OutputRecord
+    #: Arrange's objects keep where they came from; keyed by part.
+    provenance: dict[str, ManifestObject] = Field(default_factory=dict)
 
 
 class OutputRef(BaseModel):

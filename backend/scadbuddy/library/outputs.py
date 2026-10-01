@@ -7,11 +7,11 @@ import shutil
 import threading
 import uuid
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -22,11 +22,14 @@ from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
-from scadbuddy.render.job_models import FILE_NAME_PATTERN, BomEntry, OutputRecord
+from scadbuddy.render.job_models import FILE_NAME_PATTERN, BomEntry, ManifestObject, OutputRecord
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
+
+if TYPE_CHECKING:
+    from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,10 @@ GEOMETRY_NAME = "geometry.json"
 #: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
 BOM_NAME = "bom.json"
 RECORD_NAME = "record.json"
+MANIFEST_NAME = "manifest.json"
+ARRANGED_NAME = "arranged_from.json"
+#: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
+OUTPUT_HOLDER = "output"
 FILES_DIR = "files"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
@@ -206,6 +213,7 @@ class OutputStore:
         inputs: Mapping[str, Any] | None = None,
         index: int = 0,
         files_dir: Path | None = None,
+        arranged_from: Sequence[str] = (),
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
@@ -256,6 +264,15 @@ class OutputStore:
                 )
             if files_dir is not None and chosen.files:
                 shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+            if chosen.manifest:
+                (directory / MANIFEST_NAME).write_text(
+                    json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
+                    encoding="utf-8",
+                )
+        if arranged_from:
+            (directory / ARRANGED_NAME).write_text(
+                json.dumps(list(arranged_from)), encoding="utf-8"
+            )
 
         meta = OutputMeta(
             id=output_id,
@@ -281,6 +298,29 @@ class OutputStore:
         if not path.is_file():
             return []
         return [BomEntry.model_validate(e) for e in json.loads(path.read_text(encoding="utf-8"))]
+
+    def manifest(self, output_id: str) -> list[ManifestObject]:
+        """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
+        try:
+            path = self.directory(output_id) / MANIFEST_NAME
+        except OutputNotFoundError:
+            return []
+        if not path.is_file():
+            return []
+        return [
+            ManifestObject.model_validate(m) for m in json.loads(path.read_text(encoding="utf-8"))
+        ]
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        """For an arranged output, the outputs its objects came from."""
+        try:
+            path = self.directory(output_id) / ARRANGED_NAME
+        except OutputNotFoundError:
+            return []
+        if not path.is_file():
+            return []
+        loaded: list[str] = json.loads(path.read_text(encoding="utf-8"))
+        return loaded
 
     def record(self, output_id: str) -> OutputRecord | None:
         path = self.directory(output_id) / RECORD_NAME
@@ -503,3 +543,13 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = meta.id
     # A built-in's bare slug: `:` is not a character a saved file name can carry.
     return f"{meta.slug.removeprefix(BUILTIN_PREFIX)}-{suffix}.3mf"
+
+
+def hold_parts(refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject]) -> None:
+    """The output's Parts outlive the job that rendered them: Arrange reads them (§7)."""
+    for obj in manifest:
+        refs.add(obj.part, OUTPUT_HOLDER, output_id)
+
+
+def release_parts(refs: BlobRefs, output_id: str) -> None:
+    refs.drop_holder(OUTPUT_HOLDER, output_id)

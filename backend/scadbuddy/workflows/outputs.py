@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 
 import trimesh
@@ -14,7 +15,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.paths import BUILTIN_PREFIX
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.glb import bounding_box, write_glb
-from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, PipelineOutput
+from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, ManifestObject, PipelineOutput
 from scadbuddy.render.jobs import (
     LAYOUT_NAME,
     MODEL_NAME,
@@ -133,7 +134,39 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
         files_key=key if req.files else None,
         blob_keys=keys,
         record=record,
+        manifest=manifest_of(req),
     )
+
+
+def manifest_of(req: OutputRequest) -> list[ManifestObject]:
+    """The output's objects, from the layout it is written from (spec §7)."""
+    if req.layout.own is not None:
+        counts = Counter([req.layout.own])
+    else:
+        counts = Counter(p.piece_key for plate in req.layout.plates for p in plate.items)
+    named = {entry.part: entry.piece for entry in req.bom if entry.part}
+    objects: list[ManifestObject] = []
+    for part in req.parts:
+        if not counts[part.piece_key]:
+            continue
+        earlier = req.provenance.get(part.piece_key)
+        objects.append(
+            ManifestObject(
+                part=part.piece_key,
+                file=part.file,
+                slug=earlier.slug if earlier else req.slug,
+                revision=earlier.revision if earlier else req.record.revision,
+                bbox=part.bbox,
+                footprint=(part.bbox.size[0], part.bbox.size[1]),
+                colours=list(part.colours),
+                count=counts[part.piece_key],
+                plates=part.plates,
+                bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
+                source_output=earlier.source_output if earlier else None,
+                notes=list(part.notes),
+            )
+        )
+    return objects
 
 
 def _joined(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:

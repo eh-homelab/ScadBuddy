@@ -49,6 +49,8 @@ def test_persisting_a_job_writes_the_documented_layout(
     directory = paths.output_dir(model, body["id"])
     assert sorted(path.name for path in directory.iterdir()) == [
         "inputs.json",
+        # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
+        "manifest.json",
         "meta.json",
         "model.3mf",
         "params.json",
