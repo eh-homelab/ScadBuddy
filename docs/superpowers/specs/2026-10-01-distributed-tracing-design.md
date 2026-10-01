@@ -170,12 +170,14 @@ path except `/api/v1/ai/*` to the backend.
   is either a read or the realtime socket. The relay is the backend's first
   unauthenticated POST meant for browser JS, so a page on another origin
   must not be able to drive it (to spend its budget or inject spans).
-  - The request must carry an `Origin`, and `origin_allowed`
-    (`api/realtime.py`, the realtime socket's check against
-    `SCADBUDDY_PUBLIC_URL` and `SCADBUDDY_ALLOWED_ORIGINS`) must accept it.
-  - Unlike the socket, a missing `Origin` is refused, not let through: a
-    browser always sends one on a `fetch` POST, so its absence means the
-    caller is not this page.
+  - First, a separate check: a request with no `Origin` is refused.
+    `origin_allowed` cannot do this, because it returns `True` for `None`
+    on purpose (for the socket, a non-browser caller is as trusted as a REST
+    call). A browser always sends `Origin` on a `fetch` POST, so its absence
+    means the caller is not this page.
+  - Then `origin_allowed` (`api/realtime.py`, the socket's check against
+    `SCADBUDDY_PUBLIC_URL` and `SCADBUDDY_ALLOWED_ORIGINS`) must accept the
+    `Origin` that is present.
   - When `Sec-Fetch-Site` is present it must be `same-origin`.
   - Anything else is 403, before the body is read.
   - The `Origin` check is the control that matters. A cross-origin page can
@@ -227,10 +229,29 @@ path except `/api/v1/ai/*` to the backend.
   - a span name of 128 characters.
 
   These match the SDK limits `RelayExporter`'s provider is configured with
-  (`spanLimits`), so a well-behaved page never hits them. It then forwards to
-  the configured
-  endpoint with httpx in the background; the browser never waits on the
-  collector. A forged span can still name any trace ID, but never claim to be
+  (`spanLimits`), so a well-behaved page never hits them.
+- **Forwarding** happens in the background, so the browser never waits on the
+  collector. It must not lose spans silently:
+  - An accepted batch goes on a bounded in-memory queue: 64 batches,
+    16 MiB at most, given the 256 KiB cap.
+  - One forwarding task, started and stopped in the app's lifespan, posts
+    the queue to the endpoint with httpx, with a 5 s timeout.
+  - **No retries in the app.** A failed post (unreachable, timeout, any
+    non-2xx) drops its batch. Retrying and buffering are alloy's job, and
+    the browser is already gone.
+  - When the queue is full, a new batch is dropped at once, and the browser
+    still gets its 204.
+  - **Shutdown:** on SIGTERM the lifespan stops accepting (new requests get
+    503), then drains the queue for up to 5 s, inside the pod's grace
+    period, and drops whatever is left.
+  - **Visibility:** every outcome is counted in
+    `scadbuddy_trace_relay_batches_total{outcome}`, with the outcomes
+    `forwarded`, `failed`, `queue_full` and `shutdown`. The counter goes in
+    `core/metrics.py` beside the others and is pre-created at zero, so its
+    first increase alerts. Failures also log one warning a minute at most,
+    naming the status or the error class. This one counter is the only
+    metric change in this design: it watches the tracing path itself, and
+    it is not a move of metrics to OTel. A forged span can still name any trace ID, but never claim to be
   the API or the worker.
 - **Accepted residual risk.** Script running on ScadBuddy's origin (today
   only the app; in future an XSS or a compromised dependency) can post spans
@@ -448,7 +469,11 @@ This needs **new logic** in the workflow, not just its existing rules. Today's
 `expect_one` is unconditional: a count other than 1 fails the whole deploy.
 The #547 precedent skips a whole manifest file that is absent (`[ -f ... ]`),
 but the dashboard line sits in `clusters/prod/scadbuddy/kustomization.yaml`, a
-file that already exists. So the new step counts the anchored line first:
+file that already exists. So the new step counts the anchored line first.
+The step runs under `set -euo pipefail`, so both counts use `expect_one`'s
+existing idiom, `n=$(grep -c… "$file" || true)`. A bare `grep -c` exits 1 on
+zero matches and would abort the step in exactly the "not configured" case it
+has to handle:
 
 - **Not configured:** the anchored pattern matches 0 lines and the file
   does not mention `eh-homelab/ScadBuddy//deploy/grafana` at all (an
@@ -506,7 +531,9 @@ The uid never changes after that, so the check is needed once.
   `X-Forwarded-For` ignored from an untrusted peer and read right to left from
   a trusted one; resource rewrite; each attribute, event, link and name cap at
   its limit and one past it, with the dropped count; the `off` response; nothing
-  forwarded when off; the path never serves `index.html`. Redaction tests put a
+  forwarded when off; the path never serves `index.html`; a failing
+  collector, a full queue and a shutdown with batches still queued each
+  increment their outcome and never fail the browser's request. Redaction tests put a
   sentinel string in each forbidden place and assert it appears nowhere in any
   exported span: not in attributes, event attributes or status descriptions,
   on success or on failure. The places are:
