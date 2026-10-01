@@ -13,6 +13,13 @@ const uiModule = async (name: string) => {
   return loader()
 }
 type Entry = { id: string; piece: string; course: string | null; count: number | null; label?: string }
+const pieceCounts = Object.values(
+  import.meta.glob<{ cases: { house: object; counts: Record<string, number | null>; total: number }[] }>(
+    '../../../models/dollhouse-kit/pipeline/piece-counts.json',
+    { eager: true, import: 'default' },
+  ),
+)[0]
+if (!pieceCounts) throw new Error('models/dollhouse-kit/pipeline/piece-counts.json is missing')
 const load = async () =>
   (await uiModule('pieces.js')) as {
     housePieces: (h: object) => Entry[]
@@ -23,6 +30,15 @@ const load = async () =>
   }
 
 describe('housePieces', () => {
+  // #905: the same file backend/tests/test_dollhouse_pipeline.py checks the pipeline's
+  // `house_pieces` against, so the designer's counts are the pieces the server renders.
+  it.each(pieceCounts.cases)('counts $house as the pipeline does', async ({ house, counts, total }) => {
+    const { housePieces, pieceTotal } = await load()
+    const pieces = housePieces(house)
+    expect(Object.fromEntries(pieces.map((e) => [e.id, e.count]))).toEqual(counts)
+    expect(pieceTotal(pieces)).toBe(total)
+  })
+
   it('counts a one-room, one-storey house', async () => {
     const { housePieces } = await load()
     const counts = Object.fromEntries(
