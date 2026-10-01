@@ -10,6 +10,13 @@ directory a stage changed but never published is a miss, never an answer. Sticky
 scheduling would make every fetch a hit; nothing depends on it. Publishing is a
 compare-and-swap on the sha the stage checked out, so an attempt Temporal has already
 retried elsewhere cannot overwrite its successor.
+
+The per-key lock covers `fetch` and `checkout`, not a stage's use of the directory.
+While a stage writes, the directory has no marker, so a `fetch` of the same key in the
+same process is a miss and swaps the directory out from under the stage: a key must
+not be fetched while a stage of that key is writing it. One `RenderPiece` per key
+keeps that true, except for a retry overlapping a zombie attempt on the same worker,
+where the zombie loses and the retry works on fresh state.
 """
 
 from __future__ import annotations
