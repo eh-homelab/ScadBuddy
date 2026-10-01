@@ -48,6 +48,7 @@ export function HistoryPage() {
     try {
       await api.deleteOutput(id, deleteInboxCopies)
       outputsState.setData((outputsState.data ?? []).filter((o) => o.id !== id))
+      setPicked((current) => current.filter((p) => p !== id))
       setConfirmFor(undefined)
     } finally {
       setDeleting(null)

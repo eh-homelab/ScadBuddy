@@ -304,6 +304,16 @@ describe('HistoryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
   })
 
+  it('drops a deleted output from the selection', async () => {
+    const { user } = render()
+    const workshop = await row('Workshop')
+    await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    await user.click(within(workshop).getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
+    expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+  })
+
   it('offers no Edit on an arranged output', async () => {
     server.use(
       http.get('/api/v1/models/name-keychain/outputs', () =>

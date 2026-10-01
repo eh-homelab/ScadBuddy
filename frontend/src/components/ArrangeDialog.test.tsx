@@ -71,4 +71,33 @@ describe('ArrangeDialog', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent("group 'big' does not fit on one plate")
     expect(onArranged).not.toHaveBeenCalled()
   })
+
+  it('names several outputs that cannot be arranged in one sentence', () => {
+    const third: Output = { ...first, id: 'o-3', name: 'third', manifest: [] }
+    renderPage(
+      <ArrangeDialog open slug="name-keychain" outputs={[second, third]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'second and third were saved before Arrange; generate them again to arrange them.',
+    )
+  })
+
+  it('announces its progress and marks Arrange busy while it waits', async () => {
+    const created_at = '2026-09-28T12:00:00Z'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json({ id: 'arrange-slow', slug: 'name-keychain', status: 'pending', created_at }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/arrange-slow', () =>
+        HttpResponse.json({ id: 'arrange-slow', slug: 'name-keychain', status: 'running', created_at }),
+      ),
+    )
+    const { user } = renderPage(
+      <ArrangeDialog open slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    const progress = await screen.findByText('Arranging…')
+    expect(progress).toHaveAttribute('aria-live', 'polite')
+    expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
 })

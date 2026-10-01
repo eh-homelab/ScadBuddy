@@ -59,8 +59,7 @@ export function ArrangeDialog({ open, slug, outputs, onClose, onArranged }: Prop
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
           <p role="status" className="text-[12px] text-muted">
-            {unusable.map((o) => o.name ?? o.id).join(', ')} was saved before Arrange; generate it
-            again to arrange it.
+            {unusableNote(unusable.map((o) => o.name ?? o.id))}
           </p>
         )}
         <ul className="flex flex-col gap-1.5">
@@ -108,16 +107,25 @@ export function ArrangeDialog({ open, slug, outputs, onClose, onArranged }: Prop
           onChange={(event) => setName(event.target.value)}
           className="sb-field"
         />
-        {progress && <p className="text-[12px] text-faint">{progress}</p>}
+        <p aria-live="polite" className="text-[12px] text-faint">
+          {progress}
+        </p>
         {error && (
           <p role="alert" className="text-[13px] text-warn">
             {error}
           </p>
         )}
-        <Button onClick={() => void submit()} disabled={busy || rows.length === 0}>
+        <Button onClick={() => void submit()} disabled={busy || rows.length === 0} aria-busy={busy}>
           Arrange
         </Button>
       </div>
     </Dialog>
   )
+}
+
+/** "A was saved before Arrange; …", or "A, B and C were …" for several. */
+function unusableNote(names: string[]): string {
+  if (names.length === 1) return `${names[0]} was saved before Arrange; generate it again to arrange it.`
+  const listed = `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `${listed} were saved before Arrange; generate them again to arrange them.`
 }
