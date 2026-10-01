@@ -290,7 +290,7 @@ The rest:
     execution has closed starts a new execution under the same workflow ID
     (`ALLOW_DUPLICATE` reuse), with a new job id. Today, too, only an unfinished row
     coalesces.
-- **Superseding.** A request naming `supersedes: <job id>` (and `RenderService.cancel`, `submit.py:163`) looks
+- **Superseding.** A request naming `supersedes: <job id>` (and `RenderService.cancel`, `render/submit.py:185`) looks
   up that row's `workflow_id` and run id and sends that execution the `release` Update.
   - `release` takes off one claim. At zero the workflow writes `cancelled` through its
     projection activity and stops at the next activity boundary.
