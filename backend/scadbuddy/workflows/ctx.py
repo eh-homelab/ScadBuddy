@@ -167,7 +167,7 @@ class Ctx:
         process. ``timeout`` defaults to a piece's openscad bound and is capped at
         `template_activity_max_timeout`."""
         # Here, not at the top: `pipelines` imports this module.
-        from scadbuddy.workflows.pipelines import HEARTBEAT, RETRY
+        from scadbuddy.workflows.pipelines import HEARTBEAT, RETRY, TRANSFER
 
         default = workflow.memo_value("activity_timeout", default=180.0, type_hint=float)
         ceiling = workflow.memo_value(
@@ -183,14 +183,28 @@ class Ctx:
             timeout_s=seconds,
             job_id=self._job.id,
         )
-        # The subprocess's own kill (at ``seconds``) always fires before Temporal's.
+        # Before the subprocess starts, the worker brings in the revision's snapshot and
+        # every `Blob`/`Part` passed, one transfer each: with those in the budget, the
+        # subprocess's own kill (at ``seconds``) still fires before Temporal's.
+        moves = 1 + _references([call.args, call.kwargs])
         return await workflow.execute_activity(
             "run_template_activity",
             call,
-            start_to_close_timeout=timedelta(seconds=seconds + 30),
+            start_to_close_timeout=timedelta(seconds=seconds + 30) + moves * TRANSFER,
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
+
+
+def _references(value: Any) -> int:
+    """How many `Blob`/`Part` dicts ``value`` (JSON, as `_json` made it) holds."""
+    if isinstance(value, list):
+        return sum(_references(v) for v in value)
+    if isinstance(value, dict):
+        if value.get("kind") in ("blob", "part"):
+            return 1
+        return sum(_references(v) for v in value.values())
+    return 0
 
 
 def _json(value: Any) -> Any:

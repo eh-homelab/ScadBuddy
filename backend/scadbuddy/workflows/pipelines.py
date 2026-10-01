@@ -366,7 +366,8 @@ class TemplatePipeline:
                 "load_pipeline",
                 LoadRequest(slug=job.slug, revision=job.model_version),
                 result_type=LoadedPipeline,
-                start_to_close_timeout=SHORT,
+                start_to_close_timeout=_load_timeout(),
+                heartbeat_timeout=HEARTBEAT,
                 retry_policy=RETRY,
             )
             version = loaded.version
@@ -524,17 +525,26 @@ def _settled(steps: list[StepInfo], state: StepState) -> list[StepInfo]:
 
 def _output_timeout(req: OutputRequest) -> timedelta:
     """`write_output`: the openscad bound (thumbnails, the 3MF), plus one transfer per
-    store move: each piece and each `Blob` it fetches, and the output it publishes."""
-    moves = len(req.parts) + sum(isinstance(v, Blob) for v in req.files.values()) + 1
+    store move: the revision's snapshot (this worker may not have it yet), each piece
+    and each `Blob` it fetches, and the output it publishes."""
+    moves = 1 + len(req.parts) + sum(isinstance(v, Blob) for v in req.files.values()) + 1
     return _openscad_timeout() + moves * TRANSFER
+
+
+def _load_timeout() -> timedelta:
+    """`load_pipeline` and `migrate_inputs`: the revision's snapshot brought onto this
+    worker (one transfer, heartbeated, as `prepare` budgets it), then their own work: a
+    file read, or the template's `migrate` (`MIGRATE_SECONDS`, under `SHORT`)."""
+    return SHORT + TRANSFER
 
 
 #: `migrate_inputs`' retries: two attempts, a second after the first.
 MIGRATE_RETRY = RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=1))
-#: The migration workflow's bound: both attempts of `SHORT`, the backoff between them,
-#: and a margin for scheduling, so it outlasts its activity rather than cutting it off.
+#: The migration workflow's bound: both attempts at `_load_timeout()`, the backoff
+#: between them, and a margin for scheduling, so it outlasts its activity rather than
+#: cutting it off.
 MIGRATE_EXECUTION_TIMEOUT = (
-    (MIGRATE_RETRY.maximum_attempts or 1) * SHORT
+    (MIGRATE_RETRY.maximum_attempts or 1) * _load_timeout()
     + (MIGRATE_RETRY.initial_interval or timedelta())
     + timedelta(seconds=10)
 )
@@ -550,7 +560,8 @@ class MigrateInputs:
             "migrate_inputs",
             req,
             result_type=MigrateResult,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=_load_timeout(),
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=MIGRATE_RETRY,
         )
         return result

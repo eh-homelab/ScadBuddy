@@ -48,8 +48,8 @@ from scadbuddy.workflows.outputs import build_output
 from scadbuddy.workflows.packing import PackError, shelf_pack
 from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
 
-#: `migrate`'s own bound: under the activity's `SHORT` (60 s), so the subprocess's kill
-#: fires before Temporal's, as `Ctx.activity`'s +30 s does.
+#: `migrate`'s own bound: under the `SHORT` (60 s) that the activity's budget gives it
+#: after the snapshot's transfer, so the subprocess's kill fires before Temporal's.
 MIGRATE_SECONDS = 30.0
 
 
@@ -109,7 +109,8 @@ class PipelineActivities:
         workflow runs it in its sandbox, where what raises is a nondeterministic call
         (`os.getpid()`, `random.random()`, `datetime.now()`, `open()`), not an
         import (spec §3.6)."""
-        directory = await self.model_dir(req.slug, req.revision)
+        # Heartbeated: on the bambuddy store this downloads the revision's snapshot.
+        directory = await _heartbeating(asyncio.create_task(self.model_dir(req.slug, req.revision)))
         try:
             raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
         except FileNotFoundError:
@@ -190,7 +191,7 @@ class PipelineActivities:
         """The template's `migrate`, in the template process (§8.2): it runs template code,
         so it runs here on the worker, never in the API (§9)."""
         d = self.deps
-        model_dir = await self.model_dir(req.slug, req.revision)
+        model_dir = await _heartbeating(asyncio.create_task(self.model_dir(req.slug, req.revision)))
         with tempfile.TemporaryDirectory(prefix="scadbuddy-migrate-") as out:
             try:
                 migrated = await run_template(

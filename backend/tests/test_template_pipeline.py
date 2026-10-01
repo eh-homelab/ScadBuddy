@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -11,11 +12,17 @@ import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
-from temporalio.worker import Worker
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
+from scadbuddy.core.config import Config
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.projection import workflow_id_for
+from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import pipelines
+from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.ctx import _references
 from scadbuddy.workflows.models import (
     OutputRequest,
     PieceRequest,
@@ -23,6 +30,7 @@ from scadbuddy.workflows.models import (
     Projection,
     piece_key,
 )
+from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
 from tests.support.pipelines import (
     FakeWorld,
@@ -428,3 +436,105 @@ async def test_a_job_waiting_on_two_pieces_gets_each_its_own(released: tuple[int
     expected = f"{keys[1]}=1 {keys[2]}=2"
     assert names == {a.id: expected, b.id: expected}
     assert len(world.pieces) == 2  # rendered once each, by A
+
+
+class _SlowSnapshots:
+    """A snapshot store whose download outlasts `SHORT`, then lands the export."""
+
+    def __init__(self, template: Path, paths: DataPaths, seconds: float) -> None:
+        self.template, self.paths, self.seconds = template, paths, seconds
+
+    async def materialize(self, slug: str, revision: str) -> bool:
+        await asyncio.sleep(self.seconds)
+        target = self.paths.model_revision_dir(slug, revision)
+        if not target.is_dir():
+            shutil.copytree(self.template, target)
+        return True
+
+
+async def test_a_snapshot_download_longer_than_short_still_loads_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`load_pipeline` is a job's first activity, and on the bambuddy store it brings in the
+    revision's snapshot: its budget carries a transfer, as `prepare`'s does (final review I1).
+    `SHORT` and `TRANSFER` are scaled down, so the download (4 s) outlasts `SHORT` (2 s)
+    but not `SHORT + TRANSFER`; unsandboxed, so the workflow reads the patched values."""
+    monkeypatch.setattr(pipelines, "SHORT", timedelta(seconds=2))
+    monkeypatch.setattr(pipelines, "TRANSFER", timedelta(seconds=6))
+    template = tmp_path / "template"
+    template.mkdir()
+    (template / "model.scad").write_text("cube();\n", encoding="utf-8")
+    (template / "model.json").write_text('{"name": "Demo"}', encoding="utf-8")
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    deps = WorkerDeps(
+        config=Config(data_dir=paths.root),
+        paths=paths,
+        assets=AssetStore(paths.assets),
+        blobs=LocalBlobStore(paths.blobs),
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+        snapshots=_SlowSnapshots(template, paths, 4.0),  # type: ignore[arg-type]
+    )
+    real = PipelineActivities(deps)
+    world = FakeWorld()
+    job = a_job(params={"w": 12})
+    job.model_version = "a" * 40
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=[a for a in world.activities() if a != world.load_pipeline]
+            + [real.load_pipeline],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            await asyncio.wait_for(
+                client.execute_workflow(
+                    TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue
+                ),
+                90,
+            )
+    final = world.final()
+    assert final.state == "done", final.failure
+    assert final.pipeline_version == "default"
+
+
+def test_the_pipeline_activities_budget_the_snapshot_transfer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`migrate_inputs` shares `load_pipeline`'s bound; the migration workflow outlasts
+    both attempts of it; `write_output` counts the snapshot among its moves."""
+    assert pipelines._load_timeout() == pipelines.SHORT + pipelines.TRANSFER
+    assert (
+        2 * pipelines._load_timeout() + timedelta(seconds=1) + timedelta(seconds=10)
+    ) == pipelines.MIGRATE_EXECUTION_TIMEOUT
+    openscad = timedelta(seconds=100)
+    monkeypatch.setattr(pipelines, "_openscad_timeout", lambda: openscad)
+    req = OutputRequest.model_validate(
+        {
+            "job_id": "j",
+            "index": 0,
+            "slug": "demo",
+            "layout": {"own": "k"},
+            "parts": [],
+            "name": None,
+            "bom": [],
+            "files": {"a.txt": "x", "b.bin": {"key": "act-1", "path": "b.bin"}},
+            "record": {
+                "revision": None,
+                "ui_api": None,
+                "pipeline_api": 1,
+                "pipeline_version": "default",
+                "inputs_v": 0,
+                "plate_key": "default",
+                "parts": [],
+            },
+        }
+    )
+    # The snapshot, one Blob, the publish.
+    assert pipelines._output_timeout(req) == openscad + 3 * pipelines.TRANSFER
+    # `ctx.activity` adds one transfer per Blob/Part it passes, plus the snapshot's.
+    part, blob = {"kind": "part", "piece_key": "k"}, {"kind": "blob", "key": "b", "path": "f"}
+    assert _references([[part, blob, 3], {"x": {"y": blob}, "n": "blob"}]) == 3
