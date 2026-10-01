@@ -64,6 +64,16 @@ describe('Markdown', () => {
     expect(blocks[0]).toEqual({ kind: 'heading', level: 1, text: 'A | B' })
   })
 
+  it('reads a pipe after an escaped backslash as a real cell edge', () => {
+    expect(parseBlocks('| a | b |\n|---|---|\n| x\\\\ | y\\\\|')).toEqual([
+      { kind: 'table', align: [null, null], header: ['a', 'b'], rows: [['x\\\\', 'y\\\\']] },
+    ])
+  })
+
+  it('needs a pipe in the delimiter row, so `text` over `--` is not a table (setext, as in cmark-gfm)', () => {
+    expect(parseBlocks('a\n--\n1').map((b) => b.kind)).not.toContain('table')
+  })
+
   it('leaves pipes without a delimiter row as a paragraph', () => {
     expect(parseBlocks('| a | b |\n| c | d |')).toEqual([{ kind: 'para', text: '| a | b | | c | d |' }])
   })

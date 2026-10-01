@@ -10,12 +10,33 @@ export type Align = 'left' | 'center' | 'right' | null
 
 const DELIMITER_CELL = /^\s*(:?)-+(:?)\s*$/
 
-/** A GFM table row's cells: edge pipes dropped, split on unescaped `|`, `\|` unescaped. */
+/**
+ * A GFM table row's cells: edge pipes dropped, split on unescaped `|`, `\|` unescaped.
+ * A pipe is escaped only after an odd run of backslashes, so `\\|` is a backslash
+ * followed by a real cell edge.
+ */
 function cells(line: string): string[] {
-  let row = line.trim()
-  if (row.startsWith('|')) row = row.slice(1)
-  if (row.endsWith('|') && !row.endsWith('\\|')) row = row.slice(0, -1)
-  return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'))
+  const row = line.trim()
+  const out: string[] = []
+  let cell = ''
+  let slashes = 0
+  let edge = false
+  for (const ch of row) {
+    edge = ch === '|' && slashes % 2 === 0
+    if (edge) {
+      out.push(cell)
+      cell = ''
+    } else if (ch === '|') {
+      cell = cell.slice(0, -1) + ch
+    } else {
+      cell += ch
+    }
+    slashes = ch === '\\' ? slashes + 1 : 0
+  }
+  out.push(cell)
+  if (row.startsWith('|')) out.shift()
+  if (edge && out.length > 1) out.pop()
+  return out.map((c) => c.trim())
 }
 
 /** The delimiter row's alignments, or null when `line` is not one for `width` columns. */
