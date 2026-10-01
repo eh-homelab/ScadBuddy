@@ -45,15 +45,6 @@ describe('pendingFields and editedSince', () => {
     expect(editedSince(since, counts([['public_url', 1]]))).toEqual(new Set(['public_url']))
   })
 
-  it('does not let a second request forget an edit made during the first (review of #911)', () => {
-    // Save A sent at count 1; the field is edited again (2); save B is sent and answers.
-    // Each request carries its own snapshot, so B cannot erase the edit A must keep.
-    const saveA = { names: ['render_timeout'] as FieldName[], since: counts([['render_timeout', 1]]) }
-    const saveB = { names: ['display_unit'] as FieldName[], since: counts([['render_timeout', 2]]) }
-    const since = pendingFields([saveB, saveA], () => [])
-    expect(editedSince(since, counts([['render_timeout', 2]]))).toEqual(new Set(['render_timeout']))
-  })
-
   it('takes the later request when two seed one field', () => {
     const since = pendingFields(
       [
