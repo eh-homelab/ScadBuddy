@@ -367,14 +367,31 @@ def _housekeep(deps: WorkerDeps) -> None:
             logger.exception("could not prune fetched uploads")
 
 
+#: How often a worker housekeeps when the upload sweep is off (seconds): the piece
+#: cache must still be evicted.
+WORKER_CACHE_EVICT_INTERVAL = 300.0
+
+
 async def _housekeep_periodically(deps: WorkerDeps, interval: float) -> None:
-    """`_housekeep` every ``interval`` (SCADBUDDY_ASSET_SWEEP_INTERVAL)."""
+    """`_housekeep` every ``interval`` (see `_start_housekeeping`)."""
     while True:
         await asyncio.sleep(interval)
         try:
             await asyncio.to_thread(_housekeep, deps)
         except Exception:
             logger.exception("the worker's sweep failed; the next one retries")
+
+
+def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task[None] | None:
+    """Housekeep on a timer whenever the worker's blobs are a piece cache (the bambuddy
+    store; a local-store worker shares the API's volume, whose sweeps are the API's):
+    every SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
+    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops eviction."""
+    if not isinstance(deps.blobs, CachedBlobStore):
+        return None
+    interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
+    logger.info("housekeeping the worker's cache and volume every %.0f s", interval)
+    return asyncio.create_task(_housekeep_periodically(deps, interval))
 
 
 async def run_worker(
@@ -385,15 +402,11 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps, store = build_worker_deps(settings)
+    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
+    # the rest opens the projection's pool and reads the store settings.
+    deps, store = await asyncio.to_thread(build_worker_deps, settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
-    # Only on the bambuddy store: a local-store worker shares the API's volume, whose
-    # sweeps are the API's.
-    evicting = (
-        asyncio.create_task(_housekeep_periodically(deps, deps.config.asset_sweep_interval))
-        if isinstance(store.blobs, CachedBlobStore) and deps.config.asset_sweep_interval > 0
-        else None
-    )
+    evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)
