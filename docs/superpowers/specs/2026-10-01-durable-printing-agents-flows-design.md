@@ -223,8 +223,16 @@ The same for every kind:
    (`PgNotifyEventBus.publish_in`, `core/pg_events.py:413`).
 4. **The answer.** Each kind declares one of two:
    - **`done`**, for commands that normally finish in under a second (a git commit, a
-     delete). The Update waits for the workflow's result, and the route answers as it
-     does today (200/201/204 with today's body). If the result is not there within
+     delete). The route answers as it does today (200/201/204 with today's body).
+     - The `accepted` Update handler is `async` and awaits
+       `workflow.wait_condition(lambda: self.result is not None)`. `self.result` is set
+       once the effect's activities have finished, after which the workflow writes its
+       final projection and completes.
+     - An Update handler waiting on workflow state is the SDK's documented use of
+       `async` handlers. It is not a wait for workflow completion, which Updates do not
+       offer.
+     - So for a `done` command, step 5 below is the effect the Update waits on, not
+       work that comes after the answer. If the result is not there within
      `command_answer_deadline` (default 10 s, below Envoy's 15 s), the route answers
      **202** with the operation instead, and the client follows it.
    - **`accepted`**, for commands that take long (a print, a pin's clone, a URL import,
@@ -239,7 +247,7 @@ The same for every kind:
        same execution, until it gets the record or the refusal.
      - So no command, of either kind, holds a request open past the deadline, and a
        slow validation (a sluggish Bambuddy status read, say) cannot reproduce §1's 504.
-5. **Then** the workflow carries on with its activities. Each transition is a guarded
+5. **Then** (or, for `done`, while the Update waits) the workflow carries on with its activities. Each transition is a guarded
    write to our record plus an event in the same transaction, the `render/projection.py`
    pattern. Search Attributes `ScadbuddyKind`, `ScadbuddySubject` and `ScadbuddyStatus`
    are upserted at each one.
@@ -250,16 +258,16 @@ The same for every kind:
 - Every other kind writes one generic table, `operations(id, kind, subject, status,
   request jsonb, result jsonb, error jsonb, workflow_id, created_at, finished_at)`. It is
   read by `GET /api/v1/operations/{id}` (and so a tool) and announced as `operation.*`
-  events. Its pruning is a Postgres setting, `operation_retention_days`, like
-  `print_run_retention_days`.
+  events. Its pruning is a Postgres setting, `operation_retention_seconds`, like
+  `print_run_retention_seconds`.
 - Temporal's namespace Archival (§5.4) covers history past 168h for every kind.
 
 **The client.**
 - One helper, `command()` in `frontend/src/api/client.ts`, sends a `request_id`. It takes
   either answer, follows a 202 (event or `GET /operations/{id}`) to its result, and
   re-sends the same `request_id` after an answer that never arrived.
-- This generalises today's `followPrintRun` loop with its `reattach` and `mayHaveRun`
-  (`client.ts:362`, `:273`).
+- This generalises today's `followPrintRun` loop (`client.ts:362`), with its `reattach`
+  (`:343`) and `mayHaveRun` (`:273`).
 - The agent's tools get the same behaviour from one wrapper in `agent/src/api/`.
 
 ### 4.3 Queues follow what a worker holds
@@ -282,7 +290,7 @@ new serialises across models.
 
 | Today (`main.py` lifespan) | Becomes |
 |---|---|
-| render reconciler (`render/submit.py:112`) | deleted: renders are created by §4.2, so nothing needs reconciling |
+| render reconciler (started at `render/submit.py:112`; `reconcile_once` at `:192`) | deleted: renders are created by §4.2, so nothing needs reconciling |
 | print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
 | print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by `PrintRun`'s record step as an abandoned child. It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
 | asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
@@ -426,10 +434,11 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
   `output_id` keeps holding the run's subject as #945 records it: an output id, or
   `library:<file id>`, whose event topic is `print:library:<file id>`.
-- **Retention** becomes a Postgres setting, `print_run_retention_days` (the
-  `core/settings.py` pattern, shown in Settings → Printing). Empty, the default, keeps
-  every row: the rows become the start of print history (#305, #912). A number prunes
-  older rows.
+- **Retention** becomes a Postgres setting, `print_run_retention_seconds`.
+  - It is in seconds, matching the existing `event_log_retention_seconds`
+    (`core/settings.py:218`), and is shown in days in Settings → Printing.
+  - Empty, the default, keeps every row: the rows become the start of print history
+    (#305, #912). A number prunes older rows.
 - **Visibility:** custom Search Attributes `ScadbuddySource` (Keyword),
   `ScadbuddyOutputId` (Keyword), `ScadbuddyLibraryFileId` (Int), `ScadbuddyStatus`
   (Keyword) and `ScadbuddyMayHaveQueued` (Bool). They are set at start and upserted at
@@ -463,7 +472,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 ### 5.6 The frontend and the agent
 
 - Nothing changes for clients. #945 already made `runPrint` and `runLibraryPrint`
-  (`frontend/src/api/client.ts:854`, `:989-990`) share `followPrintRun` (`:362`), with its
+  (`frontend/src/api/client.ts:853`, `:989-990`) share `followPrintRun` (`:362`), with its
   202, follow loop, `reattach` and `mayHaveRun` (`:273`).
 - The route's answers (202 / 200 `repeated` / 422) and `GET /print/runs/{id}` keep their
   shapes, so the client and `agent/src/tools/print.ts` need no change beyond §4.2's
@@ -513,6 +522,16 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   - **Every bump is reviewed.** A pin change is its own PR, carrying the diff of
     `python/claude_agent_sdk` between the old and new SHAs. It is a supply-chain change:
     this package runs in the container that holds the Anthropic credential.
+  - **The pin's continued existence is monitored, not assumed.** A commit that only an
+    open draft PR references can become unreachable if that PR is force-pushed or closed
+    unmerged, and GitHub may then collect it.
+    - A scheduled workflow (weekly, on the hosted runners) and every PR that touches
+      `agent-durable/uv.lock` run `uv lock --check` against
+      `temporalio/ai-integrations`. A failure opens an issue.
+    - Images already built keep the installed package, so a vanished commit stops
+      rebuilds, never a running deployment.
+    - The remedy is a reviewed bump to the PR's new head, or to the PyPI release.
+    - Vendoring was ruled out by the user (§9).
   - The Dockerfile asserts the Claude Code version the Python `claude-agent-sdk` bundles,
     as it does `CLAUDE_CODE_VERSION` for the TypeScript SDK.
   - The two are bumped together.
@@ -711,6 +730,7 @@ None. The ones considered, and how each was resolved:
 | Polling slices on a workflow timer | Replaced by polling inside the activity with heartbeats (§3.1). |
 | `resume_from` (reusing earlier runs' results) | Dropped for Temporal Reset (§7.4). |
 | Code Mode pieces without a harness agent | Dropped. `ProjectWorkflow` is a harness agent (§7.2). |
+| Vendoring the unmerged `temporalio-claude-agent-sdk` | Not vendored, by the user's decision. The residual risk (an unreachable commit) is monitored by a scheduled `uv lock --check` (§6.2). This is not a deviation from Temporal. |
 | Tool stubs for TypeScript activities | Not a deviation. The plugin's documented `activity_as_tool` with `task_queue`, and Temporal resolves activities by name (§6.3). |
 
 If implementing any phase turns up a place where following the SDK or a framework is
