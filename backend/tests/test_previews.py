@@ -30,7 +30,7 @@ from scadbuddy.library.previews import (
     sweep_work_dirs,
 )
 from scadbuddy.render import previews as previews_module
-from scadbuddy.render.jobs import ModelSource
+from scadbuddy.render.jobs import ModelSource, SnapshotUnavailableError
 from scadbuddy.render.previews import PreviewFailedError, is_render_error, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
@@ -485,8 +485,9 @@ def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -
         ApplicationError("the store is gone", type="StaleBlobError"),
         _caused_by(OSError("no such file")),
         ApplicationError("unknown", type=None),
+        SnapshotUnavailableError("no commit of demo to snapshot for its preview"),
     ],
-    ids=["runtime", "app-other", "wrapped-os", "app-untyped"],
+    ids=["runtime", "app-other", "wrapped-os", "app-untyped", "no-snapshot"],
 )
 def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
     """Infrastructure: the scheduler tries again rather than blaming the source."""

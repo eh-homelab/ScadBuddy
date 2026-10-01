@@ -140,6 +140,12 @@ class RenderService:
             # The bambuddy store (spec §6.1): workers read the source from the store,
             # so every job names a revision whose snapshot exists before it starts.
             model_version = await self.snapshots.pin(slug, model_version)
+            if model_version is None:
+                # Started without one, the worker would look for a live source it has not got.
+                raise SnapshotUnavailableError(
+                    f"no commit of {slug} to snapshot for its render: the API has no git"
+                    " history, or the template was never committed"
+                )
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,
@@ -239,7 +245,10 @@ class RenderService:
         is ``timeout`` plus the margin. The timeout counts from the start, so it
         includes any wait for a free worker. On the bambuddy store the worker renders
         the snapshot of the slug's last commit, which it may first have to bring in:
-        the caller then waits `PREVIEW_TRANSFER` longer."""
+        the caller then waits `PREVIEW_TRANSFER` longer. There the run's id names the
+        revision too, so a join never spans two commits: a newer commit's call starts its
+        own run while an older one finishes, and the scheduler (which stores the image
+        under the source key it read first) never gets an older commit's image."""
         revision: str | None = None
         wait = timeout
         if self.snapshots is not None:
@@ -257,7 +266,7 @@ class RenderService:
         handle = await self.client.start_workflow(
             RenderPreview.run,
             args=[slug, revision],
-            id=f"preview-{slug}",
+            id=f"preview-{slug}" if revision is None else f"preview-{slug}-{revision[:12]}",
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},

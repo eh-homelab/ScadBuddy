@@ -353,12 +353,83 @@ async def test_a_preview_on_the_bambuddy_store_pins_the_last_commit_for_the_work
     assert fake.revisions == ["b" * 40]
 
 
+class _Revisions(_Pinning):
+    """`SnapshotStore.pin` whose last commit moves: each call answers the next revision."""
+
+    def __init__(self, *revisions: str) -> None:
+        super().__init__()
+        self.revisions = list(revisions)
+
+    async def pin(self, slug: str, revision: str | None) -> str | None:
+        self.pinned.append((slug, revision))
+        return self.revisions.pop(0)
+
+
+async def test_a_preview_joins_only_a_run_of_the_same_revision(
+    make_service: ServiceFactory,
+) -> None:
+    """#674 gate: a preview for a newer commit must not join a run still rendering an
+    older one, or the scheduler stores the old image under the new source's key. Two
+    calls at one revision still share one run."""
+    old, new = "a" * 40, "c" * 40
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        service.snapshots = _Revisions(old, new, new)  # type: ignore[assignment]
+        fake = FakePreview()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            first = asyncio.create_task(service.render_preview(SLUG, 30.0))
+            async with asyncio.timeout(30):
+                while fake.calls == 0:
+                    await asyncio.sleep(0.05)
+            later = asyncio.gather(
+                service.render_preview(SLUG, 30.0), service.render_preview(SLUG, 30.0)
+            )
+            async with asyncio.timeout(30):
+                while fake.calls < 2:
+                    await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+            fake.release.set()
+            await first
+            await later
+            ids = {
+                (await client.get_workflow_handle(f"preview-{SLUG}-{revision[:12]}").describe()).id
+                for revision in (old, new)
+            }
+        await service.aclose()
+
+    assert fake.calls == 2
+    assert fake.revisions == [old, new]
+    assert len(ids) == 2
+
+
 class _NoCommit(_Pinning):
     """`SnapshotStore.pin` with no history, or a template with no commit yet."""
 
     async def pin(self, slug: str, revision: str | None) -> str | None:
         self.pinned.append((slug, revision))
         return None
+
+
+async def test_a_render_on_the_bambuddy_store_with_no_commit_to_pin_is_refused(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """As for a preview: refused at submit, before a row or a workflow exists."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        service.snapshots = _NoCommit()  # type: ignore[assignment]
+        with pytest.raises(SnapshotUnavailableError, match=SLUG):
+            await service.submit(SLUG, {"size": 1})
+        await service.aclose()
+
+    # No row, so no workflow: `submit` starts one only for the row it recorded.
+    assert await asyncio.to_thread(projection.list_jobs) == []
 
 
 async def test_a_preview_on_the_bambuddy_store_with_no_commit_to_pin_is_refused(

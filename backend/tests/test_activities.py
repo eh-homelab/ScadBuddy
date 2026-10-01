@@ -344,6 +344,42 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     assert inner is not None and inner.cancelled()
 
 
+class _StoppedError(Exception):
+    """Ends `render_main` once the checkout has been watched."""
+
+
+async def test_render_main_heartbeats_while_its_checkout_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: `checkout_fresh` waits on the key's lock, which another fetch of the
+    same key may hold for a whole transfer; the activity heartbeats through it."""
+    paths = _paths(tmp_path)
+    deps = _deps(tmp_path, paths)
+    beat = asyncio.Event()
+    beats_in_checkout: list[bool] = []
+    real = activities._heartbeating
+
+    async def quick[T](work: asyncio.Task[T], every: float = 5.0) -> T:
+        return await real(work, every=0.01)
+
+    async def checkout_fresh(key: str) -> str | None:
+        try:
+            await asyncio.wait_for(beat.wait(), 5)
+            beats_in_checkout.append(True)
+        except TimeoutError:
+            beats_in_checkout.append(False)
+        raise _StoppedError
+
+    monkeypatch.setattr(activities, "_heartbeating", quick)
+    monkeypatch.setattr(deps.blobs, "checkout_fresh", checkout_fresh)
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beat.set()
+    prepared = PrepareResult(version=REVISION, scad=str(tmp_path / "model.scad"), schema_cache="")
+    with pytest.raises(_StoppedError):
+        await env.run(RenderActivities(deps).render_main, _request(), prepared)
+    assert beats_in_checkout == [True]
+
+
 # ── project ────────────────────────────────────────────────────────────────────
 
 
