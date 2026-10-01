@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, ProjectChoices, PrintOptions, RememberedChoices } from '../../api/types'
+import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
 import { useAsync } from '../../lib/useAsync'
