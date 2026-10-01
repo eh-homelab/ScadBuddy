@@ -139,6 +139,9 @@ class StoreHealth(BaseModel):
     render_key_fallback: bool
     #: The render worker Deployment may run more than one replica (spec §3.1).
     multi_worker: bool
+    #: False while the stored settings cannot be re-read: the fields above are then
+    #: the last good ones, and the API's `/healthz` says `degraded`.
+    settings_current: bool
 
 
 async def store_health(bundle: StoreBundle) -> StoreHealth:
@@ -148,6 +151,7 @@ async def store_health(bundle: StoreBundle) -> StoreHealth:
         configured_backend=current.store_backend,
         render_key_fallback=current.key_is_fallback and bool(current.api_key),
         multi_worker=bundle.backend != "local",
+        settings_current=bundle.source.fresh,
     )
 
 
