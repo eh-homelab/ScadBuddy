@@ -58,7 +58,19 @@ cluster does not run and which covers neither the browser nor Temporal context.
 
 ## 4. Propagation
 
-W3C `traceparent` and `baggage` everywhere.
+W3C Trace Context only: `OTEL_PROPAGATORS=tracecontext` in every service and
+the same single propagator in the browser. Baggage is not propagated. Nothing
+needs it, and its values travel as plain text to whatever is called next.
+
+**Trace context never leaves ScadBuddy.** It goes to ScadBuddy's own services
+(API, worker, agent, Temporal) and nowhere else. httpx is not instrumented
+process-wide (no `HTTPXClientInstrumentor().instrument()`).
+`HTTPXClientInstrumentor.instrument_client` is applied only to clients that
+call ScadBuddy's own services. The Bambuddy client (`bambuddy/client.py`)
+instead gets a manual client span per call (`bambuddy.<operation>`, with the
+status code and the client's `Scope`) and **injects no headers**. A test
+asserts that a Bambuddy request carries no `traceparent`. The relay's
+forwarder to the collector is not instrumented at all (§6).
 
 ```
 browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶ workflow ──▶ activities (worker)
@@ -82,8 +94,11 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
   from the returned job and adds a **span link** to it on its own submit span,
   not a parent. The reconciler starts a stale row's workflow under that same
   `traceparent`, so a render started late still lands in its first caller's
-  trace. A row with no `traceparent` (written before this change, or with
-  tracing off) gets no link.
+  trace. The column is written whenever the submit span's context is valid
+  and sampled. That includes a process with no exporter, which still creates
+  and propagates spans (§3); persisting a context nobody exports is harmless.
+  A row gets no `traceparent`, and a coalesced request no link, only when the
+  row predates this change or the sampler dropped the first request.
 - **Piece dedupe (`piece_key`).** This happens inside the workflow
   (`TemplatePipeline._piece`): a second job's workflow signals the running
   piece (`wait_for_me`) instead of starting it. The interceptor already puts
@@ -105,7 +120,8 @@ browser ──fetch/WS(traceparent)──▶ API ──Temporal headers──▶
 `scadbuddy/core/tracing.py`: `configure_tracing(service_name, settings)` builds
 the provider and is called once from `create_app` and from
 `python -m scadbuddy.worker`. Instrumentations: FastAPI (route templates as span
-names), httpx, psycopg, and the Temporal interceptor. Dependencies:
+names), httpx (per client, as §4 limits it), psycopg, and the Temporal
+interceptor. Dependencies:
 `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`,
 `opentelemetry-instrumentation-{fastapi,httpx,psycopg}`, and
 `temporalio[opentelemetry]` inside the existing `<1.34` pin.
@@ -150,14 +166,24 @@ path except `/api/v1/ai/*` to the backend.
   collector. A forged span can still name any trace ID, but never claim to be
   the API or the worker.
 - **Tracing off** (no endpoint): `204` with `X-ScadBuddy-Tracing: off`. The
-  frontend's exporter sees it on its first flush and stops exporting for the
-  rest of the page's life. No new config endpoint.
+  frontend's exporter (§5.3) sees it on its first flush and stops exporting for
+  the rest of the page's life. No new config endpoint.
 
 ### 5.3 Frontend
 
 `src/lib/tracing.ts`, loaded lazily after first paint so it never delays the 3D
-viewer: `WebTracerProvider`, `BatchSpanProcessor`, the OTLP/HTTP JSON exporter
-pointed at the relay; fetch instrumentation that injects `traceparent` **only
+viewer: `WebTracerProvider` and `BatchSpanProcessor`, exporting through
+`RelayExporter`, a small `SpanExporter` of our own. The stock
+`@opentelemetry/exporter-trace-otlp-http` does not hand response headers to
+its caller, so it cannot see the relay's off signal.
+- `RelayExporter` serialises with `@opentelemetry/otlp-transformer`'s JSON
+  trace serializer and POSTs to `/telemetry/v1/traces` with `fetch`
+  (`keepalive` so a batch flushed on page hide still goes).
+- On `X-ScadBuddy-Tracing: off` it switches itself off and returns success for
+  every later batch without sending.
+- On 413 or 429 it drops the batch. Unit tests cover all three cases.
+
+Also: fetch instrumentation that injects `traceparent` **only
 for same-origin URLs** (never Bambuddy deep links or Google Fonts);
 document-load instrumentation; manual spans around Generate, Print and Send,
 named after the action. The msw mocks get a handler for the relay returning
@@ -192,6 +218,13 @@ the whole wait. That is the failure §4 rejects session-long traces for. So:
   `agent.turn.resume`, a child of the decision span: the tool's execution, its
   backend calls, and the turn's remaining tool calls. An expired approval
   records `agent.approval` with `outcome=expired` and the same link.
+- **A turn can park any number of times.** Each park ends the segment that is
+  open (`agent.turn` the first time, the current `agent.turn.resume` after
+  that), together with its tool span, with `outcome=parked`. Each decision is
+  its own trace, and its continuation is a new `agent.turn.resume`, so the
+  names never nest (`.resume.resume`). Every segment carries
+  `scadbuddy.turn_id` and `scadbuddy.segment` (0 for the turn, 1, 2, … for
+  each resume), so one search on the turn id returns all of them, in order.
 
 Every span therefore ends within one interaction, and a parked turn shows up
 in Tempo as soon as it parks.
@@ -214,8 +247,8 @@ These are span attributes and never become metric labels.
 - SQL parameter values (psycopg statement text only, sqlcommenter off);
 - anything from Bambuddy beyond the status code.
 
-**Not traced:** `/healthz`, `/metrics`, `/telemetry/v1/traces` (it would
-trace its own exports), and the reconciler's idle polls (a span only when it
+**Not traced:** `/healthz`, `/metrics`, `/telemetry/v1/traces` and the
+relay's httpx forwarder (they would trace their own exports), and the reconciler's idle polls (a span only when it
 starts a row).
 
 **Sampling:** `parentbased_always_on` by default; every trace is kept at
@@ -309,8 +342,9 @@ runner image.
   request it makes carries the tool span's `traceparent`. A parked call ends
   its tool and turn spans with `outcome=parked` before any decision. The
   decision's `agent.approval` links to the parked tool span through the
-  `ai_approvals.traceparent` column, and `agent.turn.resume` is its child. An
-  expired approval records `outcome=expired`. No prompt or tool input appears in any attribute.
+  `ai_approvals.traceparent` column, and `agent.turn.resume` is its child. A
+  turn that parks twice yields segments 0, 1 and 2, each ending as the next
+  begins. An expired approval records `outcome=expired`. No prompt or tool input appears in any attribute.
 - **Frontend:** vitest for the exporter's off switch; mocked e2e asserting
   `traceparent` is on same-origin requests and absent on cross-origin ones.
 - **No collector in CI.** Nothing here needs network export.
