@@ -5,6 +5,7 @@ import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
+import type { TouchedSink } from '../sessions/touched.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -56,6 +57,8 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
+  /** Where a session's successful calls are reported, for what it touched (sessions/touched.ts, #931). */
+  touched?: TouchedSink | undefined
 }
 
 export type ToolContext = ToolServices & {

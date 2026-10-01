@@ -28,6 +28,9 @@ import { ready, type RouteModule } from './module.js'
 //                                                 429 past the owner's new-session limit
 //                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
 //   GET  /api/v1/ai/sessions/:id                  one session
+//   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
+//                                                 changed or deleted, oldest first (#931,
+//                                                 sessions/touched.ts)
 //   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
@@ -221,6 +224,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get(
     `${base}/:id`,
     route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER))),
+  )
+
+  app.get(
+    `${base}/:id/resources`,
+    route('read', async (c, sessions) => c.json({ resources: await sessions.resources(idOf(c), BROWSER_USER) })),
   )
 
   app.post(

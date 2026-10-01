@@ -69,6 +69,7 @@ import {
 } from './protocol.js'
 import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
+import { SessionResources, type TouchedRecord } from './touched.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -583,6 +584,12 @@ export class SessionManager {
     const session = await this.row(id)
     if (!session || !canSee(principal, session)) throw new SessionError('not_found', `no session ${id}`)
     return session
+  }
+
+  /** What the session's tool calls touched, oldest first (#931, touched.ts); a session the principal may not see is not found. */
+  async resources(id: string, principal: Owner): Promise<TouchedRecord[]> {
+    await this.get(id, principal)
+    return new SessionResources(this.deps.sql).list(id)
   }
 
   /** Newest first. */

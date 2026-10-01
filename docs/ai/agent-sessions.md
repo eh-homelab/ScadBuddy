@@ -22,6 +22,7 @@ so the dot is an underscore.
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
 | `sessions_send` | `write` | A user turn in a session the caller owns; refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
+| `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
 | `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does |
 | `sessions_interrupt` | `write` | Stops the running turn on whichever replica runs it |
@@ -185,6 +186,18 @@ replay them. It reports the reconnect instead (`onReconnect` in
 [`agent/src/events/bus.ts`](../../agent/src/events/bus.ts)), and followers and session
 subscriptions re-read. The event log's one-second poll remains the fallback.
 
+### 4.1 What a session touched (#931)
+
+Every tool call a session's turn makes through ScadBuddy's in-process tools, once it
+succeeds, is mapped to the resources it created, changed or deleted, one
+`ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
+extractor reads the call's parsed input and its result: models, revisions (with the
+parent and new commit), presets, assets, render jobs, outputs and prints. A `write` or
+`outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
+gap stays visible; a `read` tool records nothing. Rows go with their session. Calls
+over `/mcp` outside a session record nothing. Revision commits already name their
+session in a git trailer (#252, `agent/src/tools/authorship.ts`).
+
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
@@ -193,3 +206,7 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 - **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
   access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).
+- **The rest of #931**: extractors for the remaining tools (libraries, fonts, Bambuddy
+  projects, settings and remembered choices, `browser_*` param changes), a backfill
+  from `ai_audit`, the session view's "Touched" panel and resource-to-session links,
+  filtering sessions by resource, and "restore to before this session".
