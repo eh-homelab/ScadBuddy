@@ -120,6 +120,24 @@ def put_printer_bed_type(
     )
 
 
+@router.get(
+    "/printers/{printer_id}/camera",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}, "description": "The current frame"}},
+    summary="The printer's current camera frame",
+)
+async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Response:
+    """One JPEG from the printer's camera, through Bambuddy (#796): what is on the bed
+    now, whoever started the print. Bambuddy's stream token never leaves the server."""
+    async with client_for(store.load()) as client:
+        frame = await client.camera_snapshot(printer_id)
+    return Response(
+        frame,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @router.post(
     "/outputs/{output_id}/run",
     status_code=status.HTTP_202_ACCEPTED,
