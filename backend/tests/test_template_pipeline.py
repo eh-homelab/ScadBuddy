@@ -428,3 +428,24 @@ async def test_a_job_waiting_on_two_pieces_gets_each_its_own(released: tuple[int
     expected = f"{keys[1]}=1 {keys[2]}=2"
     assert names == {a.id: expected, b.id: expected}
     assert len(world.pieces) == 2  # rendered once each, by A
+
+
+GOAL_PIPELINE = """
+async def run(ctx, inputs):
+    red = await ctx.render("model.scad", width=10)
+    white = await ctx.render("model.scad", width=20)
+    layout = await ctx.pack([(red, 2, "left"), (white, 1, "right")], goal="keep_together",
+                            filament_plan={"slots": [{"slot_id": 1, "spool_id": 4}]})
+    await ctx.output(plates=layout, name="grouped")
+"""
+
+
+@pytest.mark.requires_temporal
+async def test_a_pipeline_packs_for_a_goal_with_a_plan_and_groups() -> None:
+    world = FakeWorld(GOAL_PIPELINE)
+    async with temporal_client() as client:
+        await run_job(world, a_job(params={}), client=client)
+    [out] = world.outputs
+    assert len(out.layout.plates) == 2
+    assert [len(p.items) for p in out.layout.plates] == [2, 1]
+    assert world.projections[-1].state == "done"

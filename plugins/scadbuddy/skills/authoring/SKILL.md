@@ -289,10 +289,21 @@ Everything else goes through `ctx`:
 | --- | --- | --- |
 | `await ctx.render(file, **params)` | renders any `.scad` of the template; identical calls render once | `Part` (a reference: `bbox`, `colours`, `notes`, `plates`) |
 | `await ctx.activity(name, *args, timeout=None, **kwargs)` | runs `pipeline/activities.py:<name>` in its own process | its JSON result |
-| `await ctx.pack([part, (part, count)])` | packs parts onto plates (goal `fewest_plates`) | layout |
+| `await ctx.pack(items, goal=…, filament_plan=…)` | packs parts onto plates for a goal | layout |
 | `ctx.plate_of(parts, at=[(x, y, 0)])` | one plate, placed by you | plate |
 | `await ctx.output(plates=…, name=…, bom=[…], files={…})` | writes a 3MF; call it again for another | `OutputRef` |
 | `ctx.progress(message, done=, total=)` | the job's progress line | — |
+
+`await ctx.pack(items, goal=…, filament_plan=…)` lays parts out on plates. `items` are
+`part`, `(part, count)` or `(part, count, group)`. `goal` is `fewest_plates` (default),
+`fewest_swaps` (a part rides on a plate that already has its filaments), `by_colour`
+(single-colour plates, which need no prime tower) or `keep_together` (each group on one
+plate, or the pack fails). `filament_plan` is `{"slots": [{"slot_id", "spool_id"}]}`:
+colours on one spool count as one filament. Every plate is checked against the printer's
+plate and prime tower before it is written. The Print dialog can re-arrange the output
+later without re-rendering, so pack for the common case.
+Sources: `backend/scadbuddy/workflows/arrange.py`, `backend/scadbuddy/workflows/ctx.py`,
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §7.
 
 One part packed alone keeps the plates it laid out itself (`echo(plates = N)`, section 5).
 `bom` entries are `{"piece", "label", "count", "plates": [..], "part": part.piece_key}`.

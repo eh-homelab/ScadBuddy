@@ -25,6 +25,7 @@ with workflow.unsafe.imports_passed_through():
         PackRequest,
         PieceRequest,
         PlateSize,
+        SlotPlan,
         TemplateCall,
         piece_key,
     )
@@ -85,20 +86,29 @@ class Ctx:
 
     async def pack(
         self,
-        items: Sequence[Part | tuple[Part, int]],
+        items: Sequence[Part | tuple[Part, int] | tuple[Part, int, str]],
         *,
         goal: str = "fewest_plates",
         filament_plan: object | None = None,
+        colours: Sequence[str] = (),
     ) -> Layout:
-        if filament_plan is not None:
-            raise ValueError("filament_plan arrives with Arrange (phase 5)")
+        """Arrange's packing activity (spec §5.2, §7): the same goals and plan the Print
+        dialog's Arrange uses. A 3-tuple names a `keep_together` group."""
         packed = [
-            PackItem(part=i[0], count=i[1]) if isinstance(i, tuple) else PackItem(part=i)
+            PackItem(part=i)
+            if isinstance(i, Part)
+            else PackItem(part=i[0], count=i[1], group=i[2] if len(i) > 2 else None)
             for i in items
         ]
-        layout: Layout = await self._host.activity_call(
-            "pack", PackRequest(items=packed, plate=self.plate, goal=goal), result_type=Layout
+        req = PackRequest(
+            items=packed,
+            plate=self.plate,
+            goal=goal,
+            filament_plan=SlotPlan.of(filament_plan),
+            colours=list(colours),
         )
+        # `activity_call` returns Any; binding it keeps mypy --strict's no-any-return quiet.
+        layout: Layout = await self._host.activity_call("pack", req, result_type=Layout)
         return layout
 
     def plate_of(
