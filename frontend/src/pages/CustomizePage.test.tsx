@@ -269,6 +269,54 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
   })
 
+  it('retries only the missing outputs of a re-render Generate had to start', async () => {
+    // The page's job did not render these inputs (a UI-state change): Generate renders
+    // them, saves output 0 of that job, and output 1 fails. A retry saves only output 1.
+    const summary = (index: number) => ({ index, name: `out ${index}`, bom: [], files: [] })
+    setMockJobOutputs('name-keychain', [summary(0), summary(1)])
+    let refuse = true
+    let pageJob: unknown
+    const posts: [unknown, unknown][] = []
+    server.use(
+      http.post('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { job_id?: string; index?: number }
+        pageJob ??= body.job_id
+        posts.push([body.job_id === pageJob ? 'page' : 'rerender', body.index])
+        if (body.job_id === pageJob) {
+          return HttpResponse.json(
+            { title: 'Unprocessable Content', status: 422, detail: `inputs are not the ones job ${String(body.job_id)} rendered` },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        if (refuse && body.index === 1) {
+          return HttpResponse.json(
+            { title: 'Internal Server Error', status: 500, detail: 'the disk is full' },
+            { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return undefined // the default handler saves it
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    expect(
+      await screen.findByText('Saved the first output; output 2 could not be saved: the disk is full', {}, { timeout: 5000 }),
+    ).toBeInTheDocument()
+    refuse = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(posts).toHaveLength(4))
+    await waitFor(() => expect(screen.queryByText(/could not be saved/)).not.toBeInTheDocument())
+    expect(posts).toEqual([
+      ['page', undefined],
+      ['rerender', undefined],
+      ['rerender', 1],
+      ['rerender', 1],
+    ])
+  })
+
   it('sends a generated output and links to the Bambuddy queue', async () => {
     const { user } = render()
     await firstRender()

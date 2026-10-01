@@ -82,7 +82,8 @@ export function ActionBar({
     generation.current = controller
     setGenerating(true)
     setError(null)
-    const resume = unfinished?.job.id === job.id ? unfinished : null
+    // Matched on the job Generate was asked to save, not a re-render it made for it.
+    const resume = unfinished?.requested.id === job.id ? unfinished : null
     setUnfinished(null)
     try {
       if (resume) {

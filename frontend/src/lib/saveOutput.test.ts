@@ -81,6 +81,32 @@ describe('saveOutput', () => {
     expect(created.job_id).toBe('j2')
   })
 
+  it('leaves no abort listener behind on the signal once its polls are done', async () => {
+    recordOutputs((body) => body.job_id === 'j1')
+    let reads = 0
+    server.use(
+      http.post('/api/v1/models/demo/render', () =>
+        HttpResponse.json({ job_id: 'j2', status_url: '/api/v1/jobs/j2' }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/j2', () => {
+        reads += 1
+        return HttpResponse.json(reads < 4 ? { ...aJob('j2', 1), status: 'running' } : aJob('j2', 1))
+      }),
+    )
+    const controller = new AbortController()
+    const added = vi.spyOn(controller.signal, 'addEventListener')
+    const removed = vi.spyOn(controller.signal, 'removeEventListener')
+    await saveOutput({
+      slug: 'demo',
+      job: aJob('j1', 1),
+      extra: { v: 1 },
+      capture: async () => null,
+      signal: controller.signal,
+    })
+    expect(added.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(removed.mock.calls.length).toBe(added.mock.calls.length)
+  })
+
   it('passes any other refusal through', async () => {
     server.use(
       http.post('/api/v1/models/demo/outputs', () =>

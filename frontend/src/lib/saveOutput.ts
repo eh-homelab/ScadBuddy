@@ -26,19 +26,31 @@ function detail(cause: unknown): string {
  */
 export class ExtraOutputsError extends Error {
   readonly slug: string
+  /** The job whose outputs were being saved: a re-render's when Generate had to render. */
   readonly job: Job
+  /** The job Generate was asked to save, which a retry is matched against. */
+  readonly requested: Job
   readonly inputs: JsonObject
   readonly saved: Output
   /** The first index not yet saved. */
   readonly next: number
 
-  constructor(slug: string, job: Job, inputs: JsonObject, saved: Output, next: number, cause: unknown) {
+  constructor(
+    slug: string,
+    job: Job,
+    requested: Job,
+    inputs: JsonObject,
+    saved: Output,
+    next: number,
+    cause: unknown,
+  ) {
     const total = (job.outputs ?? []).length
     const which = next === total - 1 ? `output ${total}` : `outputs ${next + 1} to ${total}`
     super(`Saved the first output; ${which} could not be saved: ${detail(cause)}`)
     this.name = 'ExtraOutputsError'
     this.slug = slug
     this.job = job
+    this.requested = requested
     this.inputs = inputs
     this.saved = saved
     this.next = next
@@ -46,19 +58,26 @@ export class ExtraOutputsError extends Error {
 }
 
 /** Outputs ``from``..n-1 of a job with several (§5.2); the first is already saved. */
-async function saveFrom(slug: string, job: Job, inputs: JsonObject, saved: Output, from: number) {
+async function saveFrom(
+  slug: string,
+  job: Job,
+  requested: Job,
+  inputs: JsonObject,
+  saved: Output,
+  from: number,
+) {
   for (let index = from; index < (job.outputs ?? []).length; index++) {
     try {
       await api.createOutput(slug, job.id, undefined, inputs, index)
     } catch (cause) {
-      throw new ExtraOutputsError(slug, job, inputs, saved, index, cause)
+      throw new ExtraOutputsError(slug, job, requested, inputs, saved, index, cause)
     }
   }
 }
 
 /** A retry of the outputs an `ExtraOutputsError` names, and only those. */
 export function saveRemaining(failed: ExtraOutputsError): Promise<void> {
-  return saveFrom(failed.slug, failed.job, failed.inputs, failed.saved, failed.next)
+  return saveFrom(failed.slug, failed.job, failed.requested, failed.inputs, failed.saved, failed.next)
 }
 
 /**
@@ -101,21 +120,22 @@ export async function saveOutput({
   // output gets one; it is the one the page shows.
   if (png) await api.putThumbnail(created.id, png).catch(() => undefined)
   onSaved?.(created)
-  await saveFrom(slug, saved, inputs, created, 1)
+  await saveFrom(slug, saved, job, inputs, created, 1)
   return created
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer)
-        reject(signal.reason as Error)
-      },
-      { once: true },
-    )
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason as Error)
+    }
+    // One listener per sleep, removed when it ends: a long wait does not stack them.
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
