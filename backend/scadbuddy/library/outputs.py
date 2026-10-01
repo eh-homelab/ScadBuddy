@@ -417,6 +417,11 @@ class OutputStore:
         state = BackfillState(job_id=job_id, error=error)
         _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
 
+    def clear_backfill(self, output_id: str) -> None:
+        directory = self.directory(output_id)
+        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        self._changed(directory.parent.name)
+
     def pending_backfills(self) -> list[tuple[str, BackfillState]]:
         """Every output waiting on a re-render that has not failed."""
         pending: list[tuple[str, BackfillState]] = []

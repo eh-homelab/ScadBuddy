@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
+import psycopg
 import pytest
 
+from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import attach_backfills, choose_output
-from scadbuddy.library.outputs import OUTPUT_HOLDER, OutputStore
+from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore, release_parts
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from tests.support.arrange import finished_job
@@ -128,3 +131,133 @@ async def test_the_output_is_matched_by_its_recorded_parts(tmp_path: Path) -> No
     assert choose_output(both, other.record) == other
     assert choose_output(both, None) is None  # no record: cannot tell which
     assert choose_output(job, None) == written  # one output: that one
+
+
+def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
+    """A second output saved before manifests, of the same render, both waiting on it."""
+    first = store.ids_for("demo")[0]
+    second = store.create(job.model_copy(update={"outputs": [], "id": "old2"}), name="two").id
+    store.start_backfill(first, job.id)
+    store.start_backfill(second, job.id)
+    return first, second
+
+
+def _in_order(store: OutputStore, monkeypatch: pytest.MonkeyPatch, first: str) -> None:
+    """Make ``first`` the output the pass reaches first."""
+    pending = store.pending_backfills
+
+    def ordered() -> list[tuple[str, BackfillState]]:
+        return sorted(pending(), key=lambda entry: entry[0] != first)
+
+    monkeypatch.setattr(store, "pending_backfills", ordered)
+
+
+@pytest.mark.requires_postgres
+async def test_an_output_deleted_before_its_hold_keeps_no_holds_and_the_pass_goes_on(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete lands while the Parts are being held, after the output was read: its
+    release has already run, so the pass must drop the holds it took after it."""
+    store, _, job, written = await _legacy_output(tmp_path)
+    gone, kept = _two_legacy(store, job)
+    _in_order(store, monkeypatch, gone)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        add = refs.add
+
+        def delete_then_add(key: str, kind: str, holder: str) -> None:
+            if holder == gone and gone in store.ids_for("demo"):
+                store.delete(gone)
+                release_parts(refs, gone)  # what DELETE /outputs/{id} does after
+            add(key, kind, holder)
+
+        monkeypatch.setattr(refs, "add", delete_then_add)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, kept)]
+    assert store.manifest(kept) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_an_output_deleted_inside_the_attach_keeps_no_holds_and_the_pass_goes_on(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete's rmtree lands while the attach writes: the write's temporary file has
+    no directory to go to (FileNotFoundError)."""
+    store, _, job, written = await _legacy_output(tmp_path)
+    gone, kept = _two_legacy(store, job)
+    _in_order(store, monkeypatch, gone)
+    directory = store.directory(gone)
+    replace = outputs_module._replace
+
+    def delete_then_replace(path: Path, text: str) -> None:
+        if path.parent == directory and directory.exists():
+            shutil.rmtree(directory)
+        replace(path, text)
+
+    monkeypatch.setattr(outputs_module, "_replace", delete_then_replace)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, kept)]
+    assert store.manifest(kept) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_a_corrupt_output_does_not_stop_the_ones_behind_it(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, job, written = await _legacy_output(tmp_path)
+    corrupt, good = _two_legacy(store, job)
+    _in_order(store, monkeypatch, corrupt)
+    (store.directory(corrupt) / "record.json").write_text("{not json", encoding="utf-8")
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        assert _holders(refs, written.manifest[0].part) == [(OUTPUT_HOLDER, good)]
+    assert store.manifest(good) == written.manifest
+    # Permanent: said why, and not tried again.
+    state = store.backfill(corrupt)
+    assert state is not None and state.error is not None and "record" in state.error
+    assert store.manifest(corrupt) == []
+
+
+@pytest.mark.requires_postgres
+async def test_a_transient_failure_is_left_for_the_next_pass(
+    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, job, written = await _legacy_output(tmp_path)
+    flaky, good = _two_legacy(store, job)
+    _in_order(store, monkeypatch, flaky)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        add = refs.add
+
+        def add_or_fail(key: str, kind: str, holder: str) -> None:
+            if holder == flaky:
+                raise psycopg.OperationalError("the connection dropped")
+            add(key, kind, holder)
+
+        monkeypatch.setattr(refs, "add", add_or_fail)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        assert store.manifest(good) == written.manifest
+        state = store.backfill(flaky)
+        assert state is not None and state.error is None  # still pending
+        monkeypatch.setattr(refs, "add", add)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+    assert store.manifest(flaky) == written.manifest
+
+
+@pytest.mark.requires_postgres
+async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_failed(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """A crash after the manifest, before the marker's removal, then the job pruned."""
+    store, old, job, written = await _legacy_output(tmp_path)
+    store.start_backfill(old.id, job.id)
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        assert attach_backfills(store, refs, _jobs(job)) == 1
+        store.start_backfill(old.id, job.id)  # the marker the crash left
+        assert attach_backfills(store, refs, _jobs()) == 0
+    assert store.backfill(old.id) is None
+    assert store.manifest(old.id) == written.manifest
