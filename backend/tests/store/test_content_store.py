@@ -354,15 +354,75 @@ def _meet(barrier: threading.Barrier) -> Callable[[], None]:
     return meet
 
 
-def test_concurrent_re_puts_of_one_key_do_not_deadlock(
-    pool: Pool, monkeypatch: pytest.MonkeyPatch
+async def test_concurrent_re_puts_of_one_key_reusing_other_objects_hold_each(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    index = BlobIndex(pool)
-    ref = _ref("17", "a")
-    index.put("k", ref, slug="demo", meta={})
-    _parked_hold(monkeypatch, _meet(threading.Barrier(2)))
-    put = lambda: index.put("k", ref, slug="demo", meta={}, reuse=True)  # noqa: E731
-    assert _both(put, put) == ["ok", "ok"]
+    """Two re-puts of ``k``, each reusing an object another key names (A under ``a``,
+    B under ``b``): the second waits on ``k``'s row lock, and each holds its own
+    object's row FOR SHARE. A delete of ``a`` while the first holds A waits for it, and
+    its release then sees ``k`` naming A and keeps the object. Neither re-put
+    deadlocks, and ``k`` ends up naming B."""
+    root = tmp_path / "remote"
+    store = local_content(root, pool)
+    a = await store.put("snapshot", b"alpha", name="a", scope=SCOPE, key="a")
+    b = await store.put("snapshot", b"beta", name="b", scope=SCOPE, key="b")
+    c = await store.put("snapshot", b"gamma", name="k", scope=SCOPE, key="k")
+    held = [threading.Event(), threading.Event()]
+    go = [threading.Event(), threading.Event()]
+    holds: list[int] = []
+
+    def park() -> None:
+        turn = len(holds)
+        holds.append(turn)
+        held[turn].set()
+        assert go[turn].wait(10)
+
+    _parked_hold(monkeypatch, park)
+    returned: dict[str, BlobRef | None] = {}
+
+    def re_put(name: str, ref: BlobRef) -> Callable[[], None]:
+        def run() -> None:
+            returned[name] = store.index.put("k", ref, slug="demo", meta={}, reuse=True)
+
+        return run
+
+    first = threading.Thread(target=re_put("first", a))
+    second = threading.Thread(target=re_put("second", b))
+    release = threading.Thread(target=lambda: asyncio.run(store.delete("a")))
+    try:
+        first.start()
+        assert held[0].wait(10)  # the first holds k's row and A's row
+        second.start()
+        second.join(0.3)
+        assert not held[1].is_set()  # the second waits on k's row lock
+        release.start()
+        release.join(0.5)
+        assert release.is_alive()  # the delete of `a` waits on the first's hold of A
+        go[0].set()
+        first.join(10)
+        assert held[1].wait(10)  # the second has k's row and holds B's
+        release.join(10)
+        assert not release.is_alive()
+        # The release ran after the first committed k -> A, so it kept A.
+        assert await store.read(a) == b"alpha"
+        assert store.index.get("a") is None
+        go[1].set()
+        second.join(10)
+    finally:
+        for event in go:
+            event.set()
+        for thread in (first, second, release):
+            if thread.is_alive():
+                thread.join(10)
+    assert not first.is_alive() and not second.is_alive()
+    assert returned == {"first": c, "second": a}
+    named = store.index.get("k")
+    assert named is not None and named.ref == b
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT backend_id, count(*) AS n FROM store_blobs GROUP BY backend_id"
+        ).fetchall()
+    assert {row["backend_id"]: row["n"] for row in rows} == {b.backend_id: 2}
 
 
 def test_puts_swapping_objects_between_two_keys_do_not_deadlock(
