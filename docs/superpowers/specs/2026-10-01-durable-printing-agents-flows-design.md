@@ -631,9 +631,11 @@ the most constrained runtime in the system.
 
 ### 6.5 Deleting a durable session or a flow run
 
-Today deleting a session removes its content: `agent/src/sessions/store.ts:99` deletes
-its `ai_session_entries`. A durable session's prompts, tool calls and answers also
-reach Temporal: in its history, in Visibility, and past 168h in the Archival bucket.
+Today a session's content lives only in our Postgres tables (`ai_session_entries`,
+`ai_session_events`). Removing those rows removes it: the SDK's own
+`SessionStore.delete` (`agent/src/sessions/store.ts:99`) does, and so can an operator.
+There is no user-facing delete route today, and this spec adds none. A durable
+session's prompts, tool calls and answers also reach Temporal: in its history, in Visibility, and past 168h in the Archival bucket.
 Deleting our rows alone would no longer make them unrecoverable. Temporal's documented
 mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredding:
 
@@ -657,8 +659,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   Each of them reads the KEK. Phase 4 starts by confirming that the TypeScript SDK
   exposes the same serialization context to a codec. If it does not, the work stops
   and the user decides (§9).
-- **Deleting.** `DELETE /api/v1/ai/sessions/{id}`, and the flow run's delete, do three
-  things:
+- **Deleting.** One operation, `forgetSubject(subject)` in the agent service, is what
+  every deletion of a durable session or a flow run goes through. Its callers are the
+  `SessionStore.delete` path, an operator, and any delete route added later. It does
+  three things:
   1. delete the `ai_payload_keys` row, after which every copy of the payloads (history,
      Visibility memo, Archival) is undecryptable;
   2. terminate the workflow if it is open, then `DeleteWorkflowExecution`;
