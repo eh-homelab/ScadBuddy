@@ -158,6 +158,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         snapshots=state.store.snapshots,
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
+        openscad_version=state.openscad_version or "",
     )
 
 
@@ -214,9 +215,12 @@ async def _poll(
 ) -> None:
     config = deps.config
     build_id = settings.revision
-    # What every output's record names (§8.4): this image and its openscad.
+    # What every output's record names (§8.4): this image and its openscad. The
+    # in-process worker has the API's probe already; running openscad again here, in a
+    # task beside the API's first requests, would only race them.
     deps.revision = settings.revision
-    deps.openscad_version = await probe_openscad_version(config) or ""
+    if not deps.openscad_version:
+        deps.openscad_version = await probe_openscad_version(config) or ""
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
