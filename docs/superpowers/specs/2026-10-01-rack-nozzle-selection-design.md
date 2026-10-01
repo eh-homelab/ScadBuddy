@@ -91,9 +91,12 @@ on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
   rather than restating the rule. They must agree, and are compared only when
   both are present, so a missing code or name does not rule a position out.
 
-Groups are allocated one at a time, the group with the fewest eligible positions
-first, then by `group_id`. Positions already picked for an earlier group are
-excluded. The order is fixed so the same plate on the same rack always gets the
+Groups are allocated one at a time, and the order is **dynamic**: before each
+allocation, the remaining groups are re-counted against the positions still
+free, and the one with the fewest goes next, ties by `group_id`. A static sort
+on the initial counts would be simpler but misses the case where an earlier pick
+leaves a later group with fewer options than its neighbor. Positions already
+picked for an earlier group are excluded. The order is fixed so the same plate on the same rack always gets the
 same picks. Most-constrained-first is a heuristic, not an optimal assignment:
 it keeps a group with one usable position from losing it to a group that had
 several, and with the H2C's six positions and, in practice, one or two rack
@@ -320,8 +323,12 @@ made per rack side, not per group:
   name the same position.
 
 `Pick` is internal and carries the serial: `group_id`, `position`, `serial`,
-`reason`, `unsafe_material: bool` and the ranked `candidates`. `usage` is keyed
-by serial. Nothing that carries a serial reaches the browser:
+`reason`, `unsafe_material: bool` and the ranked `candidates`. Each candidate
+is a `RackCandidate`: `position`, `color`, `nozzle_type`, `material`,
+`prints`, `print_seconds` and its rank key. It carries no serial; the serial is
+only on the `Pick` itself, so building `/check`'s `RackOption`s from the
+candidates cannot carry one. `usage` is keyed by serial. Nothing that carries a
+serial reaches the browser:
 
 - `/check` answers with its own models, `RackOption` (`position`, `color`,
   `nozzle_type`, `material`, `prints`, `print_seconds`) and `RackPickView`
@@ -353,6 +360,13 @@ blocks Print.
 - a per-side **Nozzle** select listing the eligible positions with color, type,
   material and use. Choosing one sends it as a manual pick for that side. "Automatic" goes
   back to the ranking.
+
+**Concurrent prints.** Two print requests for the same printer can rank against
+the same rack read and pick the same position, and that is fine: a queue item's
+pick applies when Bambuddy dispatches that item, and Bambuddy prints a
+printer's items one at a time, so two items naming one position never use it at
+once. There is no reservation between the read and `POST /queue/`. Positions are
+exclusive only within one plate's groups (§3), because those print together.
 
 **Failure handling.**
 
@@ -461,6 +475,9 @@ fixtures (which use invented serials), or in commits.
     both never matching;
   - three groups over two shared positions: deterministic picks, and the group
     left with nothing gets no pick and a warning;
+  - an order where a static sort and the dynamic re-count disagree: the
+    dynamic order wins (a group whose options drop to one after the first pick
+    goes next);
   - a `Glow`, `glow` and `GLOW` spool subtype all abrasive;
   - a manual pick on a plate whose slice has no `on_rack` group: no choice sent,
     and the "manual rack pick unused" warning;
@@ -496,7 +513,12 @@ fixtures (which use invented serials), or in commits.
 - A stale-pick test: a queue item that Bambuddy failed with "Nozzle rack pick no
   longer fits the printer" shows that message in the print's progress and run
   result, for a ranked pick and for a manual one.
-- A `/check` test that no serial appears in the response body.
+- A `/check` test that no serial appears anywhere in the response body,
+  nested candidates and options included (searched as a string over the whole
+  JSON).
+- Settings tests: `printer_rack_algorithms` round-trips through the jsonb
+  `settings` row and is cleared from remembered choices; a printer with no entry
+  ranks with Least used.
 - A logging test (`caplog` at `DEBUG`, as in `tests/test_library_processes.py`):
   a full pick, enqueue and settle with invented serials, including the failure
   paths of §5, leaves none of those serials in any log record's message or
