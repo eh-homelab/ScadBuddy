@@ -304,9 +304,9 @@ group on one plate, or the pack fails). An unknown goal fails at the `ctx.pack` 
 as one filament. Slot N is `colours[N-1]` when you pass `colours=[…]`; without it, the
 colours in the order they first appear among `items`. `ctx.output` numbers the 3MF's
 filaments by first appearance on its plates, which can differ, so the plan steers the
-packing only; the Print dialog matches spools to the 3MF's own slots. Every plate is checked against the printer's
-plate and prime tower before it is written. The Print dialog can re-arrange the output
-later without re-rendering, so pack for the common case.
+packing only; the Print dialog matches spools to the 3MF's own slots. Every plate is
+checked against the printer's plate and prime tower before it is written. The Print
+dialog can re-arrange the output later without re-rendering, so pack for the common case.
 Sources: `backend/scadbuddy/workflows/arrange.py`, `backend/scadbuddy/workflows/ctx.py`,
 `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §7.
 
