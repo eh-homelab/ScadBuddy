@@ -122,13 +122,18 @@ def _deps(tmp_path: Path) -> tuple[WorkerDeps, DataPaths]:
     return deps, paths
 
 
+#: A piece with no revision is scoped to its job (#926).
+SCOPE = "job:j1"
+
+
 def _request(file: str, params: dict[str, ParamValue]) -> PieceRequest:
     return PieceRequest(
         slug="demo",
         revision=None,
+        scope=SCOPE,
         file=file,
         params=params,
-        piece_key=piece_key("demo", None, file, params),
+        piece_key=piece_key("demo", SCOPE, file, params),
     )
 
 
@@ -289,7 +294,7 @@ async def test_an_output_file_name_the_output_itself_uses_is_refused(
 async def test_an_own_layout_must_name_one_of_the_parts(tmp_path: Path) -> None:
     deps, _ = _deps(tmp_path)
     part = await _render(deps, "model.scad", {"width": 12})
-    stranger = piece_key("demo", None, "model.scad", {"width": 99})
+    stranger = piece_key("demo", SCOPE, "model.scad", {"width": 99})
     req = OutputRequest(
         job_id="j1",
         index=0,
