@@ -360,8 +360,9 @@ class PipelineActivities:
 
 async def _fetched(blobs: BlobStore, key: str) -> None:
     """A blob passed to a template activity must be in the store: its absence is a
-    store problem, not the template's line that would then fail to read it."""
-    if not await blobs.fetch(key):
+    store problem, not the template's line that would then fail to read it. Heartbeated:
+    on the bambuddy store this is a download, which may outlast `HEARTBEAT`."""
+    if not await _heartbeating(asyncio.create_task(blobs.fetch(key))):
         raise ApplicationError(
             f"blob {key} is not in the store", type="TemplateActivityError", non_retryable=True
         )
