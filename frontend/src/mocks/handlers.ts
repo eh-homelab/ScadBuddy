@@ -2,6 +2,7 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
   AssetUsage,
+  StoreUsage,
   AttachResult,
   ChoicesView,
   BoundingBox,
@@ -2400,7 +2401,7 @@ export const handlers = [
       max_count: 200000,
       max_total_bytes: 53687091200,
       by_kind: { piece: 4096 },
-    }),
+    } satisfies StoreUsage),
   ),
 
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
