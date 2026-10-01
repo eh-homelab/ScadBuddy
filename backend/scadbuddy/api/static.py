@@ -22,6 +22,7 @@ def _is_asset(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return bool(parts) and parts[0] == ASSETS_DIR
 
+
 #: The app document's policy (spec 2026-09-27 §9). A template UI runs unsandboxed in
 #: this page. The policy stops it loading script from anywhere but this origin, and stops
 #: fetch/XHR/WebSocket and image, media and font beacons to other hosts. Google Fonts is

@@ -50,6 +50,13 @@ def test_revalidated_asset_keeps_immutable(client: TestClient) -> None:
     assert response.headers["cache-control"] == IMMUTABLE
 
 
+def test_ranged_asset_keeps_immutable(client: TestClient) -> None:
+    # FileResponse picks 206 when it is sent, after get_response: there it is still 200.
+    response = client.get("/assets/index-abc123.js", headers={"range": "bytes=0-3"})
+    assert response.status_code == 206
+    assert response.headers["cache-control"] == IMMUTABLE
+
+
 @pytest.mark.parametrize("path", ["/assets/Preview-fDSm7oxk.js", "/assets/nested/gone.css"])
 def test_missing_asset_is_a_404_not_the_spa(client: TestClient, path: str) -> None:
     response = client.get(path)
