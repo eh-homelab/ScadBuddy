@@ -159,9 +159,33 @@ class LoadedPipeline(BaseModel):
     plate: PlateSize
 
 
+class SlotPlan(BaseModel):
+    """The print-flow spec's `FilamentPlan` as a workflow payload: one spool per 1-based
+    filament slot. `bambuddy.filaments` imports the client, which must not enter the
+    workflow sandbox; `of` is the bridge."""
+
+    slots: dict[int, int] = Field(default_factory=dict)
+
+    @classmethod
+    def of(cls, plan: object) -> SlotPlan | None:
+        if plan is None or isinstance(plan, SlotPlan):
+            return plan
+        data = plan.model_dump() if isinstance(plan, BaseModel) else plan
+        if not isinstance(data, Mapping):
+            raise ValueError(
+                "filament_plan must be a FilamentPlan or {slots: [{slot_id, spool_id}]}"
+            )
+        slots = data.get("slots", [])
+        if isinstance(slots, Mapping):
+            return cls(slots={int(k): int(v) for k, v in slots.items()})
+        return cls(slots={int(s["slot_id"]): int(s["spool_id"]) for s in slots})
+
+
 class PackItem(BaseModel):
     part: Part
     count: int = Field(default=1, ge=1)
+    #: `keep_together` keeps every copy with the same group on one plate.
+    group: str | None = None
 
 
 class Placed(BaseModel):
@@ -171,6 +195,9 @@ class Placed(BaseModel):
     piece_key: str
     x: float
     y: float
+    #: A quarter turn about Z, in degrees (0, 90, 180 or 270); x and y place the
+    #: turned box's min corner.
+    rot: float = 0.0
 
 
 class LayoutPlate(BaseModel):
@@ -189,6 +216,12 @@ class PackRequest(BaseModel):
     items: list[PackItem]
     plate: PlateSize
     goal: str = "fewest_plates"
+    filament_plan: SlotPlan | None = None
+    #: The filament order slot numbers refer to (`#RRGGBB`); the writer keeps it.
+    colours: list[str] = Field(default_factory=list)
+    #: False (Arrange): always pack onto plates, even one object with one copy, so the
+    #: writer applies `colours`. True keeps phase 4's shortcut for a pipeline's lone part.
+    allow_own: bool = True
 
 
 class OutputRequest(BaseModel):

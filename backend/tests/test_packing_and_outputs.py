@@ -17,6 +17,7 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.template import Blob, Part
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _scope
+from scadbuddy.workflows.arrange import arrange
 from scadbuddy.workflows.models import (
     Layout,
     OutputRequest,
@@ -26,7 +27,7 @@ from scadbuddy.workflows.models import (
     PlateSize,
     piece_key,
 )
-from scadbuddy.workflows.packing import GAP_MM, PackError, explicit_plate, shelf_pack
+from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
 
@@ -44,29 +45,17 @@ def _part(key: str, w: float, d: float, *, plates: int = 1) -> Part:
 
 
 def test_one_part_alone_keeps_its_own_plates() -> None:
-    assert shelf_pack([PackItem(part=_part("a", 10, 10, plates=3))], PLATE) == Layout(own="a")
-
-
-def test_parts_are_packed_in_rows_without_overlap() -> None:
-    layout = shelf_pack([PackItem(part=_part("a", 100, 40), count=3)], PLATE)
-    assert len(layout.plates) == 1
-    xs = [(p.x, p.y) for p in layout.plates[0].items]
-    assert xs == [(0.0, 0.0), (100 + GAP_MM, 0.0), (0.0, 40 + GAP_MM)]
-
-
-def test_a_full_plate_starts_another() -> None:
-    layout = shelf_pack([PackItem(part=_part("a", 200, 200), count=3)], PLATE)
-    assert [len(p.items) for p in layout.plates] == [1, 1, 1]
+    assert arrange([PackItem(part=_part("a", 10, 10, plates=3))], PLATE) == Layout(own="a")
 
 
 def test_a_part_larger_than_the_plate_is_refused() -> None:
     with pytest.raises(PackError, match="larger than the plate"):
-        shelf_pack([PackItem(part=_part("a", 300, 10)), PackItem(part=_part("b", 1, 1))], PLATE)
+        arrange([PackItem(part=_part("a", 300, 10)), PackItem(part=_part("b", 1, 1))], PLATE)
 
 
 def test_a_multi_plate_part_cannot_share() -> None:
     with pytest.raises(PackError, match="its own 2 plates"):
-        shelf_pack(
+        arrange(
             [PackItem(part=_part("a", 10, 10, plates=2)), PackItem(part=_part("b", 1, 1))], PLATE
         )
 
@@ -74,8 +63,8 @@ def test_a_multi_plate_part_cannot_share() -> None:
 def test_an_explicit_plate_places_where_told() -> None:
     plate = explicit_plate([_part("a", 10, 10)], [(20.0, 30.0, 0.0)], plate=PLATE)
     assert plate.items[0].x == 20.0 and plate.items[0].y == 30.0
-    with pytest.raises(PackError, match="rotation"):
-        explicit_plate([_part("a", 10, 10)], [(0.0, 0.0, 90.0)], plate=PLATE)
+    with pytest.raises(PackError, match="quarter turns"):
+        explicit_plate([_part("a", 10, 10)], [(0.0, 0.0, 45.0)], plate=PLATE)
 
 
 @pytest.mark.parametrize("at", [(250.0, 0.0, 0.0), (0.0, 250.0, 0.0), (-1.0, 0.0, 0.0)])
@@ -84,9 +73,16 @@ def test_an_explicit_position_off_the_plate_is_refused(at: tuple[float, float, f
         explicit_plate([_part("a", 10, 10)], [at], plate=PLATE)
 
 
+def test_a_turned_part_is_checked_by_its_turned_footprint() -> None:
+    # 100 x 10 at x=200 fits the 256 mm plate turned (10 wide), not as it is.
+    explicit_plate([_part("a", 100, 10)], [(200.0, 0.0, 90.0)], plate=PLATE)
+    with pytest.raises(PackError, match="off the plate"):
+        explicit_plate([_part("a", 100, 10)], [(200.0, 0.0, 0.0)], plate=PLATE)
+
+
 def test_nothing_to_pack_is_refused_at_once() -> None:
     with pytest.raises(PackError, match="nothing to pack"):
-        shelf_pack([], PLATE)
+        arrange([], PLATE)
 
 
 class _Refs:

@@ -122,7 +122,7 @@ async def test_a_failed_piece_fails_the_job_with_its_log() -> None:
             "pipeline/pipeline.py:2: ValueError: no rooms",
         ),
         (
-            "async def run(ctx, inputs):\n    await ctx.pack([], goal='fewest_swaps')\n",
+            "async def run(ctx, inputs):\n    await ctx.pack([], goal='prettiest')\n",
             "pipeline/pipeline.py:2: ",
         ),
     ],
