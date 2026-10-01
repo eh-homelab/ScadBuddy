@@ -120,44 +120,30 @@ def test_a_remove_that_fails_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 @pytest.mark.requires_postgres
 def test_dir_for_touches_an_existing_blob_so_a_claim_survives_the_sweep(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    from scadbuddy.render.projection import JobProjection
-
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = LocalBlobStore(tmp_path / "blobs")
-        old = time.time() - 7200
-        os.utime(store.dir_for("claimed"), (old, old))
-        store.dir_for("claimed")  # a new holder claims it, about to add its ref
-        assert sweep_blobs(store, refs, grace=3600) == []
-    finally:
-        projection.close()
+    refs = BlobRefs(pg_pool)
+    store = LocalBlobStore(tmp_path / "blobs")
+    old = time.time() - 7200
+    os.utime(store.dir_for("claimed"), (old, old))
+    store.dir_for("claimed")  # a new holder claims it, about to add its ref
+    assert sweep_blobs(store, refs, grace=3600) == []
 
 
 @pytest.mark.requires_postgres
-def test_sweep_removes_only_unreferenced_blobs_past_grace(tmp_path: Path, pg_conninfo: str) -> None:
-    from scadbuddy.render.projection import JobProjection
-
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = LocalBlobStore(tmp_path / "blobs")
-        for key in ("kept", "fresh", "stale"):
-            (store.dir_for(key) / "model.3mf").write_bytes(b"x")
-        refs.add("kept", "job", "j1")
-        old = time.time() - 7200
-        os.utime(store.dir_for("stale"), (old, old))
-        os.utime(store.dir_for("kept"), (old, old))
-        assert sweep_blobs(store, refs, grace=3600) == ["stale"]
-        assert store.exists("kept") and store.exists("fresh")
-        refs.drop_holder("job", "j1")
-        assert sweep_blobs(store, refs, grace=3600) == ["kept"]
-    finally:
-        projection.close()
+def test_sweep_removes_only_unreferenced_blobs_past_grace(tmp_path: Path, pg_pool: PgPool) -> None:
+    refs = BlobRefs(pg_pool)
+    store = LocalBlobStore(tmp_path / "blobs")
+    for key in ("kept", "fresh", "stale"):
+        (store.dir_for(key) / "model.3mf").write_bytes(b"x")
+    refs.add("kept", "job", "j1")
+    old = time.time() - 7200
+    os.utime(store.dir_for("stale"), (old, old))
+    os.utime(store.dir_for("kept"), (old, old))
+    assert sweep_blobs(store, refs, grace=3600) == ["stale"]
+    assert store.exists("kept") and store.exists("fresh")
+    refs.drop_holder("job", "j1")
+    assert sweep_blobs(store, refs, grace=3600) == ["kept"]
 
 
 class _RacedStore(LocalBlobStore):
@@ -174,21 +160,14 @@ class _RacedStore(LocalBlobStore):
 
 
 @pytest.mark.requires_postgres
-def test_a_blob_that_vanishes_mid_sweep_does_not_stop_it(tmp_path: Path, pg_conninfo: str) -> None:
-    from scadbuddy.render.projection import JobProjection
-
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = _RacedStore(tmp_path / "blobs", raced="a-gone")
-        old = time.time() - 7200
-        for key in ("a-gone", "b-stale"):
-            os.utime(store.dir_for(key), (old, old))
-        assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
-        assert store.keys() == []
-    finally:
-        projection.close()
+def test_a_blob_that_vanishes_mid_sweep_does_not_stop_it(tmp_path: Path, pg_pool: PgPool) -> None:
+    refs = BlobRefs(pg_pool)
+    store = _RacedStore(tmp_path / "blobs", raced="a-gone")
+    old = time.time() - 7200
+    for key in ("a-gone", "b-stale"):
+        os.utime(store.dir_for(key), (old, old))
+    assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
+    assert store.keys() == []
 
 
 class _ClaimedStore(LocalBlobStore):
@@ -211,22 +190,15 @@ class _ClaimedStore(LocalBlobStore):
 
 @pytest.mark.requires_postgres
 def test_a_blob_claimed_after_its_touch_was_read_survives_the_sweep(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    from scadbuddy.render.projection import JobProjection
-
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = _ClaimedStore(tmp_path / "blobs", claimed="a-claimed")
-        old = time.time() - 7200
-        for key in ("a-claimed", "b-stale"):
-            os.utime(store.dir_for(key), (old, old))
-        assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
-        assert store.exists("a-claimed")
-    finally:
-        projection.close()
+    refs = BlobRefs(pg_pool)
+    store = _ClaimedStore(tmp_path / "blobs", claimed="a-claimed")
+    old = time.time() - 7200
+    for key in ("a-claimed", "b-stale"):
+        os.utime(store.dir_for(key), (old, old))
+    assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
+    assert store.exists("a-claimed")
 
 
 class _UnreadableStore(LocalBlobStore):
@@ -244,58 +216,44 @@ class _UnreadableStore(LocalBlobStore):
 
 @pytest.mark.requires_postgres
 def test_a_blob_whose_touch_cannot_be_read_is_skipped_and_the_sweep_goes_on(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from scadbuddy.render.projection import JobProjection
-
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = _UnreadableStore(tmp_path / "blobs", unreadable="a-unreadable")
-        old = time.time() - 7200
-        for key in ("a-unreadable", "b-stale"):
-            os.utime(store.dir_for(key), (old, old))
-        with caplog.at_level(logging.ERROR, logger="scadbuddy.store"):
-            assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
-        assert store.exists("a-unreadable")
-        [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert record.__dict__["key"] == "a-unreadable"
-    finally:
-        projection.close()
+    refs = BlobRefs(pg_pool)
+    store = _UnreadableStore(tmp_path / "blobs", unreadable="a-unreadable")
+    old = time.time() - 7200
+    for key in ("a-unreadable", "b-stale"):
+        os.utime(store.dir_for(key), (old, old))
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.store"):
+        assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
+    assert store.exists("a-unreadable")
+    [record] = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert record.__dict__["key"] == "a-unreadable"
 
 
 @pytest.mark.requires_postgres
 def test_a_blob_that_cannot_be_removed_is_skipped_and_the_sweep_goes_on(
     tmp_path: Path,
-    pg_conninfo: str,
+    pg_pool: PgPool,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from scadbuddy.render.projection import JobProjection
+    refs = BlobRefs(pg_pool)
+    store = LocalBlobStore(tmp_path / "blobs")
+    old = time.time() - 7200
+    for key in ("a-stuck", "b-stale"):
+        os.utime(store.dir_for(key), (old, old))
+    rmtree = shutil.rmtree
 
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    projection.open()
-    try:
-        refs = BlobRefs(projection.pool)
-        store = LocalBlobStore(tmp_path / "blobs")
-        old = time.time() - 7200
-        for key in ("a-stuck", "b-stale"):
-            os.utime(store.dir_for(key), (old, old))
-        rmtree = shutil.rmtree
+    def refuse_one(path: Path, ignore_errors: bool = False) -> None:
+        if path.name == "a-stuck":
+            raise PermissionError(13, "Permission denied", str(path))
+        rmtree(path, ignore_errors=ignore_errors)
 
-        def refuse_one(path: Path, ignore_errors: bool = False) -> None:
-            if path.name == "a-stuck":
-                raise PermissionError(13, "Permission denied", str(path))
-            rmtree(path, ignore_errors=ignore_errors)
-
-        monkeypatch.setattr(shutil, "rmtree", refuse_one)
-        with caplog.at_level(logging.ERROR, logger="scadbuddy.store"):
-            removed = sweep_blobs(store, refs, grace=3600)
-        # The failed one is not counted; the one after it is still removed.
-        assert removed == ["b-stale"]
-        assert store.exists("a-stuck") and not store.exists("b-stale")
-        failed = [r for r in caplog.records if getattr(r, "key", None) == "a-stuck"]
-        assert len(failed) == 1
-    finally:
-        projection.close()
+    monkeypatch.setattr(shutil, "rmtree", refuse_one)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.store"):
+        removed = sweep_blobs(store, refs, grace=3600)
+    # The failed one is not counted; the one after it is still removed.
+    assert removed == ["b-stale"]
+    assert store.exists("a-stuck") and not store.exists("b-stale")
+    failed = [r for r in caplog.records if getattr(r, "key", None) == "a-stuck"]
+    assert len(failed) == 1
