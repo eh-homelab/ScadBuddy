@@ -219,43 +219,51 @@ class OutputStore:
         output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
+        # Every copy and write, or none: a failure part-way (a source gone from the
+        # store, a full disk) leaves no half-written output behind to list.
+        try:
+            shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
+            shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
+            (directory / PARAMS_NAME).write_text(
+                json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            recorded = normalize_inputs(
+                inputs if inputs is not None else (job.inputs or None), job.params
+            )
+            (directory / INPUTS_NAME).write_text(
+                json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
 
-        shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
-        shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
-        (directory / PARAMS_NAME).write_text(
-            json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        recorded = normalize_inputs(
-            inputs if inputs is not None else (job.inputs or None), job.params
-        )
-        (directory / INPUTS_NAME).write_text(
-            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+            # A job from before the hash existed has none to read back; the live tree is
+            # then the closest thing to what it rendered.
+            version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            stamp(
+                directory / MODEL_NAME,
+                Provenance(
+                    model=job.slug,
+                    version=version,
+                    output=output_id,
+                    params=dict(job.params),
+                    edit_url=edit_url(public_url, output_id),
+                ),
+            )
 
-        # A job from before the hash existed has none to read back; the live tree is
-        # then the closest thing to what it rendered.
-        version = result.source_version or source_version(self.paths.model_dir(job.slug))
-        stamp(
-            directory / MODEL_NAME,
-            Provenance(
-                model=job.slug,
-                version=version,
-                output=output_id,
-                params=dict(job.params),
-                edit_url=edit_url(public_url, output_id),
-            ),
-        )
-
-        if chosen is not None:
-            # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
-            # a bill of materials only when the pipeline wrote one.
-            (directory / RECORD_NAME).write_text(chosen.record.model_dump_json(), encoding="utf-8")
-            if chosen.bom:
-                (directory / BOM_NAME).write_text(
-                    json.dumps([b.model_dump(mode="json") for b in chosen.bom]), encoding="utf-8"
+            if chosen is not None:
+                # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
+                # a bill of materials only when the pipeline wrote one.
+                (directory / RECORD_NAME).write_text(
+                    chosen.record.model_dump_json(), encoding="utf-8"
                 )
-            if files_dir is not None and chosen.files:
-                shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+                if chosen.bom:
+                    (directory / BOM_NAME).write_text(
+                        json.dumps([b.model_dump(mode="json") for b in chosen.bom]),
+                        encoding="utf-8",
+                    )
+                if files_dir is not None and chosen.files:
+                    shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+        except OSError:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
         meta = OutputMeta(
             id=output_id,

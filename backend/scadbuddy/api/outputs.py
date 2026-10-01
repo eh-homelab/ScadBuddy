@@ -203,7 +203,12 @@ async def create_output(
     await materialize_result(blobs, chosen.result if chosen is not None else job.result)
     files_dir = None
     if chosen is not None and chosen.files_key is not None:
-        await blobs.fetch(chosen.files_key)
+        if not await blobs.fetch(chosen.files_key):
+            # Before `create`, so a refused save leaves nothing under outputs/.
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "the job's extra files are no longer in the store; render again",
+            )
         files_dir = blobs.dir_for(chosen.files_key) / "files"
     public_url = (await asyncio.to_thread(store.load)).public_url
     meta = await asyncio.to_thread(

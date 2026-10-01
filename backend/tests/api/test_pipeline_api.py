@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.workflows.models import MigrateResult
+from scadbuddy.workflows.outputs import output_key
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -98,6 +99,23 @@ def test_an_output_saves_its_bom_record_and_files(
         client.get(f"/api/v1/outputs/{created.json()['id']}/files/..%2Fmeta.json").status_code
         == 404
     )
+
+
+def test_an_output_whose_files_left_the_store_is_a_409_and_writes_nothing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The extra files' blob is gone (final review I2): a clean refusal before anything
+    is copied, never a 500 with a half-written output directory."""
+    with_pipeline(paths, model)
+    job = _done(client, model, {"params": {}, "v": 1})
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.store.blobs.remove(output_key(str(job["id"]), 0))
+    before = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
+    refused = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job["id"], "index": 0})
+    assert refused.status_code == 409, refused.text
+    assert "no longer in the store" in refused.json()["detail"]
+    after = set((paths.outputs / model).glob("*")) if (paths.outputs / model).is_dir() else set()
+    assert after == before
 
 
 def test_an_output_index_the_job_does_not_have_is_refused(
