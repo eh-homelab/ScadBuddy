@@ -186,6 +186,20 @@ export function CustomizePage() {
         ? { file: 'model.json', message: declaration.ui_error }
         : null
   const customUi = declared && !failure ? declared : null
+  // A failure is not for good: a reload of the record or the schema, or the banner's own
+  // button, tries the interface again.
+  const reloadModel = () => {
+    setUiFailure(null)
+    modelState.reload()
+  }
+  const retryUi = () => {
+    if (uiFailure?.slug === slug && uiFailure.version === version) setUiFailure(null)
+    else reloadModel() // a declaration model.json could not hold: read the record again
+  }
+  // `host.openPrint` misuse, reported as the interface's failure rather than thrown at it.
+  const reportUi = useLatest((message: string) =>
+    setUiFailure({ slug, version, failure: { file: declared?.module ?? 'ui', message } }),
+  )
   // Wait for the record and the schema before choosing, so a template with a UI never
   // flashes the form, and a UI never mounts before `host.schema()` can answer.
   const choosing = (!record && !modelState.error) || !schema
@@ -226,6 +240,7 @@ export function CustomizePage() {
     })
   })
   const reloadSchema = () => {
+    setUiFailure(null) // the source may now hold a working interface
     setSourceChangedFor(null)
     setEdits({ of: seed, values: null, extra: null })
     schemaState.refresh()
@@ -332,8 +347,11 @@ export function CustomizePage() {
     if (!current) throw new Error('the schema is still loading')
     return current
   }, [live])
-  const hostDeps: HostDeps = useMemo(
-    () => ({
+  // The Host's Generate in flight, with the template it is for.
+  const generating = useRef<{ key: string; run: Promise<{ jobId: string; outputId: string }> } | null>(null)
+  const hostDeps: HostDeps = useMemo(() => {
+    const key = `${slug}\n${uiVersion ?? ''}`
+    return {
       slug,
       version: uiVersion,
       getSchema: schemaNow,
@@ -348,20 +366,39 @@ export function CustomizePage() {
           return { of: current.of, values: sameValues(shown, params) ? shown : params, extra: nextExtra }
         })
       },
-      generate: async () => {
-        await waitFor(() => (live.current.ready ? true : undefined), {
-          timeout: 120_000,
-          what: 'the preview render of the current inputs',
+      // One at a time at the Host, whoever calls it (<sb-generate> or the template):
+      // a second call while one runs gets the same promise, so one output.
+      generate: () => {
+        if (generating.current?.key === key) return generating.current.run
+        setUiGenerate({ generating: true, error: null })
+        const run = (async () => {
+          await waitFor(() => (live.current.ready ? true : undefined), {
+            timeout: 120_000,
+            what: 'the preview render of the current inputs',
+          })
+          const done = live.current.job
+          if (!done) throw new Error('there is no render to keep')
+          const created = await saveOutput({ slug, job: done, extra: live.current.extra, capture })
+          setSaved({ jobId: done.id, output: created })
+          live.current.reloadOutputs()
+          await committed(() => live.current.output?.id === created.id, 'the saved output')
+          return { jobId: done.id, outputId: created.id }
+        })()
+        generating.current = { key, run }
+        run.then(
+          () => setUiGenerate({ generating: false, error: null }),
+          (error: unknown) =>
+            setUiGenerate({ generating: false, error: error instanceof Error ? error.message : String(error) }),
+        ).finally(() => {
+          if (generating.current?.run === run) generating.current = null
         })
-        const done = live.current.job
-        if (!done) throw new Error('there is no render to keep')
-        const created = await saveOutput({ slug, job: done, extra: live.current.extra, capture })
-        setSaved({ jobId: done.id, output: created })
-        live.current.reloadOutputs()
-        await committed(() => live.current.output?.id === created.id, 'the saved output')
-        return { jobId: done.id, outputId: created.id }
+        return run
       },
-      openPrint: (outputId: string) => actions.current?.openPrint(outputId),
+      openPrint: (outputId: string) => {
+        if (actions.current?.openPrint(outputId) === false) {
+          reportUi.current(`openPrint(${outputId}): output is not the one on screen; call generate() first`)
+        }
+      },
       presets: {
         list: () => api.listPresets(slug),
         save: async (name: string) => {
@@ -382,10 +419,9 @@ export function CustomizePage() {
       onDescribe: (fn: (() => string) | null) => {
         describeRef.current = fn
       },
-    }),
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- everything else is read through `live`
-    [slug, uiVersion],
-  )
+  }, [slug, uiVersion])
 
   function requireSchema() {
     if (!schema) {
@@ -657,19 +693,9 @@ export function CustomizePage() {
     generate: (
       <span className="inline-flex items-center gap-2">
         <Button
-          onClick={() => {
-            // One save at a time: a second click while one runs would make two outputs.
-            if (uiGenerate.generating) return
-            setUiGenerate({ generating: true, error: null })
-            hostDeps.generate().then(
-              () => setUiGenerate({ generating: false, error: null }),
-              (error: unknown) =>
-                setUiGenerate({
-                  generating: false,
-                  error: error instanceof Error ? error.message : String(error),
-                }),
-            )
-          }}
+          // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
+          // button's state and its error) for every caller.
+          onClick={() => void hostDeps.generate().catch(() => undefined)}
           disabled={uiGenerate.generating || rendering || !settled || job?.status !== 'done'}
         >
           {uiGenerate.generating
@@ -882,7 +908,7 @@ export function CustomizePage() {
             className="flex items-center gap-3 border-b border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
           >
             <span>Could not load this model&apos;s details: {modelState.error.message}</span>
-            <Button size="sm" onClick={modelState.reload}>
+            <Button size="sm" onClick={reloadModel}>
               Try again
             </Button>
           </div>
@@ -898,6 +924,9 @@ export function CustomizePage() {
               This template&apos;s own interface ({failure.file}) could not start: {failure.message}. Showing the
               generated form instead.
             </span>
+            <Button size="sm" onClick={retryUi}>
+              Try again
+            </Button>
           </div>
         )}
       </div>

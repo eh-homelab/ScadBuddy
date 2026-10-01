@@ -12,12 +12,14 @@ const uiModule = async (name: string) => {
   if (!loader) throw new Error(`models/dollhouse-kit/ui/${name} is missing`)
   return loader()
 }
-type Entry = { id: string; piece: string; course: string | null; count: number }
+type Entry = { id: string; piece: string; course: string | null; count: number | null; label?: string }
 const load = async () =>
   (await uiModule('pieces.js')) as {
     housePieces: (h: object) => Entry[]
     clampHouse: (h: object) => object
     pieceParams: (e: Entry) => object
+    pieceTotal: (pieces: Entry[]) => number
+    pieceText: (e: Entry) => string
   }
 
 describe('housePieces', () => {
@@ -29,8 +31,17 @@ describe('housePieces', () => {
     expect(counts).toEqual({
       'wall_door_lower': 1, 'wall:lower': 3, 'wall_door_upper': 1, 'wall_window': 2, 'wall:upper': 1,
       'corner_post:lower': 4, 'corner_post:upper': 4, 'floor_tile': 1, 'roof_panel': 1, 'door_leaf_lower': 1, 'door_leaf_upper': 1,
-      'connectors': 1,
+      'connectors': null,
     })
+  })
+
+  it('leaves the connectors to the user, outside the total', async () => {
+    const { housePieces, pieceTotal, pieceText } = await load()
+    const pieces = housePieces({ cols: 1, rows: 1, storeys: 1, windows: 2 })
+    const connectors = pieces.find((e) => e.id === 'connectors')
+    if (!connectors) throw new Error('no connectors row')
+    expect(pieceText(connectors)).toBe('Connectors (keys, pegs, hinge pins): set the type and count yourself')
+    expect(pieceTotal(pieces)).toBe(20)
   })
 
   it('counts a two-by-one, two-storey house with stairs', async () => {
@@ -172,5 +183,13 @@ describe('the designer', () => {
     expect(root.activeElement).toBe(floor)
     expect(floor.textContent).toBe('Showing')
     expect(floor.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('names each Show button after its piece', async () => {
+    const { button } = await mounted({ params: {} })
+    const floor = button('floor_tile')
+    expect(floor.getAttribute('aria-label')).toBe('Show Floor tile')
+    floor.click()
+    expect(button('floor_tile').getAttribute('aria-label')).toBe('Showing Floor tile')
   })
 })

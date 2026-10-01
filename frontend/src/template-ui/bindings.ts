@@ -1,15 +1,11 @@
 import type { CustomizerSchema, Param, ParamValue } from '../api/types'
-import { getPath, type JsonObject } from '../lib/inputs'
+import { getPath, isParamValue, type JsonObject } from '../lib/inputs'
 import { allParams } from '../lib/params'
 import type { HostElement } from './elements'
 
 interface BindingContext {
   schema: CustomizerSchema
   inputs: JsonObject
-}
-
-function isParamValue(value: unknown): value is ParamValue {
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
 }
 
 interface Binding {
@@ -26,7 +22,8 @@ interface Binding {
 export function bindingOf(element: HostElement, context: BindingContext): Binding | string {
   const name = element.getAttribute('name') ?? ''
   const file = element.getAttribute('file') ?? 'model.scad'
-  const bind = element.getAttribute('bind') ?? `params.${name}`
+  // An empty `bind` is no binding: the default, never a '' key in the inputs.
+  const bind = element.getAttribute('bind') || `params.${name}`
   if (file !== 'model.scad') return `Only model.scad has parameters in host API v1, not ${file}.`
   const param = allParams(context.schema).find((candidate) => candidate.name === name)
   if (!param) return `model.scad has no parameter “${name}”.`
