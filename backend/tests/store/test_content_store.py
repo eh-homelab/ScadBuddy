@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from scadbuddy.store.content import (
     BlobMissingError,
     BlobRef,
     BlobScope,
+    ContentStore,
     RefusedDeleteError,
     ReuseLostError,
     StoreFullError,
@@ -50,6 +51,35 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(tmp_path: Path, 
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})
     assert (await store.stat(f"asset-{first.sha256}")) is not None
+
+
+class _ClosingBackend(LocalContentBackend):
+    """Records each download whose generator was closed."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.closed: list[str] = []
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        try:
+            async for chunk in super().download(backend_id):
+                yield chunk
+        finally:
+            self.closed.append(backend_id)
+
+
+async def test_a_read_stopped_early_closes_the_backends_download(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A consumer that stops mid-stream and closes `get` closes the backend's download
+    with it (#680), rather than leaving its HTTP stream to the garbage collector."""
+    backend = _ClosingBackend(tmp_path / "remote")
+    store = ContentStore(backend, BlobIndex(pool))
+    ref = await store.put("piece", os.urandom(3 << 20), name="p", scope=SCOPE)
+    async with contextlib.aclosing(store.get(ref)) as chunks:
+        async for _ in chunks:
+            break
+    assert backend.closed == [ref.backend_id]
 
 
 async def test_put_refuses_past_the_cap_except_a_re_put(tmp_path: Path, pool: Pool) -> None:
@@ -136,6 +166,37 @@ def _age(pool: Pool, *keys: str) -> None:
             "UPDATE store_blobs SET touched_at = %s WHERE key = ANY(%s)",
             (datetime.now(UTC) - timedelta(hours=2), list(keys)),
         )
+
+
+class _ClaimedAfterSnapshot(BlobRefs):
+    """A claim of ``key`` that lands right after the sweep's `referenced()` snapshot:
+    the claimant's `touch` (when ``touch``), then its `add`."""
+
+    def __init__(self, pool: Pool, store: ContentStore, key: str, *, touch: bool) -> None:
+        super().__init__(pool)
+        self.store, self.key, self.touch = store, key, touch
+
+    def referenced(self) -> set[str]:
+        snapshot = super().referenced()
+        if self.touch:
+            self.store.index.touch(self.key)
+        self.add(self.key, "job", "late")
+        return snapshot
+
+
+@pytest.mark.parametrize("touch", [True, False], ids=["touched-first", "added-only"])
+async def test_a_claim_after_the_sweeps_snapshot_survives_only_when_touched_first(
+    tmp_path: Path, pool: Pool, touch: bool
+) -> None:
+    """The claim protocol end to end (#637): `ContentStore.touch` before `refs.add`
+    keeps a blob a sweep already decided was unreferenced; an `add` alone does not."""
+    store = local_content(tmp_path / "remote", pool)
+    await store.put("piece", b"claimed", name="c", scope=SCOPE, key="claimed")
+    _age(pool, "claimed")
+    refs = _ClaimedAfterSnapshot(pool, store, "claimed", touch=touch)
+    removed = await sweep_content(store, refs, grace=3600, now=time.time())
+    assert removed == ([] if touch else ["claimed"])
+    assert (store.index.get("claimed") is not None) is touch
 
 
 async def test_the_sweep_leaves_another_backends_rows_alone(

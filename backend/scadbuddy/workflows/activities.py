@@ -161,11 +161,13 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
 
 
 async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
-    """Where the piece's blob goes: its template's folder, named by `model.json`.
+    """Where the piece's blob goes: its template's folder, named by `model.json` in
+    the template's root (a piece in `parts/` reads the root's, not `parts/`).
 
     Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
     """
-    title = await asyncio.to_thread(template_title, Path(prepared.scad).parent, req.slug)
+    root = model_dir(Path(prepared.scad), req.file)
+    title = await asyncio.to_thread(template_title, root, req.slug)
     return BlobScope(slug=req.slug, title=title)
 
 

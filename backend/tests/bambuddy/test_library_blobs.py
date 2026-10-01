@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
@@ -56,12 +58,43 @@ async def test_a_missing_file_is_a_404_problem(bambuddy: BambuddyClient) -> None
 
 
 @respx.mock
+async def test_a_download_that_fails_on_the_network_is_logged(
+    bambuddy: BambuddyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    respx.get(f"{API}/library/files/9/download").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="scadbuddy.bambuddy.client"),
+        pytest.raises(ApiError),
+    ):
+        async for _ in bambuddy.download_library_file(9):
+            pass
+    [record] = [r for r in caplog.records if r.getMessage() == "bambuddy request failed"]
+    assert record.__dict__["path"] == "/library/files/9/download"
+
+
+@respx.mock
 async def test_a_key_without_manage_library_is_named(bambuddy: BambuddyClient) -> None:
     respx.post(f"{API}/library/files").mock(
         return_value=httpx.Response(403, json={"detail": "Forbidden"})
     )
     with pytest.raises(ApiError) as caught:
         await bambuddy.upload_library_file("a.zip", b"z", folder_id=1, media_type="application/zip")
+    assert caught.value.type == SCOPE_PROBLEM and "Manage Library" in caught.value.detail
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_download_refused_by_the_key_names_manage_library(
+    bambuddy: BambuddyClient, status: int
+) -> None:
+    respx.get(f"{API}/library/files/9/download").mock(
+        return_value=httpx.Response(status, json={"detail": "Forbidden"})
+    )
+    with pytest.raises(ApiError) as caught:
+        async for _ in bambuddy.download_library_file(9):
+            pass
     assert caught.value.type == SCOPE_PROBLEM and "Manage Library" in caught.value.detail
 
 
