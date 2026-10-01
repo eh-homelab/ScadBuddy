@@ -327,6 +327,32 @@ async def test_ensure_marks_an_old_export_used_before_packing_it(
     assert prune_revision_exports(api_paths, 86400) == []
 
 
+async def test_concurrent_ensures_of_a_new_revision_store_it_once(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#686: debounced submits of a revision's first render all `pin` at once; one
+    packs and uploads, the others find its row."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "6" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(6);")
+    put = content.put
+    calls = 0
+
+    async def counting(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)  # an upload takes a while
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = counting  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None)
+    keys = await asyncio.gather(*(api.ensure("demo", rev) for _ in range(5)))
+    assert keys == [snapshot_key("demo", rev)] * 5
+    assert calls == 1
+
+
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
     """The prune takes the export between `materialize`'s `is_dir` and its touch."""
     left = [times]

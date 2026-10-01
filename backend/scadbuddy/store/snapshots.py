@@ -66,25 +66,39 @@ class SnapshotStore:
 
     async def ensure(self, slug: str, revision: str) -> str:
         key = snapshot_key(slug, revision)
-        if await asyncio.to_thread(self.content.index.get, key) is not None:
-            await self.content.touch(key)
+        if await self._stored(key):
             return key
-        directory = self.paths.model_revision_dir(slug, revision)
-        # Marked used before it is packed, so the prune (whose TTL an old revision's
-        # export is past) does not take it mid-pack; one it already took is exported again.
-        if not (directory.is_dir() and await _used(directory)):
-            if self.history is None:
-                raise SnapshotUnavailableError(f"no snapshot of {slug}@{revision} and no history")
-            await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
-        data = await asyncio.to_thread(pack_dir, directory)
-        await self.content.put(
-            "snapshot",
-            data,
-            name=f"src-{revision[:12]}.zip",
-            scope=BlobScope(slug=slug, title=template_title(directory, slug)),
-            key=key,
-        )
+        # One export and upload per key in this process: a revision's first submits
+        # (debounced, at once) wait for the first rather than each storing it (#686).
+        async with self.locks.hold(key):
+            if await self._stored(key):
+                return key
+            directory = self.paths.model_revision_dir(slug, revision)
+            # Marked used before it is packed, so the prune (whose TTL an old revision's
+            # export is past) does not take it mid-pack; one it already took is exported
+            # again.
+            if not (directory.is_dir() and await _used(directory)):
+                if self.history is None:
+                    raise SnapshotUnavailableError(
+                        f"no snapshot of {slug}@{revision} and no history"
+                    )
+                await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
+            data = await asyncio.to_thread(pack_dir, directory)
+            await self.content.put(
+                "snapshot",
+                data,
+                name=f"src-{revision[:12]}.zip",
+                scope=BlobScope(slug=slug, title=template_title(directory, slug)),
+                key=key,
+            )
         return key
+
+    async def _stored(self, key: str) -> bool:
+        """Whether the index holds ``key``; a hit is touched, as a use."""
+        if await asyncio.to_thread(self.content.index.get, key) is None:
+            return False
+        await self.content.touch(key)
+        return True
 
     async def materialize(self, slug: str, revision: str) -> bool:
         directory = self.paths.model_revision_dir(slug, revision)
