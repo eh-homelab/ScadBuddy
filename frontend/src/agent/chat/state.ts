@@ -1,6 +1,7 @@
 import type {
   Origin,
   Owner,
+  Question,
   Risk,
   ServerEvent,
   SessionStatus,
@@ -34,6 +35,22 @@ export type FeedItem =
        */
       state: 'pending' | 'queued' | 'sent' | 'approved' | 'denied'
       by?: Owner
+    }
+  /**
+   * #940 — the agent asks the user (AskUserQuestion). `pending` until the user answers;
+   * `sent` once the answer left the panel; `answered` or `cancelled` (its turn ended
+   * first, `reason`) from `question.resolved`, the server's confirmation.
+   */
+  | {
+      kind: 'question'
+      id: string
+      /** The AskUserQuestion `tool.call` id. */
+      tool: string
+      questions: Question[]
+      state: 'pending' | 'sent' | 'answered' | 'cancelled'
+      answers?: string[]
+      by?: Owner
+      reason?: string
     }
   | { kind: 'error'; id: string; message: string }
   /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
@@ -96,6 +113,8 @@ export type ChatAction =
   | { type: 'started-new' }
   | { type: 'select'; sessionId: string | null }
   | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
+  /** #940 — the user's answer to a question left the panel (or waits for the reconnect). */
+  | { type: 'answered'; sessionId: string; questionId: string }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
   /** The transport holds a message until the connection is back; it will be sent. */
@@ -275,9 +294,25 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
         ),
       )
 
+    case 'question.asked':
+      return patchSession(state, event.sessionId, (s) =>
+        push(s, { kind: 'question', id: event.id, tool: event.tool, questions: event.questions, state: 'pending' }),
+      )
+
+    case 'question.resolved':
+      return patchSession(state, event.sessionId, (s) =>
+        mapItems(s, (i) =>
+          i.kind === 'question' && i.id === event.id
+            ? event.answered
+              ? { ...i, state: 'answered', ...(event.answers ? { answers: event.answers } : {}), ...(event.by ? { by: event.by } : {}) }
+              : { ...i, state: 'cancelled', ...(event.reason === undefined ? {} : { reason: event.reason }) }
+            : i,
+        ),
+      )
+
     case 'session.status':
       return patchSession(state, event.sessionId, (s) => {
-        const settled = event.status !== 'running' && event.status !== 'waiting_approval'
+        const settled = !isLive(event.status)
         // An interrupted turn never sends `assistant.text.done`; a settled session
         // has nothing left streaming either way.
         const withStreamsClosed = settled
@@ -393,6 +428,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'queued':
       // Still awaiting its session's start, if it starts one: the message goes out on reconnect.
       return { ...state, notice: action.message }
+    case 'answered':
+      return patchSession(state, action.sessionId, (s) =>
+        mapItems(s, (i) =>
+          i.kind === 'question' && i.id === action.questionId && i.state === 'pending' ? { ...i, state: 'sent' } : i,
+        ),
+      )
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>
@@ -404,9 +445,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 }
 
+/** A turn is live: running, or parked on a human (an approval, or a question, #940). */
+function isLive(status: SessionStatus): boolean {
+  return status === 'running' || status === 'waiting_approval' || status === 'waiting_input'
+}
+
 /** A session is busy while a turn runs or waits on a human. */
 export function isBusy(session: SessionState | undefined): boolean {
-  return session?.status === 'running' || session?.status === 'waiting_approval'
+  return session !== undefined && isLive(session.status)
 }
 
 /** How much of its budget the session has spent, 0 to 1 (and past 1 once over); undefined without one. */

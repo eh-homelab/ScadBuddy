@@ -25,6 +25,7 @@
  * | complete `assistant` message with a `tool_use` block         | `tool.call`            |
  * | `user` message with the matching `tool_result` block         | `tool.result`          |
  * | `canUseTool` / `PreToolUse` for an `outward` tool (§8.2)      | `approval.required`    |
+ * | `canUseTool` for AskUserQuestion (#940)                       | `question.asked`       |
  * | `result` (total cost, number of turns)                       | `session.result`       |
  *
  * The exact SDK field names (for example the result message's cost and turn fields)
@@ -87,6 +88,27 @@ export const VersionLinkSchema = z.object({
   revision: z.string().min(1),
 })
 export type VersionLink = z.infer<typeof VersionLinkSchema>
+
+/**
+ * #940 — one question the agent asks the user (Claude Code's AskUserQuestion). The user
+ * picks an option (several when `multiSelect`) or types their own answer. An option's
+ * `preview` is Markdown it shows, e.g. a draft to approve.
+ */
+export const QuestionSchema = z.object({
+  question: z.string().min(1),
+  header: z.string(),
+  multiSelect: z.boolean(),
+  options: z
+    .array(
+      z.object({
+        label: z.string().min(1),
+        description: z.string(),
+        preview: z.string().optional(),
+      }),
+    )
+    .min(1),
+})
+export type Question = z.infer<typeof QuestionSchema>
 
 export const SessionSummarySchema = z.object({
   sessionId: z.string().min(1),
@@ -197,6 +219,32 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     approved: z.boolean(),
     by: OwnerSchema.optional(),
   }),
+  /**
+   * #940 — the agent asks the user; the turn waits (`waiting_input`) for the answer.
+   * `tool` is the AskUserQuestion `tool.call` id.
+   */
+  z.object({
+    v,
+    type: z.literal('question.asked'),
+    sessionId,
+    id: z.string().min(1),
+    tool: z.string().min(1),
+    questions: z.array(QuestionSchema).min(1),
+  }),
+  /**
+   * Answered (`answers`, one per question in order, and `by`), or cancelled with its
+   * turn (`reason`). A question never answers itself.
+   */
+  z.object({
+    v,
+    type: z.literal('question.resolved'),
+    sessionId,
+    id: z.string().min(1),
+    answered: z.boolean(),
+    answers: z.array(z.string()).optional(),
+    by: OwnerSchema.optional(),
+    reason: z.string().optional(),
+  }),
   z.object({ v, type: z.literal('session.status'), sessionId, status: SessionStatusSchema }),
   z.object({
     v,
@@ -267,6 +315,14 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     sessionId,
     id: z.string().min(1),
     approve: z.boolean(),
+  }),
+  /** #940 — the user's answer to a `question.asked`: one per question, in order. */
+  z.object({
+    v,
+    type: z.literal('question.answer'),
+    sessionId,
+    id: z.string().min(1),
+    answers: z.array(z.string().min(1)).min(1),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   z.object({ v, type: z.literal('session.handoff'), sessionId }),

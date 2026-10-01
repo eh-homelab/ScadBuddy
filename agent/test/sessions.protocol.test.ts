@@ -167,6 +167,26 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'approval.required', sessionId: S, id: 'a1', tool: 't1', summary: 'print box.3mf', risk: 'outward' }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false }),
+    event({
+      type: 'question.asked',
+      sessionId: S,
+      id: 'q1',
+      tool: 't2',
+      questions: [
+        {
+          question: 'Approve the draft?',
+          header: 'Draft',
+          multiSelect: false,
+          options: [
+            { label: 'Approve', description: 'File it', preview: '## Title' },
+            { label: 'Cancel', description: 'Do not' },
+          ],
+        },
+      ],
+    }),
+    event({ type: 'question.resolved', sessionId: S, id: 'q1', answered: true, answers: ['Approve'], by: { kind: 'browser', id: 'browser', label: 'You' } }),
+    event({ type: 'question.resolved', sessionId: S, id: 'q2', answered: false, reason: 'the turn ended' }),
+    event({ type: 'session.status', sessionId: S, status: 'waiting_input' }),
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3, budgetUsd: 1 }),
     event({ type: 'session.budget', sessionId: S, costUsd: 1.02, budgetUsd: 2 }),

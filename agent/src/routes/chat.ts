@@ -2,6 +2,7 @@ import type { Hono, MiddlewareHandler } from 'hono'
 import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { ApprovalError } from '../approvals/service.js'
+import { QuestionError } from '../questions/service.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
@@ -29,6 +30,8 @@ import { ready, type RouteModule } from './module.js'
 //                            for the model only (manager.ts SendOptions)
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
+//   question.answer        → QuestionService.answer (#940): the user's answer to
+//                            the agent's AskUserQuestion
 //   approval.decision      → ApprovalService.decision (#258): the same decision
 //                            as POST /api/v1/ai/approvals/:id/approve|deny
 //   session.interrupt      → SessionManager.interrupt
@@ -120,7 +123,7 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 
 function errorEvent(err: unknown, sessionId: string | undefined, log: (m: string) => void): ServerEvent {
   const where = sessionId ? { sessionId } : {}
-  if (err instanceof SessionError || err instanceof ApprovalError) {
+  if (err instanceof SessionError || err instanceof ApprovalError || err instanceof QuestionError) {
     return event({ type: 'error', ...where, code: err.code, message: err.message })
   }
   // Anything else is ours, not the user's: log it, and say only that it failed.
@@ -344,6 +347,9 @@ export class ChatConnection {
           return
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message)
+          return
+        case 'question.answer':
+          await this.sessions.questions.answer(this.principal, message)
           return
         case 'session.interrupt':
           await this.sessions.interrupt(message.sessionId, this.principal)

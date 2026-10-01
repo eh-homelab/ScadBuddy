@@ -15,6 +15,8 @@ export interface AgentChat {
   send: (text: string, context: PageContext) => void
   /** Answers an approval. Nothing outward proceeds until this is called (§8.2). */
   decide: (sessionId: string, approvalId: string, approve: boolean) => void
+  /** #940 — answers the agent's question: one answer per question, in order. */
+  answer: (sessionId: string, questionId: string, answers: string[]) => void
   interrupt: (sessionId: string) => void
   /** Take over a session another principal controls (§6 handoff). */
   takeOver: (sessionId: string) => void
@@ -117,6 +119,14 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [])
 
+  const answer = useCallback((sessionId: string, questionId: string, answers: string[]) => {
+    if (!transport.current) return
+    const result = transport.current.send(clientMessage({ type: 'question.answer', sessionId, id: questionId, answers }))
+    // A refused one leaves the card pending, to try again; a queued one goes first on reconnect.
+    if (result === 'refused') dispatch({ type: 'not-sent', message: `Your answer was not sent. ${NOT_SENT}` })
+    else dispatch({ type: 'answered', sessionId, questionId })
+  }, [])
+
   /** Sends a control frame, saying so when it is refused or held for the reconnect. */
   const control = useCallback((message: ClientMessage, queued: string) => {
     const result = transport.current?.send(message)
@@ -140,5 +150,5 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (sessionId && live.current) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
   }, [])
 
-  return { state, send, decide, interrupt, takeOver, select }
+  return { state, send, decide, answer, interrupt, takeOver, select }
 }

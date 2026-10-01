@@ -95,6 +95,44 @@ describe('chatReducer', () => {
     expect(resolved.sessions.s1?.items[0]).toMatchObject({ state: 'approved', by: you })
   })
 
+  it('moves a question pending → sent → answered, and shows a cancelled one as not answered (#940)', () => {
+    const questions = [
+      {
+        question: 'Approve the draft?',
+        header: 'Draft',
+        multiSelect: false,
+        options: [
+          { label: 'Approve', description: 'File it', preview: '## Title' },
+          { label: 'Cancel', description: 'Do not' },
+        ],
+      },
+    ]
+    const waiting = run(
+      [
+        server({ type: 'question.asked', sessionId: 's1', id: 'q1', tool: 't3', questions }),
+        server({ type: 'session.status', sessionId: 's1', status: 'waiting_input' }),
+      ],
+      started,
+    )
+    expect(waiting.sessions.s1?.items[0]).toEqual({ kind: 'question', id: 'q1', tool: 't3', questions, state: 'pending' })
+    expect(isBusy(waiting.sessions.s1)).toBe(true)
+
+    const sent = run([{ type: 'answered', sessionId: 's1', questionId: 'q1' }], waiting)
+    expect(sent.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
+    const answered = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
+      sent,
+    )
+    expect(answered.sessions.s1?.items[0]).toMatchObject({ state: 'answered', answers: ['Approve'], by: you })
+
+    const cancelled = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: false, reason: 'interrupted by You' })],
+      waiting,
+    )
+    expect(cancelled.sessions.s1?.items[0]).toMatchObject({ state: 'cancelled', reason: 'interrupted by You' })
+    expect(cancelled.sessions.s1?.items[0]).not.toHaveProperty('answers')
+  })
+
   it('closes a half-streamed message when the session settles (an interrupt)', () => {
     const state = run(
       [

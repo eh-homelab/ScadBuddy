@@ -88,6 +88,36 @@ describe('useAgentChat', () => {
     expect(approval(result.current.state)).toMatchObject({ state: 'approved' })
   })
 
+  it('sends the answer to a question and shows it sending until the server confirms it (#940)', () => {
+    let answer: SendResult = 'sent'
+    const t = scripted(() => answer)
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    const asked = {
+      type: 'question.asked',
+      sessionId: 's1',
+      id: 'q1',
+      tool: 't2',
+      questions: [{ question: 'Colour?', header: '', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] }],
+    }
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 't' }))
+      t.h().onFrame(frame(asked))
+    })
+    const question = () => result.current.state.sessions.s1?.items.find((i) => i.kind === 'question')
+    // Refused: nothing left, and the card stays answerable.
+    answer = 'refused'
+    act(() => result.current.answer('s1', 'q1', ['Blue']))
+    expect(question()).toMatchObject({ state: 'pending' })
+    expect(result.current.state.notice).toMatch(/Your answer was not sent/)
+    answer = 'sent'
+    act(() => result.current.answer('s1', 'q1', ['Blue']))
+    expect(t.chat()).toContainEqual({ v: 1, type: 'question.answer', sessionId: 's1', id: 'q1', answers: ['Blue'] })
+    expect(question()).toMatchObject({ state: 'sent' })
+    act(() => t.h().onFrame(frame({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Blue'], by: owner })))
+    expect(question()).toMatchObject({ state: 'answered', answers: ['Blue'] })
+  })
+
   it('shows a decision made while disconnected as queued, until the server confirms it after the reconnect', () => {
     let answer: SendResult = 'queued'
     const t = scripted(() => answer)

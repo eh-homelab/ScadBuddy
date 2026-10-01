@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { Link } from 'react-router'
 import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
+import type { Question as AskedQuestion } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { Button } from '../ui/Button'
@@ -9,6 +11,7 @@ import { RiskBadge } from './badges'
 type Tool = Extract<FeedItem, { kind: 'tool' }>
 type Approval = Extract<FeedItem, { kind: 'approval' }>
 type Memory = Extract<FeedItem, { kind: 'memory' }>
+type QuestionItem = Extract<FeedItem, { kind: 'question' }>
 
 function memoryHeadline(item: Memory): string {
   if (item.action === 'recall') {
@@ -172,13 +175,163 @@ function ApprovalCard({
   )
 }
 
+/** What the user picked for one question: option labels, and their own words when `other`. */
+type Choice = { picked: string[]; other: boolean; text: string }
+
+const NO_CHOICE: Choice = { picked: [], other: false, text: '' }
+
+/** One question's answer as the agent reads it, or undefined while it has none. */
+function answerOf(q: AskedQuestion, c: Choice): string | undefined {
+  const own = c.other ? c.text.trim() : ''
+  if (c.other && !own) return undefined
+  if (!q.multiSelect) return c.other ? own : c.picked[0]
+  const parts = q.options.map((o) => o.label).filter((l) => c.picked.includes(l))
+  if (own) parts.push(own)
+  return parts.length ? parts.join(', ') : undefined
+}
+
+/** The draft a question shows: its picked option's preview, else its first one. */
+function previewOf(q: AskedQuestion, c: Choice): string | undefined {
+  const picked = q.options.find((o) => c.picked.includes(o.label) && o.preview !== undefined)
+  return (picked ?? q.options.find((o) => o.preview !== undefined))?.preview
+}
+
+/**
+ * #940 — the agent asks the user (AskUserQuestion): pick an option, or several when
+ * the question allows it, or answer in your own words. A question with a draft (an
+ * option's `preview`) shows it as Markdown, and its own-words choice is "Edit…",
+ * starting from that draft, so editing it returns the edited text.
+ */
+function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (answers: string[]) => void }) {
+  const [choices, setChoices] = useState<Choice[]>(() => item.questions.map(() => NO_CHOICE))
+  const headingId = `question-${item.id}`
+  const answers = item.questions.map((q, i) => answerOf(q, choices[i] ?? NO_CHOICE))
+  const complete = answers.every((a) => a !== undefined)
+  const update = (i: number, next: (c: Choice) => Choice) =>
+    setChoices((all) => all.map((c, j) => (j === i ? next(c) : c)))
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="rounded-[6px] border border-accent/60 bg-accent/5 px-3 py-2.5 text-[13px]"
+      data-testid="agent-question"
+    >
+      <h3 id={headingId} className="text-[12.5px] font-semibold">
+        {item.questions.length === 1 ? 'A question for you' : 'Questions for you'}
+      </h3>
+      {item.state === 'pending' ? (
+        <form
+          className="mt-1.5 space-y-3"
+          data-agent-user-only=""
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (complete) onAnswer(answers as string[])
+          }}
+        >
+          {item.questions.map((q, i) => {
+            const choice = choices[i] ?? NO_CHOICE
+            const preview = previewOf(q, choice)
+            const name = `${item.id}-${i}`
+            const ownWords = preview === undefined ? 'Other…' : 'Edit…'
+            const kind = q.multiSelect ? 'checkbox' : 'radio'
+            const pick = (label: string) =>
+              update(i, (c) =>
+                q.multiSelect
+                  ? { ...c, picked: c.picked.includes(label) ? c.picked.filter((l) => l !== label) : [...c.picked, label] }
+                  : { ...c, picked: [label], other: false },
+              )
+            return (
+              <fieldset key={name} className="space-y-1.5">
+                <legend className="text-[13px]">
+                  {q.header && (
+                    <span className="mr-1.5 rounded-[4px] bg-surface-3 px-1.5 py-0.5 text-[11px] text-muted">{q.header}</span>
+                  )}
+                  {q.question}
+                </legend>
+                {preview !== undefined && (
+                  <div
+                    className="max-h-72 overflow-y-auto rounded-[6px] border border-line bg-surface-2 px-2.5 py-2"
+                    data-testid="agent-question-preview"
+                  >
+                    <Markdown text={preview} />
+                  </div>
+                )}
+                {q.options.map((o) => (
+                  <label key={o.label} className="flex items-start gap-2">
+                    <input
+                      type={kind}
+                      name={name}
+                      className="mt-1"
+                      checked={choice.picked.includes(o.label)}
+                      onChange={() => pick(o.label)}
+                    />
+                    <span>
+                      {o.label}
+                      {o.description && <span className="block text-[11.5px] text-muted">{o.description}</span>}
+                    </span>
+                  </label>
+                ))}
+                <label className="flex items-start gap-2">
+                  <input
+                    type={kind}
+                    name={name}
+                    className="mt-1"
+                    checked={choice.other}
+                    onChange={() =>
+                      update(i, (c) => ({
+                        picked: q.multiSelect ? c.picked : [],
+                        other: q.multiSelect ? !c.other : true,
+                        text: c.text || (preview ?? ''),
+                      }))
+                    }
+                  />
+                  <span>{ownWords}</span>
+                </label>
+                {choice.other && (
+                  <textarea
+                    aria-label="Your answer"
+                    rows={preview === undefined ? 2 : 6}
+                    className="w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]"
+                    value={choice.text}
+                    onChange={(e) => update(i, (c) => ({ ...c, text: e.target.value }))}
+                  />
+                )}
+              </fieldset>
+            )
+          })}
+          <Button type="submit" variant="primary" size="sm" disabled={!complete}>
+            Send answer
+          </Button>
+        </form>
+      ) : (
+        <div className="mt-1.5 space-y-1">
+          {item.questions.map((q, i) => (
+            <p key={i} className="text-[12.5px]">
+              {q.question}
+            </p>
+          ))}
+          <p className="text-[12px] text-muted" role="status">
+            {item.state === 'sent'
+              ? 'Sending your answer…'
+              : item.state === 'answered'
+                ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
+                : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
+          </p>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export function FeedItemView({
   item,
   onDecide,
+  onAnswer = () => {},
   advanced = false,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
+  /** #940 — the user's answer to a question: one per question, in order. */
+  onAnswer?: (questionId: string, answers: string[]) => void
   /** The panel's Advanced switch: every detail, open. Off, only the basics. */
   advanced?: boolean
 }) {
@@ -208,6 +361,8 @@ export function FeedItemView({
       return <ToolCard item={item} advanced={advanced} />
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
+    case 'question':
+      return <QuestionCard item={item} onAnswer={(answers) => onAnswer(item.id, answers)} />
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />
     case 'error':

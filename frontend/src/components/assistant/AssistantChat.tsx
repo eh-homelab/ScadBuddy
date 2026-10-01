@@ -78,6 +78,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const owned = !active || isOwnedByBrowser(active)
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
+  const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending') ?? false
   const itemCount = active?.items.length ?? 0
 
   // Voice (#257): dictation fills the draft for the user to review; replies can be read aloud.
@@ -272,6 +273,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
             item={item}
             advanced={advanced}
             onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
+            onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
           />
         ))}
         {itemCount === 0 && !busy && prompts.length > 0 && owned && (
@@ -309,7 +311,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
 
       {/* Announced once per change, unlike the stream itself. */}
       <p className="sr-only" role="status">
-        {pendingApproval ? 'The assistant needs your approval.' : ''}
+        {pendingApproval
+          ? 'The assistant needs your approval.'
+          : pendingQuestion
+            ? 'The assistant has a question for you.'
+            : ''}
       </p>
 
       {/* The user's own voice: the bridge's fill/click never type or send here (#254). */}

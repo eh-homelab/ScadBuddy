@@ -51,6 +51,8 @@ import {
   sessionWorkDir,
 } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
+import { QuestionService } from '../questions/service.js'
+import { ASK_USER_QUESTION } from '../harness/questions.js'
 import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
 import { TurnAuditor } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -537,6 +539,8 @@ export class SessionManager {
   readonly events: EventLog
   /** Approvals of outward calls (#258); `approvals.decide` is the decision API. */
   readonly approvals: ApprovalService
+  /** Questions the agent asks the user (#940); `questions.answer` is the panel's answer. */
+  readonly questions: QuestionService
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -562,6 +566,11 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       resume: (approval, by) => this.resumeApproved(approval, by),
+    })
+    this.questions = new QuestionService({
+      sql: deps.sql,
+      events: this.events,
+      ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -882,7 +891,11 @@ export class SessionManager {
     // panel shows a plugin tool at the tier the permission seam applies. The
     // headless browser's tools are tiered too (spec §5.3, "Tiers").
     let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
-    const mapper = new SdkEventMapper(id, (name, input) => eventTierOf(name, input))
+    // AskUserQuestion (#940) only asks the user: shown as `read`, as the harness tiers it.
+    const asksUser = session.owner.kind === 'browser'
+    const mapper = new SdkEventMapper(id, (name, input) =>
+      asksUser && name === ASK_USER_QUESTION ? 'read' : eventTierOf(name, input),
+    )
     let lost = false
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
@@ -1050,6 +1063,12 @@ export class SessionManager {
         signal: controller.signal,
         tierOf,
         approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
+        // AskUserQuestion (#940): only the user in the panel answers, so only
+        // a session the browser user owns is given the tool. Any other
+        // owner's turn would wait on someone who is not asked.
+        ...(asksUser
+          ? { questionGate: this.questions.gate({ sessionId: id, turnId, secrets: () => secrets, signal: controller.signal }) }
+          : {}),
         // The data/instruction boundary (#258, safety/untrusted.ts): only the
         // user's messages are instructions; tool results are data. Then which
         // browser each browser_* tool drives.
@@ -1244,6 +1263,8 @@ export class SessionManager {
     // so either outcome below can follow. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
+    // A question never outlives its turn (questions/service.ts), shutdown or not.
+    await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
     if (stopped !== SHUTTING_DOWN) {
       await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
@@ -1465,6 +1486,7 @@ export class SessionManager {
     }
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
+    await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     return this.get(id, to)
   }
 
@@ -1676,6 +1698,7 @@ export class SessionManager {
       RETURNING s.id, s.status`
     for (const { id, status } of rows) {
       await this.approvals.revokeUnused(id, 'the turn ended')
+      await this.questions.cancelPending(id, 'the turn ended', { refresh: false })
       await this.events.append(id, [
         event({
           type: 'error',

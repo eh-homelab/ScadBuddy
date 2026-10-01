@@ -41,6 +41,34 @@ test.describe('assistant panel (#256)', () => {
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
   })
 
+  // #940: the agent asks a structured question: a draft to approve, or to edit.
+  test('a draft to approve: Edit… returns the edited text, and the turn waits for it', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await composer.fill('Draft an issue about the thin name text')
+    await composer.press('Enter')
+
+    const card = panel.getByRole('region', { name: 'A question for you' })
+    await expect(card.getByRole('heading', { name: 'Name text too thin' })).toBeVisible()
+    await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for input')
+    const send = card.getByRole('button', { name: 'Send answer' })
+    await expect(send).toBeDisabled()
+
+    await card.getByRole('radio', { name: 'Edit…' }).check()
+    const box = card.getByRole('textbox', { name: 'Your answer' })
+    await expect(box).toHaveValue(/At \*\*10 mm\*\* the letters break off/)
+    await box.fill('## Name text breaks off below 12 mm')
+    await send.click()
+
+    const log = panel.getByRole('log', { name: 'Conversation' })
+    await expect(log.getByText('Updated the draft: "## Name text breaks off below 12 mm".')).toBeVisible()
+    await expect(card.getByRole('status')).toHaveText('Answered by You: ## Name text breaks off below 12 mm')
+    await expect(card.getByRole('radio')).toHaveCount(0)
+    await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
+  })
+
   // Spec §8.2: an outward step waits for a human. Deny must send nothing and say so;
   // the card keeps the decision, and its buttons do not come back (#259).
   test('Deny on the confirmation sends nothing and the turn ends', async ({ page }) => {
