@@ -10,7 +10,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
  *
  * This is the in-app channel only. OS notifications, the agent's own
  * `request_user_attention` tool and the tab-disconnected trigger are #815's later
- * parts.
+ * parts. Durable sessions and flows (the durable-agents spec) keep their pending
+ * approvals and `wait_for_human` in Temporal, not `ai_approvals`; when they land,
+ * `fetchPendingApprovals` is the one place that also counts those.
  */
 
 export const ATTENTION_PATH = '/api/v1/ai/approvals?pending=true'
