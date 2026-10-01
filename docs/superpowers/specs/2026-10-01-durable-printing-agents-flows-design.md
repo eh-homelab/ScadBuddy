@@ -250,8 +250,17 @@ The same for every kind:
        slow validation (a sluggish Bambuddy status read, say) cannot reproduce §1's 504.
 5. **Then** (or, for `done`, while the Update waits) the workflow carries on with its activities. Each transition is a guarded
    write to our record plus an event in the same transaction, the `render/projection.py`
-   pattern. Search Attributes `ScadbuddyKind`, `ScadbuddySubject` and `ScadbuddyStatus`
-   are upserted at each one.
+   pattern. Search Attributes are upserted at each transition.
+   - **Every kind carries the same three:** `ScadbuddyKind` (`render`, `print`,
+     `flow`, `session`, or an `operations` kind), `ScadbuddySubject` (the slug, output
+     id, `library:<file id>`, definition id or session id) and `ScadbuddyStatus`.
+     They hold no content, only identifiers and states, because Search Attributes
+     are not passed through the payload codec (§6.5).
+   - A kind with its own needs adds typed attributes on top, never instead. Prints
+     add `ScadbuddyMayHaveQueued` (Bool); flows add `ScadbuddyFlow` (the definition's
+     name).
+   - So one Visibility query (`ScadbuddySubject = "<x>" AND ScadbuddyStatus = "running"`)
+     finds every in-flight command of every kind for that subject.
 
 **Our record.**
 - A kind that already has its own table writes that: `render_jobs`, `print_runs`,
@@ -282,7 +291,7 @@ The template spec §9's containment rule, applied to every command:
 | `render` | `scadbuddy-render` | renders, previews, Arrange | store key; runs template code |
 | `library` | `scadbuddy-library`, a container in the API pod (it needs `scadbuddy-data`, which is RWO) | model create/import/patch/duplicate/delete, source and file writes, thumbnail/readme/media writes, preset writes that need `openscad`, version restore, upstream merge/dismiss/detach, library pin/repin/unpin/remove, font install, the sweeps | the data volume and git; no Bambuddy key; runs no template code |
 | `bambuddy` | `scadbuddy-print` (§5.5) | prints, send, project file, create project, file into project, Bambuddy part of output delete, reprint, timelapse pull, sidebar registration, analyzer fix apply | full Bambuddy key |
-| `agent-tools`, `agent` | agent pod (§6) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
+| `agent-tools`, `agent` | `agent-tools`: the agent service's sidecar; `agent`: the `scadbuddy-agent-durable` Deployment (§6.2) | tool calls, sessions, plugin package install/approve (a git fetch) | agent secrets, Anthropic credential |
 | `projects` | `scadbuddy.worker --queue projects` | flows (§7) | nothing outward; the KEK, read-only, only to encrypt flow payloads (§6.5) |
 
 Git writes to one model's history still take the catalogue's existing lock inside the
@@ -348,6 +357,8 @@ The rest:
     superseded it finds the pieces they share already rendered.
   - This is template spec §3.3's behaviour, with the cancellation decided by the
     workflow instead of by the API.
+- Each execution carries §4.2's `ScadbuddyKind = render`, `ScadbuddySubject` (the slug)
+  and `ScadbuddyStatus`.
 - `render_key` is the content-keyed exception of §4.2, so there is no `request_id`.
   `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap them).
 
@@ -442,10 +453,10 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
     (`core/settings.py:218`), and is shown in days in Settings → Printing.
   - Empty, the default, keeps every row: the rows become the start of print history
     (#305, #912). A number prunes older rows.
-- **Visibility:** custom Search Attributes `ScadbuddySource` (Keyword),
-  `ScadbuddyOutputId` (Keyword), `ScadbuddyLibraryFileId` (Int), `ScadbuddyStatus`
-  (Keyword) and `ScadbuddyMayHaveQueued` (Bool). They are set at start and upserted at
-  each transition, and registered on the namespace in `eh-homelab/clusters`.
+- **Visibility:** §4.2's `ScadbuddyKind = print`, `ScadbuddySubject` (the output id or
+  `library:<file id>`) and `ScadbuddyStatus`, plus `ScadbuddyMayHaveQueued` (Bool).
+  They are set at start and upserted at each transition. All of §4.2's attributes are
+  registered on the namespace in `eh-homelab/clusters`.
 - **Archival:** history and visibility archival on the `scadbuddy` namespace, with the
   S3 provider on DO Spaces under its own prefix. A closed run's history is then readable
   after the 168h retention. The bucket, prefix and credentials item are a clusters
@@ -506,7 +517,18 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 - `DurableSession`, workflow ID `session-<ai_sessions.id>`, on queue `agent`, in a new
   Python package `agent-durable/`. It is shipped as the Dockerfile target
-  `agent-durable` and runs as a second container in the agent pod.
+  `agent-durable` and runs as **its own Deployment, `scadbuddy-agent-durable`**. It is
+  not a container in the ScadBuddy pod, because a NetworkPolicy selects pods, not
+  containers.
+  - The ScadBuddy pod already holds the backend and the `agent` sidecar (AI spec
+    §4.1). Both need egress that this runtime must not have: Bambuddy, DO Spaces,
+    remote MCP plugins.
+  - With its own pod, §6.3a's NetworkPolicy applies to this runtime alone.
+  - It needs nothing on `localhost`: tool calls reach the agent service as activities
+    on `agent-tools` (§6.3), events go to Postgres (`ai_session_events`), and it reads
+    nothing from the data volume.
+  - It runs at one replica to start. More replicas are safe: the session store is in
+    Postgres, and each worker's `cwd` is the same fixed path.
   - It is built on `DurableClaudeAgent` with `auto_continue_as_new` and
     `live_output=True`.
   - Each user message is an Update, `send_message`. Between messages it calls
@@ -754,8 +776,9 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
     workflow_id, created_at, updated_at)`, written by the workflow's activities.
 
   Creates follow §5.1: `POST /runs` is update-with-start, and the first activity
-  type-checks, inserts the row and publishes the event. Search Attributes
-  `ScadbuddyFlow` and `ScadbuddyStatus` are set on each run.
+  type-checks, inserts the row and publishes the event. Each run carries §4.2's
+  `ScadbuddyKind = flow`, `ScadbuddySubject` (the definition id) and
+  `ScadbuddyStatus`, plus `ScadbuddyFlow` (the definition's name).
 - **Routes:** `POST /api/v1/workflows`, `GET /api/v1/workflows`,
   `POST /api/v1/workflows/{id}/runs`, `GET /api/v1/workflow-runs/{id}` and
   `POST /api/v1/workflow-runs/{id}/answer`. Each gets a tool, as the coverage test
