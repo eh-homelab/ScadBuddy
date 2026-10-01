@@ -287,8 +287,9 @@ With `SCADBUDDY_VERIFY_RECORD_DIR` set, it also writes each file's `GET /library
 body as `store-file-verify.svg.json`, `store-file-verify.png.json` and
 `store-file-verify.zip.json`; list them in the measured section's table.
 
-If the last row reads `accepted (!)`, that upload is not among the files the script
-deletes: remove `x.zip` from Bambuddy's library by hand.
+If the last row reads `accepted (!)`, that upload is deleted with the rest. A delete
+that fails does not stop the others: the JSON on stderr lists it under `failed`, and the
+script exits 1; remove those files by hand.
 
 **Two limits of the script** (follow-up: fix `verify_bambuddy.py`):
 - The re-upload rebuilds the zip with a fresh timestamp, so its bytes can differ, and a
