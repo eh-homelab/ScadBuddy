@@ -4,7 +4,7 @@ import { keychainSchema } from '../mocks/fixtures'
 import type { HostDeps } from './host'
 import { setUiModuleLoader } from './loadModule'
 import { TemplateUi } from './TemplateUi'
-import type { Mount } from './types'
+import type { Host, Mount } from './types'
 
 const UI = { module: 'ui/index.js', slot: 'panel' as const, api: 1 }
 
@@ -89,5 +89,60 @@ describe('TemplateUi', () => {
     unmount()
     expect(cleanup).toHaveBeenCalledOnce()
     expect(root.childNodes.length).toBe(0)
+  })
+
+  it('gives a host kept after a template switch nothing of the next template', async () => {
+    let kept: Host | undefined
+    withModule((root, host) => {
+      kept ??= host
+      root.append(document.createElement('span'))
+    })
+    const a = deps()
+    const b = { ...deps(), slug: 'other', getInputs: () => ({ params: { name: 'B' } }) }
+    const { container, rerender } = render(
+      <TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={a} inputs={{ params: {} }} onFailure={vi.fn()} />,
+    )
+    await waitFor(() => expect(kept).toBeDefined())
+    rerender(<TemplateUi slug="other" ui={UI} version={undefined} deps={b} inputs={{ params: {} }} onFailure={vi.fn()} />)
+    await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
+    const old = kept as Host
+    expect(() => old.inputs.get()).toThrow(/unmounted/)
+    await expect(old.schema()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.list()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.save('x')).rejects.toThrow(/unmounted/)
+    await expect(old.presets.load('x')).rejects.toThrow(/unmounted/)
+    expect(b.presets.list).not.toHaveBeenCalled()
+    expect(b.presets.save).not.toHaveBeenCalled()
+  })
+
+  it('keeps a slow mount of the previous template out of the next one\'s root', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    setUiModuleLoader(async (url) => ({
+      mount: url.includes('/models/old/')
+        ? async (root: ShadowRoot) => {
+            await gate
+            const p = document.createElement('p')
+            p.textContent = 'old'
+            root.append(p)
+          }
+        : (root: ShadowRoot) => {
+            const p = document.createElement('p')
+            p.textContent = 'new'
+            root.append(p)
+          },
+    }))
+    const props = { ui: UI, version: undefined, inputs: { params: {} }, onFailure: vi.fn() }
+    const { container, rerender } = render(<TemplateUi slug="old" deps={deps()} {...props} />)
+    await waitFor(() => expect(container.querySelector('[data-testid="template-ui"]')).not.toBeNull())
+    rerender(<TemplateUi slug="next" deps={deps()} {...props} />)
+    await waitFor(() => expect(shadow(container).textContent).toBe('new'))
+    release()
+    await gate
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(shadow(container).textContent).toBe('new')
+    expect(container.querySelectorAll('[data-testid="template-ui"]')).toHaveLength(1)
   })
 })

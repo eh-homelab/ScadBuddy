@@ -49,13 +49,24 @@ function checkedParams(schema: CustomizerSchema, patch: JsonObject): void {
   }
 }
 
+function unmounted(): Error {
+  return new Error('the template UI is unmounted')
+}
+
 export function createHost(deps: HostDeps): HostHandle {
   const listeners = new Set<(inputs: JsonObject) => void>()
   let live = true
+  /** Every call checks it: a disposed host never reads or acts on the page again. */
+  function alive(): void {
+    if (!live) throw unmounted()
+  }
   const host: Host = {
     api: UI_API_CURRENT,
     inputs: {
-      get: () => structuredClone(deps.getInputs()),
+      get: () => {
+        alive()
+        return structuredClone(deps.getInputs())
+      },
       set: (patch) => {
         if (!live) {
           console.warn('ScadBuddy: a template UI wrote its inputs after it was unmounted; ignored')
@@ -67,6 +78,7 @@ export function createHost(deps: HostDeps): HostHandle {
         deps.setInputs(next)
       },
       subscribe: (fn) => {
+        if (!live) return () => undefined
         listeners.add(fn)
         return () => {
           listeners.delete(fn)
@@ -74,20 +86,21 @@ export function createHost(deps: HostDeps): HostHandle {
       },
     },
     schema: async (file = 'model.scad') => {
+      alive()
       if (file !== 'model.scad') {
         throw new Error(`only model.scad has a customizer schema in host API v1, not ${file}`)
       }
       return deps.getSchema()
     },
     files: { url: (path) => api.uiFileUrl(deps.slug, deps.version, checkedUiPath(path)) },
-    generate: () => (live ? deps.generate() : Promise.reject(new Error('the template UI is unmounted'))),
+    generate: () => (live ? deps.generate() : Promise.reject(unmounted())),
     openPrint: (outputId) => {
       if (live) deps.openPrint(outputId)
     },
     presets: {
-      list: () => deps.presets.list(),
-      save: (name) => deps.presets.save(name),
-      load: (id) => deps.presets.load(id),
+      list: () => (live ? deps.presets.list() : Promise.reject(unmounted())),
+      save: (name) => (live ? deps.presets.save(name) : Promise.reject(unmounted())),
+      load: (id) => (live ? deps.presets.load(id) : Promise.reject(unmounted())),
     },
     describe: (fn) => {
       if (live) deps.onDescribe(fn)
