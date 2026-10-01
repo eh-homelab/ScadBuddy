@@ -259,9 +259,47 @@ new serialises across models.
 - `TemplatePipeline` continues;
 - `RenderService`'s insert-then-start and `reconcile_once` are deleted.
 
-`render_key` coalescing becomes the workflow ID: `render-<render_key>` attaches identical
-jobs (the content-keyed exception of §4.2, with no `request_id`), and `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap
-them).
+**Coalescing, claims and superseding move into the workflow.** Today they live in the
+row (template spec §3.3: `claims + 1` on a pending row with the same `render_key`; a
+`supersedes` request releases a claim; the last release marks the row `cancelled` and
+cancels the workflow). The template spec chose insert-then-start over start-first for
+two reasons, and both are answered here:
+
+- *"Coalescing and claim counting would then live in two systems."* They live in one,
+  the workflow.
+  - `TemplatePipeline` is started as `render-<render_key>` with `USE_EXISTING`, so every
+    request for the same content reaches the same execution.
+  - Its `accepted` Update adds one claim, in workflow state. A workflow's handlers run
+    one at a time, so that count is exact, as the `claims + 1` row update was.
+  - The row's `claims` column becomes a projection of that count, written with each
+    change.
+- *"A `GET /jobs/{id}` between the start and the first activity would 404."* It cannot.
+  The route answers only after the `accepted` Update returns, and that is after the first
+  activity inserted the row (§4.2 step 3).
+
+The rest:
+- **The first request** of an execution runs the first activity. It resolves the
+  revision and schema, checks `render_queue_max`, inserts the row with a new job id, and
+  publishes the event.
+  - The queue check is the same counted insert under the same lock as
+    `JobProjection.submit`'s today (`render/projection.py:134`), so a full queue is still a 429 with `Retry-After`
+    (`QueueFullError`), and nothing is started.
+  - **A later request** that reaches the open execution gets that row back with
+    `coalesced: true` and one more claim. This is today's response.
+  - The job id stays unique per job. A request for the same content after the
+    execution has closed starts a new execution under the same workflow ID
+    (`ALLOW_DUPLICATE` reuse), with a new job id. Today, too, only an unfinished row
+    coalesces.
+- **Superseding.** A request naming `supersedes: <job id>` (and `RenderService.cancel`, `submit.py:163`) looks
+  up that row's `workflow_id` and run id and sends that execution the `release` Update.
+  - `release` takes off one claim. At zero the workflow writes `cancelled` through its
+    projection activity and stops at the next activity boundary.
+  - Its `RenderPiece` children are left to finish (`ABANDON`), so the request that
+    superseded it finds the pieces they share already rendered.
+  - This is template spec §3.3's behaviour, with the cancellation decided by the
+    workflow instead of by the API.
+- `render_key` is the content-keyed exception of §4.2, so there is no `request_id`.
+  `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap them).
 
 ## 5. Printing on Temporal
 
