@@ -154,11 +154,12 @@ the wrong color beats a hardened one holding the right color.
 
 "Let Bambuddy pick" opts out of the ranking, and with it the material choice:
 Bambuddy's rule knows nothing about abrasive filaments. ScadBuddy still runs the
-material test, and when a group is abrasive and the rack holds no nozzle known
-to be hardened for it, the run carries `rack-unsafe-material` ("Bambuddy will
-pick the nozzle; none in the rack is known to be hardened for <material>"), as
-the ranked algorithms do. It cannot tell which position Bambuddy will take, so
-it warns on the rack, not on a pick. The trade is stated so it is chosen
+material test, and when a group is abrasive and **any** eligible position for it
+holds a nozzle not known to be hardened, the run carries `rack-unsafe-material`
+("Bambuddy picks the nozzle and may use a non-hardened one for <material>").
+It cannot tell which position Bambuddy will take, so it warns whenever Bambuddy
+could take an unsafe one; only a rack whose every eligible position is known
+hardened stays silent. The trade is stated so it is chosen
 knowingly: this algorithm exists for a user who wants Bambuddy's behavior back,
 and it never sends a choice.
 
@@ -474,7 +475,14 @@ fixtures (which use invented serials), or in commits.
 |---|---|---|---|
 | 1 | What do the `nozzle_type` codes say about material? | The owner reads each rack position's hotend label and records code → material here. Bambuddy does not decode it: it reads only the two-letter flow prefix (`slot_nozzle.py`), and its one remark, that `HH01` is "hardened steel high-flow" (`bambu_mqtt.py`), is not enough to call `HS00` or `HS01` hardened | **Gate, not a blocker.** `rack.py` ships with the table **empty**, so every code counts as not hardened: abrasive groups always get `rack-unsafe-material`, never a silent brass pick. The implementation plan's first task asks the owner for the labels; filling the table is a one-line data change once they are known |
 | 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color. On an unsliced upload (files 240, 251) `group_id`, `group` and `type` are all empty, which is why the pick is made after the slice (§5) |
-| 3 | Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
+| 3 | **Gate: settle before building `rack.py`, `rack_usage.py` or the migrations.** Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
+
+**Build order.** Unknown 3 is what the whole feature rests on, so the
+implementation plan settles it first: its first task is the live pick test
+below (one print, with the owner's OK), using a hand-written
+`nozzle_rack_choice` and no new code. If the printer ignores the pick, the plan
+stops there and this spec is revised to warnings only ("If it fails" column).
+Unknown 1 does not gate the build: it ships with an empty table (above).
 
 ## 9. Testing
 
@@ -489,9 +497,10 @@ fixtures (which use invented serials), or in commits.
   - an unknown code counted as not hardened, and with the empty table every
     code is unknown;
   - Least used breaking a `print_seconds` tie on `prints`;
-  - "Let Bambuddy pick" sending no choice, and still warning
-    `rack-unsafe-material` for an abrasive group on a rack with no known
-    hardened nozzle;
+  - "Let Bambuddy pick" sending no choice, and for an abrasive group warning
+    `rack-unsafe-material` on a rack with no known hardened nozzle **and** on a
+    rack with one hardened and one non-hardened eligible position; silent only
+    when every eligible position is known hardened;
   - Oldest and Newest first ordering on `first_seen_at`, with an unseen serial
     last and first respectively;
   - `PLA-CF`, `PA6-CF` and `ABS-GF` abrasive, `PLA` and `PLA-AERO` not;
