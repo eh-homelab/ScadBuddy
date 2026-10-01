@@ -10,7 +10,7 @@ import signal
 from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import uvicorn
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -42,7 +42,7 @@ from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.client import connect, drained, make_current, render_worker
+from scadbuddy.workflows.client import connect, drained, is_current, make_current, render_worker
 from scadbuddy.workflows.pipelines import TRANSFER
 
 if TYPE_CHECKING:
@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 HEALTH_PORT = 9090
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
+#: How long a stopping worker whose build is still current keeps serving its pinned
+#: runs before leaving them to the next pod of the same build.
+DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
 #: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
@@ -160,17 +163,34 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
     )
 
 
-async def _wait_drained(
-    is_drained: Callable[[], Awaitable[bool]], *, timeout: float, poll: float
-) -> bool:
-    """Poll `is_drained` until it says so (True) or `timeout` passes (False)."""
+DrainOutcome = Literal["drained", "current", "timed_out"]
+
+
+async def _drain(
+    still_current: Callable[[], Awaitable[bool]],
+    is_drained: Callable[[], Awaitable[bool]],
+    *,
+    timeout: float,
+    poll: float,
+    grace: float,
+) -> DrainOutcome:
+    """Poll until no run is pinned to this build (``drained``) or ``timeout`` passes
+    (``timed_out``). A build that is still, or again, current (``current``) ends it
+    too, because another worker of the same build serves its pinned runs (#874); but
+    only after ``grace``, during which this worker keeps serving them itself, in case
+    the pod that replaces it is slow to come, or never comes."""
+    loop = asyncio.get_running_loop()
+    trust_current_at = loop.time() + grace
     try:
         async with asyncio.timeout(timeout):
-            while not await is_drained():
+            while True:
+                if await is_drained():
+                    return "drained"
+                if loop.time() >= trust_current_at and await still_current():
+                    return "current"
                 await asyncio.sleep(poll)
     except TimeoutError:
-        return False
-    return True
+        return "timed_out"
 
 
 async def make_current_until_polled(
@@ -231,6 +251,13 @@ async def _poll(
             logger.warning("could not count this build's running workflows", exc_info=True)
             return False
 
+    async def still_current() -> bool:
+        try:
+            return await is_current(client, namespace=client.namespace, build_id=build_id)
+        except RPCError:
+            logger.warning("could not read the deployment's current build", exc_info=True)
+            return False
+
     async with worker:
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
@@ -257,14 +284,30 @@ async def _poll(
             return
 
         # A workflow is PINNED to the build that started it: one waiting between two
-        # activities is served by no other build, so keep polling until none is left.
+        # activities is served by no other build, so keep polling until none is left,
+        # unless this build is still current: a restart of the same build (a manifest
+        # change, a node drain) leaves its runs to the next pod of that build.
         drain_timeout = 2 * config.activity_timeout + 120
         logger.info(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
         )
-        if await _wait_drained(is_drained, timeout=drain_timeout, poll=DRAIN_POLL):
+        outcome = await _drain(
+            still_current,
+            is_drained,
+            timeout=drain_timeout,
+            poll=DRAIN_POLL,
+            grace=min(DRAIN_CURRENT_GRACE, drain_timeout),
+        )
+        if outcome == "drained":
             logger.info("drained", extra={"build_id": build_id})
+        elif outcome == "current":
+            logger.warning(
+                "stopping without draining: this build is still current, so its pinned"
+                " workflows are left to the next worker of this build; until one polls,"
+                " they wait",
+                extra={"build_id": build_id},
+            )
         else:
             logger.warning(
                 "drain timed out; exiting with workflows still running on this build",

@@ -345,15 +345,21 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
-  running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
+  running. If its build is still (or again) the current one, as on a restart of the
+  same build (a manifest change, a node drain), it stops after 30 s instead, because
+  the next pod of that build serves its pinned runs; it logs "stopping without
+  draining" then, so a pod that never comes back is visible. The drain lasts at
+  most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
   workflows still pinned to its build then have no poller, and their jobs stay
   `running` until that build polls again. Set `terminationGracePeriodSeconds` ≥
   `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
-  (e.g. 30 s): **690 s** at the default 120 s timeout. While a single replica drains
-  it is still current, so new renders keep landing on it; a rollout that starts
-  the new pod first (surge) lets it drain promptly.
+  (e.g. 30 s): **690 s** at the default 120 s timeout. Roll a new build out with
+  `RollingUpdate` and `maxSurge >= 1`, so the new build is current before the old
+  pod drains. Under `Recreate` the old build is still current when it stops, so it
+  stops after the 30 s, and the new build's pod makes itself current only after it
+  starts: runs pinned to the old build then have no poller.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.
