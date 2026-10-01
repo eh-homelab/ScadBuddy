@@ -17,11 +17,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.render.jobs import Job, JobStore
+from scadbuddy.render.job_models import Job
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -585,14 +586,12 @@ def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> Non
 
 
 def test_a_model_with_a_render_in_progress_cannot_be_deleted(
-    client: TestClient, model: str, paths: DataPaths
+    app: FastAPI, client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    # The test queue starts lazily, and starting fails every unfinished job left
-    # by a "previous run" -- so start it before planting the running one.
-    assert client.delete("/api/v1/models/missing").status_code == 404
-    store = JobStore(paths)
-    job = Job(id="a" * 32, slug=model, state="running", created_at=datetime.now(UTC))
-    store.write(job)
+    projection = getattr(app.state, STATE_ATTR).projection
+    job = Job(id="a" * 32, slug=model, created_at=datetime.now(UTC))
+    projection.submit(job, "planted")
+    assert projection.mark_started(job.id) is not None
 
     response = client.delete(f"/api/v1/models/{model}")
 
@@ -601,7 +600,7 @@ def test_a_model_with_a_render_in_progress_cannot_be_deleted(
     assert paths.model_source(model).is_file()
 
     job.state = "done"
-    store.write(job)
+    assert projection.finish(job)
     assert client.delete(f"/api/v1/models/{model}").status_code == 204
 
 

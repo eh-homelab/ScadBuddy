@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,9 @@ DEFAULTS: dict[str, object] = {
     "display_unit": "mm",
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
+    "has_render_api_key": False,
+    "render_key_fallback": False,
+    "store_backend": "local",
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
@@ -248,3 +252,26 @@ def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> N
     response = client.post("/api/v1/settings/test")
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
+
+
+def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestClient) -> None:
+    body = client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test", "bambuddy_api_key": "full"},
+    ).json()
+    assert body["render_key_fallback"] is True
+    assert body["has_render_api_key"] is False
+    response = client.put("/api/v1/settings", json={"bambuddy_render_api_key": "narrow"})
+    body = response.json()
+    assert body["has_render_api_key"] is True
+    assert body["render_key_fallback"] is False
+    assert "narrow" not in response.text
+    # Named in `sources` and `applies` like every env-seeded field, never as a value.
+    assert "bambuddy_render_api_key" not in body
+    assert "narrow" not in json.dumps(body)
+
+
+def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestClient) -> None:
+    response = client.put("/api/v1/settings", json={"store_backend": "bambuddy"})
+    assert response.status_code == 422
+    assert "library folder" in response.json()["detail"]

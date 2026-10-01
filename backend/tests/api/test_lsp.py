@@ -22,8 +22,9 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library import lsp
 from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
+from tests.conftest import MODEL_SLUG
 
-from .conftest import MODEL_SLUG, set_fake_env
+from .conftest import set_fake_env
 
 # A stand-in for openscad-lsp: it speaks the same Content-Length framing on stdio and
 # answers every request with what it saw, so a test can read the server's side of the

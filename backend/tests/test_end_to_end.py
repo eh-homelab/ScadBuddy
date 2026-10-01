@@ -8,30 +8,22 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render import jobs
 from scadbuddy.render.bambu3mf import write_plates_3mf
-from scadbuddy.render.jobs import Job, JobResult, RenderQueue
-from tests.conftest import FIXTURES, installed_font_families
+from scadbuddy.render.jobs import Job, JobResult
+from scadbuddy.render.schema import ParamValue
+from tests.conftest import FIXTURES, installed_font_families, render_once
 
 SLUG = "name_keychain"
 KEYCHAIN_MODEL = Path(__file__).resolve().parents[2] / "models" / "name-keychain" / "model.scad"
 pytestmark = pytest.mark.requires_openscad
 
 
-async def _render(paths: DataPaths, slug: str, params: dict[str, object]) -> tuple[Job, JobResult]:
-    queue = RenderQueue(Config(openscad=load_config().openscad, data_dir=paths.root), paths)
-    await queue.start()
-    try:
-        job = await queue.submit(slug, params)  # type: ignore[arg-type]
-        await queue.join()
-    finally:
-        await queue.aclose()
-    done = queue.store.read(job.id)
-    assert done.state == "done", done.error
-    assert done.result is not None
-    return done, done.result
+async def _render(
+    paths: DataPaths, slug: str, params: dict[str, ParamValue]
+) -> tuple[Job, JobResult]:
+    return await render_once(paths, slug, params)
 
 
 @pytest.fixture

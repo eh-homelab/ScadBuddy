@@ -1035,7 +1035,7 @@ BOTH_04_LEFT_HF = {
     ]
 }
 #: The kinds the removed nozzle checks warned with; none may come back.
-NOZZLE_KINDS = {"side-unknown", "hf-unsupported"}
+NOZZLE_KINDS = {"side-unknown", "hf-unsupported", "hf-mounted"}
 
 
 def _two_colour_run(
@@ -1166,10 +1166,10 @@ def test_a_single_nozzle_printers_other_size_is_not_refused(client: TestClient, 
 
 
 HF_LEFT = (
-    "The left nozzle is High Flow. ScadBuddy slices for standard nozzles until High Flow "
-    "slicing is supported (#484), so if the print uses the left, the printer pauses at the "
-    'first layer ("the left nozzle is not matched with slicing file"). Fit a standard '
-    "nozzle there before it starts."
+    "The left nozzle is High Flow and this print is sliced for Standard flow (High Flow "
+    "slicing isn't supported yet, #484), so if it prints on the left, the printer pauses "
+    'at the first layer ("the left nozzle is not matched with slicing file"). Fit a '
+    "standard nozzle there before it starts."
 )
 
 
@@ -1187,8 +1187,28 @@ def test_a_mounted_high_flow_nozzle_of_the_size_is_warned_about_not_refused(
 
     assert response.status_code == 200, response.text
     warnings = [(w["kind"], w["message"]) for w in response.json()["warnings"]]
-    assert ("hf-unsupported", HF_LEFT) in warnings
+    assert ("hf-mounted", HF_LEFT) in warnings
     assert "side-unknown" not in _kinds(response)
+
+
+@respx.mock
+def test_the_high_flow_warning_changes_nothing_the_run_sends(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#797: the advisory never refuses, and the upload is the one a standard left gets."""
+    _status(**{**BOTH_04_LEFT_HF, "nozzles": [BOTH_04_LEFT_HF["nozzles"][0]] * 2})
+    _, upload = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
+    )
+    standard = _uploaded_settings(upload)
+    _status(**BOTH_04_LEFT_HF)
+    response, upload = _two_colour_run(
+        client, model, paths, BOTH_ON_RIGHT, nozzles=[{"size": "0.4"}], tier="standard"
+    )
+
+    assert response.status_code == 200, response.text
+    assert "hf-mounted" in _kinds(response)
+    assert _uploaded_settings(upload) == standard
 
 
 @respx.mock
@@ -1265,27 +1285,78 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
     assert not upload.called
 
 
+def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(tier="standard", **choices), "filament_plan": ONE_ON_LEFT},
+    )
+    return response
+
+
 @respx.mock
 def test_the_check_carries_the_high_flow_warning(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    """#723: the run's one mounted-nozzle advisory is said before Print too."""
+    """#723, #797: a mounted High Flow nozzle of the chosen size is said before Print,
+    as a warning that holds nothing."""
     output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
     _status(**BOTH_04_LEFT_HF)
 
-    check = client.post(
-        f"/api/v1/print/outputs/{output_id}/check",
-        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "filament_plan": ONE_ON_LEFT},
-    )
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "standard"}])
 
     assert check.status_code == 200, check.text
     assert check.json() == {
         "errors": [],
-        "warnings": [{"kind": "hf-unsupported", "slot_id": None, "message": HF_LEFT}],
+        "warnings": [{"kind": "hf-mounted", "slot_id": None, "message": HF_LEFT}],
     }
     assert not upload.called
+
+
+@respx.mock
+def test_the_check_says_nothing_of_standard_mounted_nozzles(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(nozzles=[BOTH_04_LEFT_HF["nozzles"][0]] * 2)
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4"}])
+
+    assert check.status_code == 200, check.text
+    assert check.json() == {"errors": [], "warnings": []}
+
+
+@respx.mock
+def test_the_check_carries_the_high_flow_warning_when_high_flow_is_chosen(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#797: the slice is always Standard flow (#484), so a High Flow choice still warns
+    of a mounted High Flow nozzle of the chosen size."""
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    _status(**BOTH_04_LEFT_HF)
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4", "flow": "high_flow"}])
+
+    assert check.status_code == 200, check.text
+    assert "hf-mounted" in {warning["kind"] for warning in check.json()["warnings"]}
+
+
+@respx.mock
+def test_the_check_gives_no_high_flow_warning_when_the_status_is_unreadable(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """No side is assumed: an unreadable status is no nozzle known, so no warning."""
+    output_id = two_colour_output(client, model, paths)
+    run_routes()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+
+    check = _check(client, output_id, nozzles=[{"size": "0.4"}])
+
+    assert check.status_code == 200, check.text
+    assert check.json()["warnings"] == []
 
 
 @respx.mock

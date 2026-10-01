@@ -38,8 +38,10 @@ def reference() -> str:
     # (`APPLIES`, #322); a bootstrap field is read from the environment only.
     lines = ["| Variable | Type | Default | In Settings |", "|---|---|---|---|"]
     for name, field in Settings.model_fields.items():
-        # Its default is "" only so the validator can say what to set (#401).
-        default = PydanticUndefined if name == "database_url" else field.default
+        # A required field defaults to "" only so its validator can say what to set
+        # (#401, #546).
+        required = field.validate_default and field.default == ""
+        default = PydanticUndefined if required else field.default
         env = f"{prefix}{name}".upper()
         ui = "no" if name in BOOTSTRAP_FIELDS else APPLIES[name]
         lines.append(f"| `{env}` | `{_type_name(field.annotation)}` | {_default(default)} | {ui} |")

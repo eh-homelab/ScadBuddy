@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -43,7 +44,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     PresetsDep,
     PrintLinksDep,
-    QueueDep,
+    RenderDep,
     SlugPath,
     UploadsDep,
 )
@@ -116,13 +117,15 @@ from scadbuddy.library.upstream import (
 )
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
+    RESOLVE_TIMEOUT,
     ImportRefusedError,
     ResolverBusyError,
     fetch_model,
 )
-from scadbuddy.render.jobs import RenderQueue, resolve_source
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
+from scadbuddy.render.submit import RenderService
 
 logger = logging.getLogger(__name__)
 
@@ -783,17 +786,18 @@ async def _create(
     return record
 
 
-#: What a 503 from a full import budget says to wait. A fetch ends within
-#: `IMPORT_TIMEOUT`, most within a second or two.
-IMPORT_RETRY_AFTER = 5
+#: What a 503 for busy resolver threads says to wait: as long as an import gives a
+#: lookup (#631). A full import budget says instead when its oldest fetch must end
+#: (`ImportPermits.retry_after`).
+RESOLVER_RETRY_AFTER = math.ceil(RESOLVE_TIMEOUT)
 
 
-def _import_busy(why: str) -> ApiError:
+def _import_busy(why: str, retry_after: int) -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
-        f"{why}; try again in {IMPORT_RETRY_AFTER} s",
-        headers={"Retry-After": str(IMPORT_RETRY_AFTER)},
-        retry_after=IMPORT_RETRY_AFTER,
+        f"{why}; try again in {retry_after} s",
+        headers={"Retry-After": str(retry_after)},
+        retry_after=retry_after,
     )
 
 
@@ -840,9 +844,12 @@ async def import_model(
     # No await between the check and the acquire, so nothing can take the permit in
     # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
     # spend its wait against the client's patience, not the import's deadline.
-    if imports.locked():
-        raise _import_busy(f"{IMPORT_CONCURRENCY} imports are already fetching on this replica")
-    async with imports:
+    if imports.full():
+        raise _import_busy(
+            f"{IMPORT_CONCURRENCY} imports are already fetching on this replica",
+            imports.retry_after(),
+        )
+    with imports.hold():
         try:
             imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
         except ImportRefusedError as error:
@@ -851,7 +858,9 @@ async def import_model(
             # Library installs vet clone URLs on the same resolver threads. None free
             # is decided before the host is looked up, so it says nothing about the
             # host: the same retry as a full import budget, not the refusal.
-            raise _import_busy("every resolver thread on this replica is busy") from None
+            raise _import_busy(
+                "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
+            ) from None
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(
@@ -1041,7 +1050,7 @@ def duplicate_model(
 async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
-    queue: QueueDep,
+    render: RenderDep,
     outputs: OutputsDep,
     uploads: UploadsDep,
     links: PrintLinksDep,
@@ -1050,7 +1059,7 @@ async def delete_model(
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
-    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, render, outputs, force)
     # Its outputs went with it; so do their Bambuddy upload records (#455) and print
     # links (#306). Bambuddy's own files and archives are left alone, as a single
     # output's delete leaves them unless asked. Best effort, like the rest of the
@@ -1072,7 +1081,7 @@ async def delete_model(
 
 
 def _delete_model(
-    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+    slug: str, catalogue: Catalogue, render: RenderService, outputs: OutputStore, force: bool
 ) -> list[str]:
     """The blocking part of :func:`delete_model`; returns the ids of the outputs it
     removed, read before their directories go."""
@@ -1090,7 +1099,7 @@ def _delete_model(
             )
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
-    if queue.store.has_unfinished(slug):
+    if render.store.has_unfinished(slug):
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )

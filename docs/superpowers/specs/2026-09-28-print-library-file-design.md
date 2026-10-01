@@ -35,7 +35,7 @@ could be printed that way.
 | Slots | `filament-requirements` of the uploaded copy, colors from `meta.colors` | `filament-requirements` of the file itself |
 | Replate for the printer (#105) | yes | no: the file is laid out as its author left it |
 | Recolor for the spools (#476) | yes | no: the plate thumbnail keeps the file's colors |
-| Nozzle refusals (#469) | none: the run no longer checks the mounted nozzles (#768) | none |
+| Nozzle refusals (#469) | none: the run refuses nothing on the mounted nozzles (#768); it only warns of a mounted High Flow nozzle with Standard flow chosen (#797) | none; the same warning |
 | Remembered choices | per model slug | per library file id |
 | Where the run is recorded | the output's `meta.json` (progress, History) | nowhere in ScadBuddy; Bambuddy's queue and archives (#305 owns print history) |
 

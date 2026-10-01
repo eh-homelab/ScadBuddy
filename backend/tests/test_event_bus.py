@@ -1,19 +1,16 @@
 """The event bus (#264, #266): fan-out, bounded queues, thread-safe publishing, and
-the publishers that live below the API (the render queue, the history, settings)."""
+the publishers that live below the API (the history, settings)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
-from scadbuddy.core.config import load_config
 from scadbuddy.core.events import (
     EVENT_KINDS,
     Event,
@@ -28,14 +25,12 @@ from scadbuddy.core.events import (
     emit,
     encode_event,
 )
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
-from scadbuddy.render.job_store import JobStore, Reaped
-from scadbuddy.render.jobs import Job, JobResult, RenderQueue
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 
 def _model(slug: str, kind: str = "model.updated") -> ModelEvent:
@@ -242,151 +237,8 @@ def _record(bus: InProcessEventBus) -> list[Event]:
     return seen
 
 
-async def test_the_render_queue_announces_each_state(tmp_path: Path) -> None:
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    paths = DataPaths(tmp_path)
-
-    async def render(job: Job) -> tuple[JobResult, list[str]]:
-        if job.slug == "broken":
-            raise RuntimeError("no")
-        result = JobResult.model_validate(
-            {
-                "model_3mf": "a",
-                "preview_glb": "b",
-                "parts": [],
-                "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
-            }
-        )
-        return result, []
-
-    queue = RenderQueue(load_config(), paths, render=render, events=bus)
-    await queue.start()
-    try:
-        done = await queue.submit("demo", {})
-        failed = await queue.submit("broken", {})
-        await queue.join()
-    finally:
-        await queue.aclose()
-
-    announced = [(e.kind, e.job_id) for e in seen if isinstance(e, JobEvent)]
-    assert announced.count(("job.pending", done.id)) == 1
-    assert ("job.running", done.id) in announced
-    assert ("job.done", done.id) in announced
-    assert ("job.failed", failed.id) in announced
-    assert announced.index(("job.running", done.id)) < announced.index(("job.done", done.id))
-
-
 def _jobs(seen: list[Event]) -> list[tuple[str, str]]:
     return [(e.kind, e.job_id) for e in seen if isinstance(e, JobEvent)]
-
-
-async def test_a_superseded_job_is_announced_so_nobody_waits_on_it(tmp_path: Path) -> None:
-    """#267: a job a newer submit replaced before it started must end for whoever
-    follows it, or the UI waits forever."""
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    queue = RenderQueue(load_config(), DataPaths(tmp_path), events=bus)  # no workers
-    try:
-        first = await queue.submit("demo", {"width": 1})
-        second = await queue.submit("demo", {"width": 2}, supersedes=first.id)
-    finally:
-        queue.close_thumbnails()
-
-    assert _jobs(seen) == [
-        ("job.pending", first.id),
-        ("job.superseded", first.id),
-        ("job.pending", second.id),
-    ]
-
-
-async def test_a_coalesced_submit_publishes_nothing_new(tmp_path: Path) -> None:
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    queue = RenderQueue(load_config(), DataPaths(tmp_path), events=bus)
-    try:
-        first = await queue.submit("demo", {"width": 1})
-        again = await queue.submit("demo", {"width": 1})
-    finally:
-        queue.close_thumbnails()
-
-    assert again.id == first.id
-    assert _jobs(seen) == [("job.pending", first.id)]
-
-
-async def test_a_job_that_waited_past_its_deadline_is_failed_without_running(
-    tmp_path: Path,
-) -> None:
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    config = replace(load_config(), render_queue_timeout=1.0)
-    queue = RenderQueue(config, DataPaths(tmp_path), events=bus)
-    try:
-        job = await queue.submit("demo", {})
-        claimed = queue.store.claim()
-        assert claimed is not None
-        claimed.created_at = claimed.created_at - timedelta(minutes=5)
-        await queue._run(claimed)
-    finally:
-        queue.close_thumbnails()
-
-    assert _jobs(seen) == [("job.pending", job.id), ("job.failed", job.id)]
-
-
-class _LosesOneWorker(JobStore):
-    """The file store, but its first reap finds the running job's worker gone and
-    requeues it, as the Postgres store does when a lease expires."""
-
-    def __init__(self, paths: DataPaths) -> None:
-        super().__init__(paths)
-        self.lost: Job | None = None
-
-    def reap(self, *, lease: float, max_attempts: int) -> Reaped:
-        if self.lost is None:
-            return Reaped()
-        lost, self.lost = self.lost, None
-        return Reaped(requeued=[lost])
-
-
-async def test_a_requeued_job_is_pending_again_and_a_reaped_failure_is_failed(
-    tmp_path: Path,
-) -> None:
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    store = _LosesOneWorker(DataPaths(tmp_path))
-    config = replace(load_config(), render_lease_timeout=0.03)
-    queue = RenderQueue(config, DataPaths(tmp_path), store=store, events=bus)
-    requeued = Job(id="a" * 32, slug="demo", created_at=datetime.now(UTC))
-    store.lost = requeued
-    await queue.start()
-    try:
-        for _ in range(100):
-            if ("job.pending", requeued.id) in _jobs(seen):
-                break
-            await asyncio.sleep(0.01)
-    finally:
-        await queue.aclose()
-    assert ("job.pending", requeued.id) in _jobs(seen)
-
-    # The reaper's other outcome: out of attempts, failed.
-    seen.clear()
-    queue._settled(requeued, "failed")
-    assert _jobs(seen) == [("job.failed", requeued.id)]
-
-
-async def test_a_restart_announces_the_jobs_it_failed(tmp_path: Path) -> None:
-    paths = DataPaths(tmp_path)
-    first = RenderQueue(load_config(), paths)
-    job = await first.submit("demo", {})  # never started: no workers
-    first.close_thumbnails()
-
-    bus = InProcessEventBus()
-    seen = _record(bus)
-    second = RenderQueue(load_config(), paths, events=bus)
-    await second.start()
-    await second.aclose()
-
-    assert [(e.kind, e.job_id) for e in seen if isinstance(e, JobEvent)] == [("job.failed", job.id)]
 
 
 def test_every_settings_write_is_announced_with_its_section(
@@ -394,7 +246,12 @@ def test_every_settings_write_is_announced_with_its_section(
 ) -> None:
     bus = InProcessEventBus()
     seen = _record(bus)
-    store = SettingsStore(Settings(data_dir=tmp_path, database_url=pg_conninfo), events=bus)
+    store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ),
+        events=bus,
+    )
     store.open()
     try:
         store.save(SettingsPatch(public_url="https://scad.example"))

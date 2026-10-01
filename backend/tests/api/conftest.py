@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -13,101 +15,25 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR, get_queue
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from scadbuddy.render.bambu3mf import write_bambu_3mf
-from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobResult, JobStore, PartInfo, RenderQueue
-from scadbuddy.render.provenance import source_version
-from scadbuddy.render.runner import OpenSCADError
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from tests.conftest import write_openscad_3mf
+from tests.support.temporal import (
+    WorkflowReaper,
+    temporal_available,
+    temporal_server,
+)
 
-MODEL_SLUG = "demo"
 FAIL_WIDTH = 999.0
 #: What the failing stub says it could not open (#408).
 FAILED_WARNING = "OpenSCAD could not open pic.svg"
 
-# A stand-in for the real binary: enough to answer --version and to export a .param,
-# so the routes that shell out are exercised where no openscad is installed.
-FAKE_OPENSCAD = """#!/usr/bin/env python3
-import json
-import os
-import pathlib
-import sys
-
-args = sys.argv[1:]
-# Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
-sidecar = pathlib.Path(sys.argv[0]).with_name("fake-env.json")
-settings = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
-
-# Lets a test count how many times openscad was actually run.
-log = settings.get("FAKE_OPENSCAD_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as handle:
-        handle.write(" ".join(args) + "\\n")
-# And what OPENSCADPATH it was given (#93).
-path_log = settings.get("FAKE_OPENSCAD_PATH_LOG")
-if path_log:
-    with open(path_log, "a", encoding="utf-8") as handle:
-        handle.write(os.environ.get("OPENSCADPATH", "") + "\\n")
-if "--version" in args:
-    print("OpenSCAD version 2099.01.01", file=sys.stderr)  # the real one uses stderr too
-    raise SystemExit(0)
-
-out = None
-for index, arg in enumerate(args):
-    if arg == "-o" and index + 1 < len(args):
-        out = args[index + 1]
-
-source = pathlib.Path(args[-1])
-text = source.read_text(encoding="utf-8", errors="replace") if source.is_file() else ""
-if "%%FAIL%%" in text:
-    print("ERROR: Parser error: syntax error", file=sys.stderr)
-    raise SystemExit(1)
-
-if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
-    # Exit 0, and an export with a parameter that has no name.
-    pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
-    raise SystemExit(0)
-
-if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
-    # A customizer range and a select, as `// [1:100]` and `// [a, b]` export (#432).
-    pathlib.Path(out).write_text(
-        json.dumps(
-            {
-                "parameters": [
-                    {"name": "width", "type": "number", "initial": 10, "group": "Main",
-                     "min": 1, "max": 100, "step": 1},
-                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
-                     "options": [{"name": "Round", "value": "round"},
-                                 {"name": "Square", "value": "square"}]},
-                ],
-            }
-        )
-    )
-    raise SystemExit(0)
-
-if out is not None and out.endswith(".param"):
-    pathlib.Path(out).write_text(
-        json.dumps(
-            {
-                "title": "Fake",
-                "parameters": [
-                    {"name": "width", "type": "number", "initial": 10, "group": "Main"},
-                    {"name": "label", "type": "string", "initial": "hi", "group": "Main"},
-                ],
-            }
-        )
-    )
-raise SystemExit(0)
-"""
-
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake png body"
 
 
-def set_fake_env(directory: Path, name: str, value: str) -> None:
+def set_fake_env(directory: Path, name: str, value: Any) -> None:
     """Hand the fake binaries in ``directory`` a setting.
 
     Not an environment variable: the backend gives openscad and openscad-lsp an
@@ -126,126 +52,63 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key)
 
 
-@pytest.fixture
-def fake_openscad(tmp_path: Path) -> str:
-    binary = tmp_path / "fake-openscad"
-    binary.write_text(FAKE_OPENSCAD, encoding="utf-8")
-    binary.chmod(0o755)
-    return str(binary)
+@pytest.fixture(scope="session")
+def temporal_address() -> Iterator[str]:
+    """One Temporal for the whole session (a dev server, unless
+    SCADBUDDY_TEST_TEMPORAL_ADDRESS names one): every API test renders on it."""
+    if not temporal_available():
+        pytest.skip("no Temporal: set SCADBUDDY_TEST_TEMPORAL_ADDRESS or put `temporal` on PATH")
+    with temporal_server() as address:
+        yield address
+
+
+@pytest.fixture(scope="session")
+def workflow_reaper(temporal_address: str) -> Iterator[WorkflowReaper]:
+    with WorkflowReaper(temporal_address, "default") as reaper:
+        yield reaper
+
+
+@pytest.fixture(autouse=True)
+def _temporal(temporal_address: str) -> None:
+    """The API tests skip without a Temporal: the app renders nowhere else (#546)."""
 
 
 @pytest.fixture
-def data_dir(tmp_path: Path) -> Path:
-    return tmp_path / "data"
+def settings(
+    settings: Settings,
+    temporal_address: str,
+    workflow_reaper: WorkflowReaper,
+    fake_openscad: str,
+) -> Iterator[Settings]:
+    """The app renders on the session's Temporal with its own in-process worker, on a
+    task queue of its own: each test has its own data directory and database schema,
+    so a worker is per app, not per session. The fake openscad exports a red 10x10x5
+    box, and fails a render with ``width: 999`` (FAIL_WIDTH).
 
-
-@pytest.fixture
-def seed_dir(tmp_path: Path) -> Path:
-    directory = tmp_path / "seed"
-    directory.mkdir()
-    return directory
-
-
-@pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The app's settings, on a throwaway Postgres schema: it will not start without one."""
-    return Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        database_url=pg_conninfo,
-        # Off, so no test renders a preview behind its back; `test_previews`
-        # turns them on with a stub render.
-        preview_renders=False,
+    Afterwards every workflow still open on the queue is terminated: a piece is
+    abandoned by the job that started it, and one left running (its worker gone) would
+    be joined by the next test to render the same piece, which would wait on it."""
+    directory = Path(fake_openscad).parent
+    drawn = write_openscad_3mf(
+        directory / "drawn.3mf",
+        [("Color 1", "#FF000000", trimesh.creation.box(extents=(10, 10, 5)))],
     )
+    set_fake_env(directory, "FAKE_3MF", str(drawn))
+    queue = f"api-{uuid.uuid4().hex[:12]}"
+    yield settings.model_copy(
+        update={
+            "temporal_address": temporal_address,
+            "temporal_namespace": "default",
+            "temporal_task_queue_render": queue,
+            "temporal_worker_inprocess": True,
+        }
+    )
+    workflow_reaper.terminate(queue)
 
 
 @pytest.fixture
-def paths(data_dir: Path) -> DataPaths:
-    data = DataPaths(data_dir)
-    data.ensure()
-    return data
-
-
-@pytest.fixture
-def model(paths: DataPaths) -> str:
-    paths.model_dir(MODEL_SLUG).mkdir(parents=True, exist_ok=True)
-    paths.model_source(MODEL_SLUG).write_text('width = 10;\nlabel = "hi";\n', encoding="utf-8")
-    paths.model_meta(MODEL_SLUG).write_text(
-        json.dumps({"name": "Demo", "description": "a demo", "tags": ["test"]}) + "\n",
-        encoding="utf-8",
-    )
-    return MODEL_SLUG
-
-
-def _fake_result(paths: DataPaths, job: Job) -> JobResult:
-    work = paths.job_work_dir(job.id)
-    work.mkdir(parents=True, exist_ok=True)
-    (work / "preview.glb").write_bytes(b"glTF\x02\x00\x00\x00fake")
-    # A real archive, not a stub: saving an output stamps its provenance into the
-    # file, and the send path re-places it for the target printer's plate before
-    # uploading, so it has to be readable (#105).
-    write_bambu_3mf(
-        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 5)))],
-        work / "model.3mf",
-        thumbnails=None,
-        model_name=job.slug,
-    )
-    return JobResult(
-        model_3mf=str((work / "model.3mf").relative_to(paths.root)),
-        preview_glb=str((work / "preview.glb").relative_to(paths.root)),
-        # As `render_job` does: the revision the job was resolved to when there is a
-        # repository (#90), the content hash only when there is none.
-        source_version=job.model_version or source_version(paths.model_dir(job.slug)),
-        parts=[PartInfo(name="Color 1", colour="#FF0000", extruder=1, watertight=True)],
-        bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
-        colors=["#FF0000"],
-        warnings=["a warning"],
-        notes=["a note"],
-    )
-
-
-@pytest.fixture
-def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
-    """The real app, with the render step replaced by a stub that writes plausible files.
-
-    ``width: 999`` makes the stub fail, which is how the failed-job paths are reached.
-    """
-    application = create_app(settings)
-
-    async def fake_render(job: Job) -> tuple[JobResult, list[str]]:
-        if job.params.get("width") == FAIL_WIDTH:
-            raise OpenSCADError(
-                "openscad exited with 1", ["ERROR: something broke"], warnings=[FAILED_WARNING]
-            )
-        return _fake_result(paths, job), ["rendered fine"]
-
-    queues: dict[str, RenderQueue] = {}
-
-    async def queue_override() -> RenderQueue:
-        # Built on first use so its workers live on the app's own event loop.
-        if "queue" not in queues:
-            # On the app's own registry and bus, as `build_state` wires them, so
-            # /metrics reports this queue's jobs and its states are published.
-            state = getattr(application.state, STATE_ATTR)
-            queue = RenderQueue(
-                settings.to_config(),
-                paths,
-                render=fake_render,
-                metrics=state.metrics,
-                events=state.events,
-            )
-            await queue.start()
-            queues["queue"] = queue
-        return queues["queue"]
-
-    application.dependency_overrides[get_queue] = queue_override
-    yield application
-    # The workers die with the TestClient's loop; the thumbnail pool is threads, so
-    # it is released here rather than left for interpreter exit.
-    for queue in queues.values():
-        queue.close_thumbnails()
+def app(settings: Settings) -> FastAPI:
+    return create_app(settings)
 
 
 @pytest.fixture
@@ -254,12 +117,32 @@ def client(app: FastAPI) -> Iterator[TestClient]:
         yield test_client
 
 
-def job_file(paths: DataPaths, job_id: str, name: str) -> Path:
-    """Where a finished job's ``model.3mf`` or ``preview.glb`` is: under the template
-    once the worker kept the render (`render_cache`), the work directory otherwise."""
-    result = JobStore(paths).read(job_id).result
+def job_file(client: TestClient, job_id: str, name: str) -> Path:
+    """Where a finished job's ``model.3mf`` or ``preview.glb`` is."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    result = state.render.store.read(job_id).result
     assert result is not None, f"job {job_id} has no result"
-    return paths.root / {"model.3mf": result.model_3mf, "preview.glb": result.preview_glb}[name]
+    return (
+        state.paths.root / {"model.3mf": result.model_3mf, "preview.glb": result.preview_glb}[name]
+    )
+
+
+def set_plate_image(client: TestClient, job_id: str, cover: bytes | None) -> None:
+    """Make ``cover`` the finished job's plate image, or leave it none. A real render
+    draws its own, except when the cover step times out (and on a loaded machine it
+    may), so a test that needs a known image, or none, sets it before saving."""
+    path = job_file(client, job_id, "model.3mf")
+    with zipfile.ZipFile(path) as archive:
+        kept = [
+            (info, archive.read(info))
+            for info in archive.infolist()
+            if not (info.filename.startswith("Metadata/plate_") and info.filename.endswith(".png"))
+        ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in kept:
+            archive.writestr(info, data)
+        if cover is not None:
+            archive.writestr(PLATE_THUMBNAIL, cover)
 
 
 def read_stored(conninfo: str) -> dict[str, Any]:
@@ -280,11 +163,12 @@ def read_stored(conninfo: str) -> dict[str, Any]:
     return stored
 
 
-def wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:
-    """The stub render resolves on the queue's worker, so poll until it settles."""
-    for _ in range(200):
+def wait_for_job(client: TestClient, job_id: str, timeout: float = 60) -> dict[str, Any]:
+    """The render runs on the app's in-process worker, so poll until it settles."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         body: dict[str, Any] = client.get(f"/api/v1/jobs/{job_id}").json()
-        if body["status"] in ("done", "failed"):
+        if body["status"] in ("done", "failed", "cancelled"):
             return body
-        time.sleep(0.01)
+        time.sleep(0.05)
     raise AssertionError(f"job {job_id} never finished")

@@ -7,6 +7,8 @@ import json
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -14,14 +16,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR, get_queue
+from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES, AssetStore
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
-from tests.api.conftest import MODEL_SLUG, wait_for_job
-from tests.conftest import UNUSED_DATABASE_URL
+from scadbuddy.worker import worker_deps_from_state
+from tests.api.conftest import wait_for_job
+from tests.conftest import MODEL_SLUG, UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 def test_an_upload_store_without_its_database_is_a_503_problem(tmp_path: Path) -> None:
@@ -32,6 +36,7 @@ def test_an_upload_store_without_its_database_is_a_503_problem(tmp_path: Path) -
             data_dir=tmp_path / "data",
             frontend_dir=Path("/nonexistent"),
             database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
         )
     )
     state = getattr(app.state, STATE_ATTR)
@@ -423,17 +428,15 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     assert preset.status_code == 201, preset.text
     # The job and the output are the same render: drop the job, so only the output
     # keeps `in_output`, and leave a second job as the only thing keeping `in_job`.
-    paths.job_file(job["id"]).unlink()
+    state: AppState = getattr(app.state, STATE_ATTR)
+    with state.projection.pool.connection() as conn:
+        conn.execute("DELETE FROM render_jobs WHERE id = %s", (job["id"],))
     other = client.post(render, json={"params": {"label": in_job}})
     wait_for_job(client, other.json()["job_id"])
     for asset_id in (in_output, in_preset, in_job, unused):
         _age(pg_conninfo, asset_id, 30 * 86400)
 
-    # The jobs are in the stubbed queue the `app` fixture swaps in, not in the app's
-    # own (Postgres) one, so the sweep reads that queue's store.
-    assert client.portal is not None
-    stubbed = client.portal.call(app.dependency_overrides[get_queue])
-    assert sweep_assets(replace(getattr(app.state, STATE_ATTR), queue=stubbed)) == [unused]
+    assert sweep_assets(state) == [unused]
 
     for asset_id in (in_output, in_preset, in_job):
         assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
@@ -475,4 +478,56 @@ def test_the_file_based_stores_leftovers_are_ignored_and_removed_at_boot(
 def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
     """One store for the routes and the renders, caps and all (#390)."""
     state = getattr(app.state, STATE_ATTR)
-    assert state.queue.assets is state.assets
+    deps = worker_deps_from_state(state)
+    try:
+        assert deps.assets is state.assets
+    finally:
+        assert deps.thumbnail_executor is not None
+        deps.thumbnail_executor.shutdown()
+
+
+# -- the upload's mirror to the blob store -----------------------------------------
+
+
+class _RemoteAssets:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.mirrored: list[tuple[str, str, str]] = []
+
+    async def mirror(self, assets: Any, meta: Any, *, slug: str, title: str) -> None:
+        if self.fail:
+            raise ApiError(502, "Bambuddy is unreachable")
+        self.mirrored.append((meta.id, slug, title))
+
+
+def _with_remote_assets(app: FastAPI, remote: _RemoteAssets) -> None:
+    state = getattr(app.state, STATE_ATTR)
+    store = getattr(state, "store", None)
+    if store is None:
+        state.store = SimpleNamespace(remote_assets=remote)
+    else:
+        store.remote_assets = remote
+
+
+def test_an_upload_is_mirrored_to_the_store_under_its_template(
+    app: FastAPI, client: TestClient, paths: DataPaths, file_model: str
+) -> None:
+    paths.model_source(file_model).with_name("model.json").write_text(
+        json.dumps({"name": "Demo"}), encoding="utf-8"
+    )
+    remote = _RemoteAssets()
+    _with_remote_assets(app, remote)
+    meta = _upload(client, HEART_SVG)
+    assert remote.mirrored == [(meta["id"], file_model, "Demo")]
+
+
+def test_a_failed_mirror_fails_the_upload_with_its_problem(
+    app: FastAPI, client: TestClient
+) -> None:
+    _with_remote_assets(app, _RemoteAssets(fail=True))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Bambuddy is unreachable"
