@@ -291,13 +291,6 @@ If the last row reads `accepted (!)`, that upload is deleted with the rest. A de
 that fails does not stop the others: the JSON on stderr lists it under `failed`, and the
 script exits 1; remove those files by hand.
 
-**Two limits of the script** (follow-up: fix `verify_bambuddy.py`):
-- The re-upload rebuilds the zip with a fresh timestamp, so its bytes can differ, and a
-  "no dedupe" answer on that row may be false.
-- If Bambuddy dedupes by answering with the existing id, the script deletes that id
-  twice. The second delete fails, the remaining files stay in `ScadBuddy verify/Work`,
-  and no table is printed. Delete them by hand and read that row's answer as "dedupes".
-
 ### Checked by hand after the script
 
 Record each result in the same section:

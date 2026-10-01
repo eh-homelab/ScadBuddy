@@ -53,9 +53,10 @@ async def _folder(client: BambuddyClient, name: str, parent: int) -> int:
 
 
 async def _cleanup(client: BambuddyClient, file_ids: list[int]) -> list[str]:
-    """Delete every file; one that fails is reported, and the rest still go."""
+    """Delete every file once (a dedupe can return one id twice); one that fails is
+    reported, and the rest still go."""
     failed: list[str] = []
-    for file_id in file_ids:
+    for file_id in dict.fromkeys(file_ids):
         try:
             await client.delete_library_file(file_id)
         except ApiError as error:
@@ -73,8 +74,9 @@ async def main() -> int:
     config = BambuddyConfig(base_url=url, api_key=key, upload_timeout=600.0)
     async with BambuddyClient(config) as client:
         work = await _folder(client, "Work", await _folder(client, "ScadBuddy verify", inbox))
+        samples = _samples()  # once: the re-upload below must be these same bytes
         try:
-            for name, data, media in _samples():
+            for name, data, media in samples:
                 file = await client.upload_library_file(
                     name, data, folder_id=work, media_type=media
                 )
@@ -92,7 +94,7 @@ async def main() -> int:
                         detail.model_dump_json(indent=2)
                     )
             again = await client.upload_library_file(
-                "verify-again.zip", _samples()[2][1], folder_id=work, media_type="application/zip"
+                "verify-again.zip", samples[2][1], folder_id=work, media_type="application/zip"
             )
             uploaded.append(again.id)
             rows.append(
@@ -137,7 +139,7 @@ async def main() -> int:
     print("| Measurement | Result |\n|---|---|")
     for what, result in rows:
         print(f"| {what} | {result} |")
-    report = {"bambuddy": url, "files_cleaned": len(uploaded) - len(failed), "failed": failed}
+    report = {"bambuddy": url, "files_cleaned": len(set(uploaded)) - len(failed), "failed": failed}
     print(json.dumps(report), file=sys.stderr)
     return 1 if failed else 0
 
