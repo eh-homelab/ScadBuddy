@@ -17,7 +17,7 @@ the trust model (§9): `2026-09-27-template-pipelines-design.md` (the "template 
 below). Print flow: `2026-09-24-print-flow-design.md`,
 `2026-09-27-spool-first-print-design.md`, `2026-09-28-print-library-file-design.md`.
 AI agent: `2026-09-27-ai-integration-design.md`. Issues: #742 (the library run is
-synchronous), #470 / #567 (the output run's 202), #305 / #912 (print history).
+synchronous), #470 (the output run's 202, implemented in PR #567), #305 / #912 (print history).
 
 ## 1. Why
 
@@ -302,7 +302,7 @@ shape with answer `accepted`; renders take the same shape (§4.5).
   workflow open for `REPEAT_WINDOW` (10 min, `runs.py:89`) on a timer. While open, the
   `accepted` Update answers repeats with the finished row. Then the workflow completes,
   and the same key later starts a new run. A run refused or failed before any enqueue
-  completes at once, so a retry is a new run. This is #567's rule, kept by the workflow
+  completes at once, so a retry is a new run. This is #470's rule, kept by the workflow
   instead of `PrintRunStore.find`.
 
 ### 5.3 The workflow
