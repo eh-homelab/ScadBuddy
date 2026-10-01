@@ -61,7 +61,13 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
   /** The arrange in flight: closing the dialog (or leaving the page) stops its wait. */
   const running = useRef<AbortController | null>(null)
   useEffect(() => {
-    if (open) return
+    if (open) {
+      // Opened again (History keeps it mounted): nothing from the last time shows.
+      setAsking(false)
+      setFailures(null)
+      setError(null)
+      return
+    }
     running.current?.abort()
     running.current = null
   }, [open])
@@ -77,6 +83,7 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
     running.current = controller
     try {
       let usable = outputs.filter((output) => !unusable.includes(output))
+      let skipped: string | undefined
       if (stale.length > 0) {
         const { ready, failed } = await backfillOutputs(stale, {
           signal: controller.signal,
@@ -84,10 +91,13 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
         })
         setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
         setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
-        if (failed.length > 0) {
-          setFailures(`${backfillFailures(failed)}${ready.length === 0 ? ' Nothing was arranged.' : ''}`)
+        if (failed.length > 0) skipped = backfillFailures(failed)
+        // Every output that can be arranged is, the ones that never needed a re-render too.
+        if (ready.length === 0 && usable.length === 0) {
+          setFailures(`${skipped} Nothing was arranged.`)
+          return
         }
-        if (ready.length === 0) return
+        if (skipped) setFailures(skipped)
         // In the dialog's order, each re-rendered output in its old one's place.
         const before = usable
         usable = outputs.flatMap((output) =>
@@ -107,7 +117,7 @@ export function ArrangeDialog({ open, slug, outputs: given, onClose, onArranged 
       // Closed while the output was being saved: it is saved, a normal output in
       // History, but this dialog no longer acts on it.
       if (controller.signal.aborted) return
-      onArranged(arranged)
+      onArranged(skipped ? { ...arranged, skipped } : arranged)
     } catch (cause) {
       if (controller.signal.aborted) return
       const ids = backfillIds(cause)

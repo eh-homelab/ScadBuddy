@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
+import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Output } from '../api/types'
@@ -147,6 +148,11 @@ describe('ArrangeDialog', () => {
         'Workshop could not be re-rendered: revision abc is no longer in the template history',
       )
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: nova.id, part: 'piece-body', count: 1 }])
+      expect(onArranged).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipped: 'Workshop could not be re-rendered: revision abc is no longer in the template history.',
+        }),
+      )
     })
 
     it('arranges nothing when no re-render succeeds', async () => {
@@ -167,6 +173,61 @@ describe('ArrangeDialog', () => {
       )
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
+    })
+
+    it('arranges the outputs that never needed a re-render when every re-render fails', async () => {
+      server.use(
+        http.post(`/api/v1/outputs/${nova.id}/backfill`, () =>
+          problem(422, 'Unprocessable Content', 'revision abc is gone'),
+        ),
+      )
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open slug="name-keychain" outputs={[first, nova]} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(onArranged).toHaveBeenCalledWith(
+        expect.objectContaining({ skipped: 'Nova could not be re-rendered: revision abc is gone.' }),
+      )
+      expect(lastArrangeRequest()?.objects).toEqual([{ output_id: first.id, part: 'piece-wall', count: 2 }])
+    })
+
+    it('opens again without the last alert or prompt', async () => {
+      server.use(
+        http.post(`/api/v1/outputs/${nova.id}/backfill`, () =>
+          problem(422, 'Unprocessable Content', 'revision abc is gone'),
+        ),
+      )
+      // History keeps the dialog mounted and only flips `open`.
+      function Reopening() {
+        const [open, setOpen] = useState(true)
+        return (
+          <>
+            <button onClick={() => setOpen(true)}>Open it</button>
+            <ArrangeDialog
+              open={open}
+              slug="name-keychain"
+              outputs={[nova]}
+              onClose={() => setOpen(false)}
+              onArranged={vi.fn()}
+            />
+          </>
+        )
+      }
+      const { user } = renderPage(<Reopening />)
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Nothing was arranged.')
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      expect(screen.getByRole('group', { name: 'Re-render first' })).toBeInTheDocument()
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      await user.click(screen.getByRole('button', { name: 'Open it' }))
+      await screen.findByRole('dialog', { name: 'Arrange' })
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
     })
 
     it('asks when Arrange itself says an output needs a re-render', async () => {

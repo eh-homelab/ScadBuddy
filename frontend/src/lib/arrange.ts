@@ -14,6 +14,8 @@ export const GOAL_LABELS: Record<ArrangeGoal, string> = {
 export interface Arranged {
   output: Output
   plates: number
+  /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
+  skipped?: string
 }
 
 const ARRANGED = ' (arranged)'
@@ -85,13 +87,16 @@ export function backfillIds(cause: unknown): string[] | null {
   if (!(cause instanceof ApiError)) return null
   const problem = cause.problem as Partial<NeedsBackfillProblem>
   if (problem.code !== NEEDS_BACKFILL) return null
-  return Array.isArray(problem.output_ids) ? problem.output_ids.map(String) : []
+  const ids = Array.isArray(problem.output_ids) ? problem.output_ids.map(String) : []
+  // A refusal naming no output has nothing to offer a re-render of: show its detail.
+  return ids.length > 0 ? ids : null
 }
 
 /** "A", "A and B", "A, B and C". */
 export function listNames(outputs: OutputRef[]): string {
   const names = outputs.map((o) => o.name ?? o.id)
-  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 /** Why Arrange cannot use them yet, in one sentence. */
@@ -104,17 +109,27 @@ export interface Backfilled {
   /** Re-rendered, read back with their objects. */
   ready: Output[]
   /** Not re-rendered, each with why. */
-  failed: { output: OutputRef; error: string }[]
+  /** Not re-rendered, each with why; `running` when it was still going at the wait's limit. */
+  failed: { output: OutputRef; error: string; running?: boolean }[]
 }
 
 /** "A could not be re-rendered: why." for each failure, one sentence each. */
 export function backfillFailures(failed: Backfilled['failed']): string {
   return failed
-    .map(({ output, error }) => `${output.name ?? output.id} could not be re-rendered: ${error.replace(/\.$/, '')}.`)
+    .map(({ output, error, running }) =>
+      running
+        ? `${output.name ?? output.id} is still re-rendering; try Arrange again later.`
+        : `${output.name ?? output.id} could not be re-rendered: ${error.replace(/\.$/, '')}.`,
+    )
     .join(' ')
 }
 
 const BACKFILL_POLL_MS = 500
+/** How long the dialog waits for one re-render; the server keeps going after it gives up. */
+export const BACKFILL_WAIT_MS = 5 * 60_000
+
+/** The wait's limit passed with the re-render still going. */
+class StillRunning extends Error {}
 
 /**
  * #902 — re-render each output saved before Arrange, all at once: queue it, read its
@@ -124,10 +139,20 @@ const BACKFILL_POLL_MS = 500
  */
 export async function backfillOutputs(
   outputs: OutputRef[],
-  opts: { pollMs?: number; onProgress?: (output: OutputRef, message: string) => void; signal?: AbortSignal } = {},
+  opts: {
+    pollMs?: number
+    waitMs?: number
+    onProgress?: (output: OutputRef, message: string) => void
+    signal?: AbortSignal
+  } = {},
 ): Promise<Backfilled> {
   const { signal } = opts
   const pollMs = opts.pollMs ?? BACKFILL_POLL_MS
+  const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS)
+  const wait = async () => {
+    if (Date.now() >= deadline) throw new StillRunning('still re-rendering')
+    await pause(pollMs, signal)
+  }
   const one = async (output: OutputRef): Promise<Output> => {
     const say = (message: string) => opts.onProgress?.(output, message)
     say('Queuing a re-render…')
@@ -146,7 +171,7 @@ export async function backfillOutputs(
       }
       if (job.status === 'done') break
       say(job.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…')
-      await pause(pollMs, signal)
+      await wait()
       signal?.throwIfAborted()
       job = await api.getJob(job.id)
     }
@@ -159,7 +184,7 @@ export async function backfillOutputs(
         if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
         return read
       }
-      await pause(pollMs, signal)
+      await wait()
     }
   }
   const settled = await Promise.allSettled(outputs.map(one))
@@ -171,7 +196,7 @@ export async function backfillOutputs(
     else {
       const cause = outcome.reason as unknown
       const error = cause instanceof ApiError ? cause.detail : (cause as Error).message
-      result.failed.push({ output, error })
+      result.failed.push(cause instanceof StillRunning ? { output, error, running: true } : { output, error })
     }
   })
   return result

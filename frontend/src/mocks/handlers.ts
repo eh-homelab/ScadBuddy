@@ -117,6 +117,8 @@ const state = {
   jobs: new Map<string, Job>(),
   /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
   arranged: new Map<string, { sources: string[]; manifest: ManifestObject[] }>(),
+  /** #902 — finished re-renders a read has seen once: the next read attaches them. */
+  backfillsSeen: new Set<string>(),
   /** The last `POST /outputs/arrange` body, for tests to read back. */
   lastArrange: null as ArrangeRequest | null,
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
@@ -239,8 +241,8 @@ function runJob(jobId: string): void {
 const NEEDS_BACKFILL_PROBLEM = 'https://scadbuddy.dev/problems/needs-backfill'
 
 /**
- * #902 — a read of an output whose re-render has ended: done, it gains the objects the
- * render recorded and drops the marker; failed or cancelled, the marker says why.
+ * #902 — a read of an output whose re-render has ended: done (from the second read on),
+ * it gains the objects the render recorded and drops the marker; failed or cancelled, the marker says why.
  */
 function settleBackfill(output: Output): Output {
   const pending = output.backfill
@@ -248,6 +250,9 @@ function settleBackfill(output: Output): Output {
   const job = state.jobs.get(pending.job_id)
   if (!job) {
     output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
+  } else if (job.status === 'done' && !state.backfillsSeen.has(job.id)) {
+    // The API attaches on its next reconcile pass, not as the job ends: one read waits.
+    state.backfillsSeen.add(job.id)
   } else if (job.status === 'done') {
     output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
     output.backfill = null
@@ -276,6 +281,7 @@ export function resetMockState(): void {
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.arranged.clear()
+  state.backfillsSeen.clear()
   state.lastArrange = null
   state.modelChoices = {}
   state.libraryChoices = {}

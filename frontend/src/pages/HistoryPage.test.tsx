@@ -306,6 +306,28 @@ describe('HistoryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
   })
 
+  it('says which outputs could not be re-rendered after the dialog closes (#902)', async () => {
+    const workshop = outputs[2]!
+    server.use(
+      http.post(`/api/v1/outputs/${workshop.id}/backfill`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'revision abc is gone' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(within(await row('Workshop')).getByRole('checkbox', { name: 'Select Workshop' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (2)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    await user.click(screen.getByRole('button', { name: 'Re-render' }))
+    // Reagan still arranges; the dialog closes, and History says Workshop was skipped.
+    expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Workshop could not be re-rendered: revision abc is gone.')
+  })
+
   it('drops a deleted output from the selection', async () => {
     const { user } = render()
     const workshop = await row('Workshop')

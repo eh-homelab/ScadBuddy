@@ -41,6 +41,8 @@ export function HistoryPage() {
   /** §7 — outputs ticked for the next Arrange (#314). */
   const [picked, setPicked] = useState<string[]>([])
   const [arranging, setArranging] = useState(false)
+  /** #902 — the outputs the last Arrange could not re-render, said once it has closed. */
+  const [skipped, setSkipped] = useState<string | null>(null)
   const togglePicked = (id: string) =>
     setPicked((current) => (current.includes(id) ? current.filter((p) => p !== id) : [...current, id]))
 
@@ -100,10 +102,22 @@ export function HistoryPage() {
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <>
             <div className="mb-2 flex justify-end">
-              <Button size="sm" disabled={picked.length === 0} onClick={() => setArranging(true)}>
+              <Button
+                size="sm"
+                disabled={picked.length === 0}
+                onClick={() => {
+                  setSkipped(null)
+                  setArranging(true)
+                }}
+              >
                 Arrange selected ({picked.length})
               </Button>
             </div>
+            {skipped && (
+              <p role="alert" className="mb-2 text-[13px] text-warn">
+                {skipped}
+              </p>
+            )}
             <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
               {outputsState.data.map((output) => (
                 <OutputRow
@@ -149,7 +163,8 @@ export function HistoryPage() {
         slug={slug}
         outputs={(outputsState.data ?? []).filter((o) => picked.includes(o.id))}
         onClose={() => setArranging(false)}
-        onArranged={() => {
+        onArranged={(arranged) => {
+          setSkipped(arranged.skipped ?? null)
           setArranging(false)
           setPicked([])
           outputsState.reload()

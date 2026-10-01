@@ -80,6 +80,7 @@ import type {
   UpstreamStatus,
   UrlImport,
   VersionDiff,
+  NeedsBackfillProblem,
 } from './types'
 import type {
   McpAuthSetting,
@@ -183,7 +184,7 @@ export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-una
  * #902 — Arrange's refusal of outputs saved before Arrange existed: `code` is
  * `needs_backfill` and `output_ids` names every one, to re-render before arranging.
  */
-export const NEEDS_BACKFILL = 'needs_backfill'
+export const NEEDS_BACKFILL = 'needs_backfill' satisfies NeedsBackfillProblem['code']
 
 /**
  * The failure no problem body explained, said by its status. The detail is what the
