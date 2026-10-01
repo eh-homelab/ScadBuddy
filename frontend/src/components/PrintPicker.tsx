@@ -80,7 +80,6 @@ interface Props {
 export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
   /** §7 — the output being printed: the one passed in, or what Re-arrange made of it. */
   const [target, setTarget] = useState<Output | undefined>(output)
-  useEffect(() => setTarget(output), [output])
   const [arrangeGoal, setArrangeGoal] = useState<ArrangeGoal>('fewest_swaps')
   const [arranging, setArranging] = useState(false)
   const [arrangeNote, setArrangeNote] = useState<string | null>(null)
@@ -96,6 +95,11 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     options: PrintOptions
     ready: boolean
   } | null>(null)
+  useEffect(() => {
+    // A new output from the caller is not a re-arrange: nothing carries to it.
+    carry.current = null
+    setTarget(output)
+  }, [output])
   const [choices, setChoices] = useState<ChoicesView | null>(null)
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
@@ -222,6 +226,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       })
       .catch((cause: unknown) => {
         if (token !== attempt.current) return
+        // The arranged output's choices never arrived; its carry must not reach
+        // whatever the dialog shows next.
+        carry.current = null
         setChoices(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
       })

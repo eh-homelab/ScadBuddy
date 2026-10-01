@@ -295,6 +295,46 @@ describe('PrintPicker', () => {
     })
   })
 
+  it('carries nothing to the next output when the arranged one cannot be read', async () => {
+    // A re-arrange whose new choices never arrive must not hand its plan and settings
+    // to the next output the dialog opens.
+    const originals = new Set(fixtures.outputs.map((entry) => entry.id))
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', ({ params }) =>
+        originals.has(String(params.id))
+          ? undefined
+          : HttpResponse.json(
+              { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'no choices' },
+              { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+            ),
+      ),
+    )
+    const other = { ...(fixtures.outputs[1] as Output), library_files: [], pipeline_run_id: undefined }
+    function Switching() {
+      const [shown, setShown] = useState<Output>({ ...output, library_files: [], pipeline_run_id: undefined })
+      return (
+        <>
+          <button onClick={() => setShown(other)}>Next output</button>
+          <PrintPicker open slug="name-keychain" output={shown} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Switching />)
+    await loaded()
+    const suggested = (within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[])
+      .find((radio) => radio.checked)!.value
+    const other1 = (within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[])
+      .find((radio) => !radio.checked)!
+    await user.click(other1)
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    expect(await screen.findByText('no choices')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next output' }))
+    await loaded()
+    await waitFor(() =>
+      expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${suggested}`)).toBeChecked(),
+    )
+  })
+
   it('shows a failed re-arrange as an error, not as a note', async () => {
     server.use(
       http.post('/api/v1/outputs/arrange', () =>
