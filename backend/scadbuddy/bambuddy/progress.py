@@ -237,10 +237,29 @@ async def _queued_progress(
     linker: _Linker | None = None,
     plate_id: int | None = None,
 ) -> PrintProgress:
-    """One slice job and the queue item it became, read off Bambuddy."""
+    """One slice job and the queue item it became, read off Bambuddy.
+
+    A queue item is recorded only once its slice job has finished, so with one the
+    slice job is not read at all (#898): Bambuddy expires slice jobs and restarts their
+    ids, so the id kept may name nothing, or another output's job.
+    """
     slice_job = None
-    if slice_job_id is not None:
-        slice_job = await client.slice_job(slice_job_id)
+    if slice_job_id is not None and queue_item_id is None:
+        try:
+            slice_job = await client.slice_job(slice_job_id)
+        except ApiError as error:
+            if error.status != 404:
+                raise
+            # Gone from Bambuddy, it will never report again: polling on would read as
+            # "waiting" forever.
+            return PrintProgress(
+                route="slice_queue",
+                stage="unknown",
+                settled=True,
+                slice_job_id=slice_job_id,
+                error_message=error.detail,
+                bambuddy_url=url,
+            )
     item = None
     if queue_item_id is not None:
         try:
