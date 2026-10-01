@@ -22,13 +22,22 @@ synchronous), #470 / #567 (the output run's 202), #305 / #912 (print history).
 ## 1. Why
 
 On 2026-10-01 at 14:49 UTC, Envoy cut `POST /api/v1/print/library/68/run` off at its
-15 s `response_timeout` and answered 504. The backend carried on regardless. Bambuddy's
+15 s `response_timeout` and answered 504.
+
+The 15 s is the Envoy Gateway's default route timeout on `scadbuddy.internal`:
+- the access log has `response_flags: UT`, `duration: 14999`;
+- `eh-homelab/clusters` `clusters/prod/scadbuddy/httproute.yaml:31` lifts that default
+  only for the agent's streaming routes.
+
+`2026-09-27-spool-first-print-design.md` records "the 60 s ingress timeout" for #470,
+measured on a different path into ScadBuddy. Both numbers are real, so a request must fit
+the shortest proxy in front of it, which today is 15 s. The backend carried on regardless. Bambuddy's
 log shows one `POST /library/files/68/slice` and one `POST /queue/`, and its pending queue
 went from 8 to 9. The dialog said "may still have been queued", which was true.
 
 - `POST /print/library/{id}/run` (`api/library_print.py:149`) still uploads, slices
-  and queues inside one request. #567 moved only an output's run to *202 and follow*,
-  and the comment at `frontend/src/api/client.ts:986` says so.
+  and queues inside one request. #470 (PR #567) moved only an output's run to a 202, and
+  the comment at `frontend/src/api/client.ts:986` says so.
 - An output's run is an `asyncio` task in the API process (`bambuddy/runs.py:378`
   `PrintRuns.start`). It dies with the pod. Run `3c241a88` (07:29 UTC the same day)
   is still `running` with `enqueue_attempted = false`, and its heartbeat never moved.
@@ -168,12 +177,20 @@ The same for every kind:
    - It is started with `id_conflict_policy = USE_EXISTING`, so a retry after a lost
      answer (a proxy 502/504/524, a dropped connection) attaches to the same execution
      and never repeats the effect.
+   - **The one exception is a command that is idempotent by content**, whose repeat
+     *should* join the first rather than be a second effect. Its key is the content alone,
+     with no `request_id`.
+     - Renders are the case: `render_key` (`render/job_models.py:162`) hashes slug,
+       revision and params only, so that identical requests from any caller coalesce
+       onto one job (§4.5).
+     - A kind declares which key it uses. Every command with a physical or external
+       effect (prints, sends, Bambuddy writes, git commits) uses `request_id`.
 2. **Update-with-start.** The route calls `execute_update_with_start_workflow` with the
    Update `accepted`.
 3. **First activity: validate and record.** Refusals (422, 404, 409, as each route
    answers today) end the workflow with nothing written. Otherwise, in one transaction, it
-   writes our record and publishes the event (the `core/events.py` / `publish_in`
-   pattern).
+   writes our record and publishes the event in the same transaction
+   (`PgNotifyEventBus.publish_in`, `core/pg_events.py:413`).
 4. **The answer.** Each kind declares one of two:
    - **`done`**, for commands that normally finish in under a second (a git commit, a
      delete). The Update waits for the workflow's result, and the route answers as it
@@ -230,19 +247,20 @@ new serialises across models.
 | print runs' tasks and heartbeat (`bambuddy/runs.py`) | deleted (§5) |
 | print watcher (`bambuddy/watcher.py`: a rescan loop plus a `_follow` task per output) | `FollowPrint`, a workflow per queued print on `bambuddy`, started by `PrintRun`'s record step as an abandoned child. It polls Bambuddy inside a heartbeating activity until the print ends, then writes the outcome and the event |
 | asset/blob/staging sweeper (`main.py:211`) and the boot sweeps (`main.py:225–281`) | Temporal **Schedules** on `library`. The interval is today's setting; the boot sweeps run once more as a schedule trigger at deploy |
-| preview scheduler and backfill (`render/previews.py:160`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
+| preview scheduler (`PreviewScheduler.start`, `render/previews.py:160`) and its boot pass over every model (`request_all`, `:184`) | `RenderPreview` is already a workflow; the backfill becomes a Schedule-triggered workflow |
 | PgNotify bus, settings follower, in-process dev worker, openscad version probe, git reaper thread, LSP subprocesses | stay. They are the process's own plumbing, not operations |
 
 ### 4.5 Renders join the shape
 
 `POST /models/{slug}/render` becomes §4.2 with answer `accepted`:
-- the first activity resolves the revision and schema (today's `git rev-parse` and
-  `cached_schema`, `api/jobs.py:173,216`) and inserts the `render_jobs` row;
+- the first activity resolves the revision and schema (today's `history.resolve`, a
+  `git rev-parse`, at `api/jobs.py:172`, and `schema_of` at `:216`) and inserts the
+  `render_jobs` row;
 - `TemplatePipeline` continues;
 - `RenderService`'s insert-then-start and `reconcile_once` are deleted.
 
 `render_key` coalescing becomes the workflow ID: `render-<render_key>` attaches identical
-jobs, and `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap
+jobs (the content-keyed exception of §4.2, with no `request_id`), and `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap
 them).
 
 ## 5. Printing on Temporal
@@ -298,16 +316,26 @@ today's `execute_run` (`bambuddy/print_run.py:378`) and `slice_and_queue`
 | `print_accept` | §5.1 step 2 | default; a refusal is non-retryable |
 | `print_upload` | `source.file_to_print`. An output's 3MF is fetched from the API (§5.5), replated and recoloured, and `POST /library/files`; a library file is a no-op | default; phase 1 confirms a retried upload reuses `ensure_uploaded`'s existing file rather than adding a second |
 | `print_resolve` | spool presets, `gather_plate_options`, `resolve` per plate, hardware warnings | default |
-| `print_slice` | `POST /library/files/{id}/slice`, then polls `/slice-jobs/{id}` every 2 s **inside the activity**, heartbeating, up to `DEFAULT_SLICE_TIMEOUT` (600 s) | default; heartbeat timeout 30 s |
+| `print_slice_start` | `POST /library/files/{id}/slice` (`client.py:623`), which starts a **new** slice job on every call; returns the job id | **`maximum_attempts = 1`** |
+| `print_slice_wait` | polls `/slice-jobs/{id}` every 2 s **inside the activity**, heartbeating, up to `DEFAULT_SLICE_TIMEOUT` (600 s); returns the sliced file id | default (re-polling an existing job is safe); heartbeat timeout 30 s |
 | `print_enqueue` | `POST /queue/` | **`maximum_attempts = 1`** |
 | `print_record` | `source.record`, `remember_project`, starts the progress observer and watcher | default |
 | `print_project` | guarded transition of the row (`running` → `succeeded` / `failed`), `print.run` event in the same transaction | default |
 
-Per plate: `print_slice`, then the workflow records `enqueue_attempted` in its own state
+Per plate: `print_slice_start`, then `print_slice_wait` on the job id the workflow
+recorded, then the workflow records `enqueue_attempted` in its own state
 **and** through `print_project` before it schedules `print_enqueue`. An enqueue that
 times out, or a later plate failing after an earlier one queued, ends the run `failed`
-with `may_have_queued = true`, which is today's meaning. A worker that dies mid-slice
-loses only that activity attempt, which retries. A worker that dies mid-enqueue cannot
+with `may_have_queued = true`, which is today's meaning.
+
+A worker that dies while polling resumes polling the same job, so no second slice is
+started. If `print_slice_start` fails without returning a job id (a timeout, or a
+dropped connection after Bambuddy may have accepted it), the run fails before any
+enqueue, which is a refusal-free failure a retry may repeat.
+- Each job id is recorded, so every sliced file the run created is known.
+- `print_project` lists the sliced files of a failed run on its row.
+- An unknown job that a lost start may have created stays in Bambuddy's library. The
+  row's error says so, as `may_have_queued` does for the queue. A worker that dies mid-enqueue cannot
 retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 ### 5.4 Our record, Visibility, Archival
