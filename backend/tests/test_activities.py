@@ -799,6 +799,8 @@ async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the
         raise AssetUnavailableError("label", meta.id)
 
     monkeypatch.setattr(activities_module, "render_main", vanished)
+    # The fake openscad's schema has no file parameter; this is about the stage.
+    monkeypatch.setattr(activities_module, "params_problem", lambda *_: None)
     with store_pool(pg_conninfo) as pool:
         deps = dataclasses.replace(
             worker_deps(tmp_path, paths),
