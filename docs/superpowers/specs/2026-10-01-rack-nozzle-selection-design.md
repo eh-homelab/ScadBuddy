@@ -157,8 +157,11 @@ has its own table and is not a storage precedent here.
 
 **Usage counter.** Three new tables. Use is counted per Bambuddy archive, which
 is one physical print: a queue item with `quantity` N produces N archives, and
-each one counts. Every write is `ON CONFLICT DO NOTHING`, so a settle seen twice
-(two replicas, a restart) cannot count a print twice.
+each one counts. `rack_nozzle_picks` and `rack_nozzle_prints` are written
+`ON CONFLICT DO NOTHING`, so a settle seen twice (two replicas, a restart)
+cannot count a print twice. `rack_nozzle_seen` is the one upsert:
+`ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id`, which
+moves the hotend's printer and never touches `first_seen_at`.
 
 `rack_nozzle_seen`, primary key `serial`:
 
@@ -193,8 +196,10 @@ keeps its `first_seen_at` and its print history, and the write updates
 | `print_seconds` | bigint | null when the archive has no time |
 | `grams` | numeric | null when the archive has no weight |
 
-- `rack_nozzle_seen` is written from exactly two status reads, both on the
-  print path: `choices.py`'s (the dialog's choices read) and `choose_rack`'s.
+- `rack_nozzle_seen` is written from every status read on the print path:
+  `choices.py`'s (the dialog's choices read), `prepare_run`'s in
+  `print_run.py` (the run's first read, before any slice) and `choose_rack`'s
+  (the per-plate re-read).
   Not from `BambuddyClient.printer_status` itself: `download.py` and
   `project_file.py` read status for other reasons, and "first seen" means first
   seen by the print flow, which is what Oldest and Newest first rank on.
@@ -409,9 +414,10 @@ so the trade is accepted.
   routes read it through `api/components.py` `component_dep`. `PrintLinkStore`
   is on the older `AppState` wiring and is not the pattern to copy.
   `print_run.py`, `choices.py` and `watcher.py` call it; none of them holds SQL.
-- `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` §6: amend
-  "ScadBuddy does not set `nozzle_rack_choice`" to point at this spec, so the two
-  approved specs do not contradict each other.
+- `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` §6 and
+  `docs/superpowers/plans/2026-09-27-spool-first-print.md` (its "no
+  `nozzle_rack_choice`" design decision): amend both to point at this spec, so
+  neither contradicts it.
 - `bambuddy/dispatch.py` module docstring: name `nozzle_rack_choice` beside
   `filament_overrides` as a queue-only field.
 - `api/printing.py` / `/check`: rack options and picks per side.
@@ -461,7 +467,7 @@ fixtures (which use invented serials), or in commits.
   - an unparsable group diameter giving no pick and a `rack-left-to-bambuddy`
     warning;
   - a serial seen on printer 2 after printer 1 keeping its `first_seen_at` and
-    history;
+    history, with `printer_id` updated to 2;
   - a `used_in_plate: false` CF filament not making its group abrasive;
   - a group of PLA and PLA-CF counted as abrasive;
   - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
