@@ -86,7 +86,9 @@ def test_a_long_part_is_turned_to_share_a_plate() -> None:
 
 
 def test_a_part_no_turn_fits_is_refused_with_the_plate_saying_why() -> None:
-    with pytest.raises(PackError, match="larger than the plate"):
+    with pytest.raises(
+        PackError, match=r"^model\.scad \(300 x 10 mm\) does not fit the plate \(256 x 256 mm\): "
+    ):
         arrange([PackItem(part=part("a", 300, 10)), PackItem(part=part("b", 1, 1))], DEFAULT)
 
 
@@ -202,7 +204,7 @@ def test_the_same_request_packs_the_same_way() -> None:
 
 
 def test_an_explicit_plate_takes_quarter_turns() -> None:
-    placed = explicit_plate([part("a", 10, 20)], [(5.0, 6.0, 90.0)])
+    placed = explicit_plate([part("a", 10, 20)], [(5.0, 6.0, 90.0)], plate=DEFAULT)
     assert placed.items[0].rot == 90.0
     with pytest.raises(PackError, match="quarter turns"):
-        explicit_plate([part("a", 10, 20)], [(0.0, 0.0, 45.0)])
+        explicit_plate([part("a", 10, 20)], [(0.0, 0.0, 45.0)], plate=DEFAULT)

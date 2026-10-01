@@ -244,7 +244,7 @@ def arrange(
                 or "no turn of it fits"
             )
             raise PackError(
-                f"{copy.part.file} ({w:.0f} x {d:.0f} mm) is larger than the plate "
+                f"{copy.part.file} ({w:.0f} x {d:.0f} mm) does not fit the plate "
                 f"({plate.width:.0f} x {plate.depth:.0f} mm): {why}"
             )
         sheets.append(sheet)

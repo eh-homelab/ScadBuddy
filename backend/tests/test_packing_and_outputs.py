@@ -49,7 +49,7 @@ def test_one_part_alone_keeps_its_own_plates() -> None:
 
 
 def test_a_part_larger_than_the_plate_is_refused() -> None:
-    with pytest.raises(PackError, match="larger than the plate"):
+    with pytest.raises(PackError, match="does not fit the plate"):
         arrange([PackItem(part=_part("a", 300, 10)), PackItem(part=_part("b", 1, 1))], PLATE)
 
 
