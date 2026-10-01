@@ -108,6 +108,34 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('keeps an edit typed while its section is saving (#767)', async () => {
+    // Held open so the edit lands mid-save; the save's seed must not take it back.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      await held
+      return saved
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    await user.clear(timeout)
+    await user.type(timeout, '50')
+
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+    expect(timeout).toHaveValue(50)
+    expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
+    put.mockRestore()
+  })
+
   it('discards one section’s edits', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)

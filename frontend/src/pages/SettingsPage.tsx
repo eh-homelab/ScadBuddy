@@ -171,12 +171,14 @@ export function SettingsPage() {
   // Which fields the next settings object seeds the form with: all of them at first
   // and after a reload, one section's after its save, one field's after a reset.
   const reseed = useRef<'all' | FieldName[] | null>('all')
-  // Typed into since the pending seed was asked for. The seed runs in an effect, which
-  // can land after the first keystroke, so it leaves these alone (#767).
+  // Typed into since the pending seed's source was asked for. The seed runs in an
+  // effect, which can land after the first keystroke, and a save or reset seeds from a
+  // response that can arrive after more typing; it leaves these fields alone (#767).
   const editedSinceSeed = useRef(new Set<FieldName>())
+  // Before the request whose answer is seeded, so an edit made while it is in flight counts.
+  const beginSeed = () => editedSinceSeed.current.clear()
   const requestSeed = (names: 'all' | FieldName[]) => {
     reseed.current = names
-    editedSinceSeed.current.clear()
   }
   useEffect(() => {
     if (!settings || reseed.current === null) return
@@ -186,6 +188,7 @@ export function SettingsPage() {
     ).filter((name) => !edited.has(name))
     reseed.current = null
     const values = Object.fromEntries(names.map((name) => [name, baseline(settings, name)]))
+    // `edited` is checked again in the updater: it runs later, and a keystroke can land between.
     setDraft((current) => seedDraft(current, values, edited))
     setClearing((current) => current.filter((name) => !names.includes(name)))
   }, [settings])
@@ -215,6 +218,7 @@ export function SettingsPage() {
   const [changedElsewhere, setChangedElsewhere] = useState(false)
   const loadLatest = () => {
     setChangedElsewhere(false)
+    beginSeed()
     requestSeed('all')
     settingsState.refresh()
   }
@@ -230,6 +234,7 @@ export function SettingsPage() {
     }
     settingsState.refresh(() => {
       if (!isDirty.current()) {
+        beginSeed()
         requestSeed('all')
         return true
       }
@@ -270,6 +275,7 @@ export function SettingsPage() {
     setSaving(id)
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
+      beginSeed()
       const next = await api.putSettings(body)
       requestSeed(fieldsOf(id, next))
       settingsState.setData(next)
@@ -318,6 +324,7 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
+      beginSeed()
       const next = await api.putSettings({ reset: [name] })
       requestSeed([name])
       settingsState.setData(next)
