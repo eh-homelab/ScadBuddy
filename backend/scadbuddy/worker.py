@@ -42,7 +42,7 @@ from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.client import connect, drained, make_current, render_worker
+from scadbuddy.workflows.client import connect, drained, is_current, make_current, render_worker
 from scadbuddy.workflows.pipelines import TRANSFER
 
 if TYPE_CHECKING:
@@ -172,6 +172,14 @@ async def _wait_drained(
     return True
 
 
+async def _drain_done(
+    still_current: Callable[[], Awaitable[bool]], is_drained: Callable[[], Awaitable[bool]]
+) -> bool:
+    """The drain is over when this build is (still, or again) current, because another
+    worker of the same build then serves its pinned runs (#874), or when none is left."""
+    return await still_current() or await is_drained()
+
+
 async def make_current_until_polled(
     set_current: Callable[[], Awaitable[None]],
     *,
@@ -230,6 +238,13 @@ async def _poll(
             logger.warning("could not count this build's running workflows", exc_info=True)
             return False
 
+    async def still_current() -> bool:
+        try:
+            return await is_current(client, namespace=client.namespace, build_id=build_id)
+        except RPCError:
+            logger.warning("could not read the deployment's current build", exc_info=True)
+            return False
+
     async with worker:
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
@@ -256,13 +271,17 @@ async def _poll(
             return
 
         # A workflow is PINNED to the build that started it: one waiting between two
-        # activities is served by no other build, so keep polling until none is left.
+        # activities is served by no other build, so keep polling until none is left,
+        # unless this build is still current: a restart of the same build (a manifest
+        # change, a node drain) leaves its runs to the next pod of that build.
         drain_timeout = 2 * config.activity_timeout + 120
         logger.info(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
         )
-        if await _wait_drained(is_drained, timeout=drain_timeout, poll=DRAIN_POLL):
+        if await _wait_drained(
+            lambda: _drain_done(still_current, is_drained), timeout=drain_timeout, poll=DRAIN_POLL
+        ):
             logger.info("drained", extra={"build_id": build_id})
         else:
             logger.warning(

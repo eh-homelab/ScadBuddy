@@ -51,6 +51,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
+    _drain_done,
     _poll,
     _wait_drained,
     make_current_until_polled,
@@ -58,7 +59,13 @@ from scadbuddy.worker import (
     run_worker,
 )
 from scadbuddy.workflows.activities import WorkerDeps
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
+from scadbuddy.workflows.client import (
+    DEPLOYMENT_NAME,
+    connect_lazily,
+    drained,
+    is_current,
+    make_current,
+)
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import (
@@ -218,6 +225,36 @@ async def test_the_drain_gives_up_at_its_bound() -> None:
     assert calls > 1
 
 
+async def test_a_build_that_is_still_current_does_not_drain() -> None:
+    """#874: a same-build restart: another pod of this build serves its pinned runs."""
+    counted = 0
+
+    async def still_current() -> bool:
+        return True
+
+    async def drained() -> bool:
+        nonlocal counted
+        counted += 1
+        return False
+
+    done = await asyncio.wait_for(
+        _wait_drained(lambda: _drain_done(still_current, drained), timeout=5, poll=0.01), 5
+    )
+    assert done and counted == 0
+
+
+async def test_the_drain_ends_when_the_build_becomes_current_again() -> None:
+    answers = iter([False, False, True])
+
+    async def still_current() -> bool:
+        return next(answers)
+
+    async def drained() -> bool:
+        return False
+
+    assert await _wait_drained(lambda: _drain_done(still_current, drained), timeout=5, poll=0.01)
+
+
 @workflow.defn(name="BlocksUntilReleased")
 class _BlocksUntilReleased:
     def __init__(self) -> None:
@@ -278,6 +315,35 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
         await handle.signal(_BlocksUntilReleased.release)
         await asyncio.wait_for(handle.result(), 30)
         await _until_drained_is(True, client, build_id)
+
+
+@pytest.mark.requires_temporal
+async def test_is_current_names_the_deployments_current_build() -> None:
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    async with (
+        temporal_client() as client,
+        Worker(
+            client,
+            task_queue=queue,
+            workflows=[_BlocksUntilReleased],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=DEPLOYMENT_NAME, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        ),
+    ):
+        assert await make_current_until_polled(
+            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+            build_id=build_id,
+            backoff=(0.1,),
+            every=0.2,
+            deadline=30,
+        )
+        assert await is_current(client, namespace=client.namespace, build_id=build_id)
+        assert not await is_current(client, namespace=client.namespace, build_id="other")
 
 
 @pytest.mark.requires_temporal
