@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import asyncio
+from contextlib import ExitStack
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR
-from scadbuddy.api.models import IMPORT_RETRY_AFTER, MAX_SOURCE_CHARS
+from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
+from scadbuddy.api.models import MAX_SOURCE_CHARS, RESOLVER_RETRY_AFTER
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import url_import
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
@@ -169,15 +169,26 @@ def test_an_import_never_targets_a_built_in(client: TestClient) -> None:
     assert (response.json()["slug"], response.json()["origin"]) == ("builtin-bin", "mine")
 
 
-def test_an_import_over_the_fetch_budget_is_a_503_with_retry_after(client: TestClient) -> None:
-    getattr(client.app.state, STATE_ATTR).imports = asyncio.Semaphore(0)  # type: ignore[attr-defined]
+def test_the_fetch_budget_is_the_resolver_s_threads() -> None:
+    assert IMPORT_CONCURRENCY == url_import.RESOLVER_THREADS
 
-    with respx.mock(assert_all_called=False) as mock:
-        response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+
+def test_an_import_over_the_fetch_budget_is_a_503_with_retry_after(client: TestClient) -> None:
+    """Retry-After is when the oldest held fetch must end (#631), not a flat guess."""
+    imports: ImportPermits = getattr(client.app.state, STATE_ATTR).imports  # type: ignore[attr-defined]
+    with ExitStack() as held:
+        for _ in range(IMPORT_CONCURRENCY):
+            held.enter_context(imports.hold())
+        oldest = next(iter(imports._taken))
+        imports._taken[oldest] -= url_import.IMPORT_TIMEOUT - 10
+        with respx.mock(assert_all_called=False) as mock:
+            response = client.post("/api/v1/models/import", json={"url": RAW_URL})
 
     assert response.status_code == 503
-    assert response.headers["retry-after"] == str(IMPORT_RETRY_AFTER)
-    assert response.json()["retry_after"] == IMPORT_RETRY_AFTER
+    # About 10 s left on the oldest fetch, less however long the request took.
+    retry_after = response.json()["retry_after"]
+    assert 5 <= retry_after <= 10
+    assert response.headers["retry-after"] == str(retry_after)
     assert not mock.calls
     assert client.get("/api/v1/models").json() == []
 
@@ -198,7 +209,7 @@ def test_an_import_with_every_resolver_thread_busy_is_a_503_not_the_refusal(
         url_import._RESOLVER_SLOTS.release(taken)
 
     assert response.status_code == 503
-    assert response.headers["retry-after"] == str(IMPORT_RETRY_AFTER)
+    assert response.headers["retry-after"] == str(RESOLVER_RETRY_AFTER)
     assert "resolver" in response.json()["detail"]
     assert not mock.calls
     assert client.get("/api/v1/models").json() == []
@@ -212,3 +223,18 @@ def test_every_import_gives_its_fetch_permit_back(client: TestClient) -> None:
 
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
     assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 201
+
+
+def test_import_retry_after_counts_down_from_the_oldest_held_fetch() -> None:
+    permits = ImportPermits(2)
+    with permits.hold(), permits.hold():
+        assert permits.full()
+        assert permits.retry_after() == url_import.IMPORT_TIMEOUT
+        second = list(permits._taken)[1]
+        permits._taken[second] -= 20
+        assert permits.retry_after() == url_import.IMPORT_TIMEOUT - 20
+        # A fetch past its deadline is about to give its permit back.
+        permits._taken[second] -= 60
+        assert permits.retry_after() == 1
+    assert not permits.full()
+    assert permits.retry_after() == 1

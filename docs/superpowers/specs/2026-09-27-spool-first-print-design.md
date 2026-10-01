@@ -208,21 +208,28 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
-**Extruder per filament (#469, #768).** The run does not check the mounted nozzles.
+**Extruder per filament (#469, #768, #797).** The run refuses nothing on the mounted
+nozzles, and warns of one thing only (below).
 From #538 until #768 it refused, before upload, a size neither mounted nozzle (nor a
 rack spare) had, a multi-color print when only one side had the size, and a spool on
 the side with another size, and it warned when a side was unreported or a mounted
 nozzle of the size was High Flow. Those rested on the premise that the slicer spreads
 a multi-color print across both extruders (queue item 108 paused with HMS 05FE8053,
 "the left nozzle is not matched", with no spare 0.2 in the rack). Measured by the
-maintainer's test print, 2026-09-29: a two-colour print sliced for 0.2 mm printed
+maintainer's test print, 2026-09-29: a two-color print sliced for 0.2 mm printed
 through the one 0.2 mm nozzle while the other extruder had a different size fitted. The
 printer handles its nozzles itself, and the H2C swaps hotends from its rack (§6), so
 those refusals and warnings are gone, from the run, the check before Print (#755) and
-the dialog alike. One stays, by the owner's ruling on #772: a mounted High Flow nozzle
-of the sliced size is an `hf-unsupported` warning (#723; queue item 149 paused on it),
-never a refusal, since a print may be set up before its nozzle is fitted. The dialog
-shows it, like every nozzle message, in Advanced mode only.
+the dialog alike. One warning stays, by the owner's rulings on #772 and #797: when a
+mounted nozzle of the chosen size is High Flow (`nozzle_type` `HH01`), whatever flow is
+chosen, the run and the check before Print carry an `hf-mounted` warning (#723; queue
+item 149 paused on it), since the slice is always Standard flow until Bambuddy supports
+High Flow presets (#484). It is advisory only, never a refusal, and it changes nothing
+the run sends, since a print may be set up before its nozzle is fitted. A High Flow
+choice also gets the resolver's `hf-unsupported` note (§4.1), and an unreadable printer
+status gives no warning rather than assuming a side. The dialog shows `hf-mounted` in
+Simple and Advanced mode alike, and it never holds Print; the nozzle step's own notes
+(`hf-unsupported`, `not-installed`) stay Advanced only.
 
 That print was sliced in desktop Bambu Studio 02.08.02.61 ("Name Keychain (H2C)",
 project Raegan): printer `Bambu Lab H2C 0.2 nozzle`, process `0.08mm High Quality @BBL
@@ -315,10 +322,22 @@ filament/plate-temperature warning.
 
 - **Errors** block the Print button (422) and name the slot or setting: no filament
   preset for a slot (§4.3.4); mixed nozzle sizes (§4.1 — there is no override).
-- **Warnings** show and allow printing: spool not loaded; nozzle not installed; High
-  Flow slicing as Standard (§4.1); no size-specific preset for a spool, falling back to
-  Bambu's Generic (§4.3); plate differs from the last print (§4.4 — there is no
-  plate/filament-temperature warning).
+- **Warnings** show and allow printing: spool not loaded; nozzle not installed; a
+  mounted High Flow nozzle of the chosen size (`hf-mounted`, §4.3 — shown in Simple and
+  Advanced mode alike, and never blocks Print); High Flow slicing as Standard (§4.1); no
+  size-specific preset for a spool, falling back to Bambu's Generic (§4.3); plate
+  differs from the last print (§4.4 — there is no plate/filament-temperature warning).
+
+### 4.6 Template print settings (#770)
+
+The resolver picks the process preset; the template may still say how it prints best.
+A template's `print_settings` (its `model.json`, keys and values allowlisted by
+`PRINT_SETTING_VALUES` in `library/catalogue.py`) go on every slice as
+`SlicePlan.process_overrides`, sent as the `SliceRequest`'s `process_overrides` over the
+resolved process preset, and are part of its `preset_key`. They are not a choice in the
+dialog. A downloaded 3MF gets the same settings in `project_settings.config`, listed in
+`different_settings_to_system` as edits to the system process. The print-flow spec
+(`2026-09-24-print-flow-design.md` §4) has the details.
 
 ## 5. Unknowns to test before building on them
 
@@ -378,7 +397,7 @@ Also found:
 
 ### The maintainer's test print (2026-09-29, #768)
 
-A two-colour print sliced for 0.2 mm printed through the one 0.2 mm nozzle, while the other extruder had a different size fitted. #538's multi-color refusal (first row of the table above) refused exactly that, so the run no longer checks the mounted nozzles at all (§4.3).
+A two-color print sliced for 0.2 mm printed through the one 0.2 mm nozzle, while the other extruder had a different size fitted. #538's multi-color refusal (first row of the table above) refused exactly that, so the run no longer refuses anything on the mounted nozzles; only the advisory High Flow warning remains (§4.3, #797).
 
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
