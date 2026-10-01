@@ -62,8 +62,9 @@ ENGINE=(
 pipeline_models() {
   local f
   for f in "$MODELS_DIR"/*/pipeline; do
-    [ -d "$f" ] && [ -f "$(dirname "$f")/verify.sh" ] || continue
-    basename "$(dirname "$f")"
+    if [ -d "$f" ] && [ -f "$(dirname "$f")/verify.sh" ]; then
+      basename "$(dirname "$f")"
+    fi
   done
 }
 
