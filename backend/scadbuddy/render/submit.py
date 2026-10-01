@@ -31,6 +31,7 @@ from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, QueueFullError, now, render_key
 from scadbuddy.render.jobs import (
@@ -248,7 +249,8 @@ class RenderService:
         the caller then waits `PREVIEW_TRANSFER` longer. There the run's id names the
         revision too, so a join never spans two commits: a newer commit's call starts its
         own run while an older one finishes, and the scheduler (which stores the image
-        under the source key it read first) never gets an older commit's image."""
+        under the source key it read first) never gets an older commit's image. On the
+        local store the id names the source key the same way."""
         revision: str | None = None
         wait = timeout
         if self.snapshots is not None:
@@ -262,11 +264,18 @@ class RenderService:
                     " history, or the template was never committed"
                 )
             wait += PREVIEW_TRANSFER.total_seconds()
+            run_id = f"preview-{slug}-{revision[:12]}"
+        else:
+            # The local store renders the live source, so the id names what it reads
+            # (the scheduler's `source_key`): a call after an edit does not join a run
+            # of the source before it (#903).
+            key = await asyncio.to_thread(source_key, self.paths, slug)
+            run_id = f"preview-{slug}" if key is None else f"preview-{slug}-{key[:12]}"
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,
             args=[slug, revision],
-            id=f"preview-{slug}" if revision is None else f"preview-{slug}-{revision[:12]}",
+            id=run_id,
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
             memo={**self._memo(), "preview_timeout": preview_timeout},
