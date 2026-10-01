@@ -468,7 +468,8 @@ file that already exists. So the new step counts the anchored line first:
 
 The anchor is `^\s*- https://github\.com/eh-homelab/ScadBuddy//deploy/grafana\?ref=[0-9a-f]{40}$`.
 The `.github/scripts/*.test.sh` suite gets cases for all four outcomes, the
-malformed one among them with a short SHA, a branch ref and a trailing comment.
+malformed one among them with a short SHA, a branch ref, a trailing comment
+and a lower-cased `scadbuddy//deploy/grafana`.
 
 Clusters needs, in clusters#1596 Phase 5: the remote resource line, and the
 `unsetOnly` NamespaceTransformer in place of the overlay's plain
