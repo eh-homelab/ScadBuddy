@@ -95,6 +95,14 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     options: PrintOptions
     ready: boolean
   } | null>(null)
+  /** The re-arrange in flight: closing the dialog (or unmounting it) stops its wait. */
+  const arrangeRun = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (open) return
+    arrangeRun.current?.abort()
+    arrangeRun.current = null
+  }, [open])
+  useEffect(() => () => arrangeRun.current?.abort(), [])
   useEffect(() => {
     // A new output from the caller is not a re-arrange: nothing carries to it.
     carry.current = null
@@ -268,6 +276,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     setArranging(true)
     setArrangeNote(null)
     setArrangeError(null)
+    const controller = new AbortController()
+    arrangeRun.current = controller
     try {
       const next = await runArrange(slug, {
         objects: (target.manifest ?? []).map((object) => ({
@@ -280,13 +290,15 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         filament_plan: { slots: plan, force_colour_match: false },
         colours: target.colors ?? [],
         name: arrangedName(target.name),
-      })
+      }, { signal: controller.signal })
       carry.current = { plan, overrides, options, ready: false }
       setTarget(next.output)
       setArrangeNote(arrangedNote(next.plates))
     } catch (cause) {
+      if (controller.signal.aborted) return
       setArrangeError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
     } finally {
+      if (arrangeRun.current === controller) arrangeRun.current = null
       setArranging(false)
     }
   }

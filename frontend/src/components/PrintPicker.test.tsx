@@ -335,6 +335,38 @@ describe('PrintPicker', () => {
     )
   })
 
+  it('stops a re-arrange when the dialog closes, so nothing is saved after it', async () => {
+    const created_at = '2026-09-28T12:00:00Z'
+    let status = 'pending'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status: 'pending', created_at }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/arrange-wait', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status, created_at }),
+      ),
+    )
+    const save = vi.spyOn(api, 'createOutput')
+    const shown = { ...output, library_files: [], pipeline_run_id: undefined }
+    function Closing() {
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <button onClick={() => setOpen(false)}>Close it</button>
+          <PrintPicker open={open} slug="name-keychain" output={shown} onClose={vi.fn()} onRan={vi.fn()} />
+        </>
+      )
+    }
+    const { user } = renderPage(<Closing />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+    await waitFor(() => expect(lastArrangeRequest()).toBeDefined())
+    await user.click(screen.getByRole('button', { name: 'Close it', hidden: true }))
+    status = 'done'
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(save).not.toHaveBeenCalled()
+  })
+
   it('shows a failed re-arrange as an error, not as a note', async () => {
     server.use(
       http.post('/api/v1/outputs/arrange', () =>
