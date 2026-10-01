@@ -48,7 +48,9 @@ export function PlatesToPrint({ plates, value, onChange, thumbnailUrl }: Props) 
                   <span className="sb-num text-[11px] text-faint">{number}</span>
                 </span>
               ) : (
-                number
+                <span>
+                  Plate <span className="sb-num">{entry.index}</span>
+                </span>
               )}
             </label>
           )

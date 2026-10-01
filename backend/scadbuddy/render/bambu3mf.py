@@ -508,8 +508,12 @@ def plates_of(path: Path) -> list[PlateEntry]:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    # An <object> without an id is named by nothing, so a missing object_id ("") on a
+    # plate's instance can never meet one.
     object_names = {
-        obj.get("id", ""): _metadata(obj).get("name", "") for obj in config.iter("object")
+        object_id: _metadata(obj).get("name", "")
+        for obj in config.iter("object")
+        if (object_id := obj.get("id"))
     }
     plates: list[PlateEntry] = []
     for plate in plate_settings(config):

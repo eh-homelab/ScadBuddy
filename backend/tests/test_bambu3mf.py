@@ -539,6 +539,23 @@ class TestPlatesOf:
         )
         assert [plate.name for plate in plates_of(path)] == ["two_boxes", "two_boxes + Lid"]
 
+    def test_an_instance_without_an_object_id_names_no_object(self, tmp_path: Path) -> None:
+        """#929 review: a missing ``object_id`` and an ``<object>`` with no ``id`` must not
+        meet on ``""`` and lend the plate an unrelated object's name."""
+        path = _edit_settings(
+            _write(tmp_path / "foreign.3mf", covers=False),
+            lambda config: config.replace(
+                "</config>",
+                ' <object>\n  <metadata key="name" value="Stray"/>\n </object>\n'
+                " <plate>\n"
+                '  <metadata key="plater_id" value="2"/>\n'
+                '  <model_instance>\n   <metadata key="instance_id" value="0"/>\n'
+                "  </model_instance>\n"
+                " </plate>\n</config>",
+            ),
+        )
+        assert [plate.name for plate in plates_of(path)] == ["two_boxes", None]
+
     def test_a_plate_with_no_name_and_no_objects_has_none(self, tmp_path: Path) -> None:
         path = add_plate(_write(tmp_path / "bare.3mf", covers=False), 2)
         assert [plate.name for plate in plates_of(path)] == ["two_boxes", None]

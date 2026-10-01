@@ -1398,7 +1398,9 @@ describe('PrintPicker · Plates of a 3MF', () => {
     const number = within(body.closest('label')!).getByText('Plate 1')
     expect(number).toHaveClass('text-faint')
     // No name from the 3MF: "Plate N" is the label itself, the last resort.
-    expect(within(plates).getByRole('radio', { name: 'Plate 2' })).toBeInTheDocument()
+    const unnamed = within(plates).getByRole('radio', { name: 'Plate 2' })
+    // Its number keeps the numeric face a named plate's secondary text has.
+    expect(within(unnamed.closest('label')!).getByText('2')).toHaveClass('sb-num')
   })
 
   it('queues every plate when asked for all of them', async () => {
