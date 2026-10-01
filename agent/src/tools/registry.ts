@@ -287,12 +287,34 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     },
     executed,
   )
-  return {
+  const done: ToolRun = {
     ...run,
     ...(reported.outcome ? { outcome: reported.outcome } : {}),
     ...(reported.detail ? { detail: reported.detail } : {}),
     ...(reported.approvalId ? { approvalId: reported.approvalId } : {}),
     ...(reported.ran ? { ran: reported.ran } : {}),
+  }
+  // What the session touched (#931, sessions/touched.ts): here, not in a
+  // projection, so every path that runs a session's tool records it (the
+  // harness server today; a durable session's tool activities would call
+  // this too). The tool that ran, as it ran; never fails the call.
+  if (ctx.session !== undefined && done.outcome === 'ok' && ctx.touched) {
+    await ctx.touched.record({
+      sessionId: ctx.session,
+      tool: (done.ran && ctx.lookup?.(done.ran.tool)) || tool,
+      input: done.ran?.input ?? parsedOrRaw(tool, args),
+      result: done.result,
+    })
+  }
+  return done
+}
+
+/** The arguments as the handler saw them (defaults applied), or as sent when they do not parse. */
+function parsedOrRaw(tool: Tool, args: unknown): Record<string, unknown> {
+  try {
+    return tool.parse(args)
+  } catch {
+    return (args ?? {}) as Record<string, unknown>
   }
 }
 

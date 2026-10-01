@@ -188,13 +188,16 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 
 ### 4.1 What a session touched (#931)
 
-Every tool call a session's turn makes through ScadBuddy's in-process tools, once it
+Every ScadBuddy tool call a session makes, once it
 succeeds, is mapped to the resources it created, changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
 extractor reads the call's parsed input and its result: models, revisions (with the
 parent and new commit), presets, assets, render jobs, outputs and prints. A `write` or
 `outward` tool with no extractor yet is listed as `unclassified` with its tool, so the
-gap stays visible; a `read` tool records nothing. Rows go with their session. Calls
+gap stays visible; a `read` tool records nothing. It is recorded in `runToolWithOutcome`
+(`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
+projection, so a durable session's tool activities (the durable-sessions spec, §5.3)
+record the same way. Rows go with their session. Calls
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 

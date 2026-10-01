@@ -8,7 +8,8 @@ import { EXTRACTORS, resultJson, type TouchedCall, touchesOf } from '../src/sess
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
-import { json, type Risk } from '../src/tools/registry.js'
+import { harnessPrincipal } from '../src/auth/principal.js'
+import { json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // What a session touched (#931, src/sessions/touched.ts): the per-tool
@@ -175,5 +176,21 @@ describe('the harness projection', () => {
     await outside.callTool({ name: 'update_source', arguments: { slug: 'ok', source: '' } })
     await outside.close()
     expect(seen).toEqual([])
+  })
+
+  it('records from runToolWithOutcome itself, so a path that bypasses the projection still records', async () => {
+    backend.use(http.put(`${BACKEND}/api/v1/models/box/source`, () => HttpResponse.json({ slug: 'box', version: C2 })))
+    const seen: TouchedCall[] = []
+    const tool = ALL_TOOLS.find((t) => t.name === 'update_source')!
+    const ctx = {
+      ...services({ touched: { record: async (call: TouchedCall) => void seen.push(call) } }),
+      principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+      progress: async () => {},
+      signal: new AbortController().signal,
+    }
+    await runToolWithOutcome(tool, { slug: 'box', source: '' }, { ...ctx, session: 'sess-2' })
+    // Over /mcp there is no session: nothing to record against.
+    await runToolWithOutcome(tool, { slug: 'box', source: '' }, ctx)
+    expect(seen.map((c) => [c.sessionId, c.tool.name])).toEqual([['sess-2', 'update_source']])
   })
 })

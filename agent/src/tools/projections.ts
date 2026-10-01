@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
-import { errorResult, type Progress, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
+import { errorResult, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -109,10 +109,10 @@ export function createHarnessServer(
         // from the types, so the same file pins the SDK version: a bump fails
         // there until someone re-checks this (and drops it if fixed).
         z.object(t.shape) as unknown as typeof t.shape,
-        async (args, extra) => {
+        (args, extra) =>
           // `gate: 'harness'`: the query's permission seam has already parked
           // an outward call for approval (registry.ts ToolContext.gate).
-          const run = await runToolWithOutcome(t, args, {
+          runTool(t, args, {
             ...services,
             principal,
             session,
@@ -120,19 +120,7 @@ export function createHarnessServer(
             signal: signalFrom(extra),
             lookup,
             gate: 'harness',
-          })
-          // What the session touched (#931): the tool that ran, as it ran.
-          if (session !== undefined && run.outcome === 'ok' && services.touched) {
-            const ran = run.ran ? lookup(run.ran.tool) : undefined
-            await services.touched.record({
-              sessionId: session,
-              tool: ran ?? t,
-              input: run.ran?.input ?? parsedOrRaw(t, args),
-              result: run.result,
-            })
-          }
-          return run.result
-        },
+          }),
         { annotations: t.annotations },
       ),
     ),
