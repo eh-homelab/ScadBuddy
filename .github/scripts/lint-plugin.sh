@@ -21,6 +21,9 @@
 #     YAML frontmatter carrying a non-empty `name` and `description`
 #   - every SKILL.md cites at least one source: a URL, or a repository file
 #     path with a `§` or "section" reference on the same line
+#   - agent/plugins/scadbuddy, the harness's copy, when present: the same
+#     `version`, no `userConfig` or .mcp.json, and `skills` and `agents` as
+#     links to plugins/scadbuddy's
 #
 # Every problem is printed (one per line, prefixed with the file); the exit
 # status is 1 if there was any, 2 on a usage error.
@@ -169,6 +172,35 @@ for dir in "${plugins[@]}"; do
     check_frontmatter "$agent"
   done
 done
+
+# ── the agent's copy (#896) ──────────────────────────────────────────────────
+# agent/plugins/scadbuddy is plugins/scadbuddy as the harness loads it: its own
+# manifest, at the same version, without userConfig or .mcp.json, and `skills`
+# and `agents` as links to the shared directories (agent/src/harness/ownPlugin.ts).
+own="$root/agent/plugins/scadbuddy"
+if [ -d "$own" ]; then
+  own_manifest="$own/.claude-plugin/plugin.json"
+  shared_manifest="$root/plugins/scadbuddy/.claude-plugin/plugin.json"
+  if ! json_ok "$own_manifest"; then
+    err "$(rel "$own_manifest")" "missing or not a JSON object"
+  else
+    jq -e '.name == "scadbuddy"' "$own_manifest" >/dev/null || err "$(rel "$own_manifest")" "'name' must be 'scadbuddy'"
+    jq -e 'has("userConfig") | not' "$own_manifest" >/dev/null ||
+      err "$(rel "$own_manifest")" "must not have 'userConfig' (the harness refuses it)"
+    if json_ok "$shared_manifest" &&
+      [ "$(jq -r .version "$own_manifest")" != "$(jq -r .version "$shared_manifest")" ]; then
+      err "$(rel "$own_manifest")" "'version' must match $(rel "$shared_manifest")"
+    fi
+  fi
+  [ ! -e "$own/.mcp.json" ] || err "$(rel "$own/.mcp.json")" "must not exist (the harness serves the tools in-process)"
+  for part in skills agents; do
+    if [ ! -L "$own/$part" ] || [ "$(readlink "$own/$part")" != "../../../plugins/scadbuddy/$part" ]; then
+      err "$(rel "$own/$part")" "must be a symlink to ../../../plugins/scadbuddy/$part"
+    elif [ ! -d "$own/$part" ]; then
+      err "$(rel "$own/$part")" "does not resolve to a directory"
+    fi
+  done
+fi
 
 if [ "$errors" -gt 0 ]; then
   printf '\n%d problem(s) in the plugin\n' "$errors"

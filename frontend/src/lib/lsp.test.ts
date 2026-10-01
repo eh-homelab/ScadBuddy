@@ -188,6 +188,12 @@ describe('definitionFile', () => {
       commit: COMMIT,
       path: 'shapes3d.scad',
     })
+    // As a Monaco URI's `toString()` spells it (#185): the `@` encoded.
+    expect(definitionFile(`file:///libraries/BOSL2%40${COMMIT}/shapes3d.scad`, ROOT)).toEqual({
+      library: 'BOSL2',
+      commit: COMMIT,
+      path: 'shapes3d.scad',
+    })
     expect(definitionFile(`file:///libraries/NopSCADlib@${COMMIT}/vitamins/screw.scad`, ROOT)).toEqual({
       library: 'NopSCADlib',
       commit: COMMIT,

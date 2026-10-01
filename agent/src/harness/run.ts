@@ -32,13 +32,15 @@ import {
   makePreToolUseHook,
   type TierResolver,
 } from './permissions.js'
+import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
 
 // The harness loop (issue #255): one `query()` of the Claude Agent SDK per turn,
-// built on buildQueryOptions() so every query keeps `tools: []`,
+// built on buildQueryOptions() so every query keeps `tools: []` (or only
+// Skill and Agent, with ScadBuddy's own plugin: ownPlugin.ts, #896),
 // `settingSources: []`, `strictMcpConfig` and the service-owned
 // CLAUDE_CONFIG_DIR (spec §4.4). This module adds, per query:
 //
@@ -109,6 +111,13 @@ export type HarnessRun = {
    * would inherit the credential env, throws PluginRefusedError.
    */
   pluginPaths?: string[]
+  /**
+   * ScadBuddy's own plugin (ownPlugin.ts `OWN_PLUGIN_DIR`, #896), vetted like
+   * `pluginPaths`. Loading it gives the run the Skill and Agent tools, at
+   * `read`, so its skills and subagents can be used; a run without it has no
+   * built-in tool at all.
+   */
+  ownPlugin?: string
   /**
    * Registered remote MCP plugins (#297), each already registered with the
    * loopback forwarder (src/plugins/forwarder.ts `forwardForRun`), so `url` is
@@ -224,12 +233,16 @@ export function remotePluginOptions(
   return { mcpServers, disallowedTools }
 }
 
-/** The tier resolver a run uses: its plugins' tiers first, then `run.tierOf`. */
-export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf'>): TierResolver {
-  const base = run.tierOf ?? (() => undefined)
-  if (!run.remotePlugins?.length) return base
-  const plugins = pluginTierResolver(run.remotePlugins)
-  return (toolName, input) => plugins(toolName) ?? base(toolName, input)
+/**
+ * The tier resolver a run uses: the own plugin's Skill and Agent when it is
+ * loaded, then its plugins' tiers, then `run.tierOf`.
+ */
+export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin'>): TierResolver {
+  const given = run.tierOf ?? (() => undefined)
+  const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
+  const base: TierResolver = remote ? (toolName, input) => remote(toolName) ?? given(toolName, input) : given
+  if (run.ownPlugin === undefined) return base
+  return (toolName, input) => ownPluginTierOf(toolName) ?? base(toolName, input)
 }
 
 /** `promise`'s value, or undefined once `signal` aborts first. */
@@ -361,10 +374,11 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   if (run.cwd !== undefined) options.cwd = run.cwd
   if (run.includePartialMessages) options.includePartialMessages = true
-  const plugins = (run.pluginPaths ?? []).map((p) => {
+  const plugins = [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? [])].map((p) => {
     assertPluginAllowed(p)
     return { type: 'local' as const, path: path.resolve(p) }
   })
+  if (run.ownPlugin !== undefined) options.tools = [...OWN_PLUGIN_TOOLS]
   // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
   // assertPluginAllowed refuses, but one this module wrote and starts under `env -i`.
   if (browserPlugin !== undefined) plugins.push({ type: 'local', path: browserPlugin })

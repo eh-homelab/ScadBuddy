@@ -212,7 +212,9 @@ export function definitionFile(uri: string, root: string): DefinitionFile | null
     const rest = uri.slice(LIBRARY_ROOT.length)
     const slash = rest.indexOf('/')
     if (slash <= 0) return null
-    const directory = LIBRARY_DIRECTORY.exec(rest.slice(0, slash))
+    // Decoded, like the path: the bridge sends `BOSL2@<commit>`, but a Monaco URI's
+    // `toString()` spells it `BOSL2%40<commit>`, and the editor opener gets that.
+    const directory = LIBRARY_DIRECTORY.exec(decodedPath(rest.slice(0, slash)) ?? '')
     const path = decodedPath(rest.slice(slash + 1))
     return !directory || path === null ? null : { library: directory[1]!, commit: directory[2]!, path }
   }

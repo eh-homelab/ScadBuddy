@@ -270,6 +270,25 @@ jobs:
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
 
+      # The Claude Code hook (.claude/settings.json) that bumps a plugin's
+      # version on its first change in a branch, then lints it (#896).
+      - name: Test the plugin edit hook
+        run: .github/scripts/plugin-edited.test.sh
+
+      # The hook only sees edits made through Claude Code; this catches every
+      # other plugin change that kept its version (#896). The checkout is
+      # shallow, so the base commit is fetched first.
+      - name: Check plugin versions were bumped
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          .github/scripts/check-plugin-version.sh "$BASE_SHA"
+
+      - name: Test the plugin version check
+        run: .github/scripts/check-plugin-version.test.sh
+
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
   frontend:
     name: Frontend lint, typecheck, test, build

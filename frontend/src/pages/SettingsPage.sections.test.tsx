@@ -135,15 +135,18 @@ describe('SettingsPage sections (#322)', () => {
   it('shows a refused value beside its field', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    const field = screen.getByLabelText('Editor checks at once')
+    // Queried inside the section, not across the whole page, which is slow (#906).
+    const rendering = within(region('Rendering'))
+    const field = rendering.getByLabelText('Editor checks at once')
     await user.clear(field)
     await user.type(field, '0')
-    await user.click(screen.getByRole('button', { name: 'Save Rendering' }))
-    expect(await within(region('Rendering')).findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
+    await user.click(rendering.getByRole('button', { name: 'Save Rendering' }))
+    expect(await rendering.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
       'SCADBUDDY_CHECK_CONCURRENCY must be at least 1',
     )
-    expect(within(region('Rendering')).getByText('Unsaved')).toBeInTheDocument()
-  })
+    expect(rendering.getByText('Unsaved')).toBeInTheDocument()
+    // The alert's own wait is 5 s, so the test needs more than vitest's default 5 s (#906).
+  }, 15_000)
 
   it('edits the upload limit in MB or GB and stores bytes', async () => {
     // The default is 1 GiB, shown as exactly that.
