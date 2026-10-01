@@ -2,8 +2,11 @@ import type { CustomizerSchema, ParamPreset } from '../api/types'
 import type { JsonObject } from '../lib/inputs'
 
 export const UI_API_CURRENT = 1
-/** The majors this host mounts: the current one and the one before it (spec §8.1). */
-export const UI_API_SUPPORTED: readonly number[] = [UI_API_CURRENT]
+/** The majors a host at `current` mounts: that one and the one before it (spec §8.1). */
+export function supportedMajors(current: number): number[] {
+  return [current, current - 1].filter((n) => n > 0)
+}
+export const UI_API_SUPPORTED: readonly number[] = supportedMajors(UI_API_CURRENT)
 
 export type UiSlot = 'panel' | 'page'
 
@@ -29,9 +32,12 @@ export interface Host {
   inputs: {
     get(): JsonObject
     /**
-     * An RFC 7386 merge patch over the inputs; `null` deletes a key. Parameters are the
-     * exception: they are typed values and are never deleted, so `null` inside `params`
-     * is refused. A UI returns one to its default by setting the default value.
+     * An RFC 7386 merge patch over the inputs; `null` deletes a key, including one
+     * parameter override under `params` (the parameter goes back to its default).
+     * The host checks only that each parameter is declared and that its value is a
+     * number, string or boolean. Ranges, options and formats are the render's job:
+     * it refuses an invalid value with a 422 naming the parameter, as the generated
+     * form's widgets already rely on.
      */
     set(patch: JsonObject): void
     subscribe(fn: (inputs: JsonObject) => void): () => void

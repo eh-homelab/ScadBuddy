@@ -5,7 +5,7 @@ import type { JsonObject } from '../lib/inputs'
 import { extrudersOf } from '../lib/params'
 import { useLatest } from '../lib/useLatest'
 import { defineHostElements, provideRegistry, type HostElement } from './elements'
-import { createHost, type HostDeps, type HostHandle } from './host'
+import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './host'
 import { effectiveValues } from './bindings'
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
@@ -85,7 +85,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     let cleanup: (() => void) | void
     void (async () => {
       try {
-        const module = await loadUiModule(api.uiFileUrl(slug, version, ui.module.replace(/^ui\//, '')))
+        const module = await loadUiModule(api.uiFileUrl(slug, version, checkedUiPath(ui.module.replace(/^ui\//, ''))))
         const mount = mountOf(module)
         if (!mount) throw new Error(`${ui.module} does not export a mount function`)
         if (!active) return
