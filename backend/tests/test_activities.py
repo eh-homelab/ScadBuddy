@@ -24,7 +24,7 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import AssetStore, AssetUnavailableError, file_assets
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render.diagnostics import Diagnostic
@@ -717,3 +717,38 @@ async def test_an_upload_the_store_lacks_fails_the_stage_as_an_input_error(
             await ActivityEnvironment().run(run, *args)
     assert raised.value.type == "AssetUnavailable" and raised.value.non_retryable
     assert missing in str(raised.value) and "not in the blob store" in str(raised.value)
+
+
+async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the_store(
+    tmp_path: Path, pg_conninfo: str, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ensure` found the upload already local, then the worker's sweep took the copy
+    before the render read it: a retry brings it back, so the stage is retried, and the
+    error does not say the store lacks it."""
+    paths = demo_paths(tmp_path)
+    assets = AssetStore(paths.assets, pg_pool)
+    meta = assets.put(b'<svg xmlns="http://www.w3.org/2000/svg"/>', "logo.svg")
+
+    async def vanished(*_: object, **__: object) -> None:
+        raise AssetUnavailableError("label", meta.id)
+
+    monkeypatch.setattr(activities_module, "render_main", vanished)
+    with store_pool(pg_conninfo) as pool:
+        deps = dataclasses.replace(
+            worker_deps(tmp_path, paths),
+            assets=assets,
+            remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
+        )
+        acts = RenderActivities(deps)
+        params = {"label": meta.id}
+        req = PieceRequest(
+            slug="demo",
+            revision=REVISION,
+            params=params,
+            piece_key=piece_key("demo", REVISION, "model.scad", params),
+        )
+        prepared = await ActivityEnvironment().run(acts.prepare, req)
+        with pytest.raises(ApplicationError) as raised:
+            await ActivityEnvironment().run(acts.render_main, req, prepared)
+    assert raised.value.type == "AssetUnavailable" and not raised.value.non_retryable
+    assert meta.id in str(raised.value) and "not in the blob store" not in str(raised.value)
