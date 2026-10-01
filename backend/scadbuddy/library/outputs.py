@@ -182,10 +182,14 @@ class OutputStore:
         loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
         return loaded
 
-    def inputs(self, output_id: str) -> dict[str, Any]:
+    def inputs(
+        self, output_id: str, params: Mapping[str, ParamValue] | None = None
+    ) -> dict[str, Any]:
+        """The output's inputs; one from before them reads as its params at ``v`` 0.
+        A caller that already read :meth:`params` passes them, so they are read once."""
         path = self._find_dir(output_id) / INPUTS_NAME
         if not path.is_file():
-            return legacy_inputs(self.params(output_id))
+            return legacy_inputs(self.params(output_id) if params is None else params)
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -194,7 +198,7 @@ class OutputStore:
             # The record itself (meta, files, params) is intact: read it as one from
             # before inputs rather than lose it to a damaged side file.
             logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
-            return legacy_inputs(self.params(output_id))
+            return legacy_inputs(self.params(output_id) if params is None else params)
         checked: dict[str, Any] = loaded
         return checked
 

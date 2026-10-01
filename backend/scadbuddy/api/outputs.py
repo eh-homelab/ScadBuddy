@@ -52,7 +52,12 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
+from scadbuddy.render.inputs import (
+    InputsDisagreeError,
+    InputsError,
+    legacy_inputs,
+    normalize_inputs,
+)
 from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
@@ -110,11 +115,12 @@ class EditTarget(BaseModel):
 
 
 def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+    params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
-        params=store.params(meta.id),
-        inputs=store.inputs(meta.id),
+        params=params,
+        inputs=store.inputs(meta.id, params),
         library_files=library_files,
     )
 
@@ -169,9 +175,10 @@ async def create_output(
         # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
         try:
             inputs = normalize_inputs(body.inputs, job.params).data
+        except InputsDisagreeError:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
         except InputsError as error:
-            message = rendered if "disagree" in str(error) else str(error)
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, message) from None
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         # The job with no params: nothing was compared above, so compare here.
         if inputs["params"] != job.params:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
@@ -253,12 +260,13 @@ def get_edit_target(
     # outlive its output — that is the point of the 3MF fallback — but not its model:
     # answering 200 would send the customizer somewhere it cannot load.
     require_model(catalogue, meta.slug)
+    params = outputs.params(output_id)
     return EditTarget(
         output_id=meta.id,
         slug=meta.slug,
         name=meta.name,
-        params=outputs.params(output_id),
-        inputs=outputs.inputs(output_id),
+        params=params,
+        inputs=outputs.inputs(output_id, params),
         model_version=meta.model_version,
         source="record",
     )

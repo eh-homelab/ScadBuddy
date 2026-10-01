@@ -14,11 +14,12 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
@@ -552,6 +553,29 @@ def test_an_output_from_before_inputs_reads_as_params_v0(
         "params": {"width": 12},
         "v": 0,
     }
+
+
+def test_an_output_from_before_inputs_reads_its_params_once_per_request(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = _rendered(client, model, {"params": {"width": 12}})
+    output = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    reads: list[str] = []
+    params = OutputStore.params
+
+    def counting(self: OutputStore, output_id: str) -> dict[str, ParamValue]:
+        reads.append(output_id)
+        return params(self, output_id)
+
+    monkeypatch.setattr(OutputStore, "params", counting)
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {"width": 12}
+    assert reads == [output["id"]]
+    reads.clear()
+    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"]["params"] == {
+        "width": 12
+    }
+    assert reads == [output["id"]]
 
 
 def test_saving_a_job_whose_result_is_gone_is_a_404(
