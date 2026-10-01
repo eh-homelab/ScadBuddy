@@ -356,6 +356,43 @@ async def test_a_preview_renders_on_the_worker_and_one_slug_runs_once(
     assert fake.calls == 1
 
 
+async def test_a_local_preview_after_a_source_edit_does_not_join_the_older_run(
+    make_service: ServiceFactory, paths: DataPaths
+) -> None:
+    """#903: on the local store the run's id names the source key, so a preview asked
+    for after an edit starts its own run rather than taking the pre-edit image."""
+    paths.model_dir(SLUG).mkdir(parents=True, exist_ok=True)
+    paths.model_source(SLUG).write_text("cube(1);", encoding="utf-8")
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        fake = FakePreview()
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[RenderPreview],
+            activities=[fake.render_preview_png],
+        ):
+            before = asyncio.create_task(service.render_preview(SLUG, 30.0))
+            try:
+                async with asyncio.timeout(30):
+                    while fake.calls == 0:
+                        await asyncio.sleep(0.05)
+                paths.model_source(SLUG).write_text("cube(2);", encoding="utf-8")
+                after = asyncio.create_task(service.render_preview(SLUG, 30.0))
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(5):
+                        while fake.calls < 2:
+                            await asyncio.sleep(0.05)
+                calls = fake.calls
+            finally:
+                fake.release.set()
+            await asyncio.gather(before, after)
+        await service.aclose()
+
+    assert calls == 2
+
+
 class _Pinning:
     """`SnapshotStore.pin` as the API's: the slug's last commit, stored."""
 

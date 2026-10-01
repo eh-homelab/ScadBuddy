@@ -470,7 +470,9 @@ With `store_backend` set to `bambuddy`, the API and the render worker refuse to 
 without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
 is out of reach. Settings no longer saves that state, but a stored `bambuddy` beats
 `SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
-database, then set the URL and folder in Settings and choose the Bambuddy store again:
+database, in the schema `SCADBUDDY_DATABASE_URL` uses (the `settings` table is
+unqualified: on a custom schema, `SET search_path` to it first), then set the URL and
+folder in Settings and choose the Bambuddy store again:
 
 ```sql
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';

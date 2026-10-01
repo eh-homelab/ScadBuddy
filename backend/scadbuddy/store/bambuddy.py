@@ -10,16 +10,22 @@ deleted. No dot-named folders: Bambuddy shows them.
 Every folder ScadBuddy makes or adopts is recorded in `store_folders`, and a delete is
 refused unless the file sits in one recorded as `work`. What each file is lives in
 `store_blobs`, so a fetch is by file id, never a folder scan.
+
+Known limits (#682): a folder is adopted by `(parent, name)`, so two templates whose
+titles clean to the same name share one folder pair, and a template titled "Shared"
+shares the fonts' folder. A retitled template keeps its old folder (rows are keyed by
+slug). Deletes stay safe: they are by file id and go through the `Work` check.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +43,8 @@ from scadbuddy.library.settings_store import RenderStoreSettings, load_render_st
 from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
 from scadbuddy.store.index import Pool
+
+logger = logging.getLogger(__name__)
 
 WORK = "Work"
 SHARED_TITLE = "Shared"
@@ -79,19 +87,37 @@ class RenderSettingsSource:
         self._clock = clock
         self._cached: RenderStoreSettings | None = None
         self._at = 0.0
+        #: False while a re-read fails and `current` answers the last good settings.
+        self.fresh = True
 
     async def current(self) -> RenderStoreSettings:
+        """The settings, re-read once ``ttl`` has passed. A re-read that fails keeps the
+        last good ones (and clears `fresh`) rather than failing `/healthz` and the
+        renders with the database; only a first read that fails raises."""
         now = self._clock()
         if self._cached is None or now - self._at >= self.ttl:
-            self._cached = await asyncio.to_thread(
-                load_render_store_settings, self._pool, self._defaults
-            )
+            try:
+                self._cached = await asyncio.to_thread(
+                    load_render_store_settings, self._pool, self._defaults
+                )
+            except Exception:
+                if self._cached is None:
+                    raise
+                logger.warning("could not re-read the store settings; keeping the last good")
+                self.fresh = False
+            else:
+                self.fresh = True
             self._at = now
         return self._cached
 
+    def seed(self, current: RenderStoreSettings) -> None:
+        """Start from the settings the process read at start, so a database that is
+        down at the first re-read leaves these in place rather than nothing."""
+        self._cached, self._at = current, self._clock()
+
     def invalidate(self) -> None:
         """Re-read on the next call: the API calls this after its own settings write."""
-        self._cached = None
+        self._at = float("-inf")
 
     async def target(self) -> BambuddyTarget:
         current = await self.current()
@@ -166,11 +192,12 @@ class BambuddyContentBackend:
                 return str(uploaded.id)
         raise AssertionError("unreachable")
 
-    async def download(self, backend_id: str) -> AsyncIterator[bytes]:
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         async with self._client() as (client, _):
             try:
-                async for chunk in client.download_library_file(int(backend_id)):
-                    yield chunk
+                async with aclosing(client.download_library_file(int(backend_id))) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
             except ApiError as error:
                 if error.status == 404:
                     raise BlobMissingError(backend_id) from None

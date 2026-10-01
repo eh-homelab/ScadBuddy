@@ -27,6 +27,7 @@ def test_healthz_says_where_blobs_live_and_whether_workers_hold_the_full_key(
         "configured_backend": "local",
         "render_key_fallback": False,
         "multi_worker": False,
+        "settings_current": True,
     }
     client.put("/api/v1/settings", json={"bambuddy_api_key": "full"})
     # the API invalidates its settings source on its own write, so this is immediate
@@ -75,3 +76,17 @@ def test_a_start_that_fails_after_the_store_is_built_closes_it(
         pass
     assert closed == ["store"]
     assert getattr(app.state, STATE_ATTR).settings_store.pool.closed
+
+
+def test_healthz_is_degraded_not_failed_while_the_settings_cannot_be_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def down(*_: object) -> NoReturn:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("scadbuddy.store.bambuddy.load_render_store_settings", down)
+    getattr(client.app.state, STATE_ATTR).store.source.invalidate()  # type: ignore[attr-defined]
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["store"]["settings_current"] is False

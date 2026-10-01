@@ -9,6 +9,7 @@ import {
   bestUnit,
   envVar,
   hasKey,
+  type SecretName,
   humanSeconds,
   inUnit,
   type ByteUnit,
@@ -233,7 +234,7 @@ export function RuntimeInput({
         </select>
       )
     case 'secret': {
-      const stored = Boolean(settings[hasKey(spec.name as 'bambuddy_api_key' | 'google_fonts_api_key')])
+      const stored = Boolean(settings[hasKey(spec.name as SecretName)])
       return (
         <div className="flex gap-2">
           <input

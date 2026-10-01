@@ -38,7 +38,8 @@ class Health(BaseModel):
 @router.get("/healthz", response_model=Health, summary="Liveness")
 async def healthz(state: StateDep) -> Health:
     writable = state.paths.root.is_dir() and os.access(state.paths.root, os.W_OK)
-    healthy = writable and state.openscad_version is not None
+    store = await store_health(state.store)
+    healthy = writable and state.openscad_version is not None and store.settings_current
     settings = state.settings
     return Health(
         status="ok" if healthy else "degraded",
@@ -46,7 +47,7 @@ async def healthz(state: StateDep) -> Health:
         data_dir_writable=writable,
         revision=settings.revision,
         version=settings.version,
-        store=await store_health(state.store),
+        store=store,
         temporal=TemporalHealth(
             address=settings.temporal_address,
             namespace=settings.temporal_namespace,

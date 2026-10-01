@@ -99,6 +99,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     try:
         source = RenderSettingsSource(projection.pool, settings)
         current = load_render_store_settings(projection.pool, settings)
+        source.seed(current)
         backend = current.store_backend
         store = build_store(
             backend=backend,

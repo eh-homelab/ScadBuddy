@@ -32,11 +32,11 @@ async def test_an_upload_on_the_api_is_readable_on_a_worker(
     await remote.mirror(api, meta, slug="demo", title="Demo")
     worker = AssetStore(tmp_path / "worker" / "assets", pg_pool)
     params = {"logo": meta.id, "width": 3}
-    assert await remote.ensure(worker, asset_ids_in(params)) == [meta.id]
+    assert await remote.ensure(worker, asset_ids_in(params)) == []  # fetched
     assert worker.get(meta.id) == meta
     assert worker.blob_path(meta).read_bytes() == api.blob_path(meta).read_bytes()
     assert await remote.ensure(worker, [meta.id]) == []  # already local: no download
-    assert await remote.ensure(worker, ["f" * 64]) == []  # unknown id: the render reports it
+    assert await remote.ensure(worker, ["f" * 64]) == ["f" * 64]  # the render reports it
     stored = tmp_path / "remote" / f"asset/{meta.id}"
     assert stored.is_file()
     assert await remote.drop([meta.id], cutoff=await remote.clock()) == [meta.id]
@@ -128,7 +128,7 @@ async def test_ensure_leaves_another_backends_row_and_drops_a_corrupt_copy(
     foreign = BlobRef(sha256=foreign_id, kind="asset", backend="bambuddy", backend_id="7", size=1)
     remote.content.index.put(asset_key(foreign_id), foreign, slug=None, meta={})
     worker = AssetStore(tmp_path / "worker" / "assets", pg_pool)
-    assert await remote.ensure(worker, [meta.id, foreign_id]) == []
+    assert await remote.ensure(worker, [meta.id, foreign_id]) == sorted([meta.id, foreign_id])
     assert remote.content.index.get(asset_key(foreign_id)) is not None
     assert remote.content.index.get(asset_key(meta.id)) is None  # dropped, object too
     assert not (tmp_path / "remote" / f"asset/{meta.id}").exists()
@@ -236,6 +236,6 @@ async def test_ensure_marks_a_local_upload_used_so_the_workers_sweep_keeps_it(
             "UPDATE assets SET last_used_at = %s WHERE id = %s",
             (datetime.now(UTC) - timedelta(days=7), meta.id),
         )
-    assert await remote.ensure(worker, [meta.id]) == []  # a hit: nothing fetched
+    assert await remote.ensure(worker, [meta.id]) == []  # a hit
     assert worker.prune_local(grace=3600) == []
     assert worker.get(meta.id) == meta
