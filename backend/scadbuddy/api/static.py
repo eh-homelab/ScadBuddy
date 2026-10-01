@@ -65,11 +65,14 @@ class SPAStaticFiles(StaticFiles):
         try:
             response = await super().get_response(path, scope)
         except HTTPException as error:
-            if error.status_code != 404:
+            if error.status_code == 404 and _is_asset(path):
+                # Returned, not raised: the app's problem handler would answer it without
+                # get_response's Cache-Control. Plain text and no CSP, as before: not a
+                # document, so nothing runs in it.
+                return PlainTextResponse("Not Found", 404)
+            if error.status_code != 404 or not fallback:
                 raise
-            # Returned, not re-raised: a raised 404 would reach the app's problem handler
-            # and skip get_response's Cache-Control. Plain text, so nothing runs in it.
-            response = FileResponse(self.index) if fallback else PlainTextResponse("Not Found", 404)
+            response = FileResponse(self.index)
         if response.status_code == 404 and fallback:
             response = FileResponse(self.index)
         response.headers["Content-Security-Policy"] = PAGE_CSP

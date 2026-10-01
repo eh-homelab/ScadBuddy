@@ -68,6 +68,20 @@ def test_missing_asset_is_a_404_not_the_spa(client: TestClient, path: str) -> No
     assert response.headers["cache-control"] == REVALIDATE
 
 
+def test_missing_asset_404_has_no_csp(client: TestClient) -> None:
+    response = client.get("/assets/Preview-fDSm7oxk.js")
+    assert "content-security-policy" not in response.headers
+
+
+def test_a_route_without_index_html_is_a_problem_document(
+    client: TestClient, tmp_path: Path
+) -> None:
+    (tmp_path / "dist" / "index.html").unlink()
+    response = client.get("/models/demo")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
 def test_other_root_files_are_revalidated(client: TestClient) -> None:
     response = client.get("/favicon.svg")
     assert response.status_code == 200
