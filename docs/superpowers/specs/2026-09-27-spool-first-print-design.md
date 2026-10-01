@@ -399,6 +399,24 @@ Also found:
 
 A two-color print sliced for 0.2 mm printed through the one 0.2 mm nozzle, while the other extruder had a different size fitted. #538's multi-color refusal (first row of the table above) refused exactly that, so the run no longer refuses anything on the mounted nozzles; only the advisory High Flow warning remains (§4.3, #797).
 
+### Acceptance after #840 (2026-10-01)
+
+This is the two-color rerun that the #538 acceptance was waiting on. It ran against a build that includes #840, which tells the slicer the only side with the chosen nozzle (`extruder_nozzle_stats`, §4.3). The printer had a Standard 0.2 mm nozzle on the right and 0.4 mm on the left. The job was a `name-keychain` output ("Reagan"), Fine, on two Bambu PLA Basic spools. It was queued as a manual start through the Print dialog, and the user started it on the printer.
+
+| Check | Result | Measured value |
+|---|---|---|
+| 0.2 printer preset on the queue item | **Pass** | Queue item 160's sliced file: printer `Bambu Lab H2C 0.2 nozzle` |
+| Fine tier resolves to `0.08mm High Quality` | **Pass** | Process `0.08mm High Quality @BBL H2C 0.2 nozzle`, layer height 0.08 |
+| Both spools' colors | **Pass** | `#00B1B7` / `#EC008C`, both `Bambu PLA Basic @BBL H2C 0.2 nozzle` |
+| Only the side with the nozzle is sliced | **Pass** | One nozzle group, `extruder_id="2"` (the right), 0.2 Standard; `filament_maps` `2 2`; `extruder_nozzle_stats` `["Standard#0","Standard#1"]`; no pre-heat of the left |
+| A two-color print completes | **Pass** | Started 01:49:57 and completed 03:08:27 UTC with no HMS, 6.88 g. [Print 84](https://scadbuddy.internal.nullreference.io/prints/84) in ScadBuddy; [finish photo](https://scadbuddy.internal.nullreference.io/api/v1/prints/84/photos/finish_20260930_230831_4f4c887b.jpg) and [plate thumbnail](https://scadbuddy.internal.nullreference.io/api/v1/prints/84/plates/1/thumbnail), both in the chosen colors |
+
+The run before it, queue item 159, was sliced before #840 and paused at layer 0 with HMS `05FE8053`, "The left nozzle is not matched with slicing file." The slicer's "Auto For Flush" grouping had split the filaments across both sides. It was cancelled, and 160 is that print resliced. This closes the acceptance: the spool-first flow queues, slices and completes a two-color print on this printer.
+
+The user passed it with notes, from nine photos (in the template's media on [`name-keychain`](https://scadbuddy.internal.nullreference.io/m/builtin:name-keychain), and copied with metadata stripped to [`media/2026-10-01-acceptance-160/`](media/2026-10-01-acceptance-160/)). Colors and letter edges are correct, and nothing dragged across the letters, which was the defect in earlier runs. The underside and edges are clean. What remains is cosmetic and comes from slicer tuning, not from the flow:
+- a few fine strings in the counters of `e` and across the key-ring hole;
+- faint diagonal scuffs and small zits on the letters' top surface.
+
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
 - **Which AMS tray and which extruder each spool feeds.** Bambuddy's scheduler computes
