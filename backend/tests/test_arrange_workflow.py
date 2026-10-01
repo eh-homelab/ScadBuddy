@@ -102,11 +102,11 @@ async def test_the_reconciler_starts_an_arrange_row_as_arrange(
         reconcile_after=0.0,
     )
     job = await svc.arrange("demo", _inputs())
-    assert client.start_workflow.await_args.args[0] == "Arrange"
+    assert client.start_workflow.await_args.args[0] == Arrange.run
     client.start_workflow.side_effect = None
     client.start_workflow.reset_mock()
     assert await svc.reconcile_once() == 1
-    assert client.start_workflow.await_args.args[0] == "Arrange"
+    assert client.start_workflow.await_args.args[0] == Arrange.run
     assert client.start_workflow.await_args.kwargs["id"] == f"render-{job.id}"
 
 

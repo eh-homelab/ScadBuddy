@@ -42,6 +42,7 @@ from scadbuddy.workflows.models import ArrangeInputs, MigrateRequest, MigrateRes
 from scadbuddy.workflows.pipelines import (
     MIGRATE_EXECUTION_TIMEOUT,
     PREVIEW_TRANSFER,
+    Arrange,
     MigrateInputs,
     RenderPreview,
     TemplatePipeline,
@@ -387,7 +388,7 @@ class RenderService:
         if job.kind == "arrange":
             # The row runs its own kind's workflow, so the reconciler restarts it as one.
             await self.client.start_workflow(
-                "Arrange",
+                Arrange.run,
                 job,
                 id=workflow_id_for(job.id),
                 task_queue=self.task_queue,
