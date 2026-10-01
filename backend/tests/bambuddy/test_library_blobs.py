@@ -84,6 +84,20 @@ async def test_a_key_without_manage_library_is_named(bambuddy: BambuddyClient) -
     assert caught.value.type == SCOPE_PROBLEM and "Manage Library" in caught.value.detail
 
 
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_download_refused_by_the_key_names_manage_library(
+    bambuddy: BambuddyClient, status: int
+) -> None:
+    respx.get(f"{API}/library/files/9/download").mock(
+        return_value=httpx.Response(status, json={"detail": "Forbidden"})
+    )
+    with pytest.raises(ApiError) as caught:
+        async for _ in bambuddy.download_library_file(9):
+            pass
+    assert caught.value.type == SCOPE_PROBLEM and "Manage Library" in caught.value.detail
+
+
 def test_a_library_file_reads_its_folder_and_hash() -> None:
     from scadbuddy.bambuddy.models import LibraryFile
 
