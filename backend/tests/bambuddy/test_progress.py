@@ -567,6 +567,30 @@ async def test_a_failing_archive_scan_still_reads_the_gone_item_as_finished(
 
 @respx.mock
 @pytest.mark.usefixtures("no_recent_scans")
+async def test_a_gone_slice_job_still_looks_for_the_print_by_hash(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#898 review: a slice job Bambuddy dropped may still have printed, so its archive
+    is looked for by hash the way a gone queue item's is."""
+    respx.get(f"{API}/slice-jobs/21").mock(
+        return_value=httpx.Response(404, json={"detail": "Slice job not found or expired"})
+    )
+    scan = respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    progress = await progress_for(
+        bambuddy,
+        meta(slice_job_id=21, print_route="slice_queue"),
+        uploads=FakeUploads(),
+        links=FakeLinks(),
+    )
+    assert scan.called
+    assert progress is not None
+    assert (progress.stage, progress.settled) == ("unknown", True)
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
 async def test_without_a_database_a_gone_item_still_reads_as_finished(
     bambuddy: BambuddyClient,
 ) -> None:
