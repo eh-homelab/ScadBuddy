@@ -82,7 +82,10 @@ on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
 - **Flow**: the group's `volume_type` is a name (`"Standard"`, `"High Flow"`)
   and the slot's `nozzle_type` is a code. The group wants High Flow when
   `volume_type.strip().lower()` starts with `"high flow"`; the slot is High Flow
-  when its code starts with `HH`. They must agree, and are compared only when
+  when `NozzleInfo.high_flow` (`models.py`, which `NozzleRackSlot` inherits)
+  says so. That property reads the code's second letter, which for every
+  measured code agrees with Bambuddy's `HH` prefix test; `rack.py` reuses it
+  rather than restating the rule. They must agree, and are compared only when
   both are present, so a missing code or name does not rule a position out.
 
 Groups are allocated one at a time, the group with the fewest eligible positions
@@ -112,7 +115,9 @@ that had several. Among the eligible positions:
    them. If no safe nozzle exists for an abrasive filament, the pick still names
    the best remaining position and carries the warning in §5.
 2. **Already holds this color.** The position's `filament_color` matches the
-   group's color, ignoring alpha. This saves a purge. It is Bambuddy's own
+   group's color, both passed through `normalise_colour` (`filaments.py`) first.
+   The rack gives `RRGGBBAA` with no `#` and the group gives `#RRGGBB` (§8
+   unknown 2), so a direct compare would never match. This saves a purge. It is Bambuddy's own
    preference, kept.
 3. **The algorithm key** (§4).
 4. **Lowest position**, as the final tiebreak, matching Bambuddy.
@@ -240,7 +245,9 @@ it builds the `RackChoice`. `slice_and_queue` puts the choice on
    plate, never `PreparedRun.printer_status`: on an all-plates print each plate
    slices in turn, and a rack read before the first slice can be stale by the
    last.
-2. Collapse the requirements into groups. Several filaments can share one
+2. Collapse the requirements into groups. Only filaments with `used_in_plate`
+   count, as in `filaments.py`'s existing read of the same endpoint, so an unused
+   CF filament cannot make a group abrasive. Several filaments can share one
    `group_id` (two colors on one hotend, §8), so `print_run.py` keeps one
    `RackGroup` per `group_id`, with that group's `group` fields and the material
    of its filaments; `rank_rack` never sees a duplicate.
@@ -260,13 +267,24 @@ rank_rack(groups: list[RackGroup], rack: list[NozzleRackSlot],
           manual: Mapping[int, int]) -> dict[int, Pick]
 ```
 
-`manual` is the user's manual picks, `{group_id: position}`. They are placed
-first and their positions are excluded for every other group, so a manual pick
-and a ranked one can never name the same position. A manual pick that is not
-eligible for its group, or two manual picks on one position, are refused before
-anything is sliced: `/run` answers 422 naming the group. The Advanced select
-lists only eligible positions and disables one already taken by another group,
-so the refusal is a guard, not a path the UI offers.
+**Groups exist only after the slice.** Measured 2026-10-01: on an unsliced
+upload (library files 240 and 251) every filament comes back with
+`group_id: null`, `group: null` and `type: ""`; the sliced file 228 has them.
+So nothing before the slice can name a group, and the user's manual choice is
+made per rack side, not per group:
+
+- The dialog knows the rack side's nozzle diameter and flow (the user chose
+  them) and the spools assigned to it. That is enough to list the eligible
+  positions and to judge material, from the spools' `material` and `subtype`.
+- A manual pick is one position for the rack side. `/run` refuses it with 422
+  before anything is sliced when it does not fit the side's diameter and flow.
+- After the slice, `manual` is built from it: when the slice has one `on_rack`
+  group, that group gets the manual position. When it has several, the lowest
+  `group_id` gets it and the others are ranked, and the run result carries a
+  `rack-left-to-bambuddy`-style note saying which groups were ranked instead.
+- `manual` is `{group_id: position}`. Its positions are placed first and
+  excluded for every other group, so a manual pick and a ranked one can never
+  name the same position.
 
 `Pick` is internal and carries the serial: `group_id`, `position`, `serial`,
 `reason`, `unsafe_material: bool` and the ranked `candidates`. `usage` is keyed
@@ -279,10 +297,16 @@ by serial. Nothing that carries a serial reaches the browser:
 - `QueueOutcome` carries serials only as far as `print_run.py` (§6).
 
 The choices endpoint (`/check`) returns the rack options per side, so the dialog
-can show them before the run:
+can show them before the run. It runs before any slice, so it is a **preview**:
+it ranks the rack side as one group built from the dialog's diameter, flow and
+assigned spools.
 
 - the eligible positions, each with color, type, its decoded material and its use;
-- the pick and its reason.
+- the predicted pick and its reason.
+
+The real pick is made after the slice and can differ from the preview when the
+slicer splits the side into several groups. The run result reports the picks
+actually sent.
 
 **Simple mode** shows one line per rack-side group, for example: "Rack nozzle:
 position 3 (0.4 Standard) — already loaded with this color". When the pick is
@@ -293,8 +317,8 @@ blocks Print.
 **Advanced mode** adds:
 
 - an **Algorithm** select (§4), saved per printer;
-- a per-group **Nozzle** select listing the eligible positions with color, type,
-  material and use. Choosing one sends it as a manual pick. "Automatic" goes
+- a per-side **Nozzle** select listing the eligible positions with color, type,
+  material and use. Choosing one sends it as a manual pick for that side. "Automatic" goes
   back to the ranking.
 
 **Failure handling.**
@@ -330,6 +354,10 @@ so the trade is accepted.
   both carried on `PrintRunResult.warnings` and on `/check`'s warnings like the
   existing kinds:
   - `rack-unsafe-material`: the pick is not hardened for an abrasive group;
+  Both carry `slot_id: null`, which the frontend reads as plate-wide
+  (`warningsFor` in `frontend/src/lib/filaments.ts`). That is deliberate: a rack
+  pick is a choice for the whole plate's rack side, and the message names the
+  group or side it is about.
   - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
     unreadable", "requirements unreadable", "no eligible position for group N").
     This is the message §5's failure table promises.
@@ -360,7 +388,7 @@ fixtures (which use invented serials), or in commits.
 | # | Question | Test | If it fails |
 |---|---|---|---|
 | 1 | What do the `nozzle_type` codes say about material? | Compare each rack position's code with the hotend's own label or Bambu's hotend list. Record the table here | Material step treats every nozzle as unknown (not hardened), and the abrasive warning is always shown for CF/GF/Glow |
-| 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color |
+| 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color. On an unsliced upload (files 240, 251) `group_id`, `group` and `type` are all empty, which is why the pick is made after the slice (§5) |
 | 3 | Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
 
 ## 9. Testing
