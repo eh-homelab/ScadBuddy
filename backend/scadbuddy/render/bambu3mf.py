@@ -454,6 +454,9 @@ class PlateEntry:
 
     index: int
     thumbnail: str | None
+    #: What the plate holds, for a label (#929): its ``plater_name``, else the names of
+    #: the objects on it joined with " + ", else ``None``.
+    name: str | None = None
 
 
 def _metadata(node: ET.Element) -> dict[str, str]:
@@ -471,6 +474,8 @@ class PlateSettings:
     index: int
     metadata: dict[str, str]
     object_id: str | None
+    #: Every ``model_instance``'s object id, in file order (#929).
+    object_ids: tuple[str, ...] = ()
 
 
 def plate_settings(config: ET.Element) -> list[PlateSettings]:
@@ -485,7 +490,12 @@ def plate_settings(config: ET.Element) -> list[PlateSettings]:
             raise ValueError("a <plate> in the 3MF's model settings has no plater_id")
         instance = plate.find("model_instance")
         object_id = _metadata(instance).get("object_id") if instance is not None else None
-        plates.append(PlateSettings(int(metadata["plater_id"] or 0), metadata, object_id))
+        object_ids = tuple(
+            _metadata(instance).get("object_id", "") for instance in plate.findall("model_instance")
+        )
+        plates.append(
+            PlateSettings(int(metadata["plater_id"] or 0), metadata, object_id, object_ids)
+        )
     return plates
 
 
@@ -498,10 +508,15 @@ def plates_of(path: Path) -> list[PlateEntry]:
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    object_names = {
+        obj.get("id", ""): _metadata(obj).get("name", "") for obj in config.iter("object")
+    }
     plates: list[PlateEntry] = []
     for plate in plate_settings(config):
         cover = plate.metadata.get("thumbnail_file")
-        plates.append(PlateEntry(plate.index, cover if cover in names else None))
+        on_plate = (object_names.get(object_id, "") for object_id in plate.object_ids)
+        name = plate.metadata.get("plater_name") or " + ".join(n for n in on_plate if n) or None
+        plates.append(PlateEntry(plate.index, cover if cover in names else None, name))
     return sorted(plates, key=lambda plate: plate.index)
 
 

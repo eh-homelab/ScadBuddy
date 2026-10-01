@@ -215,6 +215,20 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
 
 
 @respx.mock
+def test_a_library_file_s_plates_carry_their_names(client: TestClient) -> None:
+    """#929: the dialog labels a plate by what it holds, so Bambuddy's name comes through."""
+    configure(client)
+    library_file(67, plates="library-plates-multi.json")
+
+    plates = client.get("/api/v1/print/library/67/plates").json()
+
+    assert [(plate["index"], plate["name"]) for plate in plates] == [
+        (1, "makerlab"),
+        (2, "quant_1_A"),
+    ]
+
+
+@respx.mock
 def test_the_choices_are_remembered_per_library_file(client: TestClient) -> None:
     configure(client)
     library_file(89)
