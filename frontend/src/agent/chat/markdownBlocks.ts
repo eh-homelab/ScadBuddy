@@ -53,7 +53,10 @@ export function parseBlocks(text: string): Block[] {
       out.push({ kind: 'code', lang: fence[1] ?? '', body: body.join('\n') })
       continue
     }
-    if (line.includes('|')) {
+    const heading = /^(#{1,3})\s+(.*)$/.exec(line)
+    const bullet = /^\s*(?:[-*]|(\d+)\.)\s+(.*)$/.exec(line)
+    // A heading or list item that happens to hold a `|` stays one, as in GFM.
+    if (!heading && !bullet && line.includes('|')) {
       const header = cells(line)
       const align = delimiter(lines[i + 1], header.length)
       if (align) {
@@ -69,13 +72,11 @@ export function parseBlocks(text: string): Block[] {
         continue
       }
     }
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line)
     if (heading) {
       flush()
       out.push({ kind: 'heading', level: (heading[1]?.length ?? 1) as 1 | 2 | 3, text: heading[2] ?? '' })
       continue
     }
-    const bullet = /^\s*(?:[-*]|(\d+)\.)\s+(.*)$/.exec(line)
     if (bullet) {
       flush()
       const ordered = bullet[1] !== undefined

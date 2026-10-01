@@ -18,13 +18,22 @@ export function safeHttpUrl(value: string | null | undefined): string | null {
   return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : null
 }
 
+// The read-only, side-effect-free image routes Markdown may embed. Nothing else under
+// /api/v1/ is: an <img> fires a cookie-carrying GET on render, with no click.
+const SEG = '[A-Za-z0-9._~%-]+'
+const IMAGE_ROUTES = new RegExp(
+  `^/api/v1/(?:jobs/${SEG}/(?:views/${SEG}\\.png|colours\\.png)` +
+    `|outputs/${SEG}/(?:thumbnail|views/${SEG}\\.png|plates/\\d+/thumbnail)` +
+    `|models/${SEG}/thumbnail)$`,
+)
+
 /**
- * A `src` for an image in untrusted Markdown (#820): a same-origin path under
- * `/api/v1/`, normalised, else null. Only ScadBuddy's own API serves what such an
- * image may show (a render view, a thumbnail), so text from the model, a README or a
- * tool result can never make the browser fetch another host. A backslash is refused
- * because the URL parser reads it as `/`, and `..` is resolved before the prefix is
- * checked so it cannot climb out of the API.
+ * A `src` for an image in untrusted Markdown (#820): a same-origin path to one of
+ * ScadBuddy's image routes (a render view, colour map, output or plate thumbnail, or
+ * model thumbnail), normalised, else null. Text from the model, a README, a preset
+ * description or a tool result can never make the browser fetch another host, or any
+ * other API route. A backslash is refused because the URL parser reads it as `/`, and
+ * `..` is resolved before the route is matched so it cannot climb to another route.
  */
 export function safeImageSrc(value: string | null | undefined): string | null {
   if (!value || !value.startsWith('/api/v1/') || value.includes('\\')) return null
@@ -34,6 +43,6 @@ export function safeImageSrc(value: string | null | undefined): string | null {
   } catch {
     return null
   }
-  if (parsed.origin !== 'http://scadbuddy.invalid' || !parsed.pathname.startsWith('/api/v1/')) return null
+  if (parsed.origin !== 'http://scadbuddy.invalid' || !IMAGE_ROUTES.test(parsed.pathname)) return null
   return parsed.pathname + parsed.search
 }

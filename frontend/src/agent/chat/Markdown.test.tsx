@@ -58,6 +58,12 @@ describe('Markdown', () => {
     ])
   })
 
+  it('keeps a heading or list item with a pipe as itself, not a table header', () => {
+    const blocks = parseBlocks('# A | B\n-|-\n\n- x | y\n--|--')
+    expect(blocks.map((b) => b.kind)).not.toContain('table')
+    expect(blocks[0]).toEqual({ kind: 'heading', level: 1, text: 'A | B' })
+  })
+
   it('leaves pipes without a delimiter row as a paragraph', () => {
     expect(parseBlocks('| a | b |\n| c | d |')).toEqual([{ kind: 'para', text: '| a | b | | c | d |' }])
   })
@@ -74,14 +80,28 @@ describe('Markdown', () => {
         text={
           '![remote](https://evil.example/x.png) ![proto](//evil.example/x.png) ' +
           '![data](data:image/png;base64,AAAA) ![js](javascript:alert(1)) ![other](/assets/x.png) ' +
-          '![dots](/api/v1/../../x.png) ![slash](/api/v1\\evil)'
+          '![dots](/api/v1/../../x.png) ![slash](/api/v1\\evil) ![settings](/api/v1/settings) ' +
+          '![print](/api/v1/prints/1/thumbnail) ![climb](/api/v1/models/m/../../settings#thumbnail)'
         }
       />,
     )
     expect(container.querySelector('img')).toBeNull()
-    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash']) {
+    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash', 'settings', 'print', 'climb']) {
       expect(screen.getByText(alt)).toBeInTheDocument()
     }
+  })
+
+  it('shows only the read-only media routes: views, colours, thumbnails, plates', () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '![a](/api/v1/jobs/j1/views/iso.png) ![b](/api/v1/jobs/j1/colours.png) ' +
+          '![c](/api/v1/outputs/o1/thumbnail) ![d](/api/v1/outputs/o1/views/top.png) ' +
+          '![e](/api/v1/outputs/o1/plates/2/thumbnail) ![f](/api/v1/models/my-box/thumbnail?v=3)'
+        }
+      />,
+    )
+    expect(container.querySelectorAll('img')).toHaveLength(6)
   })
 
   it('renders an image and a link side by side', () => {
