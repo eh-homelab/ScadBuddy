@@ -1116,6 +1116,10 @@ export const api = {
 
   forgetAllRemembered: () => request<RememberedChoices>('/settings/remembered', { method: 'DELETE' }),
 
+  /** #599 — forgets the printer and nozzle one Bambuddy project last printed on. */
+  forgetRememberedProject: (projectId: number | string) =>
+    request<RememberedChoices>(`/settings/remembered/projects/${projectId}`, { method: 'DELETE' }),
+
   registerSidebar: () =>
     request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 

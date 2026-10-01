@@ -1,7 +1,7 @@
 import { HttpResponse, delay, http } from 'msw'
 import type { BambuddyStatus, Settings } from '../../api/types'
 import * as fixtures from '../fixtures'
-import { forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
+import { forgetMockProjectTarget, forgetMockRemembered, mockRemembered, mockSettings, problem, setMockSettings } from '../handlers'
 
 /**
  * #322 — the Settings page's routes: `GET`/`PUT /settings`, the connection test, what
@@ -155,6 +155,11 @@ export const handlers = [
 
   http.delete(`${base}/settings/remembered`, () => {
     forgetMockRemembered()
+    return HttpResponse.json(mockRemembered())
+  }),
+
+  http.delete(`${base}/settings/remembered/projects/:projectId`, ({ params }) => {
+    forgetMockProjectTarget(String(params.projectId))
     return HttpResponse.json(mockRemembered())
   }),
 

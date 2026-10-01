@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, PrintOptions, RememberedChoices } from '../../api/types'
+import type { BambuddyTargets, ModelPrintChoices, ProjectChoices, PrintOptions, RememberedChoices } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
 import { useAsync } from '../../lib/useAsync'
@@ -42,7 +42,13 @@ function isEmptyOptions(options: PrintOptions | undefined): boolean {
  * #322 — what the print dialog remembers, each with Forget. Every Forget is
  * that entry's own one-key route, so the page never posts a whole map back.
  */
-export function RememberedChoicesPanel({ targets }: { targets: BambuddyTargets | null | undefined }) {
+export function RememberedChoicesPanel({
+  targets,
+  projects,
+}: {
+  targets: BambuddyTargets | null | undefined
+  projects?: ProjectChoices | null
+}) {
   const state = useAsync(() => api.getRemembered(), [], ['settings'])
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmAll, setConfirmAll] = useState(false)
@@ -50,6 +56,9 @@ export function RememberedChoicesPanel({ targets }: { targets: BambuddyTargets |
 
   const printerName = (id: number | string) =>
     targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ?? `Printer ${id}`
+
+  const projectName = (id: string) =>
+    projects?.projects?.find((project) => String(project.id) === id)?.name ?? `Project ${id}`
 
   const remembered: RememberedChoices | undefined = state.data
   const rows: Row[] = []
@@ -70,6 +79,17 @@ export function RememberedChoicesPanel({ targets }: { targets: BambuddyTargets |
         subject: printerName(printerId),
         value: bed,
         forget: () => api.putPrinterBedType(Number(printerId), null),
+      })
+    }
+    for (const [projectId, target] of Object.entries(remembered.project_print_targets ?? {})) {
+      rows.push({
+        key: `project:${projectId}`,
+        kind: 'Project printer and nozzle',
+        subject: projectName(projectId),
+        value: [printerName(target.printer_id), target.nozzle_diameter ? `${target.nozzle_diameter} mm` : null]
+          .filter(Boolean)
+          .join(' · '),
+        forget: () => api.forgetRememberedProject(projectId),
       })
     }
     if (!isEmptyOptions(remembered.print_options)) {
