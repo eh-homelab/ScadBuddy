@@ -149,12 +149,12 @@ the wrong color beats a hardened one holding the right color.
 | Least used | Fewest `print_seconds` on that hotend's serial, then fewest `prints` | Yes |
 | Oldest first | Earliest `first_seen_at` for the serial | |
 | Newest first | Latest `first_seen_at` | |
+| Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
 
-All three read one `Usage` per serial from `RackUsageStore.usage(serials)`:
+The first three read one `Usage` per serial from `RackUsageStore.usage(serials)`:
 `prints`, `print_seconds`, `grams` and `first_seen_at` (`None` for a serial the
 print flow has not seen yet, which sorts last for Oldest first and first for
 Newest first). That is the only path `first_seen_at` takes into `rank_rack`.
-| Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
 
 The algorithm is remembered per printer as `printer_rack_algorithms:
 dict[str, Algorithm]`, a new `StoredSettings` field stored in the existing
@@ -379,7 +379,7 @@ exclusive only within one plate's groups (§3), because those print together.
 | Condition | Behavior |
 |---|---|
 | Status or requirements unreadable | Send no choice, so Bambuddy picks. The run result carries a `rack-left-to-bambuddy` warning: "rack pick left to Bambuddy: <reason>" |
-| No eligible position for a group | Send no choice for that group. Bambuddy fails or auto-assigns exactly as today |
+| No eligible position for a group | Send no choice for that group, and carry a `rack-left-to-bambuddy` warning ("no eligible position for group N"). Bambuddy fails or auto-assigns exactly as today |
 | A manual pick, but the slice puts no group on the rack (every filament on the fixed side) | Nothing to pick; send no choice. The run result carries `rack-left-to-bambuddy`: "manual rack pick unused: this plate does not print from the rack" |
 | A sent pick goes stale before dispatch | Bambuddy fails the item with its own message, which the run tracking already surfaces |
 
