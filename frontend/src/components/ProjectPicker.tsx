@@ -63,6 +63,16 @@ interface Props {
   testId?: string
   /** The label beside the select rather than above it, for the Customize page's bar. */
   inline?: boolean
+  /**
+   * #665 — frozen while a request that already carries the chosen project is in flight
+   * (Generate filing its file), so what is on screen matches where it was filed.
+   */
+  disabled?: boolean
+  /**
+   * #665 — whether a "Create project" is in flight, so the parent can hold Generate:
+   * the create's completion moves `value`, which must not happen under a Generate.
+   */
+  onCreating?: (creating: boolean) => void
 }
 
 export function ProjectPicker({
@@ -74,6 +84,8 @@ export function ProjectPicker({
   id = 'print-project',
   testId = 'project-select',
   inline = false,
+  disabled = false,
+  onCreating,
 }: Props) {
   const own = useProjectList(onLoaded, list === undefined)
   const { choices, loading, error: listError, rereadFor, add } = list ?? own
@@ -89,6 +101,11 @@ export function ProjectPicker({
   const reportProject = useRef(onProject)
   useEffect(() => {
     reportProject.current = onProject
+  })
+
+  const reportCreating = useRef(onCreating)
+  useEffect(() => {
+    reportCreating.current = onCreating
   })
 
   const projects = choices?.projects ?? []
@@ -116,6 +133,9 @@ export function ProjectPicker({
       colour: colour.trim() || null,
     }
     setSaving(true)
+    // Tied to the request, not this component: the picker can unmount mid-create (the
+    // dialog toggling to Simple), and the guard must hold until the request settles.
+    reportCreating.current?.(true)
     setCreateError(null)
     try {
       const created = await api.createProject(body)
@@ -128,6 +148,7 @@ export function ProjectPicker({
     } catch (cause) {
       setCreateError(cause instanceof ApiError ? cause.detail : 'Could not create the project.')
     } finally {
+      reportCreating.current?.(false)
       setSaving(false)
     }
   }
@@ -148,6 +169,7 @@ export function ProjectPicker({
       <select
         id={id}
         data-testid={testId}
+        disabled={disabled || saving}
         value={creating ? NEW : value === null ? '' : String(value)}
         onChange={(event) => {
           if (event.target.value === NEW) {
@@ -235,7 +257,7 @@ export function ProjectPicker({
               variant="primary"
               size="sm"
               onClick={() => void create()}
-              disabled={name.trim() === '' || saving}
+              disabled={name.trim() === '' || saving || disabled}
               aria-busy={saving}
               data-testid="create-project"
               {...USER_ONLY}
