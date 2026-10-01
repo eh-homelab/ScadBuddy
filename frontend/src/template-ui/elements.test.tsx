@@ -117,6 +117,23 @@ describe('host custom elements', () => {
     expect(shadowOf(container).querySelector('sb-preview')?.querySelector('[data-testid="the-preview"]')).not.toBeNull()
   })
 
+  it('picks the first sb-preview in document order, not connect order', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        const b = document.createElement('sb-preview')
+        b.id = 'b'
+        root.append(b)
+        const first = document.createElement('sb-preview')
+        first.id = 'a'
+        root.insertBefore(first, b)
+      },
+    }))
+    const { container } = render(page({ params: {} }, vi.fn(), 'page'))
+    await waitFor(() => expect(shadowOf(container).querySelector('#b')?.textContent).toContain('Only the first <sb-preview>'))
+    expect(shadowOf(container).querySelector('#a')?.querySelector('[data-testid="the-preview"]')).not.toBeNull()
+    expect(shadowOf(container).querySelectorAll('[data-testid="the-preview"]')).toHaveLength(1)
+  })
+
   it('says why sb-preview is empty in the panel slot', async () => {
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
