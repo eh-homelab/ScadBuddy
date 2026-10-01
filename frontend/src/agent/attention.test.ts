@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setPendingApprovals } from '../mocks/features/approvals'
 import { server } from '../mocks/server'
-import { ATTENTION_POLL_MS, attentionLabel, fetchPendingApprovals, titleWithAttention, useAttention } from './attention'
+import { ATTENTION_POLL_MS, attentionLabel, fetchPendingApprovals, useAttention, useAttentionTitle } from './attention'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -20,6 +20,11 @@ describe('fetchPendingApprovals', () => {
     expect(await fetchPendingApprovals()).toBeNull()
     server.use(http.get('/api/v1/ai/approvals', () => HttpResponse.text('<html></html>')))
     expect(await fetchPendingApprovals()).toBeNull()
+  })
+
+  it('gives up on an agent that accepts and never answers', async () => {
+    server.use(http.get('/api/v1/ai/approvals', () => new Promise<never>(() => {})))
+    expect(await fetchPendingApprovals(20)).toBeNull()
   })
 
   it('asks only for pending ones', async () => {
@@ -69,6 +74,34 @@ describe('useAttention', () => {
     expect(result.current.waiting).toBe(3)
   })
 
+  it('starts no second read while one is still waiting for the agent', async () => {
+    let calls = 0
+    let answer: (() => void) | undefined
+    server.use(
+      http.get('/api/v1/ai/approvals', async () => {
+        calls += 1
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ approvals: [{}] })
+      }),
+    )
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(calls).toBe(1))
+    act(() => {
+      result.current.refresh()
+      window.dispatchEvent(new Event('focus'))
+    })
+    await act(async () => {})
+    expect(calls).toBe(1)
+
+    act(() => answer?.())
+    await waitFor(() => expect(result.current.waiting).toBe(1))
+    act(() => result.current.refresh())
+    await waitFor(() => expect(calls).toBe(2))
+    act(() => answer?.())
+  })
+
   it('reads again on refresh and when the tab comes back into view', async () => {
     setPendingApprovals(1)
     const { result } = renderHook(() => useAttention(true))
@@ -87,14 +120,32 @@ describe('useAttention', () => {
 })
 
 describe('labels', () => {
-  it('names the count for the button and the tab title', () => {
+  it('names the count for the button', () => {
     expect(attentionLabel(0)).toBe('')
     expect(attentionLabel(1)).toBe('1 action waiting for your approval')
     expect(attentionLabel(4)).toBe('4 actions waiting for your approval')
-    expect(titleWithAttention('ScadBuddy', 0)).toBe('ScadBuddy')
-    expect(titleWithAttention('ScadBuddy', 2)).toBe('(2) ScadBuddy')
-    // Never stacks a second prefix on one it wrote.
-    expect(titleWithAttention('(2) ScadBuddy', 3)).toBe('(3) ScadBuddy')
-    expect(titleWithAttention('(2) ScadBuddy', 0)).toBe('ScadBuddy')
+  })
+})
+
+describe('useAttentionTitle', () => {
+  it('prefixes the count and restores the title it found, even one that looks prefixed', () => {
+    document.title = '(3) copies'
+    const { rerender, unmount } = renderHook(({ n }) => useAttentionTitle(n, true), { initialProps: { n: 0 } })
+    expect(document.title).toBe('(3) copies')
+    rerender({ n: 2 })
+    expect(document.title).toBe('(2) (3) copies')
+    rerender({ n: 5 })
+    expect(document.title).toBe('(5) (3) copies')
+    rerender({ n: 0 })
+    expect(document.title).toBe('(3) copies')
+    rerender({ n: 1 })
+    unmount()
+    expect(document.title).toBe('(3) copies')
+  })
+
+  it('leaves the title alone when off (embedded in Bambuddy)', () => {
+    document.title = 'ScadBuddy'
+    renderHook(() => useAttentionTitle(4, false))
+    expect(document.title).toBe('ScadBuddy')
   })
 })

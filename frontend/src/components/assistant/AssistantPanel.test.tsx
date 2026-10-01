@@ -263,6 +263,22 @@ describe('assistant panel', () => {
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
   })
 
+  it('shows the badge embedded in Bambuddy, but leaves the frame\'s unseen title alone (#815)', async () => {
+    setPendingApprovals(1)
+    document.title = 'ScadBuddy'
+    renderPage(
+      <Routes>
+        <Route element={<AppShell embedded assistantTransport={factory} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    const button = await screen.findByRole('button', { name: 'Assistant, 1 action waiting for your approval' })
+    expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('1')
+    expect(document.title).toBe('ScadBuddy')
+  })
+
   it('Stop interrupts the turn', async () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Stop' }))
