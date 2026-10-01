@@ -36,7 +36,9 @@ def normalize_inputs(
     inputs: Mapping[str, Any] | None, params: Mapping[str, ParamValue] | None
 ) -> dict[str, Any]:
     if inputs is None:
-        return legacy_inputs(params or {})
+        # The params-only body is these inputs, and takes the same checks: an
+        # integer parameter at Infinity would otherwise reach `int()` downstream.
+        inputs, params = legacy_inputs(params or {}), None
     result = dict(inputs)
     raw = result.get("params", {})
     if not isinstance(raw, dict):

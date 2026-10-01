@@ -85,3 +85,14 @@ def test_oversized_inputs_are_refused() -> None:
 
 def test_legacy_inputs() -> None:
     assert legacy_inputs({"width": 3}) == {"params": {"width": 3}, "v": 0}
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("nan")])
+def test_bare_params_that_are_not_json_are_refused(value: float) -> None:
+    with pytest.raises(InputsError, match="no NaN or Infinity"):
+        normalize_inputs(None, {"width": value})
+
+
+def test_bare_params_past_the_size_cap_are_refused() -> None:
+    with pytest.raises(InputsError, match=f"at most {MAX_INPUTS_BYTES}"):
+        normalize_inputs(None, {"label": "x" * MAX_INPUTS_BYTES})

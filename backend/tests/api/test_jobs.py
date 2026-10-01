@@ -293,8 +293,23 @@ def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: st
         ({"inputs": {"params": {}, "blob": "x" * 70000}}, f"at most {MAX_INPUTS_BYTES}"),
         ('{"inputs": {"params": {"width": NaN}}}', "no NaN or Infinity"),
         ('{"inputs": {"params": {}, "ui": {"zoom": Infinity}}}', "no NaN or Infinity"),
+        # The params-only body takes the same checks (#706 gate): an integer
+        # parameter at Infinity was a 500 from `int(float("inf"))`.
+        ('{"params": {"width": Infinity}}', "no NaN or Infinity"),
+        ('{"params": {"width": NaN}}', "no NaN or Infinity"),
+        ({"params": {"label": "x" * 70000}}, f"at most {MAX_INPUTS_BYTES}"),
     ],
-    ids=["disagree", "unknown", "type", "size", "nan-param", "inf-nested"],
+    ids=[
+        "disagree",
+        "unknown",
+        "type",
+        "size",
+        "nan-param",
+        "inf-nested",
+        "legacy-inf",
+        "legacy-nan",
+        "legacy-size",
+    ],
 )
 def test_bad_inputs_are_refused_before_a_job_exists(
     client: TestClient, model: str, body: dict[str, object] | str, detail: str
