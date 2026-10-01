@@ -145,9 +145,16 @@ def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(
+            200, json={"id": 41, "filename": "renamed-in-bambuddy.3mf", "folder_id": 2}
+        )
+    )
     body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
 
     assert body["library_file_id"] == 41
+    # The name is the one the existence read returned, not the one uploaded.
+    assert body["filename"] == "renamed-in-bambuddy.3mf"
     assert upload.call_count == 1
     assert not delete.called
 
