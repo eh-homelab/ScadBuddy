@@ -42,6 +42,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'preferences, confirmed in the Settings UI only. An agent forgets one entry through its own tool.',
   },
   {
+    operation: 'DELETE /api/v1/settings/remembered/projects/{project_id}',
+    reason:
+      "Forgets the printer and nozzle a project last printed on (#599), Settings housekeeping: the next print " +
+      'into that project records it again, so an agent has nothing to gain by clearing it. Reading it is ' +
+      'get_remembered_choices.',
+  },
+  {
     operation: 'POST /api/v1/settings/register-sidebar',
     reason: "One-time setup that edits Bambuddy's own sidebar; an operator action in Settings, not an agent task.",
   },
