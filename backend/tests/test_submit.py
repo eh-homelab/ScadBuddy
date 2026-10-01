@@ -830,6 +830,9 @@ async def test_inputs_too_large_to_migrate_are_refused_before_any_workflow(
 ) -> None:
     client = _MigrationClient()
     service = make_service(client, "q")
+    # On the bambuddy store: refused before a snapshot is uploaded for it.
+    snapshots = _RecordingSnapshots()
+    service.snapshots = snapshots  # type: ignore[assignment]
     try:
         with pytest.raises(ApiError) as raised:
             await service.migrate_inputs(
@@ -839,6 +842,7 @@ async def test_inputs_too_large_to_migrate_are_refused_before_any_workflow(
         await service.aclose()
     assert raised.value.status == 413
     assert client.calls == []
+    assert snapshots.pinned == []
 
 
 @pytest.mark.parametrize(

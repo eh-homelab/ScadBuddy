@@ -273,17 +273,20 @@ class RenderService:
         and a migration that ran out of time a 504. On the bambuddy store the worker has
         no volume, so every revision is pinned as a snapshot first, as for a render
         (`pin` takes None as the last commit)."""
-        revision = version
-        if self.snapshots is not None:
-            revision = await self.snapshots.pin(slug, version)
-        req = MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs))
-        size = len(pydantic_data_converter.payload_converter.to_payload(req).data)
+        # Measured before the pin, so an oversized request uploads no snapshot: with a
+        # full-length revision, the longest `pin` can return.
+        probe = MigrateRequest(slug=slug, revision="0" * 40, inputs=dict(inputs))
+        size = len(pydantic_data_converter.payload_converter.to_payload(probe).data)
         if size > MAX_WORKFLOW_INPUT_BYTES:
             raise ApiError(
                 status.HTTP_413_CONTENT_TOO_LARGE,
                 f"these inputs make a migration request of {size} bytes; the most one"
                 f" can carry is {MAX_WORKFLOW_INPUT_BYTES}",
             )
+        revision = version
+        if self.snapshots is not None:
+            revision = await self.snapshots.pin(slug, version)
+        req = MigrateRequest(slug=slug, revision=revision, inputs=dict(inputs))
         try:
             result: MigrateResult = await self.client.execute_workflow(
                 MigrateInputs.run,

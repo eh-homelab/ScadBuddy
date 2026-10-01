@@ -439,8 +439,12 @@ async def migrate_inputs(
     """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
     record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
     v = body.inputs.get("v", 0)
+    if record.pipeline is None and record.pipeline_raw is None:
+        # No pipeline, so no `migrate` to run, at any revision: the inputs are as they are.
+        current = v if isinstance(v, int) else 0
+        return MigrateResult(inputs=body.inputs, from_version=current, to_version=current)
     if body.version is None and isinstance(v, int) and v == record.inputs_version:
-        # Already current (for a template without a pipeline, v 0 always is): no worker.
+        # Already current: no worker.
         return MigrateResult(inputs=body.inputs, from_version=v, to_version=v)
     version = await _resolve_version(history, slug, body.version)
     try:

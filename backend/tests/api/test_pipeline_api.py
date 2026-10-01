@@ -229,11 +229,13 @@ def test_migrate_at_an_unknown_revision_is_a_404(
 
 
 def test_migrate_resolves_a_short_revision(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     created = client.post("/api/v1/models", json={"name": "Pasted", "source": "cube();\n"})
     assert created.status_code == 201, created.text
     full = client.get("/api/v1/models/pasted").json()["version"]
+    # A pipeline, or the route answers identity without asking (below).
+    with_pipeline(paths, "pasted")
     calls = _spy_migrations(client, monkeypatch)
     response = client.post(
         "/api/v1/models/pasted/inputs/migrate",
@@ -252,6 +254,23 @@ def test_current_inputs_of_a_template_without_a_pipeline_come_back_unchanged(
     assert response.status_code == 200, response.text
     assert response.json() == {"inputs": inputs, "from_version": 0, "to_version": 0}
     assert calls == []  # no workflow
+
+
+def test_inputs_of_a_template_without_a_pipeline_are_identity_at_any_revision(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to migrate with: no worker, whatever the revision or the inputs' `v`."""
+    created = client.post("/api/v1/models", json={"name": "Pasted", "source": "cube();\n"})
+    assert created.status_code == 201, created.text
+    full = client.get("/api/v1/models/pasted").json()["version"]
+    calls = _spy_migrations(client, monkeypatch)
+    inputs = {"params": {"w": 1}, "v": 3}
+    response = client.post(
+        "/api/v1/models/pasted/inputs/migrate", json={"inputs": inputs, "version": full}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"inputs": inputs, "from_version": 3, "to_version": 3}
+    assert calls == []
 
 
 def test_current_inputs_of_a_pipeline_template_come_back_unchanged(
