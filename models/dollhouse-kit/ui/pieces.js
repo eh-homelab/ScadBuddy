@@ -67,8 +67,19 @@ export function housePieces(input) {
   add('railing', null, storeys - 1)
   add('door_leaf_lower', null, 1)
   add('door_leaf_upper', null, 1)
-  add('connectors', null, 1)
+  // How many keys, pegs and hinge pins a house needs is the model's knowledge (one key
+  // per joint, pins per door leaf), not the designer's: the row has no count and says so.
+  counts.set('connectors', { id: 'connectors', piece: 'connectors', course: null, count: null, label: LABELS.connectors })
   return [...counts.values()]
+}
+
+/** The pieces with a count; a row the user sizes themself (count null) is not one. */
+export function pieceTotal(pieces) {
+  return pieces.reduce((sum, entry) => sum + (entry.count ?? 0), 0)
+}
+
+export function pieceText(entry) {
+  return entry.count === null ? `${entry.label}: set the type and count yourself` : `${entry.count} × ${entry.label}`
 }
 
 // The model's default course. A piece the model renders the same in either course still

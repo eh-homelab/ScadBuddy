@@ -2,7 +2,7 @@
 // a house designer. It lists the pieces a box house needs and previews one at a time;
 // Generate keeps the piece on screen. The whole house in one Generate is phase 4's pipeline.
 
-import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceParams } from './pieces.js'
+import { DEFAULT_HOUSE, LIMITS, clampHouse, housePieces, pieceParams, pieceText, pieceTotal } from './pieces.js'
 
 const DRIVEN = new Set(['piece', 'course', 'width_units', 'depth_units'])
 const HOUSE_LABELS = {
@@ -102,7 +102,7 @@ export async function mount(root, host) {
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
     for (const [key, input] of Object.entries(numbers)) input.value = String(house[key])
     const pieces = housePieces(house)
-    total.textContent = `${pieces.reduce((sum, entry) => sum + entry.count, 0)} pieces; Generate keeps the one shown.`
+    total.textContent = `${pieceTotal(pieces)} pieces; Generate keeps the one shown.`
     const wanted = new Set(pieces.map((entry) => entry.id))
     for (const [id, { li }] of rows) {
       if (!wanted.has(id)) {
@@ -115,7 +115,7 @@ export async function mount(root, host) {
       const current =
         inputs.params?.piece === entry.piece &&
         (entry.course === null || inputs.params?.course === entry.course)
-      text.textContent = `${entry.count} × ${entry.label}`
+      text.textContent = pieceText(entry)
       // Pressed, not disabled: a disabled button would lose the focus it has.
       show.textContent = current ? 'Showing' : 'Show'
       // The name says which piece: a list of buttons that all read "Show" does not.
@@ -130,7 +130,7 @@ export async function mount(root, host) {
   host.describe(() => {
     const inputs = host.inputs.get()
     const house = clampHouse(inputs.house ?? DEFAULT_HOUSE)
-    const count = housePieces(house).reduce((sum, entry) => sum + entry.count, 0)
+    const count = pieceTotal(housePieces(house))
     return `${house.cols}×${house.rows}-module house, ${house.storeys} storey(s), ${count} pieces; showing ${inputs.params?.piece ?? 'the default piece'}.`
   })
   return () => {

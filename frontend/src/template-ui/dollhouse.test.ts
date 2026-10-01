@@ -29,8 +29,16 @@ describe('housePieces', () => {
     expect(counts).toEqual({
       'wall_door_lower': 1, 'wall:lower': 3, 'wall_door_upper': 1, 'wall_window': 2, 'wall:upper': 1,
       'corner_post:lower': 4, 'corner_post:upper': 4, 'floor_tile': 1, 'roof_panel': 1, 'door_leaf_lower': 1, 'door_leaf_upper': 1,
-      'connectors': 1,
+      'connectors': null,
     })
+  })
+
+  it('leaves the connectors to the user, outside the total', async () => {
+    const { housePieces, pieceTotal, pieceText } = await load()
+    const pieces = housePieces({ cols: 1, rows: 1, storeys: 1, windows: 2 })
+    const connectors = pieces.find((e) => e.id === 'connectors')
+    expect(pieceText(connectors)).toBe('Connectors (keys, pegs, hinge pins): set the type and count yourself')
+    expect(pieceTotal(pieces)).toBe(20)
   })
 
   it('counts a two-by-one, two-storey house with stairs', async () => {
