@@ -26,7 +26,8 @@ interface Binding {
 export function bindingOf(element: HostElement, context: BindingContext): Binding | string {
   const name = element.getAttribute('name') ?? ''
   const file = element.getAttribute('file') ?? 'model.scad'
-  const bind = element.getAttribute('bind') ?? `params.${name}`
+  // An empty `bind` is no binding: the default, never a '' key in the inputs.
+  const bind = element.getAttribute('bind') || `params.${name}`
   if (file !== 'model.scad') return `Only model.scad has parameters in host API v1, not ${file}.`
   const param = allParams(context.schema).find((candidate) => candidate.name === name)
   if (!param) return `model.scad has no parameter “${name}”.`
@@ -49,16 +50,23 @@ export function bindingOf(element: HostElement, context: BindingContext): Bindin
 }
 
 /** The values the widgets show: `params`, with every `<sb-param>`'s bound value applied,
- *  so colour parameters bound outside `params` are numbered with the rest. */
+ *  so colour parameters bound outside `params` are numbered with the rest. A parameter is
+ *  keyed by its default binding (`params.<name>`) when an element has it: an element
+ *  rebound elsewhere then never overrides it, whatever the elements' order. */
 export function effectiveValues(
   elements: readonly HostElement[],
   context: BindingContext,
 ): ParamValues {
   const values: ParamValues = { ...splitInputs(context.inputs).params }
+  const byDefault = new Set<string>()
   for (const element of elements) {
     if (element.localName !== 'sb-param') continue
     const binding = bindingOf(element, context)
-    if (typeof binding !== 'string' && !binding.mistyped) values[binding.name] = binding.value
+    if (typeof binding === 'string' || binding.mistyped) continue
+    const isDefault = binding.bind === `params.${binding.name}`
+    if (!isDefault && byDefault.has(binding.name)) continue
+    if (isDefault) byDefault.add(binding.name)
+    values[binding.name] = binding.value
   }
   return values
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api/client'
 import type { JsonObject } from '../lib/inputs'
+import { extrudersOf } from '../lib/params'
 import { useLatest } from '../lib/useLatest'
 import { defineHostElements, provideRegistry, type HostElement } from './elements'
 import { createHost, type HostDeps, type HostHandle } from './host'
@@ -10,6 +11,8 @@ import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
 import { UI_API_SUPPORTED, type Mount, type TemplateUiFailure, type UiDeclaration } from './types'
+
+const NO_EXTRUDERS: ReadonlyMap<string, number> = new Map()
 
 interface Props {
   slug: string
@@ -53,7 +56,10 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
   const [elements, setElements] = useState<readonly HostElement[]>([])
   const [, setRevision] = useState(0)
   const firstPreview = elements.find((el) => el.localName === 'sb-preview')
-  const values = elementContext ? effectiveValues(elements, elementContext) : {}
+  // Once per render, for every widget: an attribute change on any element re-renders all.
+  const extruders = elementContext
+    ? extrudersOf(elementContext.schema, effectiveValues(elements, elementContext))
+    : NO_EXTRUDERS
 
   useEffect(() => {
     const el = element.current
@@ -71,21 +77,9 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     })
     const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     adoptAppStyles(root)
-    const created = createHost({
-      slug,
-      version,
-      getSchema: () => latest.current.deps.getSchema(),
-      getInputs: () => latest.current.deps.getInputs(),
-      setInputs: (next) => latest.current.deps.setInputs(next),
-      generate: () => latest.current.deps.generate(),
-      openPrint: (id) => latest.current.deps.openPrint(id),
-      presets: {
-        list: () => latest.current.deps.presets.list(),
-        save: (name) => latest.current.deps.presets.save(name),
-        load: (id) => latest.current.deps.presets.load(id),
-      },
-      onDescribe: (fn) => latest.current.deps.onDescribe(fn),
-    })
+    // This mount's own deps: a host the template kept after its unmount never reaches
+    // the next template's.
+    const created = createHost(latest.current.deps)
     handle.current = created
     let active = true
     let cleanup: (() => void) | void
@@ -137,7 +131,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
             <HostElementContent
               element={el}
               context={{ ...elementContext, slot }}
-              values={values}
+              extruders={extruders}
               firstPreview={firstPreview}
             />,
             el,

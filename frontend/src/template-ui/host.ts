@@ -57,10 +57,17 @@ function unmounted(): Promise<never> {
 export function createHost(deps: HostDeps): HostHandle {
   const listeners = new Set<(inputs: JsonObject) => void>()
   let live = true
+  /** Every call checks it: a disposed host never reads or acts on the page again. */
+  function alive(): void {
+    if (!live) throw new Error('the template UI is unmounted')
+  }
   const host: Host = {
     api: UI_API_CURRENT,
     inputs: {
-      get: () => structuredClone(deps.getInputs()),
+      get: () => {
+        alive()
+        return structuredClone(deps.getInputs())
+      },
       set: (patch) => {
         if (!live) {
           console.warn('ScadBuddy: a template UI wrote its inputs after it was unmounted; ignored')
@@ -72,6 +79,7 @@ export function createHost(deps: HostDeps): HostHandle {
         deps.setInputs(next)
       },
       subscribe: (fn) => {
+        if (!live) return () => undefined
         listeners.add(fn)
         return () => {
           listeners.delete(fn)
@@ -79,6 +87,7 @@ export function createHost(deps: HostDeps): HostHandle {
       },
     },
     schema: async (file = 'model.scad') => {
+      alive()
       if (file !== 'model.scad') {
         throw new Error(`only model.scad has a customizer schema in host API v1, not ${file}`)
       }
