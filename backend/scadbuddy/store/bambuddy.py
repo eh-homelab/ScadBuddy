@@ -18,8 +18,8 @@ import asyncio
 import hashlib
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,11 +166,12 @@ class BambuddyContentBackend:
                 return str(uploaded.id)
         raise AssertionError("unreachable")
 
-    async def download(self, backend_id: str) -> AsyncIterator[bytes]:
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         async with self._client() as (client, _):
             try:
-                async for chunk in client.download_library_file(int(backend_id)):
-                    yield chunk
+                async with aclosing(client.download_library_file(int(backend_id))) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
             except ApiError as error:
                 if error.status == 404:
                     raise BlobMissingError(backend_id) from None

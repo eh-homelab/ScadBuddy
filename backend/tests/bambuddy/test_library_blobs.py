@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import httpx
 import pytest
 import respx
@@ -53,6 +55,23 @@ async def test_a_missing_file_is_a_404_problem(bambuddy: BambuddyClient) -> None
         async for _ in bambuddy.download_library_file(9):
             pass
     assert caught.value.status == 404 and caught.value.type == NOT_FOUND_PROBLEM
+
+
+@respx.mock
+async def test_a_download_that_fails_on_the_network_is_logged(
+    bambuddy: BambuddyClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    respx.get(f"{API}/library/files/9/download").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="scadbuddy.bambuddy.client"),
+        pytest.raises(ApiError),
+    ):
+        async for _ in bambuddy.download_library_file(9):
+            pass
+    [record] = [r for r in caplog.records if r.getMessage() == "bambuddy request failed"]
+    assert record.__dict__["path"] == "/library/files/9/download"
 
 
 @respx.mock

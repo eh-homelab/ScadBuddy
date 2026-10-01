@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from pathlib import Path
 
@@ -111,7 +111,7 @@ class LocalContentBackend:
         await asyncio.to_thread(write)
         return backend_id
 
-    async def download(self, backend_id: str) -> AsyncIterator[bytes]:
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         try:
             data = await asyncio.to_thread(self._path(backend_id).read_bytes)
         except FileNotFoundError:

@@ -15,7 +15,8 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -48,7 +49,7 @@ class ContentBackend(Protocol):
     backend: str
 
     async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str: ...
-    def download(self, backend_id: str) -> AsyncIterator[bytes]: ...
+    def download(self, backend_id: str) -> AsyncGenerator[bytes]: ...
     async def exists(self, backend_id: str) -> bool: ...
     async def remove(self, backend_id: str) -> None: ...
 
@@ -249,14 +250,17 @@ class ContentStore:
             await self._release_replaced(key, previous.ref)
         return ref
 
-    async def get(self, ref: BlobRef) -> AsyncIterator[bytes]:
+    async def get(self, ref: BlobRef) -> AsyncGenerator[bytes]:
         """The object's bytes, sha-checked at the end. On `BlobMissingError` the index
         row is kept; a caller that gets it should `forget` the key."""
         digest = hashlib.sha256()
         try:
-            async for chunk in self.backend.download(ref.backend_id):
-                digest.update(chunk)
-                yield chunk
+            # Closed with this generator: a consumer that stops early (and closes it)
+            # closes the backend's download, and its HTTP stream, with it.
+            async with aclosing(self.backend.download(ref.backend_id)) as chunks:
+                async for chunk in chunks:
+                    digest.update(chunk)
+                    yield chunk
         except BlobMissingError:
             self._count("get", "missing")
             raise
@@ -266,7 +270,8 @@ class ContentStore:
         self._count("get", "ok")
 
     async def read(self, ref: BlobRef) -> bytes:
-        return b"".join([chunk async for chunk in self.get(ref)])
+        async with aclosing(self.get(ref)) as chunks:
+            return b"".join([chunk async for chunk in chunks])
 
     async def stat(self, key: str) -> BlobStat | None:
         stat = await asyncio.to_thread(self.index.get, key)

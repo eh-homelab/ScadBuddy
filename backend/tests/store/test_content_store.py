@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,35 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(tmp_path: Path, 
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"asset": 6})
     assert (await store.stat(f"asset-{first.sha256}")) is not None
+
+
+class _ClosingBackend(LocalContentBackend):
+    """Records each download whose generator was closed."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.closed: list[str] = []
+
+    async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
+        try:
+            async for chunk in super().download(backend_id):
+                yield chunk
+        finally:
+            self.closed.append(backend_id)
+
+
+async def test_a_read_stopped_early_closes_the_backends_download(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A consumer that stops mid-stream and closes `get` closes the backend's download
+    with it (#680), rather than leaving its HTTP stream to the garbage collector."""
+    backend = _ClosingBackend(tmp_path / "remote")
+    store = ContentStore(backend, BlobIndex(pool))
+    ref = await store.put("piece", os.urandom(3 << 20), name="p", scope=SCOPE)
+    async with contextlib.aclosing(store.get(ref)) as chunks:
+        async for _ in chunks:
+            break
+    assert backend.closed == [ref.backend_id]
 
 
 async def test_put_refuses_past_the_cap_except_a_re_put(tmp_path: Path, pool: Pool) -> None:
