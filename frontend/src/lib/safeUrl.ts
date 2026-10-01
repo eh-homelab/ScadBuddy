@@ -24,25 +24,87 @@ const SEG = '[A-Za-z0-9._~%-]+'
 const IMAGE_ROUTES = new RegExp(
   `^/api/v1/(?:jobs/${SEG}/(?:views/${SEG}\\.png|colours\\.png)` +
     `|outputs/${SEG}/(?:thumbnail|views/${SEG}\\.png|plates/\\d+/thumbnail)` +
-    `|models/${SEG}/thumbnail)$`,
+    `|models/${SEG}/(?:thumbnail|images/(?:${SEG}/)*${SEG}\\.(?:png|jpe?g|gif|webp|svg)))$`,
+  'i',
 )
 
+/** The model a Markdown text belongs to, which its relative images resolve against (#951). */
+export interface ImageBase {
+  slug: string
+  /** The revision being viewed; without one, the model's current files. */
+  revision?: string
+}
+
 /**
- * A `src` for an image in untrusted Markdown (#820): a same-origin path to one of
- * ScadBuddy's image routes (a render view, colour map, output or plate thumbnail, or
- * model thumbnail), normalised, else null. Text from the model, a README, a preset
- * description or a tool result can never make the browser fetch another host, or any
- * other API route. A backslash is refused because the URL parser reads it as `/`, and
- * `..` is resolved before the route is matched so it cannot climb to another route.
+ * The longest `data:` image shown (#951), in characters: about 384 KiB of base64. An
+ * inline blob past it is its alt text, so one huge image cannot stall the chat.
  */
-export function safeImageSrc(value: string | null | undefined): string | null {
-  if (!value || !value.startsWith('/api/v1/') || value.includes('\\')) return null
+export const MAX_DATA_IMAGE_CHARS = 512 * 1024
+
+// An `<img>` never runs script, even an SVG's, so these are inert as an image source.
+const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp|svg\+xml)(?:;[^,;]+)*,/i
+
+// What `GET /models/{slug}/images/{path}` serves.
+const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|svg)$/i
+
+const ORIGIN = 'http://scadbuddy.invalid'
+
+/**
+ * A `src` for an image in untrusted Markdown (#820, #951), normalised, else null:
+ *
+ * - a same-origin path to one of ScadBuddy's image routes (a render view, colour map,
+ *   output or plate thumbnail, model thumbnail or model image), so text from the
+ *   model, a README, a preset description or a tool result can never make the browser
+ *   fetch another host, or any other API route. A backslash is refused because the URL
+ *   parser reads it as `/`, and `..` is resolved before the route is matched so it
+ *   cannot climb to another route.
+ * - a `data:image/*` of a type an `<img>` shows, up to `MAX_DATA_IMAGE_CHARS`.
+ * - with a `base`, a path relative to that model's folder (`thumbnail.png`,
+ *   `images/a.png`), as the model image route at the base's revision. The rules are
+ *   the route's: nothing that climbs out, no dot-file segment, an image extension.
+ *   Without a base (agent chat) such a path, like a filesystem path, is never fetched.
+ */
+export function safeImageSrc(value: string | null | undefined, base?: ImageBase): string | null {
+  if (!value || value.includes('\\')) return null
+  if (value.startsWith('/api/v1/')) return apiPath(value)
+  if (DATA_IMAGE.test(value)) return value.length <= MAX_DATA_IMAGE_CHARS ? value : null
+  return base ? modelImage(value, base) : null
+}
+
+function apiPath(value: string): string | null {
   let parsed: URL
   try {
-    parsed = new URL(value, 'http://scadbuddy.invalid')
+    parsed = new URL(value, ORIGIN)
   } catch {
     return null
   }
-  if (parsed.origin !== 'http://scadbuddy.invalid' || !IMAGE_ROUTES.test(parsed.pathname)) return null
+  if (parsed.origin !== ORIGIN || !IMAGE_ROUTES.test(parsed.pathname)) return null
   return parsed.pathname + parsed.search
+}
+
+function modelImage(value: string, base: ImageBase): string | null {
+  // No scheme (which covers `C:/`), no absolute or protocol-relative path, and no
+  // query or fragment: the route takes a plain file path and nothing else.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('/') || /[?#]/.test(value)) return null
+  let parsed: URL
+  try {
+    parsed = new URL(value, `${ORIGIN}/m/`)
+  } catch {
+    return null
+  }
+  if (parsed.origin !== ORIGIN || !parsed.pathname.startsWith('/m/')) return null
+  const path = parsed.pathname.slice('/m/'.length)
+  const segments = path.split('/')
+  for (const segment of segments) {
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      return null
+    }
+    if (!decoded || decoded.startsWith('.') || /[/\\]/.test(decoded)) return null
+  }
+  if (!IMAGE_EXTENSION.test(decodeURIComponent(segments[segments.length - 1] ?? ''))) return null
+  const revision = base.revision ? `?commit=${encodeURIComponent(base.revision)}` : ''
+  return `/api/v1/models/${encodeURIComponent(base.slug)}/images/${path}${revision}`
 }
