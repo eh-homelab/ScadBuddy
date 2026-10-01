@@ -19,7 +19,7 @@ export interface UiDeclaration {
 
 export interface MountContext {
   slot: UiSlot
-  /** The revision the module was loaded from, or null for the live template. */
+  /** The revision the module was loaded from: the commit the record is at, pinned or live; null only when history is unavailable. */
   version: string | null
   theme: 'light' | 'dark'
   /** The host-API major this host speaks. */

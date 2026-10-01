@@ -151,13 +151,22 @@ test.describe('customizer', () => {
 
   test('fills the frame where the page may not go full screen, as inside Bambuddy', async ({
     page,
+    context,
     baseURL,
+    browserName,
   }) => {
     // Bambuddy's External Link frame: another origin, its sandbox flags and no
     // allow="fullscreen", so the Fullscreen API is refused inside it. The page around it
     // only has to be on a second origin; a static file there will do.
     const host = new URL('/mockServiceWorker.js', baseURL)
     host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
+    // Bambuddy's page, not ours: served without ScadBuddy's page CSP, which would refuse
+    // to frame another origin.
+    await page.route(host.href, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
+    // A routed page is not on the loopback address space, so Chrome's Local Network
+    // Access checks refuse its loopback frame. Bambuddy on the LAN is local; grant it.
+    // Chromium's permission: another browser's context throws on the unknown name.
+    if (browserName === 'chromium') await context.grantPermissions(['local-network-access'])
     await page.goto(host.href)
     await page.setContent(
       `<iframe src="${new URL('/m/name-keychain', baseURL).href}" title="ScadBuddy"

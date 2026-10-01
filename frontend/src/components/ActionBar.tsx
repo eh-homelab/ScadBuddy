@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
@@ -30,7 +30,14 @@ import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import { bambuddyLink } from '../lib/bambuddyLinks'
 
+/** What a template UI's `host.openPrint` reaches (spec §4.3). */
+export interface ActionBarHandle {
+  /** False, and nothing opens, when ``outputId`` is not the output on screen. */
+  openPrint(outputId: string): boolean
+}
+
 interface Props {
+  ref?: Ref<ActionBarHandle>
   slug: string
   job: Job | undefined
   rendering: boolean
@@ -71,6 +78,7 @@ interface Props {
 }
 
 export function ActionBar({
+  ref,
   slug,
   job,
   rendering,
@@ -129,6 +137,18 @@ export function ActionBar({
       )
     }
   }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openPrint: (outputId) => {
+        if (output?.id !== outputId) return false
+        setPrintOpen(true)
+        return true
+      },
+    }),
+    [output],
+  )
 
   const ready = job?.status === 'done' && !rendering && upToDate
   const stale = Boolean(output) && output?.id !== undefined && !ready

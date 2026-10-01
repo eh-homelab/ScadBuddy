@@ -62,6 +62,8 @@ describe('filterModels', () => {
       'name-keychain',
       'creme-coaster',
       'gridfinity-bin',
+      'ui-broken',
+      'ui-demo',
       'builtin:keychain-template',
     ])
   })
@@ -106,6 +108,8 @@ describe('filterModels', () => {
       'gridfinity-bin',
       'builtin:keychain-template',
       'name-keychain',
+      'ui-broken',
+      'ui-demo',
     ])
   })
 
@@ -120,6 +124,7 @@ describe('tagCounts', () => {
   it('counts each tag once per model, most used first, then by name', () => {
     const extra = { ...(models[0] as ModelSummary), slug: 'x', tags: ['kitchen', 'kitchen'] }
     expect(tagCounts([...models, extra])).toEqual([
+      { tag: 'custom-ui', count: 2 },
       { tag: 'keychain', count: 2 },
       { tag: 'kitchen', count: 2 },
       { tag: 'gridfinity', count: 1 },
