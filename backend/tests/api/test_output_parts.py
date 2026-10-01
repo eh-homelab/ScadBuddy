@@ -201,3 +201,22 @@ def test_saving_an_arrange_job_records_its_sources_and_holds_its_parts(
     detail = client.get(f"/api/v1/outputs/{output_id}").json()
     assert detail["arranged_from"] == sources
     assert held(pool) == {(m.part, output_id) for m in written.manifest}
+
+
+def test_the_edit_link_of_an_arranged_output_says_it_was_arranged(
+    client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path
+) -> None:
+    """An arranged output has no one template state to reopen: the deep link says where
+    its objects came from, so the page can say so rather than open empty inputs."""
+    _, job, written = asyncio.run(finished_job(tmp_path, job_id="arr-2"))
+    sources = ["a" * 32]
+    inputs = ArrangeInputs(
+        items=[PackItem(part=part_of(written.manifest[0]), count=1)],
+        plate=PlateSize(key="default", width=256.0, depth=256.0),
+        sources=sources,
+    )
+    arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
+    app.dependency_overrides[get_render] = lambda: OneJob(arranged)
+    output_id = save(client, "arr-2")
+    target = client.get(f"/api/v1/outputs/{output_id}/edit").json()
+    assert target["arranged_from"] == sources

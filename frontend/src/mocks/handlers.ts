@@ -2198,6 +2198,7 @@ export const handlers = [
       inputs: output.inputs ?? { params: output.params, v: 0 },
       model_version: output.model_version ?? null,
       source: 'record',
+      arranged_from: output.arranged_from ?? [],
     })
   }),
 

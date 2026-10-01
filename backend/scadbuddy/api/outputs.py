@@ -130,6 +130,9 @@ class EditTarget(BaseModel):
     model_version: str | None = None
     #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
     source: Literal["record", "3mf"]
+    #: An arranged output's sources (spec 2026-09-27 §7): it has no one template state
+    #: to reopen, so the page says where its objects came from instead.
+    arranged_from: list[str] = Field(default_factory=list)
 
 
 def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
@@ -461,6 +464,7 @@ def get_edit_target(
         inputs=outputs.inputs(output_id),
         model_version=meta.model_version,
         source="record",
+        arranged_from=outputs.arranged_from(output_id),
     )
 
 
