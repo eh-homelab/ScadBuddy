@@ -70,7 +70,9 @@ class SnapshotStore:
             await self.content.touch(key)
             return key
         directory = self.paths.model_revision_dir(slug, revision)
-        if not directory.is_dir():
+        # Marked used before it is packed, so the prune (whose TTL an old revision's
+        # export is past) does not take it mid-pack; one it already took is exported again.
+        if not (directory.is_dir() and await _used(directory)):
             if self.history is None:
                 raise SnapshotUnavailableError(f"no snapshot of {slug}@{revision} and no history")
             await asyncio.to_thread(export_revision, self.history, slug, revision, directory)

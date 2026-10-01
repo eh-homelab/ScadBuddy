@@ -311,6 +311,22 @@ async def test_an_export_a_worker_uses_again_is_not_pruned_within_the_ttl(
     assert (export / "model.scad").is_file()
 
 
+async def test_ensure_marks_an_old_export_used_before_packing_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#688: `ensure` packs an existing export, so it touches it first; otherwise the
+    prune (its mtime past the TTL) could remove it mid-pack."""
+    api_paths = DataPaths(tmp_path / "api")
+    rev = "7" * 40
+    export = api_paths.model_revision_dir("demo", rev)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(7);")
+    old = time.time() - 7 * 86400
+    os.utime(export, (old, old))
+    await SnapshotStore(content, api_paths, history=None).ensure("demo", rev)
+    assert prune_revision_exports(api_paths, 86400) == []
+
+
 def _pruned_on_touch(monkeypatch: pytest.MonkeyPatch, times: int = 1) -> None:
     """The prune takes the export between `materialize`'s `is_dir` and its touch."""
     left = [times]
