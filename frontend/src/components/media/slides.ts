@@ -17,6 +17,9 @@ export type Slide = {
   contentType?: string
 }
 
+/** Where the media leads: the card's template, from the catalogue. */
+export type SlideLink = { to: string; label: string }
+
 /** A template's media as slides, in order. An item whose file is missing is skipped. */
 export function toSlides(slug: string, media: MediaView[]): Slide[] {
   const shown = media.filter((item) => !item.missing)
@@ -33,6 +36,20 @@ export function toSlides(slug: string, media: MediaView[]): Slide[] {
       contentType: item.content_type,
     }
   })
+}
+
+/**
+ * A template's slides with an uncaptioned one named after the template ("Crème Coaster,
+ * image 1 of 4", or the bare name for a single item) rather than just "Image 1 of 4".
+ */
+export function namedSlides(model: { slug: string; name: string; media?: MediaView[] | null }): Slide[] {
+  const all = toSlides(model.slug, model.media ?? [])
+  return all.map((slide, index) => ({
+    ...slide,
+    alt:
+      slide.caption ??
+      (all.length === 1 ? model.name : `${model.name}, ${slide.kind} ${index + 1} of ${all.length}`),
+  }))
 }
 
 type EmblaOptions = NonNullable<Parameters<typeof useEmblaCarousel>[0]>

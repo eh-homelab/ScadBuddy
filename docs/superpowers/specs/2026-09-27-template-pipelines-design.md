@@ -174,7 +174,7 @@ All in `backend/scadbuddy/workflows/`, `temporalio` Python SDK.
 
 ```
 TemplatePipeline   id render-<job_id>          one per Generate (render_jobs.kind = 'render')
-  └─ RenderPiece   id piece-<piece_key>         one per DISTINCT openscad render; USE_EXISTING
+  └─ RenderPiece   id piece-<piece_key>         one per DISTINCT openscad render; shared (below)
 Arrange            id render-<job_id>          objects → plates (§7); render_jobs.kind = 'arrange'
 ```
 
@@ -230,9 +230,26 @@ activity directly, not the workflow.
 A `RenderPiece` is keyed by `piece_key`. Fourteen identical walls render once; two
 people building the same house share one child; changing the wallpaper re-renders
 walls but not floors or corner posts. Children are started with
-`parent_close_policy=ABANDON`: cancelling a `TemplatePipeline` never cancels a piece
-another job may be sharing, and a Part nothing references is swept by the store's
-grace rule (§6.2).
+`parent_close_policy=ABANDON` **and** `cancellation_type=ABANDON`: cancelling a
+`TemplatePipeline` never cancels a piece another job may be sharing (without the
+second, the SDK's default `WAIT_CANCELLATION_COMPLETED` requests cancellation of the
+awaited child when the parent is cancelled), and a Part nothing references is swept
+by the store's grace rule (§6.2).
+
+Sharing a piece is start-then-signal, not `USE_EXISTING`. The SDK's child start has no
+`id_conflict_policy` (verified against `temporalio` 1.33.0, §3.6), so a second job
+cannot attach to a running child by starting it. Instead the job calls
+`start_child_workflow`; on `WorkflowAlreadyStartedError` it signals the running piece
+`RenderPiece.wait_for_me(<its own workflow id>)` and waits for the piece's
+`TemplatePipeline.piece_finished(PieceOutcome)` signal, which carries the `PieceResult`
+or the `Failure`. The piece signals every waiter when it finishes; a signal to a
+waiter that has since closed is ignored. The wait is bounded (a multiple of the
+piece's worst-case run): on timeout the job retries the start — success means the
+piece closed without signalling (terminated by an operator, a workflow task stuck
+failing) and this job now owns a fresh render; `WorkflowAlreadyStartedError` means it
+re-signals and waits again. `wait_for_me` ignores an id it already holds. A piece
+that closes between a job's failed start and its signal makes that job start the
+piece again: a re-render the render cache makes cheap.
 
 *(phase 1 note)* On the Temporal path the render cache is the piece's blob and its
 `piece.json` marker. `finish_piece` writes the marker last, atomically, and the
@@ -289,31 +306,49 @@ workflows; the default is to let them finish on the old build.
 - **In-process mode.** `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (dev and tests) does not
   drain.
 
-### 3.6 To verify against the pinned `temporalio` before phase 1 lands
+### 3.6 Verified against the pinned `temporalio` (1.33.0)
 
-These were recalled when this spec was written, before `temporalio` was a dependency;
-the base spec's §3 rule is to measure them. Measured against the pinned 1.33.0:
+Measured while phase 1 landed (the base spec's §3 rule), in
+`backend/tests/test_workflows.py`:
 
-- Pipeline source (phase 4, measured in `backend/tests/test_pipeline_sandbox.py`):
-  - `compile(source, "pipeline/pipeline.py", "exec")`, then `exec`, works inside the
-    sandbox.
-  - A traceback frame's `co_filename`/`tb_lineno` name the template file and line. This
-    holds for a runtime error, for a restricted call at module level or inside `run`,
-    and for a `SyntaxError` (via its `lineno`).
-  - A restricted call raises
-    `temporalio.worker.workflow_sandbox._restrictions.RestrictedWorkflowAccessError`,
-    which the workflow can catch. For `datetime.datetime.now()` inside `run`, the
-    message is "Cannot access datetime.datetime.now.__call__ from inside a workflow.
-    If this is code from a module not used in a workflow or known to only be used
-    deterministically from a workflow, mark the import as pass through."
-  - For `open(...)` at module level: "Cannot access __builtins__.open from inside a
-    workflow. If this is code from a module not used in a workflow or known to only be
-    used deterministically from a workflow, mark the import as pass through."
-  - Walking `tb_next` needs no `linecache`, so no file is read inside the sandbox.
+- `workflow.start_child_workflow` / `execute_child_workflow` take `id_reuse_policy`
+  and **no `id_conflict_policy`**; the core `StartChildWorkflowExecution` command has
+  no such field either, and `WorkflowIDReusePolicy` only governs closed ids. Hence
+  §3.4's start-then-signal sharing. `WorkflowIDConflictPolicy.USE_EXISTING` exists on
+  the *client's* `start_workflow` and is what §3.3 uses.
+- A second child start with a running id raises
+  `temporalio.exceptions.WorkflowAlreadyStartedError`; an external handle
+  (`get_external_workflow_handle_for`) can signal and cancel but not await a result.
+- `parent_close_policy=ABANDON` alone does not keep a shared child alive through the
+  parent's cancellation: `cancellation_type=ChildWorkflowCancellationType.ABANDON` is
+  needed too. Under it the child resolves at once as a `ChildWorkflowError` whose cause
+  is a `CancelledError`, which `is_cancelled_exception` recognises.
+- `workflow.CancelledError` does not exist; cancellation arrives as
+  `asyncio.CancelledError`. `workflow.memo_value(key, default, type_hint=float)` exists.
+- `imports_passed_through` for `scadbuddy.render.job_models` and
+  `scadbuddy.workflows.models` (pydantic) is accepted by the sandbox.
 
-Still to verify when their phases land: that `parent_close_policy=ABANDON` with
-`id_conflict_policy=USE_EXISTING` behaves as §3.4 assumes for shared children;
-worker build-ID versioning semantics in the pinned SDK release (§3.5).
+Measured while phase 4 landed, against the pinned 1.33.0, in
+`backend/tests/test_pipeline_sandbox.py`:
+
+- `compile(source, "pipeline/pipeline.py", "exec")`, then `exec`, works inside the
+  sandbox.
+- A traceback frame's `co_filename`/`tb_lineno` name the template file and line. This
+  holds for a runtime error, for a restricted call at module level or inside `run`,
+  and for a `SyntaxError` (via its `lineno`).
+- A restricted call raises
+  `temporalio.worker.workflow_sandbox._restrictions.RestrictedWorkflowAccessError`,
+  which the workflow can catch. For `datetime.datetime.now()` inside `run`, the
+  message is "Cannot access datetime.datetime.now.__call__ from inside a workflow.
+  If this is code from a module not used in a workflow or known to only be used
+  deterministically from a workflow, mark the import as pass through."
+- For `open(...)` at module level: "Cannot access __builtins__.open from inside a
+  workflow. If this is code from a module not used in a workflow or known to only be
+  used deterministically from a workflow, mark the import as pass through."
+- Walking `tb_next` needs no `linecache`, so no file is read inside the sandbox.
+
+Still to verify when its phase lands: worker build-ID versioning semantics, including
+whether the dev server needs `system.enableDeploymentVersions` (§3.5, the worker PR).
 
 ### 3.7 Tests
 
@@ -367,12 +402,16 @@ interface Host {
   inputs: { get(): Json; set(patch: Json): void; subscribe(fn: (i: Json) => void): () => void }
   schema(file?: string): Promise<CustomizerSchema>     // default model.scad
   files: { url(path: string): string }                  // template assets
-  generate(): Promise<{ jobId: string }>
+  generate(): Promise<{ jobId: string; outputId: string }>
   openPrint(outputId: string): void
   presets: { list(); save(name); load(id) }             // over inputs
   describe?: (fn: () => string) => void                 // agent-facing summary (optional)
 }
 ```
+
+`generate()` waits for the render of the current inputs and keeps it as an output,
+resolving with both ids: a template's own Generate then has an output to hand to
+`openPrint`, with no polling of its own (phase 4's pipeline outputs build on this shape).
 
 `inputs` is the one piece of state. It is JSON the template owns. For a template
 with no custom UI, inputs are exactly the parameter values, so today's

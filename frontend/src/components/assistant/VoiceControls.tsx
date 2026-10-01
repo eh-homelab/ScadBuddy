@@ -117,7 +117,7 @@ export function VoiceDisclosure({ id }: { id: string }) {
   if (!recognitionCtor()) return null
   return (
     <p id={id} className="mt-1 text-[11px] text-faint">
-      Voice input is transcribed by your browser, which may send the audio to its maker’s servers (Chrome does).
+      Voice input is transcribed by your browser, which may send the audio to its maker’s servers.
     </p>
   )
 }

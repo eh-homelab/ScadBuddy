@@ -125,9 +125,3 @@ export function isNonDefault(
   if (!isSet(value)) return false
   return value !== optionValue(defaults, name)
 }
-
-/** `quantity`'s declared bound, so the send bar's Copies box cannot drift from the row. */
-export function quantityBounds(): { min: number; max: number } {
-  const spec = PRINT_OPTIONS.find((option) => option.name === 'quantity')
-  return { min: spec?.min ?? 1, max: spec?.max ?? 1000 }
-}

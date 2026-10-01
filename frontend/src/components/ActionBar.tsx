@@ -1,32 +1,65 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
-import { triggerDownload } from '../lib/embed'
-import type { InputsExtra } from '../lib/inputs'
+import type {
+  Job,
+  ModelSummary,
+  Output,
+  PlateFit,
+  PrintRunResult,
+  ProjectFile,
+  ProjectView,
+  SendResult,
+} from '../api/types'
+import { DownloadBlockedError, downloadBlob, openExternal } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
+import type { CameraView } from '../lib/framing'
+import type { SnapshotOptions } from '../lib/snapshot'
+import type { InputsExtra } from '../lib/inputs'
 import { ExtraOutputsError, saveOutput, saveRemaining } from '../lib/saveOutput'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
+import { ImageDialog } from './ImageDialog'
 import { PrintPicker } from './PrintPicker'
+import { useProjectList } from '../lib/projects'
+import { ProjectPicker } from './ProjectPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
+import { bambuddyLink } from '../lib/bambuddyLinks'
+
+/** What a template UI's `host.openPrint` reaches (spec §4.3). */
+export interface ActionBarHandle {
+  /** False, and nothing opens, when ``outputId`` is not the output on screen. */
+  openPrint(outputId: string): boolean
+}
 
 interface Props {
+  ref?: Ref<ActionBarHandle>
   slug: string
   job: Job | undefined
   rendering: boolean
   /**
-   * #254 — whether `job` is the render of the values on screen. Only an agent's
-   * `generate` reads it: a person cannot press Generate in the frame where it is not.
+   * #254 — whether `job` is the render of the values on screen. Also gates the
+   * Generate button (#754): between a param edit settling and `rendering` flipping
+   * true for the new render, `job` and `rendering` still describe the PREVIOUS,
+   * already-`done` job — this is the only prop that already knows it is stale.
    */
   upToDate?: boolean
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
+  /** A high-resolution image of the view to share, from Generate's menu. */
+  captureImage: (options: SnapshotOptions) => Promise<Blob | null>
+  /** The view's size in CSS pixels. */
+  viewSize: () => { width: number; height: number }
+  /** #722 — the viewer's camera now, which the image dialog frames a copy of. */
+  cameraView?: () => CameraView | null
+  /** The template, so the rendered image can be added to its media. */
+  model?: ModelSummary
+  onModelChanged?: (model: ModelSummary) => void
   /** The UI state recorded with the output (spec 2026-09-27 §4.3). */
   extra: InputsExtra
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
@@ -45,12 +78,18 @@ interface Props {
 }
 
 export function ActionBar({
+  ref,
   slug,
   job,
   rendering,
   upToDate = true,
   output,
   capture,
+  captureImage,
+  viewSize,
+  cameraView,
+  model,
+  onModelChanged,
   extra,
   fit,
   fitProblems,
@@ -63,14 +102,60 @@ export function ActionBar({
   const [downloading, setDownloading] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
+  const [imageOpen, setImageOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /** A job whose first output was saved but not the rest: Generate saves only those. */
   const [unfinished, setUnfinished] = useState<ExtraOutputsError | null>(null)
   /** Stops a render Generate is waiting for when the page leaves this model. */
   const generation = useRef<AbortController | null>(null)
   useEffect(() => () => generation.current?.abort(), [slug])
+  /**
+   * #317 — the project Generate files the editable 3MF into, shared with the print
+   * dialog's picker so both show one choice. Seeded from `last_project_id`; a change on
+   * either picker becomes the new `last_project_id`.
+   */
+  const [projectId, setProjectId] = useState<number | null>(null)
+  const [project, setProject] = useState<ProjectView | null>(null)
+  /** Fetched once here and shared by both pickers, so the dialog does not list it again. */
+  const projects = useProjectList(setProjectId)
+  const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
+    null,
+  )
+  const [fileError, setFileError] = useState<string | null>(null)
 
-  const ready = job?.status === 'done' && !rendering
+  function chooseProject(next: number | null) {
+    setProjectId(next)
+    // Only a preference: the picker still shows the choice if it is not remembered.
+    void api.rememberProject(next).catch(() => undefined)
+  }
+
+  /** Best effort: the output is saved whether or not Bambuddy takes the file. */
+  async function fileIntoProject(created: Output) {
+    if (projectId === null) return
+    const name = project?.name ?? `project ${projectId}`
+    try {
+      const file = await api.fileIntoProject(created.id, projectId)
+      setFiled({ outputId: created.id, name, file })
+    } catch (cause) {
+      setFileError(
+        `Saved, but not filed in ${name}: ${cause instanceof ApiError ? cause.detail : 'Bambuddy did not answer.'}`,
+      )
+    }
+  }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openPrint: (outputId) => {
+        if (output?.id !== outputId) return false
+        setPrintOpen(true)
+        return true
+      },
+    }),
+    [output],
+  )
+
+  const ready = job?.status === 'done' && !rendering && upToDate
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
   const unit = useDisplayUnit()
@@ -82,15 +167,23 @@ export function ActionBar({
     generation.current = controller
     setGenerating(true)
     setError(null)
-    const resume = unfinished?.job.id === job.id ? unfinished : null
+    // Matched on the job Generate was asked to save, not a re-render it made for it.
+    const resume = unfinished?.requested.id === job.id ? unfinished : null
     setUnfinished(null)
+    setFiled(null)
+    setFileError(null)
     try {
+      let created: Output
       if (resume) {
         await saveRemaining(resume)
-        return resume.saved
+        created = resume.saved
+      } else {
+        // The first output shows as soon as it is saved, before a pipeline job's others.
+        created = await saveOutput({ slug, job, extra, capture, onSaved: onGenerated, signal: controller.signal })
       }
-      // The first output shows as soon as it is saved, before a pipeline job's others.
-      return await saveOutput({ slug, job, extra, capture, onSaved: onGenerated, signal: controller.signal })
+      // After the thumbnail, so the file Bambuddy lists carries the plate image.
+      await fileIntoProject(created)
+      return created
     } catch (cause) {
       if (controller.signal.aborted) return null // the page has moved on
       if (cause instanceof ExtraOutputsError) setUnfinished(cause)
@@ -107,7 +200,7 @@ export function ActionBar({
     }
   }
 
-  const live = useLatest({ ready: ready && upToDate, generating, output, sendOpen, printOpen })
+  const live = useLatest({ ready, generating, output, sendOpen, printOpen })
 
   // #254 — Generate, and opening (never confirming) the print and send dialogs.
   useAgentHandlers('actions', {
@@ -130,6 +223,9 @@ export function ActionBar({
           'There is no generated output for these values yet; call generate first.',
         )
       }
+      if (kind !== 'send' && live.current.generating) {
+        throw new AgentToolError('invalid_args', 'Generate is still filing the project file.')
+      }
       if (kind === 'send') setSendOpen(true)
       else setPrintOpen(true)
       await committed(() => (kind === 'send' ? live.current.sendOpen : live.current.printOpen), 'the dialog to open')
@@ -146,15 +242,15 @@ export function ActionBar({
     setDownloading(true)
     setError(null)
     try {
-      // Fetched as a blob so the download works from inside Bambuddy's sandboxed iframe.
-      const response = await fetch(api.downloadUrl(output.id))
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      triggerDownload(url, `${slug}-${output.id}.3mf`)
-      setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    } catch {
-      setError('Download failed.')
+      // Fetched as a blob and saved through lib/embed, so it works inside Bambuddy's
+      // sandboxed iframe (a popup that escapes the sandbox, opened before the fetch).
+      await downloadBlob(async () => {
+        const response = await fetch(api.downloadUrl(output.id))
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.blob()
+      }, `${slug}-${output.id}.3mf`)
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : 'Download failed.')
     } finally {
       setDownloading(false)
     }
@@ -163,7 +259,8 @@ export function ActionBar({
   return (
     <>
       <footer className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-t border-line bg-surface px-3 py-2">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+        {/* A basis, so a crowded bar wraps its buttons below rather than squeezing "Saved …" to nothing. */}
+        <div className="flex min-w-0 grow basis-64 items-center gap-3">
           {job?.colors && job.colors.length > 0 && (
             <>
               <ColorStrip colors={job.colors} />
@@ -182,18 +279,49 @@ export function ActionBar({
               Saved {output.name ?? output.id.slice(0, 8)}
             </span>
           )}
+          {!error && output && !stale && filed?.outputId === output.id && (
+            <span className="flex min-w-0 items-center gap-1.5 text-[12px]" data-testid="project-filed">
+              <span className="truncate text-ok">Saved to {filed.name}</span>
+              <button
+                type="button"
+                onClick={() => openExternal(bambuddyLink(filed.file.bambuddy_url))}
+                className="shrink-0 text-accent underline"
+              >
+                Open in Bambuddy
+              </button>
+            </span>
+          )}
+          {!error && output && !stale && fileError && (
+            <span role="alert" className="truncate text-[12px] text-warn">
+              {fileError}
+            </span>
+          )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="primary"
-            onClick={() => void generate().catch(() => undefined)}
-            disabled={!ready || generating}
-            data-testid="generate"
-          >
-            {generating && <Spinner />}
-            {generating ? 'Generating' : 'Generate'}
-          </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* #317 — Generate files the editable 3MF in this project's Bambuddy folder. */}
+          <ProjectPicker
+            id="customize-project"
+            testId="customize-project-select"
+            inline
+            value={projectId}
+            onChange={chooseProject}
+            list={projects}
+            onProject={setProject}
+          />
+          <div className="flex">
+            <Button
+              variant="primary"
+              onClick={() => void generate().catch(() => undefined)}
+              disabled={!ready || generating}
+              data-testid="generate"
+              className="rounded-r-none"
+            >
+              {generating && <Spinner />}
+              {generating ? 'Generating' : 'Generate'}
+            </Button>
+            <GenerateMenu disabled={!ready} onImage={() => setImageOpen(true)} />
+          </div>
           <Button onClick={() => void download()} disabled={!output || downloading}>
             {downloading && <Spinner />}
             Download 3MF
@@ -204,7 +332,8 @@ export function ActionBar({
           <Button
             variant={misfit ? 'danger' : 'default'}
             onClick={() => setPrintOpen(true)}
-            disabled={!output}
+            // #317 — Generate is still filing the project file, which the print reuses.
+            disabled={!output || generating}
             data-testid="print"
             title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >
@@ -213,6 +342,17 @@ export function ActionBar({
           </Button>
         </div>
       </footer>
+
+      <ImageDialog
+        open={imageOpen}
+        slug={slug}
+        captureImage={captureImage}
+        viewSize={viewSize}
+        cameraView={cameraView}
+        model={model}
+        onMediaChanged={onModelChanged}
+        onClose={() => setImageOpen(false)}
+      />
 
       <SendDialog
         open={sendOpen}
@@ -223,12 +363,73 @@ export function ActionBar({
 
       <PrintPicker
         open={printOpen}
-        slug={slug}
-        output={output}
+        source={output ? { kind: 'output', output } : undefined}
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
         onPrinterModel={onPrinterModel}
+        project={{ value: projectId, onChange: chooseProject, list: projects }}
       />
     </>
+  )
+}
+
+/** The other things Generate can make from the preview: for now, an image to share. */
+function GenerateMenu({ disabled, onImage }: { disabled: boolean; onImage: () => void }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={root} className="relative">
+      <Button
+        variant="primary"
+        onClick={() => setOpen((value) => !value)}
+        disabled={disabled}
+        aria-label="More to generate"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid="generate-menu"
+        className="rounded-l-none border-l-accent-ink/25 px-2"
+      >
+        <svg aria-hidden="true" viewBox="0 0 12 12" className="size-3 fill-current">
+          <path d="M2 4.5 6 8.5 10 4.5z" />
+        </svg>
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 bottom-full z-30 mb-1 min-w-48 rounded-[6px] border border-line bg-surface py-1 shadow-xl"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="generate-image"
+            className="block w-full px-3 py-1.5 text-left text-[13px] hover:bg-surface-2"
+            onClick={() => {
+              setOpen(false)
+              onImage()
+            }}
+          >
+            Rendered image…
+            <span className="block text-[11px] text-faint">A high-resolution PNG of the view</span>
+          </button>
+        </div>
+      )}
+    </div>
   )
 }

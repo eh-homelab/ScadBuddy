@@ -142,6 +142,7 @@ def _prepared(result: PrepareResult) -> Prepared:
         result.version,
         tuple(Path(path) for path in result.library_path),
         Path(result.schema_cache),
+        tuple(result.libraries),
     )
 
 
@@ -158,11 +159,15 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
     )
 
 
-def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
+async def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
     """Where the piece's blob goes: its template's folder, named by `model.json`; the
-    template's root even for a piece in a subdirectory (`parts/roof.scad`)."""
+    template's root even for a piece in a subdirectory (`parts/roof.scad`).
+
+    Reading `model.json` is file I/O, so it runs in a thread, off the activity's loop.
+    """
     root = model_dir(Path(prepared.scad), req.file)
-    return BlobScope(slug=req.slug, title=template_title(root, req.slug))
+    title = await asyncio.to_thread(template_title, root, req.slug)
+    return BlobScope(slug=req.slug, title=title)
 
 
 def _parameter_error(message: str) -> ApplicationError:
@@ -336,6 +341,7 @@ class RenderActivities:
             scad=str(prepared.scad),
             library_path=[str(path) for path in prepared.library_path],
             schema_cache=str(prepared.schema_cache),
+            libraries=list(prepared.libraries),
         )
         if d.fonts_mirror is not None:
             # Only the families this template could name: a fresh worker does not
@@ -390,7 +396,9 @@ class RenderActivities:
             raise _unavailable(error, missing) from None
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
         return _main_result(output)
@@ -425,7 +433,9 @@ class RenderActivities:
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
 
@@ -463,7 +473,9 @@ class RenderActivities:
         await asyncio.to_thread(_write_piece, work, piece)
         await _heartbeating(
             asyncio.create_task(
-                d.blobs.publish_fresh(req.piece_key, scope=_scope(req, prepared), expected=baseline)
+                d.blobs.publish_fresh(
+                    req.piece_key, scope=await _scope(req, prepared), expected=baseline
+                )
             )
         )
         return piece

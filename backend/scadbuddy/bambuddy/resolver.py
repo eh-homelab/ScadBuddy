@@ -76,8 +76,8 @@ TIERS: dict[str, dict[str, str]] = {
     },
 }
 
-#: Source order when the same preset is in several tiers: the cloud id is what every
-#: existing pipeline and the filament intake use.
+#: Source order when the same preset is in several tiers: the cloud id is what
+#: Bambuddy's own pipelines and the filament intake use.
 _SOURCE_ORDER = {"cloud": 0, "local": 1, "standard": 2, "orca_cloud": 3}
 
 

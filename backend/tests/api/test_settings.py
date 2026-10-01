@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -14,28 +16,28 @@ from tests.api.conftest import read_stored
 
 # The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
 PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
+DEFAULTS: dict[str, object] = {
+    "bambuddy_url": None,
+    "has_api_key": False,
+    "public_url": None,
+    "library_folder_id": None,
+    "printer_id": None,
+    "default_plate": None,
+    "display_unit": "mm",
+    "media_upload_max_bytes": 1024**3,
+    "last_project_id": None,
+    "temporal_ui_url": None,
+    "has_render_api_key": False,
+    "render_key_fallback": False,
+    "store_backend": "local",
+}
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
 
 def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
-    assert client.get("/api/v1/settings").json() == {
-        "bambuddy_url": None,
-        "has_api_key": False,
-        "public_url": None,
-        "library_folder_id": None,
-        "pipeline_id": None,
-        "printer_id": None,
-        "printer_preset": None,
-        "process_preset": None,
-        "filament_presets": [],
-        "bed_type": None,
-        "default_plate": None,
-        "display_unit": "mm",
-        "media_upload_max_bytes": 1024**3,
-        "has_render_api_key": False,
-        "render_key_fallback": False,
-        "store_backend": "local",
-    }
+    body = client.get("/api/v1/settings").json()
+    assert {name: body[name] for name in DEFAULTS} == DEFAULTS
+    assert "bambuddy_api_key" not in body
 
 
 def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> None:
@@ -62,28 +64,76 @@ def test_the_api_key_is_write_only(client: TestClient, settings: Settings) -> No
 
 
 def test_settings_live_in_the_database_not_in_a_file(client: TestClient, data_dir: Path) -> None:
-    client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret", "pipeline_id": 3})
+    client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret", "printer_id": 3})
     assert not (data_dir / "settings.json").exists()
 
 
 def test_each_setting_is_its_own_row_and_an_omitted_one_writes_nothing(
     client: TestClient, settings: Settings
 ) -> None:
-    client.put("/api/v1/settings", json={"pipeline_id": 3})
+    client.put("/api/v1/settings", json={"printer_id": 3})
     assert read_stored(settings.database_url) == {
-        "pipeline_id": 3,
+        "printer_id": 3,
         "model_print_choices": {},
         "printer_bed_types": {},
     }
 
     # A clear of a field the environment does not seed goes back to "never set".
-    client.put("/api/v1/settings", json={"pipeline_id": None})
-    assert "pipeline_id" not in read_stored(settings.database_url)
+    client.put("/api/v1/settings", json={"printer_id": None})
+    assert "printer_id" not in read_stored(settings.database_url)
+
+
+@pytest.mark.requires_postgres
+def test_settings_stored_before_312_still_load_and_shed_the_old_keys(
+    client: TestClient, settings: Settings
+) -> None:
+    """The store is Postgres rows now, not ``settings.json``: seed the retired rows the
+    way an older ScadBuddy wrote them, one per name."""
+    legacy = {
+        "bambuddy_url": "https://bambuddy.test",
+        "pipeline_id": 4,
+        "printer_id": 1,
+        "printer_preset": {"source": "cloud", "id": "GM041"},
+        "process_preset": {"source": "cloud", "id": "GP252"},
+        "filament_presets": [{"source": "cloud", "id": "GFSA05_22"}],
+        "bed_type": "Textured PEI Plate",
+        "model_pipelines": {"demo": 9},
+    }
+    with psycopg.connect(settings.database_url) as conn:
+        for name, value in legacy.items():
+            conn.execute("INSERT INTO settings (name, value) VALUES (%s, %s)", (name, Jsonb(value)))
+
+    body = client.get("/api/v1/settings").json()
+    assert body["bambuddy_url"] == "https://bambuddy.test"
+    assert body["printer_id"] == 1
+    assert "pipeline_id" not in body
+    assert "printer_preset" not in body
+
+    assert client.put("/api/v1/settings", json={"public_url": "https://scad.test"}).is_success
+    stored = read_stored(settings.database_url)
+    for key in (
+        "pipeline_id",
+        "printer_preset",
+        "process_preset",
+        "filament_presets",
+        "bed_type",
+        "model_pipelines",
+    ):
+        assert key not in stored
+    assert stored["printer_id"] == 1
+    assert stored["bambuddy_url"] == "https://bambuddy.test"
+
+
+def test_an_old_client_sending_a_pipeline_is_not_refused(client: TestClient) -> None:
+    response = client.put("/api/v1/settings", json={"pipeline_id": 3, "printer_id": 2})
+    assert response.status_code == 200
+    assert response.json()["printer_id"] == 2
+    assert "pipeline_id" not in response.json()
 
 
 def test_an_omitted_key_is_kept_and_an_empty_one_clears_it(client: TestClient) -> None:
     client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret"})
-    assert client.put("/api/v1/settings", json={"pipeline_id": 3}).json()["has_api_key"] is True
+    assert client.put("/api/v1/settings", json={"printer_id": 3}).json()["has_api_key"] is True
     assert (
         client.put("/api/v1/settings", json={"bambuddy_api_key": ""}).json()["has_api_key"] is False
     )
@@ -96,7 +146,7 @@ def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
         client.put("/api/v1/settings", json={"display_unit": "in"}).json()["display_unit"] == "in"
     )
     # Another field's save leaves it alone.
-    assert client.put("/api/v1/settings", json={"pipeline_id": 3}).json()["display_unit"] == "in"
+    assert client.put("/api/v1/settings", json={"printer_id": 3}).json()["display_unit"] == "in"
     assert read_stored(settings.database_url)["display_unit"] == "in"
 
     assert (
@@ -145,7 +195,7 @@ def test_a_field_never_stored_follows_the_environment_it_starts_with(
 ) -> None:
     """A variable added to a deployment later is honoured: nothing stored beats it."""
     with TestClient(create_app(settings)) as client:
-        client.put("/api/v1/settings", json={"pipeline_id": 3})
+        client.put("/api/v1/settings", json={"printer_id": 3})
     later = settings.model_copy(update={"public_url": "https://scad.example"})
     with TestClient(create_app(later)) as client:
         assert client.get("/api/v1/settings").json()["public_url"] == "https://scad.example"
@@ -166,6 +216,12 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
         {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
     ]
     assert route.calls.last.request.headers["X-API-Key"] == "s3cret"
+    assert body["scopes"][0] == {
+        "scope": "Read Status",
+        "status": "ok",
+        "required": True,
+        "detail": "Printers, their status, and the print history.",
+    }
 
 
 @respx.mock
@@ -199,12 +255,30 @@ def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> N
     assert response.headers["content-type"] == "application/problem+json"
 
 
-def test_the_upload_limit_is_read_only(client: TestClient) -> None:
-    """It comes from SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES alone: a PUT cannot store one."""
-    saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 5 * 1024 * 1024})
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["media_upload_max_bytes"] == 1024**3
-    assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024**3
+def test_the_temporal_ui_url_round_trips(client: TestClient, settings: Settings) -> None:
+    """Not a secret (#668): it is read back as written, and a clear empties it."""
+    body = client.put("/api/v1/settings", json={"temporal_ui_url": "https://temporal.lan"}).json()
+    assert body["temporal_ui_url"] == "https://temporal.lan"
+    assert body["sources"]["temporal_ui_url"] == "stored"
+    assert client.get("/api/v1/settings").json()["temporal_ui_url"] == "https://temporal.lan"
+    assert read_stored(settings.database_url)["temporal_ui_url"] == "https://temporal.lan"
+
+    cleared = client.put("/api/v1/settings", json={"temporal_ui_url": None}).json()
+    assert cleared["temporal_ui_url"] is None
+
+
+def test_the_temporal_ui_url_follows_its_variable(settings: Settings) -> None:
+    deployed = settings.model_copy(update={"temporal_ui_url": "https://temporal.env"})
+    with TestClient(create_app(deployed)) as client:
+        body = client.get("/api/v1/settings").json()
+    assert body["temporal_ui_url"] == "https://temporal.env"
+    assert body["sources"]["temporal_ui_url"] == "env"
+
+
+def test_a_temporal_ui_url_that_is_not_http_is_a_422(client: TestClient) -> None:
+    response = client.put("/api/v1/settings", json={"temporal_ui_url": "javascript:alert(1)"})
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["loc"] == ["body", "temporal_ui_url"]
 
 
 def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestClient) -> None:
@@ -219,7 +293,9 @@ def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestCli
     assert body["has_render_api_key"] is True
     assert body["render_key_fallback"] is False
     assert "narrow" not in response.text
-    assert "bambuddy_render_api_key" not in json.dumps(body)
+    # Named in `sources` and `applies` like every env-seeded field, never as a value.
+    assert "bambuddy_render_api_key" not in body
+    assert "narrow" not in json.dumps(body)
 
 
 def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestClient) -> None:
@@ -247,3 +323,22 @@ def test_clearing_what_the_bambuddy_store_needs_while_on_it_is_refused(
     # Leaving the store first, then clearing, is fine.
     assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
     assert client.put("/api/v1/settings", json={cleared: None}).status_code == 200
+
+
+def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
+    client: TestClient,
+) -> None:
+    """A reset clears the stored row, so the merged value is the deployment's (none here):
+    the same unready store as an explicit clear, refused before anything is deleted."""
+    ready = {
+        "bambuddy_url": "http://bambuddy.test",
+        "library_folder_id": 7,
+        "store_backend": "bambuddy",
+    }
+    assert client.put("/api/v1/settings", json=ready).status_code == 200
+    response = client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]})
+    assert response.status_code == 422
+    assert "library folder" in response.json()["detail"]
+    assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
+    assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
+    assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200

@@ -1,6 +1,8 @@
 import { CompletionItemKind } from 'monaco-editor/editor/common/standalone/standaloneEnums.js'
 import { describe, expect, it } from 'vitest'
 import {
+  definitionFile,
+  definitionLabel,
   directoryOf,
   socketUrl,
   toCompletion,
@@ -168,5 +170,68 @@ describe('socketUrl', () => {
     expect(socketUrl('/api/v1/models/a/lsp', 'https://scadbuddy.example/m/a/source')).toBe(
       'wss://scadbuddy.example/api/v1/models/a/lsp',
     )
+  })
+})
+
+describe('definitionFile', () => {
+  const ROOT = 'file:///models/name-keychain/'
+  const COMMIT = '0123456789abcdef0123456789abcdef01234567'
+
+  it('names a file beside the model by its path under the model directory', () => {
+    expect(definitionFile(`${ROOT}parts/helper.scad`, ROOT)).toEqual({ path: 'parts/helper.scad' })
+    expect(definitionFile(`${ROOT}my%20part.scad`, ROOT)).toEqual({ path: 'my part.scad' })
+  })
+
+  it('names a library file by the library, the pinned commit and its path in it', () => {
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}/shapes3d.scad`, ROOT)).toEqual({
+      library: 'BOSL2',
+      commit: COMMIT,
+      path: 'shapes3d.scad',
+    })
+    // As a Monaco URI's `toString()` spells it (#185): the `@` encoded.
+    expect(definitionFile(`file:///libraries/BOSL2%40${COMMIT}/shapes3d.scad`, ROOT)).toEqual({
+      library: 'BOSL2',
+      commit: COMMIT,
+      path: 'shapes3d.scad',
+    })
+    expect(definitionFile(`file:///libraries/NopSCADlib@${COMMIT}/vitamins/screw.scad`, ROOT)).toEqual({
+      library: 'NopSCADlib',
+      commit: COMMIT,
+      path: 'vitamins/screw.scad',
+    })
+  })
+
+  it('is null anywhere else, and for a URI with no file in it', () => {
+    expect(definitionFile('file:///usr/share/openscad/libraries/MCAD/units.scad', ROOT)).toBeNull()
+    expect(definitionFile('file:///models/other/helper.scad', ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}`, ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/@${COMMIT}/std.scad`, ROOT)).toBeNull()
+    // No commit, or not one: a library URI always names the checkout it is from.
+    expect(definitionFile('file:///libraries/BOSL2/shapes3d.scad', ROOT)).toBeNull()
+    expect(definitionFile('file:///libraries/BOSL2@HEAD/shapes3d.scad', ROOT)).toBeNull()
+    expect(definitionFile(`${ROOT}parts//helper.scad`, ROOT)).toBeNull()
+    expect(definitionFile(`${ROOT}bad%E0.scad`, ROOT)).toBeNull()
+  })
+
+  it.each([
+    '../secret.scad',
+    'parts/../../secret.scad',
+    './model.scad',
+    '%2E%2E/secret.scad',
+    'parts/%2e/helper.scad',
+    '.git/config',
+    'parts/.hidden.scad',
+    'parts%2F..%2F..%2Fsecret.scad',
+    'parts%5Chelper.scad',
+    'parts\\helper.scad',
+    'bad%00.scad',
+  ])('refuses a path that is not plain, as the backend does: %s', (path) => {
+    expect(definitionFile(`${ROOT}${path}`, ROOT)).toBeNull()
+    expect(definitionFile(`file:///libraries/BOSL2@${COMMIT}/${path}`, ROOT)).toBeNull()
+  })
+
+  it('labels a file the way the editor names it', () => {
+    expect(definitionLabel({ path: 'helper.scad' })).toBe('helper.scad')
+    expect(definitionLabel({ library: 'BOSL2', path: 'shapes3d.scad' })).toBe('BOSL2/shapes3d.scad')
   })
 })

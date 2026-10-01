@@ -19,8 +19,6 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    PrintProgressDep,
-    PrintWatcherDep,
     RenderDep,
     SettingsStoreDep,
     SlugPath,
@@ -28,6 +26,7 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.jobs import (
+    GLB_MEDIA_TYPE,
     PNG_MEDIA_TYPE,
     JobStatus,
     ViewSize,
@@ -38,12 +37,22 @@ from scadbuddy.api.jobs import (
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.project_file import (
+    ProjectFile,
+    ProjectFileRequest,
+    file_into_project,
+    project_stem,
+)
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
@@ -52,15 +61,19 @@ from scadbuddy.library.outputs import (
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
-    download_filename,
     hold_parts,
     release_parts,
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
+from scadbuddy.render.inputs import (
+    InputsDisagreeError,
+    InputsError,
+    legacy_inputs,
+    normalize_inputs,
+)
 from scadbuddy.render.job_models import BomEntry, ManifestObject, OutputRecord
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.workflows.arrange import GOALS, part_of
@@ -136,11 +149,12 @@ class EditTarget(BaseModel):
 
 
 def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
+    params = store.params(meta.id)
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
-        params=store.params(meta.id),
-        inputs=store.inputs(meta.id),
+        params=params,
+        inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
         record=store.record(meta.id),
         files=store.files(meta.id),
@@ -199,10 +213,15 @@ async def create_output(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"job {job.id} has no output {body.index}"
         )
     chosen = job.outputs[body.index] if job.outputs else None
-    inputs = None
+    inputs: dict[str, Any] | None = None
     if body.inputs is not None:
+        rendered = f"inputs.params are not the parameters job {job.id} rendered"
+        # One pass: the shape checks, then the typed comparison with what the job
+        # rendered (12.0 is not 12, True is not 1), which skips a job with no params.
         try:
-            inputs = normalize_inputs(body.inputs, None)
+            inputs = normalize_inputs(body.inputs, job.params).data
+        except InputsDisagreeError:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
         except InputsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         # A template's own pipeline read the job's whole inputs (§3.4), so the output
@@ -213,22 +232,26 @@ async def create_output(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"inputs are not the ones job {job.id} rendered",
             )
-        rendered = f"inputs.params are not the parameters job {job.id} rendered"
-        # The store's rule, which compares type as well as value (12.0 is not 12), so
-        # nothing this lets through fails the store's check half-way through the copy.
-        # It skips a job with no params, which the equality check covers.
+        # The job with no params: nothing was compared above, so compare here.
         if inputs["params"] != job.params:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered)
-        try:
-            normalize_inputs(inputs, job.params)
-        except InputsError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, rendered) from None
+    result = chosen.result if chosen is not None else job.result
     blobs = state.store.blobs
     # The copy reads the job's files, which on the bambuddy backend come through the cache.
-    await materialize_result(blobs, chosen.result if chosen is not None else job.result)
+    await materialize_result(blobs, result)
+    # A piece the store no longer has (aged out, or the Bambuddy store unreachable) is not
+    # fetched, and the copy would fail with a server path in its message: say so instead.
+    files = (result.model_3mf, result.preview_glb)
+    if not all((outputs.paths.root / name).is_file() for name in files):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone")
     files_dir = None
     if chosen is not None and chosen.files_key is not None:
-        await blobs.fetch(chosen.files_key)
+        if not await blobs.fetch(chosen.files_key):
+            # Before `create`, so a refused save leaves nothing under outputs/.
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "the job's extra files are no longer in the store; render again",
+            )
         files_dir = blobs.dir_for(chosen.files_key) / "files"
     public_url = (await asyncio.to_thread(store.load)).public_url
     # The Parts outlive the job that rendered them: Arrange reads them later (§7). They
@@ -252,13 +275,19 @@ async def create_output(
             arranged_from=sources,
             output_id=output_id,
         )
-    except Exception:
+    except Exception as error:
         # Not on cancellation: the write's thread cannot be stopped and may still finish,
         # and an output written without its holds loses its Parts at the next sweep.
         try:
             await asyncio.to_thread(release_parts, state.refs, output_id)
         except psycopg.Error:
             logger.exception("could not release a failed save's Parts", extra={"id": output_id})
+        if isinstance(error, OSError):
+            # Evicted or swept after the check above, or unreadable: the same answer, not
+            # the copy's path. Only after the release, so this path leaks no holds.
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"the result of job {job.id!r} is gone"
+            ) from None
         raise
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
@@ -456,12 +485,13 @@ def get_edit_target(
     # outlive its output — that is the point of the 3MF fallback — but not its model:
     # answering 200 would send the customizer somewhere it cannot load.
     require_model(catalogue, meta.slug)
+    params = outputs.params(output_id)
     return EditTarget(
         output_id=meta.id,
         slug=meta.slug,
         name=meta.name,
-        params=outputs.params(output_id),
-        inputs=outputs.inputs(output_id),
+        params=params,
+        inputs=outputs.inputs(output_id, params),
         model_version=meta.model_version,
         source="record",
         arranged_from=outputs.arranged_from(output_id),
@@ -519,16 +549,34 @@ async def delete_output(
 
 @router.get(
     "/outputs/{output_id}/model.3mf",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
+) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+    # For the default printer, on its real presets (#769), with the template's own
+    # print settings (#770).
+    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+
+
+@router.get(
+    "/outputs/{output_id}/preview.glb",
+    response_class=FileResponse,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+    summary="The output's preview mesh",
+)
+def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+    require_output(outputs, output_id)
+    path = outputs.directory(output_id) / PREVIEW_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
+    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
 
 
 @router.get(
@@ -687,7 +735,7 @@ async def put_output_thumbnail(
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
-    summary="Send the 3MF to Bambuddy",
+    summary="Upload the 3MF to the Bambuddy library",
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
@@ -695,22 +743,96 @@ async def send_output_to_bambuddy(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
-    observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
 ) -> SendResult:
-    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-    slice and queue it.
+    """Upload ``model.3mf`` to the configured library folder, laid out for the printer
+    set in Settings, and note the "Edit in ScadBuddy" link on it.
+
+    Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+    ``mode`` accepts only ``"library"``.
 
     The file is read from the PVC and pushed by the server, so the API key never
     reaches the browser. A re-send reuses the copy already in the inbox while it was
     laid out for the same printer, and replaces it otherwise (#316).
     """
+    del body  # validated for its ``mode`` alone
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, uploads, meta, settings, body)
-    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
-    if result.pipeline_run_id is not None or result.queue_item_id is not None:
-        observer.started(meta)
-        await watcher.started(meta.id)
-    return result
+        return await send_output(client, outputs, uploads, meta, settings)
+
+
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
+
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
+        return {}
+    if schema is None:
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    """The name a project file of this output goes by (#317): the template's name and
+    the params that differ from its defaults (`project_stem`).
+
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
+    """
+    try:
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)
+
+
+@router.post(
+    "/outputs/{output_id}/project-file",
+    response_model=ProjectFile,
+    summary="File this output's 3MF in a project's Bambuddy folder",
+)
+async def post_project_file(
+    output_id: OutputIdPath,
+    body: ProjectFileRequest,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
+    store: SettingsStoreDep,
+    catalogue: CatalogueDep,
+) -> ProjectFile:
+    """Upload the editable project 3MF into the project's folder (#317), as Generate does
+    when a project is chosen.
+
+    Idempotent per (folder, target): the same project chosen again answers with the file
+    already there (``created: false``), and a later print on the same printer reuses it
+    (#316). The folder is created and linked if the project has none. Every Bambuddy
+    call is made here, so the API key never reaches the browser.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    stem = await output_stem(meta, outputs, catalogue)
+    async with client_for(settings) as client:
+        return await file_into_project(
+            client, outputs, uploads, meta, settings, body.project_id, stem=stem
+        )

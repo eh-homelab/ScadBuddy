@@ -79,6 +79,11 @@ def slow(seconds):
     time.sleep(seconds)
     return "slept"
 
+def helper_value():
+    import helper
+
+    return helper.VALUE
+
 def chatty():
     for i in range(3000):
         print(f"line {i} " + "x" * 1000)
@@ -276,6 +281,8 @@ async def test_identical_calls_at_once_on_one_worker_run_once(tmp_path: Path) ->
     )
     assert first == second
     assert count.read_text() == "x"
+    # The lock went with the last call: the map holds only calls in flight.
+    assert acts._calls == {}
 
 
 @pytest.mark.parametrize(
@@ -346,3 +353,62 @@ async def test_a_call_longer_than_its_heartbeat_timeout_survives(tmp_path: Path)
                 60,
             )
     assert result == "slept"
+
+
+async def test_editing_a_module_activities_imports_changes_the_call(tmp_path: Path) -> None:
+    """A live template's `act-` key covers every `*.py` under `pipeline/`, not
+    `activities.py` alone: an edited sibling it imports is never answered from the
+    store with the old result."""
+    acts, paths = _world(tmp_path)
+    helper = paths.model_dir("demo") / "pipeline" / "helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    env = ActivityEnvironment()
+    assert await env.run(acts.run_template_activity, _call("helper_value")) == 1
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+    assert await env.run(acts.run_template_activity, _call("helper_value")) == 2
+
+
+class _SlowFetch(LocalBlobStore):
+    """A store whose fetch of one key is a long download, as on the bambuddy store."""
+
+    def __init__(self, root: Path, slow: set[str], seconds: float) -> None:
+        super().__init__(root)
+        self.slow, self.seconds = slow, seconds
+
+    async def fetch(self, key: str) -> bool:
+        if key in self.slow:
+            await asyncio.sleep(self.seconds)
+        return await super().fetch(key)
+
+
+@pytest.mark.requires_temporal
+async def test_a_blob_argument_slower_than_the_heartbeat_timeout_still_arrives(
+    tmp_path: Path,
+) -> None:
+    """Bringing in a Blob argument beats while it downloads (final re-review): a 12 s
+    fetch outlives the 8 s heartbeat timeout `_CallsATemplateActivity` gives it."""
+    paths = DataPaths(tmp_path / "data")
+    store = _SlowFetch(paths.blobs, set(), 12.0)
+    acts, _ = _world(tmp_path, blobs=store)
+    blob = Blob.model_validate(
+        await ActivityEnvironment().run(acts.run_template_activity, _call("guide", 3))
+    )
+    store.slow.add(blob.key)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[_CallsATemplateActivity],
+            activities=[acts.run_template_activity],
+        ):
+            result = await asyncio.wait_for(
+                client.execute_workflow(
+                    _CallsATemplateActivity.run,
+                    _call("read", blob.model_dump(mode="json")),
+                    id=f"calls-{uuid.uuid4().hex[:8]}",
+                    task_queue=queue,
+                ),
+                60,
+            )
+    assert result == "<svg>3</svg>"

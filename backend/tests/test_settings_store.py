@@ -21,6 +21,7 @@ from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
+    STORE_READINESS_LOCK,
     ModelPrintChoices,
     RenderStoreSettings,
     SettingsPatch,
@@ -186,12 +187,12 @@ def test_a_key_removed_while_another_is_written_leaves_only_the_other(
 def test_a_connection_save_leaves_the_remembered_choices_alone(store: SettingsStore) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(1, "Cool Plate")
-    store.save(SettingsPatch(pipeline_id=4, public_url="https://scad.example"))
+    store.save(SettingsPatch(printer_id=4, public_url="https://scad.example"))
 
     loaded = store.load()
     assert loaded.model_print_choices["gear"].tier == "fine"
     assert loaded.printer_bed_types == {"1": "Cool Plate"}
-    assert loaded.pipeline_id == 4
+    assert loaded.printer_id == 4
 
 
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
@@ -224,6 +225,153 @@ def test_settings_changed_is_published_once_the_write_is_visible(settings: Setti
     finally:
         store.close()
     assert seen == ["Cool Plate"]
+
+
+# -- #322: every runtime setting env-seeded, with its source --------------------------
+
+
+def _store_over(settings: Settings) -> SettingsStore:
+    opened = SettingsStore(settings)
+    opened.open()
+    return opened
+
+
+def test_each_field_says_where_its_value_came_from(settings: Settings) -> None:
+    deployed = settings.model_copy(
+        update={"render_timeout": 30.0, "public_url": "https://env.example", "job_ttl": 60.0}
+    )
+    store = _store_over(deployed)
+    try:
+        store.save(SettingsPatch(job_ttl=90.0, public_url=None))
+        snapshot = store.snapshot()
+    finally:
+        store.close()
+    assert snapshot.sources["render_timeout"] == "env"
+    assert snapshot.runtime.render_timeout == 30.0
+    assert snapshot.sources["job_ttl"] == "stored"
+    assert snapshot.runtime.job_ttl == 90.0
+    assert snapshot.sources["public_url"] == "cleared"
+    assert snapshot.stored.public_url is None
+    assert snapshot.sources["render_concurrency"] == "default"
+    # The bootstrap fields are not the store's to report.
+    assert "database_url" not in snapshot.sources
+
+
+def test_an_env_var_added_after_other_settings_were_saved_is_honoured(
+    settings: Settings,
+) -> None:
+    """Review focus (#322): the ENV_SEEDED semantics, extended to every field."""
+    store = _store_over(settings)
+    try:
+        store.save(SettingsPatch(render_timeout=45.0, printer_id=3))
+    finally:
+        store.close()
+    later = settings.model_copy(update={"job_ttl": 600.0, "log_level": "DEBUG"})
+    store = _store_over(later)
+    try:
+        snapshot = store.snapshot()
+    finally:
+        store.close()
+    assert snapshot.runtime.job_ttl == 600.0
+    assert snapshot.sources["job_ttl"] == "env"
+    assert snapshot.runtime.log_level == "DEBUG"
+    # What the UI did save still wins.
+    assert snapshot.runtime.render_timeout == 45.0
+
+
+def test_reset_on_a_cleared_field_brings_the_environment_back(
+    settings: Settings, pg_conninfo: str
+) -> None:
+    """Review focus (#322): the reset drops the "cleared" row, and env is back."""
+    deployed = settings.model_copy(update={"default_plate": "H2C"})
+    store = _store_over(deployed)
+    try:
+        store.save(SettingsPatch(default_plate=None))
+        assert store.snapshot().sources["default_plate"] == "cleared"
+        assert store.load().default_plate is None
+
+        store.save(SettingsPatch(reset=["default_plate"]))
+        snapshot = store.snapshot()
+    finally:
+        store.close()
+    assert snapshot.stored.default_plate == "H2C"
+    assert snapshot.sources["default_plate"] == "env"
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT 1 FROM settings WHERE name = 'default_plate'").fetchone()
+    assert row is None
+
+
+def test_reset_on_a_stored_value_follows_the_environment_then_the_default(
+    settings: Settings,
+) -> None:
+    deployed = settings.model_copy(update={"render_timeout": 30.0})
+    store = _store_over(deployed)
+    try:
+        store.save(SettingsPatch(render_timeout=10.0, lsp_sessions=2))
+        store.save(SettingsPatch(reset=["render_timeout", "lsp_sessions"]))
+        snapshot = store.snapshot()
+    finally:
+        store.close()
+    assert (snapshot.runtime.render_timeout, snapshot.sources["render_timeout"]) == (30.0, "env")
+    assert (snapshot.runtime.lsp_sessions, snapshot.sources["lsp_sessions"]) == (4, "default")
+
+
+def test_a_stored_value_this_version_refuses_falls_back_rather_than_failing(
+    store: SettingsStore, pg_conninfo: str
+) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES ('render_concurrency', '0'),"
+            " ('render_timeout', '\"soon\"')"
+        )
+    snapshot = store.snapshot()
+    assert snapshot.runtime.render_concurrency == 2
+    assert snapshot.sources["render_concurrency"] == "default"
+    assert snapshot.runtime.render_timeout == 120.0
+
+
+def test_the_google_fonts_key_is_stored_and_an_empty_one_clears_it(store: SettingsStore) -> None:
+    store.save(SettingsPatch(google_fonts_api_key="g-key"))
+    assert store.snapshot().runtime.google_fonts_api_key == "g-key"
+    store.save(SettingsPatch(google_fonts_api_key=""))
+    snapshot = store.snapshot()
+    assert snapshot.runtime.google_fonts_api_key is None
+    assert snapshot.sources["google_fonts_api_key"] == "cleared"
+
+
+def test_the_patch_refuses_what_the_ui_may_not_set() -> None:
+    with pytest.raises(ValueError, match="render_concurrency"):
+        SettingsPatch.model_validate({"render_concurrency": 0})
+    with pytest.raises(ValueError, match="cannot be cleared"):
+        SettingsPatch.model_validate({"render_timeout": None})
+    with pytest.raises(ValueError, match="openscad"):
+        SettingsPatch.model_validate({"openscad": "/bin/sh"})
+    with pytest.raises(ValueError, match="not an env-seeded setting"):
+        SettingsPatch.model_validate({"reset": ["data_dir"]})
+    with pytest.raises(ValueError, match="both set and reset"):
+        SettingsPatch.model_validate({"render_timeout": 5, "reset": ["render_timeout"]})
+
+
+def test_forget_all_clears_the_remembered_choices_and_nothing_else(
+    store: SettingsStore,
+) -> None:
+    store.save(SettingsPatch(printer_id=4, render_timeout=33.0))
+    store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
+    store.set_printer_bed_type(1, "Cool Plate")
+    store.save_print_options("global", None, PrintOptions(timelapse=True))
+    store.save_print_options("printer", "1", PrintOptions(vibration_cali=False))
+    store.save_print_options("model", "gear", PrintOptions(use_ams=True))
+
+    store.forget_remembered()
+
+    loaded = store.load()
+    assert loaded.model_print_choices == {}
+    assert loaded.printer_bed_types == {}
+    assert loaded.print_options.is_empty()
+    assert loaded.printer_print_options == {}
+    assert loaded.model_print_options == {}
+    assert loaded.printer_id == 4
+    assert store.snapshot().runtime.render_timeout == 33.0
 
 
 def test_the_render_key_is_seeded_stored_and_cleared_like_the_full_key(
@@ -264,7 +412,6 @@ def test_a_render_worker_gets_the_narrow_key_the_url_and_the_inbox(
             bambuddy_api_key="full",
             bambuddy_render_api_key="narrow",
             library_folder_id=7,
-            pipeline_id=3,
         )
     )
     assert load_render_store_settings(store.pool, settings) == RenderStoreSettings(
@@ -305,5 +452,40 @@ def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore)
         SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7, store_backend="bambuddy")
     )
     assert store.load().store_backend == "bambuddy"
-    store.save(SettingsPatch(store_backend=None))
+    store.save(SettingsPatch(reset=["store_backend"]))
     assert store.load().store_backend == "local"
+
+
+def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_refused(
+    store: SettingsStore, settings: Settings
+) -> None:
+    """Clearing the URL and switching to Bambuddy are each safe alone. While one save
+    (here, by hand) holds the readiness lock and has cleared the URL, the switch waits,
+    then sees the clear and is refused: the store is never Bambuddy without a URL."""
+    store.save(SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7))
+    errors: list[Exception] = []
+
+    def switch() -> None:
+        try:
+            store.save(SettingsPatch(store_backend="bambuddy"))
+        except Exception as error:
+            errors.append(error)
+
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (STORE_READINESS_LOCK,)
+        )
+        conn.execute(
+            "INSERT INTO settings (name, value) VALUES ('bambuddy_url', 'null'::jsonb)"
+            " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value"
+        )
+        thread = threading.Thread(target=switch)
+        thread.start()
+        thread.join(0.5)
+        assert thread.is_alive()  # the switch waits on the lock
+        conn.commit()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], StoreNotReadyError)
+    loaded = _fresh_load(settings)
+    assert (loaded.store_backend, loaded.bambuddy_url) == ("local", None)

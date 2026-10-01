@@ -47,7 +47,7 @@ class AnalysisRequest(BaseModel):
     """The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).
 
     Every field means what it means on
-    :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
+    :class:`~scadbuddy.bambuddy.print_run.PrintRunRequest`, but the plan and the
     choices are optional here: an analysis can run before the dialog has them.
     ``printer_id`` omitted is the model's remembered printer, then the configured one,
     then the first active one, as the dialog's choices route picks it; ``choices``
@@ -60,6 +60,10 @@ class AnalysisRequest(BaseModel):
     filament_plan: FilamentPlan | None = None
     choices: PrintChoices | None = None
     plate_id: int = Field(default=1, ge=1)
+    #: An all-plates print (#83): the filament checks read every plate's usage, summed
+    #: per slot as the print dialog's filament step does. The mesh checks still read
+    #: ``plate_id``.
+    all_plates: bool = False
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -55,6 +57,22 @@ def test_a_two_by_one_house_counts_like_the_designer() -> None:
         "door_leaf_upper": 1,
         "connectors": 1,
     }
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((TEMPLATE / "pipeline" / "piece-counts.json").read_text(encoding="utf-8"))["cases"],
+    ids=lambda case: "x".join(str(v) for v in case["house"].values()),
+)
+def test_the_pipeline_counts_every_piece_as_the_designer_does(case: dict[str, Any]) -> None:
+    """#905: the designer's counts (ui/pieces.js, checked against the same file by
+    frontend/src/template-ui/dollhouse.test.ts) are the pieces the server renders."""
+    counts = {e["id"]: e["count"] for e in _module().house_pieces(case["house"])}
+    # The designer leaves connectors to the user; the pipeline renders one sheet of them.
+    assert case["counts"].pop("connectors") is None
+    assert counts.pop("connectors") == 1
+    assert counts == case["counts"]
+    assert sum(counts.values()) == case["total"]
 
 
 def test_each_coursed_piece_renders_its_own_course() -> None:

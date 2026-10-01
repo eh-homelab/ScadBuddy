@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -55,6 +55,12 @@ logger = logging.getLogger(__name__)
 HEALTH_PORT = 9090
 #: Seconds between drain checks after stop.
 DRAIN_POLL = 5.0
+#: Making the build current, retried once the worker polls: Temporal 1.28 ignores
+#: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
+MAKE_CURRENT_EVERY = 5.0
+MAKE_CURRENT_DEADLINE = 60.0
 
 
 def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
@@ -86,6 +92,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     projection.open()
     assets = AssetStore(
         paths.assets,
+        projection.pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
@@ -151,6 +158,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         snapshots=state.store.snapshots,
         fonts_mirror=state.store.fonts,
         remote_assets=state.store.remote_assets,
+        openscad_version=state.openscad_version or "",
     )
 
 
@@ -167,14 +175,52 @@ async def _wait_drained(
     return True
 
 
+async def make_current_until_polled(
+    set_current: Callable[[], Awaitable[None]],
+    *,
+    build_id: str,
+    backoff: Sequence[float],
+    every: float,
+    deadline: float,
+) -> bool:
+    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
+    passed; False when it never took. Any other error propagates."""
+    loop = asyncio.get_running_loop()
+    give_up = loop.time() + deadline
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await set_current()
+        except RPCError as error:
+            delay = backoff[attempt - 1] if attempt <= len(backoff) else every
+            logger.warning(
+                "could not make this build current yet",
+                extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
+            )
+            if loop.time() + delay > give_up:
+                logger.error(
+                    "could not make this build current; polling anyway",
+                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
+                )
+                return False
+            await asyncio.sleep(delay)
+        else:
+            logger.info("made this build current", extra={"build_id": build_id})
+            return True
+
+
 async def _poll(
     settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event, *, drain: bool
 ) -> None:
     config = deps.config
     build_id = settings.revision
-    # What every output's record names (§8.4): this image and its openscad.
+    # What every output's record names (§8.4): this image and its openscad. The
+    # in-process worker has the API's probe already; running openscad again here, in a
+    # task beside the API's first requests, would only race them.
     deps.revision = settings.revision
-    deps.openscad_version = await probe_openscad_version(config) or ""
+    if not deps.openscad_version:
+        deps.openscad_version = await probe_openscad_version(config) or ""
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
@@ -195,16 +241,27 @@ async def _poll(
             return False
 
     async with worker:
-        # Phase 1 runs one replica: the newest worker is current.
-        try:
-            await make_current(client, namespace=client.namespace, build_id=build_id)
-        except RPCError:
-            logger.exception(
-                "could not make this build current; polling anyway", extra={"build_id": build_id}
+        # Phase 1 runs one replica: the newest worker is current. Entering the worker
+        # started its polling, so the retry runs beside it; stop cancels the retry.
+        current = asyncio.create_task(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                deadline=MAKE_CURRENT_DEADLINE,
             )
-        else:
-            logger.info("made this build current", extra={"build_id": build_id})
-        await stop.wait()
+        )
+        stopped = asyncio.create_task(stop.wait())
+        try:
+            done, _ = await asyncio.wait({current, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if current in done:
+                current.result()  # an error other than RPCError stops the worker, as before
+                await stopped
+        finally:
+            current.cancel()
+            stopped.cancel()
+            await asyncio.wait({current, stopped})
         if not drain:
             return
 
@@ -312,21 +369,39 @@ def _housekeep(deps: WorkerDeps) -> None:
         logger.exception("could not prune revision exports")
     if deps.remote_assets is not None:
         try:
-            swept = deps.assets.sweep((), grace=_upload_grace(deps.config))
-            if swept:
-                logger.info("swept fetched uploads", extra={"count": len(swept)})
+            # Its copies only: the rows are the API's (#591), and its sweep decides.
+            pruned_uploads = deps.assets.prune_local(grace=_upload_grace(deps.config))
+            if pruned_uploads:
+                logger.info("pruned fetched uploads", extra={"count": len(pruned_uploads)})
         except Exception:
-            logger.exception("could not sweep fetched uploads")
+            logger.exception("could not prune fetched uploads")
+
+
+#: How often a worker housekeeps when the upload sweep is off (seconds): the piece
+#: cache must still be evicted.
+WORKER_CACHE_EVICT_INTERVAL = 300.0
 
 
 async def _housekeep_periodically(deps: WorkerDeps, interval: float) -> None:
-    """`_housekeep` every ``interval`` (SCADBUDDY_ASSET_SWEEP_INTERVAL)."""
+    """`_housekeep` every ``interval`` (see `_start_housekeeping`)."""
     while True:
         await asyncio.sleep(interval)
         try:
             await asyncio.to_thread(_housekeep, deps)
         except Exception:
             logger.exception("the worker's sweep failed; the next one retries")
+
+
+def _start_housekeeping(deps: WorkerDeps, sweep_interval: float) -> asyncio.Task[None] | None:
+    """Housekeep on a timer whenever the worker's blobs are a piece cache (the bambuddy
+    store; a local-store worker shares the API's volume, whose sweeps are the API's):
+    every SCADBUDDY_ASSET_SWEEP_INTERVAL when that is on, else every
+    `WORKER_CACHE_EVICT_INTERVAL`. Turning the upload sweep off never stops eviction."""
+    if not isinstance(deps.blobs, CachedBlobStore):
+        return None
+    interval = sweep_interval if sweep_interval > 0 else WORKER_CACHE_EVICT_INTERVAL
+    logger.info("housekeeping the worker's cache and volume every %.0f s", interval)
+    return asyncio.create_task(_housekeep_periodically(deps, interval))
 
 
 async def run_worker(
@@ -337,15 +412,11 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps, store = build_worker_deps(settings)
+    # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
+    # the rest opens the projection's pool and reads the store settings.
+    deps, store = await asyncio.to_thread(build_worker_deps, settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
-    # Only on the bambuddy store: a local-store worker shares the API's volume, whose
-    # sweeps are the API's.
-    evicting = (
-        asyncio.create_task(_housekeep_periodically(deps, deps.config.asset_sweep_interval))
-        if isinstance(store.blobs, CachedBlobStore) and deps.config.asset_sweep_interval > 0
-        else None
-    )
+    evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)

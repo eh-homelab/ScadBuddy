@@ -2,20 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+import math
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
-from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.runs import PrintRuns, PrintRunStore
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
+from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
     EventBus,
@@ -26,6 +30,7 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
@@ -38,6 +43,7 @@ from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
 from scadbuddy.render.previews import (
     TIMEOUT_FACTOR,
     PreviewScheduler,
@@ -53,6 +59,51 @@ logger = logging.getLogger(__name__)
 
 STATE_ATTR = "scadbuddy"
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
+RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
+
+
+#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
+#: N x this. As many as the resolver has threads. Library installs share those
+#: threads; an import that finds none free is the same retryable 503.
+IMPORT_CONCURRENCY = RESOLVER_THREADS
+#: `POST /models/{slug}/dependencies` reports worked out at once per replica (#253,
+#: review of #740). Each reads the model's files and every model.json in a worker
+#: thread; uncapped, a burst of them holds the default executor every other
+#: `to_thread` route shares. A report past it waits on the loop, not in a thread.
+DEPENDENCY_CHECK_CONCURRENCY = 2
+
+
+class ImportPermits:
+    """The import fetch budget (#178): at most `limit` fetches at once, each
+    remembered by when it started, so a refusal can say when the oldest must end
+    (#631). Used on the event loop only; a fetch finds it full or takes a permit with
+    no await in between."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        #: When each held permit was taken, by a token of its own.
+        self._taken: dict[object, float] = {}
+
+    def full(self) -> bool:
+        return len(self._taken) >= self.limit
+
+    @contextmanager
+    def hold(self) -> Iterator[None]:
+        token = object()
+        self._taken[token] = time.monotonic()
+        try:
+            yield
+        finally:
+            del self._taken[token]
+
+    def retry_after(self) -> int:
+        """Seconds until the oldest held fetch reaches `IMPORT_TIMEOUT` and must have
+        given its permit back; at least 1."""
+        if not self._taken:
+            return 1
+        left = min(self._taken.values()) + IMPORT_TIMEOUT - time.monotonic()
+        return max(1, math.ceil(left))
 
 
 @dataclass
@@ -89,9 +140,9 @@ class AppState:
     print_progress: ProgressObserver
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
+    #: The print dialog's runs, answered 202 and run in the background (#470).
+    print_runs: PrintRuns
     metrics: Metrics
-    #: Print-analyzer decisions (#284), in Postgres.
-    decisions: DecisionStore
     #: Caps the openscad runs that do NOT go through a render — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the worker's cap is its activity slots, so there is no semaphore to share, and
@@ -108,6 +159,15 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
+    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
+    #: replica. Held for the fetch only -- the parse check after it takes `checks`
+    #: like any create -- and an import that finds it full is refused at once, not
+    #: queued.
+    imports: ImportPermits = field(default_factory=lambda: ImportPermits(IMPORT_CONCURRENCY))
+    #: At most DEPENDENCY_CHECK_CONCURRENCY dependency reports at once.
+    dependency_checks: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(DEPENDENCY_CHECK_CONCURRENCY)
+    )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
     #: in-process worker holds the same one.
     checkouts: CheckoutGate = field(default_factory=CheckoutGate)
@@ -118,6 +178,22 @@ class AppState:
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
+    #: Read through :attr:`components`. An ``__init__`` field, so ``dataclasses.replace``
+    #: carries the built registry over to the copy rather than dropping it.
+    _components: Components | None = field(default=None, kw_only=True, repr=False)
+
+    @property
+    def components(self) -> Components:
+        """Every feature service that is a component (`core/components.py`), built over
+        this state by `build_state`: a new service goes there, not in a field here."""
+        if self._components is None:
+            raise RuntimeError("the components are not built yet: use build_state")
+        return self._components
+
+    @components.setter
+    def components(self, value: Components) -> None:
+        self._components = value
+
     #: The blob store (#426), built in the lifespan once the settings pool is open;
     #: nothing reads it earlier. `blobs` is its piece store, set with it.
     store: StoreBundle = field(init=False)
@@ -152,6 +228,14 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 
 
 def build_state(settings: Settings) -> AppState:
+    """The core services, then every discovered component over them."""
+    state = _build_core(settings)
+    state.components = Components(state, discover_components())
+    state.components.build_all()
+    return state
+
+
+def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
@@ -175,7 +259,6 @@ def build_state(settings: Settings) -> AppState:
     # Job events commit with the job change that they describe.
     projection.events = events
     preview_store = PreviewStore(pool.connection)
-    decisions = PostgresDecisionStore(settings.database_url)
     outputs = OutputStore(paths)
     uploads = BambuddyUploadStore(pool)
     checkouts = CheckoutGate()
@@ -183,6 +266,7 @@ def build_state(settings: Settings) -> AppState:
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     assets = AssetStore(
         paths.assets,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
@@ -216,17 +300,9 @@ def build_state(settings: Settings) -> AppState:
         paths=paths,
         metrics=metrics,
     )
-    previews: PreviewScheduler | None = None
-    if settings.preview_renders:
-        previews = PreviewScheduler(
-            catalogue,
-            preview_store,
-            render.render_preview,
-            timeout=config.render_timeout * TIMEOUT_FACTOR,
-        )
-        # Everything that can change whether a model needs a preview, or which one.
-        catalogue.on_change = previews.request
-        outputs.on_change = previews.request
+    previews = (
+        build_previews(catalogue, outputs, render, config) if settings.preview_renders else None
+    )
     # Nothing connects here either: the lifespan opens it first thing.
     settings_store = SettingsStore(settings, events=events)
     print_progress = ProgressObserver(events)
@@ -263,7 +339,6 @@ def build_state(settings: Settings) -> AppState:
         render=render,
         previews=previews,
         metrics=metrics,
-        decisions=decisions,
         events=events,
         print_progress=print_progress,
         print_watcher=PrintWatcher(
@@ -274,6 +349,7 @@ def build_state(settings: Settings) -> AppState:
             prints=PgPrintLog(settings.database_url) if settings.database_url else None,
             lock=PgWatchLock(settings.database_url) if settings.database_url else None,
         ),
+        print_runs=PrintRuns(PrintRunStore(pool), events),
         checkouts=checkouts,
         installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -282,6 +358,41 @@ def build_state(settings: Settings) -> AppState:
         projection=projection,
         refs=BlobRefs(pool),
     )
+
+
+def build_previews(
+    catalogue: Catalogue,
+    outputs: OutputStore,
+    render: RenderService,
+    config: Config,
+) -> PreviewScheduler | None:
+    """The preview scheduler, hooked to every change that can call for a new preview;
+    ``None`` without a database, where there is nowhere to keep one. A preview is a
+    render on Temporal like any other (`RenderService.render_preview`)."""
+    if catalogue.previews is None:
+        return None
+    previews = PreviewScheduler(
+        catalogue,
+        catalogue.previews,
+        render.render_preview,
+        timeout=config.render_timeout * TIMEOUT_FACTOR,
+    )
+    # Everything that can change whether a model needs a preview, or which one.
+    catalogue.on_change = previews.request
+    outputs.on_change = previews.request
+    return previews
+
+
+def set_previews(state: AppState, enabled: bool) -> None:
+    """Turn the default-render previews on or off before the boot starts them (#322:
+    ``preview_renders`` saved in Settings applies at the next start)."""
+    state.catalogue.serve_previews = enabled
+    if enabled and state.previews is None:
+        state.previews = build_previews(state.catalogue, state.outputs, state.render, state.config)
+    elif not enabled and state.previews is not None:
+        state.previews = None
+        state.catalogue.on_change = None
+        state.outputs.on_change = None
 
 
 def get_state(connection: HTTPConnection) -> AppState:
@@ -357,8 +468,19 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
     return state.print_watcher
 
 
-def get_decisions(state: StateDep) -> DecisionStore:
-    return state.decisions
+#: Problem ``type`` for a route that needs the database when none is configured.
+DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
+
+
+def require_print_runs(state: StateDep) -> PrintRuns:
+    """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
+    if not state.print_runs.store.available:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "print runs are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
+            type_=DATABASE_REQUIRED_PROBLEM,
+        )
+    return state.print_runs
 
 
 def get_checks(state: StateDep) -> asyncio.Semaphore:
@@ -367,6 +489,14 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
 
 def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
+
+
+def get_dependency_checks(state: StateDep) -> asyncio.Semaphore:
+    return state.dependency_checks
+
+
+def get_imports(state: StateDep) -> ImportPermits:
+    return state.imports
 
 
 def get_checkouts(state: StateDep) -> CheckoutGate:
@@ -389,9 +519,11 @@ RenderDep = Annotated[RenderService, Depends(get_render)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-DecisionsDep = Annotated[DecisionStore, Depends(get_decisions)]
+PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+DependencyChecksDep = Annotated[asyncio.Semaphore, Depends(get_dependency_checks)]
+ImportsDep = Annotated[ImportPermits, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 
@@ -406,6 +538,7 @@ FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
+RunIdPath = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
 # with the full 40 characters.
 CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]

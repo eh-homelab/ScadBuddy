@@ -18,6 +18,10 @@ smaller "Random Maze Generator" customizers. Written to the Parametric Model
 Maker customizer conventions, so the same file works unchanged on MakerWorld
 and in ScadBuddy.
 
+In ScadBuddy the customizer is the template's own `ui/index.js`: the same
+parameters as the generated form, but the lid colour is hidden unless the mode
+is "Ball with snap-on lid", since only the lid uses it.
+
 **Safety:** balls, BBs and marbles are choking hazards. Not for children under
 3; supervise younger players, and use the lid mode so the ball stays inside.
 

@@ -108,7 +108,15 @@ def test_submit_inserts_pending_with_its_workflow_id(projection: JobProjection) 
     stored = projection.read(job.id)
     assert stored.state == "pending"
     assert stored.workflow_id == f"render-{job.id}"
-    assert stored.inputs == {"params": {"width": 1}}
+
+
+def test_a_job_without_inputs_is_stored_with_the_legacy_inputs(
+    projection: JobProjection,
+) -> None:
+    job = _job(width=1)
+    assert job.inputs == {}
+    projection.submit(job, render_key("demo", {"width": 1}, None))
+    assert projection.read(job.id).inputs == {"params": {"width": 1}, "v": 0}
 
 
 def test_an_identical_pending_submit_coalesces(projection: JobProjection) -> None:

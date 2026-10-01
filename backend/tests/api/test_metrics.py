@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
+import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import AppState
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
+from scadbuddy.api.metrics import refresh_asset_metrics
+from scadbuddy.core.metrics import Metrics
+from scadbuddy.library.assets import AssetStore
 from tests.api.conftest import wait_for_job
+
+
+def test_an_upload_store_without_a_database_keeps_the_last_gauges(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Its usage is rows (#591): with no pool it cannot be read, which costs the
+    scrape nothing, as a store outage does not."""
+    metrics = Metrics()
+    metrics.assets_stored.set(7)
+    state = cast(AppState, SimpleNamespace(assets=AssetStore(tmp_path), metrics=metrics))
+    refresh_asset_metrics(state)
+    assert "scadbuddy_assets_stored 7.0" in metrics.exposition().decode()
+    assert "could not read the upload store's usage" in caplog.text
 
 
 def test_metrics_are_served_as_prometheus_text(client: TestClient) -> None:

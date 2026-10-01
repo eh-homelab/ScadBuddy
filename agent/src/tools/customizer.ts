@@ -4,7 +4,9 @@ import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Customizer (issue #251): the schema (with the `// color` and `// font`
 // overlays), validating a parameter set, rendering and waiting with progress,
@@ -19,6 +21,12 @@ const jobId = z
   .regex(/^[0-9a-f]{32}$/, 'must be a render job id: 32 lowercase hex digits, as render_model returns it')
   .describe('Render job id, as render_model returns it')
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
+// The bounds of backend/scadbuddy/library/presets.py (#327).
+const presetDescription = z.string().max(2000).describe("What the preset is for, in short Markdown")
+const presetTags = z
+  .array(z.string().max(40).regex(/^[^,]*$/, 'a tag cannot contain a comma'))
+  .max(20)
+  .describe('Short labels to find the preset by')
 async function fetchSchema(ctx: ToolContext, slug: string, version?: string) {
   return version
     ? ok(
@@ -48,8 +56,40 @@ export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatu
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (job.status === 'done' || job.status === 'failed' || Date.now() >= deadline) return job
+    if (settled(job.status) || Date.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+  }
+}
+
+function settled(status: JobStatus['status']): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * Polls a render that render_model handed back unsettled (or whose wait was
+ * aborted) until it settles, fails to answer, or `holdMs` passes, so its
+ * render-limit slot is held while the backend still runs it (PR #752 review).
+ * It outlives the call, so it uses no call signal, and it never rejects.
+ *
+ * This holds on however the wait ended: a job handed back still running, the call
+ * aborted, or `getJob` failing once in `waitForJob`. That errs toward holding, since
+ * the render may still be running and a released slot would let a second one start
+ * beside it. The hold ends when a poll shows the job settled or gone, when the backend
+ * cannot be reached, or after `holdMs` (30 min) at most (#774).
+ */
+async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
+  const deadline = Date.now() + holdMs
+  try {
+    while (Date.now() < deadline) {
+      await sleep(ctx.pollIntervalMs)
+      const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
+        params: { path: { job_id: id } },
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      })
+      if (!data || settled(data.status)) return
+    }
+  } catch {
+    // An unreachable backend or the deadline: stop holding.
   }
 }
 
@@ -76,6 +116,8 @@ export const customizerTools: Tool[] = [
       'the schema at an earlier revision.',
     input: z.object({ slug, version: z.string().regex(/^[0-9a-f]{7,40}$/).optional() }),
     risk: 'read',
+    source:
+      "the customizer schema OpenSCAD derives from the model's source, with the parameter names and comments its author wrote",
     routes: ['GET /api/v1/models/{slug}/schema', 'GET /api/v1/models/{slug}/versions/{commit}/schema'],
     handler: async ({ slug, version }, ctx) => json(await fetchSchema(ctx, slug, version)),
   }),
@@ -98,35 +140,70 @@ export const customizerTools: Tool[] = [
       'Render a model with the given parameters and wait for it to finish, reporting progress. Returns the ' +
       "job's outcome (bounding box, colours, parts, warnings, errors). Parameters are validated first; " +
       'set `save_output` to keep the result as an output (needed before plates, 3MF download or printing). ' +
-      'If the render outlasts the wait, the still-running job id is returned: poll it with get_render_job.',
+      'If the render outlasts the wait, the still-running job id is returned: poll it with get_render_job. ' +
+      'For a template with its own UI (`ui` in get_model), pass `inputs` to keep its state; the output records them.',
     input: z.object({
       slug,
       params: params.default({}),
+      // `catchall`, not `z.record`: see `params` in common.ts.
+      inputs: z
+        .object({})
+        .catchall(z.unknown())
+        .optional()
+        .describe(
+          'Template inputs (a template with its own UI keeps state beside `params`); when given, leave `params` out: inputs.params is what renders',
+        ),
       version: z.string().regex(/^[0-9a-f]{7,40}$/).optional().describe('Render an earlier revision'),
       save_output: z.boolean().default(false),
       output_name: z.string().optional(),
     }),
     risk: 'write',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
-    handler: async ({ slug, params, version, save_output, output_name }, ctx) => {
-      const report = validateParams(await fetchSchema(ctx, slug, version), params)
+    handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
+      // With inputs, inputs.params is what renders (missing: the defaults). A `params`
+      // beside them would be dropped, so it is refused rather than validated in vain.
+      if (inputs && Object.keys(params).length > 0) {
+        throw new ToolError('not rendered: put the parameters in inputs.params, not beside inputs')
+      }
+      const given = inputs ? (inputs['params'] ?? {}) : params
+      if (typeof given !== 'object' || given === null || Array.isArray(given)) {
+        throw new ToolError('not rendered: inputs.params must be an object')
+      }
+      const report = validateParams(await fetchSchema(ctx, slug, version), given as typeof params)
       if (!report.valid) {
         throw new ToolError(
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      const accepted = await ok(
-        ctx.backend.POST('/api/v1/models/{slug}/render', {
-          params: { path: { slug } },
-          body: { params, version: version ?? null },
-          signal: ctx.signal,
-        }),
-        `render ${slug}`,
-      )
-      await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
-      const job = await waitForJob(ctx, accepted.job_id)
+      // Per-principal render bounds (renderLimits.ts, #252), held until the
+      // backend job settles, past this call when it hands the job back running.
+      const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
+      const release = limiter.acquire(ctx.principal.id)
+      let submitted: string | undefined
+      let job: JobStatus | undefined
+      try {
+        const accepted = await ok(
+          ctx.backend.POST('/api/v1/models/{slug}/render', {
+            params: { path: { slug } },
+            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
+            signal: ctx.signal,
+          }),
+          `render ${slug}`,
+        )
+        submitted = accepted.job_id
+        await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
+        job = await waitForJob(ctx, accepted.job_id)
+      } finally {
+        if (submitted !== undefined && (job === undefined || !settled(job.status))) {
+          void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
+        } else {
+          release()
+        }
+      }
       const summary = jobSummary(job)
-      if (job.status === 'failed') {
+      if (job.status === 'failed' || job.status === 'cancelled') {
         return { ...json(summary), isError: true }
       }
       if (job.status !== 'done') {
@@ -136,7 +213,7 @@ export const customizerTools: Tool[] = [
       const output = await ok(
         ctx.backend.POST('/api/v1/models/{slug}/outputs', {
           params: { path: { slug } },
-          body: { job_id: job.id, name: output_name ?? null },
+          body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
         }),
         `save output of ${job.id}`,
       )
@@ -149,6 +226,8 @@ export const customizerTools: Tool[] = [
     description: "A render job's current state: status, error, warnings, bounding box, colours, parts and log tail.",
     input: z.object({ job_id: jobId }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: [],
     handler: async ({ job_id }, ctx) => json(jobSummary(await getJob(ctx, job_id))),
   }),
@@ -203,6 +282,8 @@ export const customizerTools: Tool[] = [
       'settled render (done or failed). Use it to fix a failing or warning-laden model.',
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['GET /api/v1/models/{slug}/diagnostics'],
     handler: async ({ slug }, { backend }) =>
       json(
@@ -233,24 +314,42 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'list_presets',
-    description: "A model's saved parameter presets, including read-only ones a template ships.",
-    input: z.object({ slug }),
+    description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
+    source:
+      'preset names and values written by model authors or users',
     routes: ['GET /api/v1/models/{slug}/presets'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`)),
+    handler: async ({ slug, ...args }, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`),
+          { slug, ...args },
+          (p) => p.id,
+          'list_presets',
+        ),
+      ),
   }),
 
   defineTool({
     name: 'save_preset',
-    description: 'Save a parameter set as a named preset of a model.',
-    input: z.object({ slug, name: z.string().min(1).max(80), params: params.default({}) }),
+    description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.',
+    input: z.object({
+      slug,
+      name: z.string().min(1).max(80),
+      params: params.default({}),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets'],
-    handler: async ({ slug, name, params }, { backend }) =>
+    handler: async ({ slug, name, params, description, tags }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/models/{slug}/presets', { params: { path: { slug } }, body: { name, params } }),
+          backend.POST('/api/v1/models/{slug}/presets', {
+            params: { path: { slug } },
+            body: { name, params, description, tags },
+          }),
           `save preset ${name}`,
         ),
       ),
@@ -258,16 +357,24 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'update_preset',
-    description: "Rename a preset or replace its values. Omitted fields are unchanged.",
-    input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80).optional(), params: params.optional() }),
+    description:
+      'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.',
+    input: z.object({
+      slug,
+      preset_id: presetId,
+      name: z.string().min(1).max(80).optional(),
+      params: params.optional(),
+      description: presetDescription.optional(),
+      tags: presetTags.optional(),
+    }),
     risk: 'write',
     routes: ['PATCH /api/v1/models/{slug}/presets/{preset_id}'],
-    handler: async ({ slug, preset_id, name, params }, { backend }) =>
+    handler: async ({ slug, preset_id, name, params, description, tags }, { backend }) =>
       json(
         await ok(
           backend.PATCH('/api/v1/models/{slug}/presets/{preset_id}', {
             params: { path: { slug, preset_id } },
-            body: { name: name ?? null, params: params ?? null },
+            body: { name: name ?? null, params: params ?? null, description: description ?? null, tags: tags ?? null },
           }),
           `update preset ${preset_id}`,
         ),

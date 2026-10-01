@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,9 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import BomEntry, OutputRecord
+from scadbuddy.render.job_models import BomEntry, Job, JobResult, OutputRecord
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.template import Blob, Part
@@ -154,7 +156,7 @@ async def test_a_piece_renders_another_file_of_the_template(tmp_path: Path) -> N
     req = _request("parts/roof.scad", {"width": 3})
     prepared = await ActivityEnvironment().run(RenderActivities(deps).prepare, req)
     assert prepared.scad.endswith("parts/roof.scad")
-    assert _scope(req, prepared).title == "Demo"  # the template's folder, not parts/
+    assert (await _scope(req, prepared)).title == "Demo"  # the template's folder, not parts/
 
 
 @pytest.mark.parametrize(
@@ -299,3 +301,25 @@ async def test_an_own_layout_must_name_one_of_the_parts(tmp_path: Path) -> None:
         await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
     assert raised.value.type == "PackError" and raised.value.non_retryable
     assert _refs(deps) == []
+
+
+def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -> None:
+    """`OutputStore.create` copies all or nothing (final review I2): a source gone from
+    the store fails the save and removes what it had written."""
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    job = Job(
+        id="j1",
+        slug="demo",
+        params={},
+        created_at=datetime.now(UTC),
+        result=JobResult(
+            model_3mf="blobs/gone/model.3mf",
+            preview_glb="blobs/gone/preview.glb",
+            parts=[],
+            bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        ),
+    )
+    with pytest.raises(FileNotFoundError):
+        OutputStore(paths).create(job)
+    assert not any((paths.outputs / "demo").iterdir())

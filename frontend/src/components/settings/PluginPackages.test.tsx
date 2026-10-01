@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { GREETER_V1, GREETER_V2, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
+import { GREETER_V1, GREETER_V2, MOVED_URL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { PluginPackagesPanel } from './PluginPackages'
@@ -133,6 +133,48 @@ describe('PluginPackagesPanel', () => {
     const again = await within(card).findByRole('generic', { name: 'Pending re-pin' })
     await user.click(within(again).getByRole('button', { name: 'Discard re-pin' }))
     await waitFor(() => expect(within(card).queryByRole('generic', { name: 'Pending re-pin' })).not.toBeInTheDocument())
+  })
+
+  it('flags a re-pin that moved to another repository, and approving it leaves the package disabled', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await user.click(screen.getByLabelText('Marketplace entry'))
+    await user.type(screen.getByLabelText('Marketplace repository URL'), 'https://git.example/market.git')
+    await user.type(screen.getByLabelText('Plugin name in the marketplace'), 'greeter')
+    await user.click(screen.getByRole('button', { name: 'Fetch and review' }))
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await user.click(within(card).getByRole('button', { name: 'Approve…' }))
+    let dialog = screen.getByRole('dialog', { name: 'Approve greeter' })
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    await user.click(await within(card).findByRole('button', { name: 'Enable' }))
+    expect(await within(card).findByText('Enabled')).toBeInTheDocument()
+
+    await user.type(within(card).getByLabelText('Re-pin to branch, tag or commit'), 'moved')
+    await user.click(within(card).getByRole('button', { name: 'Fetch re-pin' }))
+    const pending = await within(card).findByRole('generic', { name: 'Pending re-pin' })
+    expect(within(pending).getByRole('note')).toHaveTextContent(
+      `fetched from a different place: ${MOVED_URL}, not https://git.example/market.git · plugins/greeter`,
+    )
+
+    await user.click(within(pending).getByRole('button', { name: 'Approve re-pin…' }))
+    dialog = screen.getByRole('dialog', { name: 'Approve the re-pin of greeter' })
+    expect(within(dialog).getByRole('note')).toHaveTextContent('leaves the package disabled')
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
+    expect(await within(card).findByText('Approved, disabled')).toBeInTheDocument()
+    expect(within(card).getByText(GREETER_V2.commit)).toBeInTheDocument()
+  })
+
+  it('shows no move notice for a re-pin from the same repository', async () => {
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await user.type(within(card).getByLabelText('Re-pin to branch, tag or commit'), 'v2')
+    await user.click(within(card).getByRole('button', { name: 'Fetch re-pin' }))
+    const pending = await within(card).findByRole('generic', { name: 'Pending re-pin' })
+    expect(within(pending).queryByRole('note')).not.toBeInTheDocument()
   })
 
   it('removes a package after confirming', async () => {

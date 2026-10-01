@@ -103,15 +103,15 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
                 for number, case in enumerate(cases, start=1):
                     try:
                         # Exactly as the API takes inputs: `v` stamped, params checked.
-                        inputs = normalize_inputs(case, None)
+                        normalized = normalize_inputs(case, None)
                     except InputsError as refused:
                         failures.append(f"case {number}: {refused}")
                         continue
                     job = Job(
                         id=uuid.uuid4().hex,
                         slug=slug,
-                        params=inputs["params"],
-                        inputs=inputs,
+                        params=normalized.params,
+                        inputs=normalized.data,
                         created_at=datetime.now(UTC),
                     )
                     try:

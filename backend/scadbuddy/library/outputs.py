@@ -13,10 +13,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
+from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
@@ -53,8 +54,15 @@ FILES_DIR = "files"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
-#: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``.
-PrintRoute = Literal["pipeline", "slice_queue"]
+#: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``. The
+#: ``"pipeline"`` route went with the send bar's queue mode (#312).
+PrintRoute = Literal["slice_queue"]
+
+#: What the last print left on a record. A record whose last print was a pipeline run
+#: may still carry an *older* slice-and-queue print's ids here, so they go with it.
+_LAST_PRINT_FIELDS = frozenset(
+    {"print_route", "pipeline_run_id", "queue_item_id", "slice_job_id", "plates"}
+)
 
 
 class OutputNotFoundError(KeyError):
@@ -95,20 +103,36 @@ class OutputMeta(BaseModel):
     # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as
     # pydantic ignores any unknown key, so such an output simply has no recorded copy
     # and its next send uploads afresh.
-    pipeline_run_id: int | None = None
     queue_item_id: int | None = None
-    #: Which of Bambuddy's two routes the last print took (#87). Without it an output
-    #: that has been printed both ways carries a run id *and* a queue item id, and
-    #: nothing says which one describes the print now in progress.
+    #: Which route the last print took (#87). Only slice-and-queue is left; a record
+    #: from the retired pipeline route loads as never printed (see the validator below).
     print_route: PrintRoute | None = None
     slice_job_id: int | None = None
     #: The Bambuddy project this output was last printed into (#79), so reopening the
     #: history shows what each print was filed under rather than only that it happened.
     project_id: int | None = None
     #: Every plate the last slice-and-queue print put on the queue (#83), in order.
-    #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on a
-    #: pipeline run and on records written before multi-plate prints.
+    #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on
+    #: records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
+    #: The library pins the render read (#169): each checkout's name, ref and exact
+    #: commit, so an output names what it was built from beyond ``model_version``.
+    #: Empty for a model with none, and on records written before the field existed.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _forget_a_pipeline_run(cls, data: Any) -> Any:
+        """Records from before #312 can say their last print was a pipeline run: either
+        ``print_route: "pipeline"``, or (before #89) no route and a run id. That route is
+        gone, so the record reads as never printed rather than failing to load or
+        reporting an older print's queue item as the current one."""
+        if not isinstance(data, dict):
+            return data
+        route = data.get("print_route")
+        if route == "pipeline" or (route is None and data.get("pipeline_run_id") is not None):
+            return {key: value for key, value in data.items() if key not in _LAST_PRINT_FIELDS}
+        return data
 
 
 @dataclass(frozen=True)
@@ -176,12 +200,25 @@ class OutputStore:
         loaded: dict[str, ParamValue] = json.loads(params_path.read_text(encoding="utf-8"))
         return loaded
 
-    def inputs(self, output_id: str) -> dict[str, Any]:
+    def inputs(
+        self, output_id: str, params: Mapping[str, ParamValue] | None = None
+    ) -> dict[str, Any]:
+        """The output's inputs; one from before them reads as its params at ``v`` 0.
+        A caller that already read :meth:`params` passes them, so they are read once."""
         path = self._find_dir(output_id) / INPUTS_NAME
         if not path.is_file():
-            return legacy_inputs(self.params(output_id))
-        loaded: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-        return loaded
+            return legacy_inputs(self.params(output_id) if params is None else params)
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if not isinstance(loaded, dict):
+            # The record itself (meta, files, params) is intact: read it as one from
+            # before inputs rather than lose it to a damaged side file.
+            logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
+            return legacy_inputs(self.params(output_id) if params is None else params)
+        checked: dict[str, Any] = loaded
+        return checked
 
     def list_for(self, slug: str) -> list[OutputMeta]:
         directory = self.paths.outputs / slug
@@ -227,56 +264,67 @@ class OutputStore:
         result = chosen.result if chosen is not None else job.result
         if result is None:
             raise ValueError("the job has no result to persist")
+        # The store's own guarantee, kept even though the route checked the same
+        # thing: checked before anything is written, so inputs the job did not
+        # render leave no directory behind, whichever caller sent them.
+        recorded = normalize_inputs(
+            inputs if inputs is not None else (job.inputs or None), job.params
+        ).data
         if output_id is None:
             output_id = uuid.uuid4().hex
         directory = self.paths.output_dir(job.slug, output_id)
         directory.mkdir(parents=True, exist_ok=True)
-
-        shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
-        shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
-        (directory / PARAMS_NAME).write_text(
-            json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        recorded = normalize_inputs(
-            inputs if inputs is not None else (job.inputs or None), job.params
-        )
-        (directory / INPUTS_NAME).write_text(
-            json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-
-        # A job from before the hash existed has none to read back; the live tree is
-        # then the closest thing to what it rendered.
-        version = result.source_version or source_version(self.paths.model_dir(job.slug))
-        stamp(
-            directory / MODEL_NAME,
-            Provenance(
-                model=job.slug,
-                version=version,
-                output=output_id,
-                params=dict(job.params),
-                edit_url=edit_url(public_url, output_id),
-            ),
-        )
-
-        if chosen is not None:
-            # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
-            # a bill of materials only when the pipeline wrote one.
-            (directory / RECORD_NAME).write_text(chosen.record.model_dump_json(), encoding="utf-8")
-            if chosen.bom:
-                (directory / BOM_NAME).write_text(
-                    json.dumps([b.model_dump(mode="json") for b in chosen.bom]), encoding="utf-8"
-                )
-            if files_dir is not None and chosen.files:
-                shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
-            if chosen.manifest:
-                (directory / MANIFEST_NAME).write_text(
-                    json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
-                    encoding="utf-8",
-                )
-        if arranged_from:
-            (directory / ARRANGED_NAME).write_text(
-                json.dumps(list(arranged_from)), encoding="utf-8"
+        # Every copy and write, or none: a failure part-way (a source gone from the
+        # store, a full disk) leaves no half-written output behind to list.
+        try:
+            shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
+            shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
+            (directory / PARAMS_NAME).write_text(
+                json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
+            (directory / INPUTS_NAME).write_text(
+                json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
+            # A job from before the hash existed has none to read back; the live tree is
+            # then the closest thing to what it rendered.
+            version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            stamp(
+                directory / MODEL_NAME,
+                Provenance(
+                    model=job.slug,
+                    version=version,
+                    output=output_id,
+                    params=dict(job.params),
+                    edit_url=edit_url(public_url, output_id),
+                ),
+            )
+
+            if chosen is not None:
+                # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
+                # a bill of materials only when the pipeline wrote one.
+                (directory / RECORD_NAME).write_text(
+                    chosen.record.model_dump_json(), encoding="utf-8"
+                )
+                if chosen.bom:
+                    (directory / BOM_NAME).write_text(
+                        json.dumps([b.model_dump(mode="json") for b in chosen.bom]),
+                        encoding="utf-8",
+                    )
+                if files_dir is not None and chosen.files:
+                    shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+                if chosen.manifest:
+                    (directory / MANIFEST_NAME).write_text(
+                        json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
+                        encoding="utf-8",
+                    )
+            if arranged_from:
+                (directory / ARRANGED_NAME).write_text(
+                    json.dumps(list(arranged_from)), encoding="utf-8"
+                )
+        except OSError:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
 
         meta = OutputMeta(
             id=output_id,
@@ -289,6 +337,7 @@ class OutputStore:
             colors=list(result.colors),
             parts=list(result.parts),
             warnings=list(result.warnings),
+            libraries=list(result.libraries),
         )
         self._write_meta(directory, meta)
         # After the record is complete: a lookup racing the writes above may have
@@ -350,7 +399,6 @@ class OutputStore:
         self,
         output_id: str,
         *,
-        pipeline_run_id: int | None = None,
         queue_item_id: int | None = None,
         print_route: PrintRoute | None = None,
         slice_job_id: int | None = None,
@@ -370,7 +418,6 @@ class OutputStore:
             update={
                 key: value
                 for key, value in (
-                    ("pipeline_run_id", pipeline_run_id),
                     ("queue_item_id", queue_item_id),
                     ("print_route", print_route),
                     ("slice_job_id", slice_job_id),

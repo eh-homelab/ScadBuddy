@@ -54,7 +54,7 @@ def test_the_measured_bound_comes_from_bambuddys_own_schema() -> None:
     that widens it reds this test instead of ScadBuddy quietly 422ing a value the user's
     own instance would have taken. ``quantity`` deliberately has no counterpart here:
     Bambuddy declares it unbounded, and 1-1000 is ScadBuddy's own bound mirroring
-    ``SendRequest.copies``.
+    ``PrintRunRequest.copies``.
     """
     schema = recording("openapi/scadbuddy-routes.json")
     field = schema["components"]["schemas"]["PrintQueueItemCreate"]["properties"][
@@ -90,9 +90,3 @@ def test_an_absent_scope_is_skipped() -> None:
 
 def test_resolving_nothing_leaves_every_option_to_bambuddy() -> None:
     assert resolve(None, None).is_empty()
-
-
-def test_quantity_alone_can_ride_a_pipeline_run_but_nothing_else_can() -> None:
-    assert PrintOptions(quantity=3).beyond_pipeline() == ()
-    assert PrintOptions(quantity=3, timelapse=False).beyond_pipeline() == ("timelapse",)
-    assert PrintOptions().beyond_pipeline() == ()

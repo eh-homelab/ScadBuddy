@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import socket
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
@@ -18,8 +19,12 @@ import httpx
 import psycopg
 import pytest
 from temporalio import workflow
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
+from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import (
     UnsandboxedWorkflowRunner,
     Worker,
@@ -45,12 +50,23 @@ from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
-from scadbuddy.worker import _poll, _wait_drained, run_inprocess_worker, run_worker
+from scadbuddy.worker import (
+    _poll,
+    _wait_drained,
+    make_current_until_polled,
+    run_inprocess_worker,
+    run_worker,
+)
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, connect_lazily, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
+from tests.conftest import (
+    UNUSED_DATABASE_URL,
+    UNUSED_TEMPORAL_ADDRESS,
+    PgPool,
+    fake_3mf_openscad,
+)
 from tests.support.temporal import current_address, temporal_client
 
 
@@ -246,7 +262,14 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
             ),
         ),
     ):
-        await make_current(client, namespace=client.namespace, build_id=build_id)
+        # As the worker does: Temporal 1.28 takes the build only once it polls.
+        assert await make_current_until_polled(
+            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+            build_id=build_id,
+            backoff=(0.1,),
+            every=0.2,
+            deadline=30,
+        )
         handle = await client.start_workflow(
             _BlocksUntilReleased.run, id=f"blocks-{uuid.uuid4().hex}", task_queue=queue
         )
@@ -320,6 +343,45 @@ async def test_the_worker_names_its_image_and_openscad_for_every_record(
         await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
     assert deps.revision == settings.revision
     assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+
+
+@pytest.mark.requires_temporal
+async def test_a_worker_given_the_apis_openscad_version_does_not_run_openscad_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process worker takes the API's probe (`worker_deps_from_state`): a second
+    `openscad --version`, in a task beside the API's first requests, would race them."""
+
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    ran = tmp_path / "ran"
+    openscad = tmp_path / "openscad"
+    openscad.write_text(f"#!/bin/sh\ntouch {ran}\necho 'OpenSCAD version 2099.01.01' >&2\n")
+    openscad.chmod(0o755)
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad=str(openscad), data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+        openscad_version="OpenSCAD version 2026.09.28",
+    )
+    stop = asyncio.Event()
+    stop.set()
+    async with temporal_client() as client:
+        await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+    assert deps.openscad_version == "OpenSCAD version 2026.09.28"
+    assert not ran.exists()
 
 
 @pytest.mark.requires_temporal
@@ -406,6 +468,150 @@ async def test_a_lazy_client_connects_on_its_first_call() -> None:
         assert (await client.count_workflows("WorkflowId = 'nothing-here'")).count == 0
 
 
+# ── making the build current (Temporal 1.28 needs a poller first) ─────────────
+
+
+def _not_found() -> RPCError:
+    """What Temporal 1.28 answers until the build's first poll: it ignores
+    `allow_no_pollers`."""
+    return RPCError(
+        f"workflow not found for ID: temporal-sys-worker-deployment:{DEPLOYMENT_NAME}",
+        RPCStatusCode.NOT_FOUND,
+        b"",
+    )
+
+
+async def _pollers(client: Client, queue: str) -> int:
+    described = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=queue),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+        )
+    )
+    return len(described.pollers)
+
+
+def _in_process_settings(tmp_path: Path) -> tuple[Settings, WorkerDeps]:
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad="openscad", data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=None,  # type: ignore[arg-type]
+    )
+    return settings, deps
+
+
+async def test_making_the_build_current_retries_until_the_server_takes_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise _not_found()
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        made = await asyncio.wait_for(
+            make_current_until_polled(
+                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, deadline=5
+            ),
+            5,
+        )
+
+    assert made
+    assert calls == 3
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.__dict__["attempt"] for r in warnings] == [1, 2]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.INFO] == [
+        "made this build current"
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.requires_temporal
+async def test_a_build_never_made_current_keeps_the_worker_polling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    attempts = 0
+
+    async def refuses(*_: object, **__: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _not_found()
+
+    monkeypatch.setattr(worker_module, "make_current", refuses)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_DEADLINE", 0.3)
+    settings, deps = _in_process_settings(tmp_path)
+    stop = asyncio.Event()
+
+    def errors() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    async with temporal_client() as client:
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.worker"):
+            polling = asyncio.create_task(_poll(settings, deps, client, stop, drain=False))
+            try:
+                async with asyncio.timeout(30):
+                    while not errors():
+                        assert not polling.done(), polling.result()
+                        await asyncio.sleep(0.02)
+                # Gave up, and the worker polls on: Temporal sees its poller.
+                async with asyncio.timeout(10):
+                    while not await _pollers(client, settings.temporal_task_queue_render):
+                        await asyncio.sleep(0.1)
+                assert not polling.done()
+            finally:
+                stop.set()
+                await asyncio.wait_for(polling, 30)
+
+    assert attempts >= 3
+    [error] = errors()
+    assert error.getMessage() == "could not make this build current; polling anyway"
+    assert error.__dict__["attempts"] == attempts
+    assert "workflow not found" in error.__dict__["error"]
+
+
+@pytest.mark.requires_temporal
+async def test_stopping_the_worker_cancels_the_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = 0
+
+    async def refuses(*_: object, **__: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _not_found()
+
+    monkeypatch.setattr(worker_module, "make_current", refuses)
+    settings, deps = _in_process_settings(tmp_path)
+    stop = asyncio.Event()
+    async with temporal_client() as client:
+        polling = asyncio.create_task(_poll(settings, deps, client, stop, drain=False))
+        try:
+            async with asyncio.timeout(30):
+                while attempts == 0:
+                    await asyncio.sleep(0.02)
+        finally:
+            stop.set()
+            # The retry would run for a minute; stop cancels it.
+            await asyncio.wait_for(polling, 10)
+    assert attempts == 1
+
+
 async def test_the_workers_housekeeping_runs_each_interval_and_survives_a_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -435,13 +641,13 @@ async def test_the_workers_housekeeping_runs_each_interval_and_survives_a_failur
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="4"/></svg>'
 
 
-def _own_volume_deps(tmp_path: Path) -> WorkerDeps:
+def _own_volume_deps(tmp_path: Path, pg_pool: PgPool) -> WorkerDeps:
     paths = DataPaths(tmp_path / "worker")
     paths.ensure()
     return WorkerDeps(
         config=Config(data_dir=paths.root),
         paths=paths,
-        assets=AssetStore(paths.assets),
+        assets=AssetStore(paths.assets, pg_pool),
         blobs=LocalBlobStore(paths.blobs),
         refs=cast(BlobRefs, None),
         projection=cast(JobProjection, None),
@@ -455,11 +661,26 @@ def _aged(*paths: Path, days: float = 7) -> None:
         os.utime(path, (old, old))
 
 
+def _last_used_long_ago(pg_pool: PgPool, asset_id: str, days: float = 7) -> None:
+    """The shared row's last use (#591): what a worker's prune goes by."""
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE assets SET last_used_at = %s WHERE id = %s",
+            (datetime.now(UTC) - timedelta(days=days), asset_id),
+        )
+
+
+def _rows(pg_pool: PgPool) -> list[str]:
+    with pg_pool.connection() as conn:
+        return sorted(row["id"] for row in conn.execute("SELECT id FROM assets"))
+
+
 def test_one_housekeeping_pass_prunes_old_exports_and_uploads_and_keeps_fresh_ones(
-    tmp_path: Path,
+    tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    """Final review I2: what a worker fetched is pruned on its own volume, by last use."""
-    deps = _own_volume_deps(tmp_path)
+    """Final review I2: what a worker fetched is pruned on its own volume, by last use.
+    Its files only: the rows are the API's (#591), shared, and the API's sweep decides."""
+    deps = _own_volume_deps(tmp_path, pg_pool)
     old_export = deps.paths.model_revision_dir("demo", "a" * 40)
     fresh_export = deps.paths.model_revision_dir("demo", "b" * 40)
     for export in (old_export, fresh_export):
@@ -468,29 +689,56 @@ def test_one_housekeeping_pass_prunes_old_exports_and_uploads_and_keeps_fresh_on
     _aged(old_export)
     old = deps.assets.put(SVG, "old.svg")
     fresh = deps.assets.put(SVG.replace(b'"4"', b'"5"'), "fresh.svg")
-    _aged(deps.assets.blob_path(old), deps.assets.root / f"{old.id}.json")
+    _aged(deps.assets.blob_path(old))
+    _last_used_long_ago(pg_pool, old.id)
 
     worker_module._housekeep(deps)
 
     assert not old_export.exists() and fresh_export.is_dir()
     assert deps.assets.ids() == [fresh.id]
+    assert _rows(pg_pool) == sorted([old.id, fresh.id])
 
 
-def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(tmp_path: Path) -> None:
+def test_housekeeping_leaves_a_volume_shared_with_the_api_alone(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     """A worker that still mounts the API's /data holds none of the references: its
     uploads and exports are the API's to sweep."""
-    deps = _own_volume_deps(tmp_path)
+    deps = _own_volume_deps(tmp_path, pg_pool)
     deps.paths.model_dir("demo").mkdir(parents=True)  # the API's templates are here
     export = deps.paths.model_revision_dir("demo", "a" * 40)
     export.mkdir(parents=True)
     _aged(export)
     upload = deps.assets.put(SVG, "old.svg")
-    _aged(deps.assets.blob_path(upload), deps.assets.root / f"{upload.id}.json")
+    _aged(deps.assets.blob_path(upload))
+    _last_used_long_ago(pg_pool, upload.id)
 
     worker_module._housekeep(deps)
 
     assert export.is_dir()
     assert deps.assets.ids() == [upload.id]
+
+
+@pytest.mark.parametrize(("sweep", "interval"), [(0.0, 300.0), (60.0, 60.0)])
+async def test_a_piece_cache_is_evicted_even_with_the_upload_sweep_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sweep: float, interval: float
+) -> None:
+    """SCADBUDDY_ASSET_SWEEP_INTERVAL=0 turns the upload sweep off, not the worker's
+    housekeeping (its cache eviction), which then runs every WORKER_CACHE_EVICT_INTERVAL."""
+    intervals: list[float] = []
+
+    async def housekeep(_deps: object, every: float) -> None:
+        intervals.append(every)
+
+    monkeypatch.setattr(worker_module, "_housekeep_periodically", housekeep)
+    cache = CachedBlobStore.__new__(CachedBlobStore)
+    task = worker_module._start_housekeeping(cast(WorkerDeps, SimpleNamespace(blobs=cache)), sweep)
+    assert task is not None
+    await task
+    assert intervals == [interval]
+    local = cast(WorkerDeps, SimpleNamespace(blobs=LocalBlobStore(tmp_path)))
+    assert worker_module._start_housekeeping(local, sweep) is None
+    assert intervals == [interval]
 
 
 class _Source:
@@ -554,6 +802,25 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     with pytest.raises(StoreNotReadyError):
         worker_module.build_worker_deps(settings)
     assert len(opened) == 1 and opened[0].pool.closed
+
+
+async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
+    loops: list[asyncio.AbstractEventLoop | None] = []
+
+    def build(_settings: Settings) -> NoReturn:
+        try:
+            loops.append(asyncio.get_running_loop())
+        except RuntimeError:
+            loops.append(None)  # no loop in this thread: off the loop, as it should be
+        raise StoreNotReadyError("stop here")
+
+    monkeypatch.setattr(worker_module, "build_worker_deps", build)
+    with pytest.raises(StoreNotReadyError):
+        await worker_module.run_worker(settings, health_port=None)
+    assert loops == [None]
 
 
 async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(

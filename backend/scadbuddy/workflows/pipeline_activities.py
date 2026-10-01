@@ -9,6 +9,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +50,32 @@ from scadbuddy.workflows.outputs import build_output
 from scadbuddy.workflows.packing import PackError
 from scadbuddy.workflows.template_process import TemplateError, run_template, template_out_key
 
-#: `migrate`'s own bound: under the activity's `SHORT` (60 s), so the subprocess's kill
-#: fires before Temporal's, as `Ctx.activity`'s +30 s does.
+#: `migrate`'s own bound: under the `SHORT` (60 s) that the activity's budget gives it
+#: after the snapshot's transfer, so the subprocess's kill fires before Temporal's.
 MIGRATE_SECONDS = 30.0
+
+
+@dataclass
+class _Call:
+    """One `act-` key's lock and how many calls hold or wait on it."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+def _pipeline_sha(model_dir: Path, *, live: bool) -> str:
+    """What the call's code is, for its `act-` key. A revision is exact already, so
+    `activities.py` alone; the live template, every `*.py` under `pipeline/` (by path),
+    since `activities.py` may import a sibling that is edited in between."""
+    pipeline = model_dir / "pipeline"
+    if not live:
+        source = pipeline / "activities.py"
+        return hashlib.sha256(source.read_bytes()).hexdigest() if source.is_file() else ""
+    digest = hashlib.sha256()
+    for path in sorted(pipeline.rglob("*.py")) if pipeline.is_dir() else []:
+        digest.update(path.relative_to(pipeline).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
 
 
 def _refuse(message: str) -> ApplicationError:
@@ -85,7 +109,7 @@ class PipelineActivities:
         self._render = RenderActivities(deps)
         #: One run per `act-` key at a time on this worker: an identical call waits,
         #: then is answered from the blob the first one wrote.
-        self._calls: dict[str, asyncio.Lock] = {}
+        self._calls: dict[str, _Call] = {}
 
     def all(self) -> Sequence[Callable[..., Any]]:
         return [
@@ -111,7 +135,8 @@ class PipelineActivities:
         workflow runs it in its sandbox, where what raises is a nondeterministic call
         (`os.getpid()`, `random.random()`, `datetime.now()`, `open()`), not an
         import (spec §3.6)."""
-        directory = await self.model_dir(req.slug, req.revision)
+        # Heartbeated: on the bambuddy store this downloads the revision's snapshot.
+        directory = await _heartbeating(asyncio.create_task(self.model_dir(req.slug, req.revision)))
         try:
             raw = json.loads(await asyncio.to_thread((directory / "model.json").read_text, "utf-8"))
         except FileNotFoundError:
@@ -192,7 +217,7 @@ class PipelineActivities:
         """The template's `migrate`, in the template process (§8.2): it runs template code,
         so it runs here on the worker, never in the API (§9)."""
         d = self.deps
-        model_dir = await self.model_dir(req.slug, req.revision)
+        model_dir = await _heartbeating(asyncio.create_task(self.model_dir(req.slug, req.revision)))
         with tempfile.TemporaryDirectory(prefix="scadbuddy-migrate-") as out:
             try:
                 migrated = await run_template(
@@ -246,36 +271,41 @@ class PipelineActivities:
         Identical calls share one `act-` blob holding the emitted files and the value
         returned (`ACTIVITY_RESULT_NAME`): one already in the store is the answer, on
         any worker, and runs nothing. The job holds a ref on the blob either way."""
-        d = self.deps
         model_dir = await self.model_dir(call.slug, call.revision)
-        source = model_dir / "pipeline" / "activities.py"
-        source_sha = (
-            hashlib.sha256(await asyncio.to_thread(source.read_bytes)).hexdigest()
-            if source.is_file()
-            else ""
-        )
+        source_sha = await asyncio.to_thread(_pipeline_sha, model_dir, live=call.revision is None)
         out_key = template_out_key(call, source_sha)
-        lock = self._calls.setdefault(out_key, asyncio.Lock())
-        async with lock:
-            stored = await self._stored_result(out_key)
-            if stored is not None:
-                await self._hold(out_key, call)
-                return stored[0]
-            value = await self._run_call(call, model_dir, out_key)
+        entry = self._calls.setdefault(out_key, _Call())
+        entry.users += 1
+        try:
+            async with entry.lock:
+                return await self._run_once(call, model_dir, out_key)
+        finally:
+            # The last one out drops the lock: the map holds only calls in flight.
+            entry.users -= 1
+            if entry.users == 0 and self._calls.get(out_key) is entry:
+                del self._calls[out_key]
+
+    async def _run_once(self, call: TemplateCall, model_dir: Path, out_key: str) -> Any:
+        d = self.deps
+        stored = await self._stored_result(out_key)
+        if stored is not None:
             await self._hold(out_key, call)
-            scope = BlobScope(slug=call.slug)
-            try:
-                await d.blobs.publish_fresh(
-                    out_key, scope=scope, expected=await d.blobs.indexed_sha(out_key)
-                )
-            except StaleBlobError:
-                # Another worker published the same call in between: its blob is the
-                # answer (identical calls write identical files).
-                stored = await self._stored_result(out_key)
-                if stored is None:
-                    raise
-                return stored[0]
-            return value
+            return stored[0]
+        value = await self._run_call(call, model_dir, out_key)
+        await self._hold(out_key, call)
+        scope = BlobScope(slug=call.slug)
+        try:
+            await d.blobs.publish_fresh(
+                out_key, scope=scope, expected=await d.blobs.indexed_sha(out_key)
+            )
+        except StaleBlobError:
+            # Another worker published the same call in between: its blob is the
+            # answer (identical calls write identical files).
+            stored = await self._stored_result(out_key)
+            if stored is None:
+                raise
+            return stored[0]
+        return value
 
     async def _stored_result(self, out_key: str) -> tuple[Any] | None:
         """The value a finished identical call returned, as a 1-tuple; None when the
@@ -332,8 +362,9 @@ class PipelineActivities:
 
 async def _fetched(blobs: BlobStore, key: str) -> None:
     """A blob passed to a template activity must be in the store: its absence is a
-    store problem, not the template's line that would then fail to read it."""
-    if not await blobs.fetch(key):
+    store problem, not the template's line that would then fail to read it. Heartbeated:
+    on the bambuddy store this is a download, which may outlast `HEARTBEAT`."""
+    if not await _heartbeating(asyncio.create_task(blobs.fetch(key))):
         raise ApplicationError(
             f"blob {key} is not in the store", type="TemplateActivityError", non_retryable=True
         )

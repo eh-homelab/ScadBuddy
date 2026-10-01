@@ -15,6 +15,7 @@ from unittest import mock
 import psycopg
 import pytest
 import trimesh
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -29,8 +30,8 @@ from scadbuddy.library.previews import (
     sweep_work_dirs,
 )
 from scadbuddy.render import previews as previews_module
-from scadbuddy.render.jobs import ModelSource
-from scadbuddy.render.previews import render_preview
+from scadbuddy.render.jobs import ModelSource, SnapshotUnavailableError
+from scadbuddy.render.previews import PreviewFailedError, is_render_error, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
@@ -448,3 +449,46 @@ async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
 
     assert leased_during == [[f"preview:{SLUG}"]]
     assert gate.leased(checkout) == []
+
+
+# -- is_render_error: the source's fault, or the run's? ---------------------------
+
+
+def _caused_by(cause: BaseException) -> RuntimeError:
+    error = RuntimeError("the preview failed")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OpenSCADError("openscad exited 1", []),
+        PreviewFailedError("no colours"),
+        TimeoutError(),
+        ApplicationError("openscad exited 1", type="OpenSCADError"),
+        ApplicationError("no colours", type="PreviewFailedError"),
+        _caused_by(OpenSCADError("openscad exited 1", [])),
+        _caused_by(_caused_by(ApplicationError("openscad exited 1", type="OpenSCADError"))),
+    ],
+    ids=["openscad", "preview", "timeout", "app-openscad", "app-preview", "wrapped", "nested"],
+)
+def test_a_source_that_does_not_render_is_a_render_error(error: BaseException) -> None:
+    """The scheduler records it against the source and does not retry until it changes."""
+    assert is_render_error(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("worker not polling"),
+        ApplicationError("the store is gone", type="StaleBlobError"),
+        _caused_by(OSError("no such file")),
+        ApplicationError("unknown", type=None),
+        SnapshotUnavailableError("no commit of demo to snapshot for its preview"),
+    ],
+    ids=["runtime", "app-other", "wrapped-os", "app-untyped", "no-snapshot"],
+)
+def test_a_run_that_could_not_happen_is_not_a_render_error(error: BaseException) -> None:
+    """Infrastructure: the scheduler tries again rather than blaming the source."""
+    assert not is_render_error(error)

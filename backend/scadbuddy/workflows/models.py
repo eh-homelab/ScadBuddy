@@ -11,6 +11,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.library.history import COMMIT_ID_PATTERN
+from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.job_models import (
@@ -76,6 +77,8 @@ class PrepareResult(BaseModel):
     scad: str
     library_path: list[str] = Field(default_factory=list)
     schema_cache: str
+    #: The pins `library_path` holds (#169), for the result to record.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
 
 
 class RenderMainResult(BaseModel):

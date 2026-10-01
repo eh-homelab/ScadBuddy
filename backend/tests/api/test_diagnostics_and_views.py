@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
+import pytest
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -149,3 +150,92 @@ def test_a_saved_output_is_drawn_from_a_named_view(
     assert response.status_code == 200, response.text
     assert read_png(response.content).shape == (512, 512, 4)
     assert client.get(f"/api/v1/outputs/{'0' * 32}/views/top.png").status_code == 404
+
+
+# ── per-colour breakdown ─────────────────────────────────────────────────────
+
+
+def _three_colours(client: TestClient, job_id: str) -> None:
+    """Three boxes side by side along X, red, green and blue."""
+    parts = [
+        ColourPart(
+            index + 1,
+            f"Color {index + 1}",
+            colour,
+            trimesh.creation.box(
+                extents=(10, 10, 10),
+                transform=trimesh.transformations.translation_matrix((index * 20, 0, 0)),
+            ),
+        )
+        for index, colour in enumerate(("#FF0000", "#00FF00", "#0000FF"))
+    ]
+    write_glb(parts, job_file(client, job_id, "preview.glb"))
+
+
+def test_a_breakdown_has_one_tile_per_colour_named_in_order(client: TestClient, model: str) -> None:
+    job_id = _render(client, model)
+    _three_colours(client, job_id)
+
+    response = client.get(f"/api/v1/jobs/{job_id}/colours.png", params={"view": "top", "size": 64})
+
+    assert response.status_code == 200, response.text
+    named = response.headers["x-scadbuddy-colours"].split(",")
+    assert response.headers["x-scadbuddy-colour-columns"] == "2"
+    # The stub job's `colors` (extruder order) lists red, so it comes first.
+    assert named[0] == "#FF0000"
+    assert sorted(named) == ["#0000FF", "#00FF00", "#FF0000"]
+    channels = [{"#FF0000": 0, "#00FF00": 1, "#0000FF": 2}[colour] for colour in named]
+    image = read_png(response.content)
+    # Three tiles in a 2x2 grid; the fourth is empty.
+    assert image.shape == (128, 128, 4)
+    assert not image[64:, 64:, 3].any()
+    for tile, (row, column), channel in zip(
+        range(3), [(0, 0), (0, 1), (1, 0)], channels, strict=True
+    ):
+        pixels = image[row * 64 : (row + 1) * 64, column * 64 : (column + 1) * 64]
+        solid = pixels[pixels[..., 3] == 255][:, :3].astype(int)
+        # Its own colour is on the tile; the other boxes are grey (all channels equal).
+        coloured = solid[(solid.max(axis=1) - solid.min(axis=1)) > 60]
+        assert len(coloured) > 0, tile
+        assert (coloured.argmax(axis=1) == channel).all(), tile
+        greys = solid[(solid.max(axis=1) - solid.min(axis=1)) <= 1]
+        assert len(greys) > len(coloured), tile
+
+
+def test_a_breakdown_of_a_failed_job_is_a_404(client: TestClient, model: str) -> None:
+    job_id = _render(client, model, FAIL_WIDTH)
+    assert client.get(f"/api/v1/jobs/{job_id}/colours.png").status_code == 404
+
+
+def test_a_breakdown_tile_past_its_cap_is_a_422(client: TestClient, model: str) -> None:
+    job_id = _render(client, model)
+    _real_preview(client, job_id)
+    assert (
+        client.get(f"/api/v1/jobs/{job_id}/colours.png", params={"size": 1024}).status_code == 422
+    )
+
+
+def test_a_breakdown_of_a_result_only_in_the_store_fetches_it_first(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As `/preview.glb` and `/views/…`: on the Bambuddy store a finished piece may be
+    only in the store, so the route pulls it into the cache before reading the glb."""
+    job_id = _render(client, model)
+    _three_colours(client, job_id)
+    glb = job_file(client, job_id, "preview.glb")
+    kept = glb.read_bytes()
+    glb.unlink()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    rel = state.render.store.read(job_id).result.preview_glb
+    assert rel.split("/")[0] == "blobs", rel
+    fetched: list[str] = []
+
+    async def fetch(key: str) -> bool:
+        fetched.append(key)
+        glb.write_bytes(kept)
+        return True
+
+    monkeypatch.setattr(state.store.blobs, "fetch", fetch)
+    response = client.get(f"/api/v1/jobs/{job_id}/colours.png", params={"view": "top", "size": 64})
+    assert response.status_code == 200, response.text
+    assert set(fetched) == {rel.split("/")[1]}

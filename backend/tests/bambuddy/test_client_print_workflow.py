@@ -19,7 +19,6 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import Scope
 from scadbuddy.bambuddy.models import (
     FolderCreate,
-    PipelineRunRequest,
     PresetRef,
     ProjectCreate,
     QueueItemCreate,
@@ -127,102 +126,6 @@ async def test_available_filaments_passes_a_location_when_given_one(
     await bambuddy.available_filaments("H2C", location="Garage")
 
     assert route.calls.last.request.url.params["location"] == "Garage"
-
-
-# --- pipelines ---------------------------------------------------------------------
-
-
-@respx.mock
-async def test_a_configured_pipeline_carries_its_target_and_fanout(
-    bambuddy: BambuddyClient,
-) -> None:
-    respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipelines-configured.json"))
-    )
-
-    [pipeline] = await bambuddy.pipelines()
-
-    assert (pipeline.id, pipeline.name) == (1, "Default")
-    assert pipeline.target_kind == "specific_printer"
-    assert pipeline.target_printer_id == 1
-    assert pipeline.fanout_strategy == "max_parallel"
-    assert pipeline.printer_preset == PresetRef(source="cloud", id="GM041")
-    assert pipeline.bed_type == "Textured PEI Plate"
-
-
-@respx.mock
-async def test_a_run_reports_the_queue_entry_and_printer_of_every_copy(
-    bambuddy: BambuddyClient,
-) -> None:
-    route = respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(
-            202,
-            json={
-                "id": 12,
-                "pipeline_id": 1,
-                "pipeline_name": "Default",
-                "source_library_file_id": 41,
-                "copies": 2,
-                "copies_completed": 0,
-                "copies_in_progress": 1,
-                "status": "dispatching",
-                "slice_job_id": 9,
-                "sliced_library_file_id": 52,
-                "eligibility_overridden": True,
-                "created_by": None,
-                "created_at": "2026-09-23T01:00:00Z",
-                "started_at": "2026-09-23T01:00:05Z",
-                "completed_at": None,
-                "target_kind": "specific_printer",
-                "target_printer_id": 1,
-                "fanout_strategy": "max_parallel",
-                "jobs": [
-                    {
-                        "id": 30,
-                        "pipeline_run_id": 12,
-                        "copy_index": 0,
-                        "assigned_printer_id": 1,
-                        "assigned_printer_name": "3DP-31B-598",
-                        "queue_entry_id": 90,
-                        "status": "queued",
-                    },
-                    {
-                        "id": 31,
-                        "pipeline_run_id": 12,
-                        "copy_index": 1,
-                        "assigned_printer_id": None,
-                        "assigned_printer_name": None,
-                        "queue_entry_id": None,
-                        "status": "awaiting_printer",
-                    },
-                ],
-            },
-        )
-    )
-
-    run = await bambuddy.run_pipeline(
-        1, PipelineRunRequest(source_library_file_id=41, copies=2, force=True)
-    )
-
-    assert (run.id, run.status, run.copies) == (12, "dispatching", 2)
-    assert run.eligibility_overridden is True
-    assert [(j.copy_index, j.queue_entry_id, j.assigned_printer_id) for j in run.jobs] == [
-        (0, 90, 1),
-        (1, None, None),
-    ]
-    assert sent(route) == {"source_library_file_id": 41, "copies": 2, "force": True}
-
-
-@respx.mock
-async def test_the_runs_list_is_wrapped_and_carries_a_total(bambuddy: BambuddyClient) -> None:
-    route = respx.get(f"{API}/slicer-pipelines/1/runs").mock(
-        return_value=httpx.Response(200, json=recording("pipeline-runs.json"))
-    )
-
-    runs = await bambuddy.pipeline_runs(1, limit=25)
-
-    assert (runs.runs, runs.total) == ([], 0)
-    assert route.calls.last.request.url.params["limit"] == "25"
 
 
 # --- presets -----------------------------------------------------------------------
@@ -441,27 +344,6 @@ def test_a_bool_is_not_a_calibration_mode(bad: object) -> None:
         QueueItemCreate(printer_id=1, bed_levelling=bad)  # type: ignore[arg-type]
 
 
-# --- #88: reading one pipeline -------------------------------------------------------
-
-
-@respx.mock
-async def test_reading_one_pipeline_returns_its_presets_and_target(
-    bambuddy: BambuddyClient,
-) -> None:
-    """A send carrying print options slices with these rather than running the pipeline."""
-    respx.get(f"{API}/slicer-pipelines/1").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipeline.json"))
-    )
-
-    pipeline = await bambuddy.pipeline(1)
-
-    assert pipeline.id == 1
-    assert pipeline.printer_preset == PresetRef(source="cloud", id="GM041")
-    assert pipeline.bed_type == "Textured PEI Plate"
-    assert pipeline.target_kind == "specific_printer"
-    assert pipeline.target_printer_id == 1
-
-
 # --- scopes ------------------------------------------------------------------------
 
 
@@ -507,13 +389,6 @@ async def test_reading_one_pipeline_returns_its_presets_and_target(
             "/projects/1/add-queue",
             "post",
             Scope.MANAGE_PROJECTS,
-        ),
-        (lambda c: c.pipeline(1), "/slicer-pipelines/1", "get", Scope.MANAGE_QUEUE),
-        (
-            lambda c: c.pipeline_runs(1),
-            "/slicer-pipelines/1/runs",
-            "get",
-            Scope.MANAGE_QUEUE,
         ),
     ],
 )

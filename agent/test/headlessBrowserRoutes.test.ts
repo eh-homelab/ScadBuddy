@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
+import type { AuditContext } from '../src/audit/log.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { originPolicy } from '../src/http/origins.js'
 import { HEADLESS_BROWSER_SETTING_PATH, registerHeadlessBrowserRoutes, type SettingsRepo } from '../src/routes/headlessBrowser.js'
@@ -14,10 +16,12 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 
 function setup(options: { ready?: boolean; settings?: boolean } = {}) {
   const values = new Map<string, unknown>()
+  const contexts: AuditContext[] = []
   const repo: SettingsRepo = {
     get: <T>(key: string) => Promise.resolve(values.get(key) as T),
-    set: (key, value) => {
+    set: (key, value, context) => {
       values.set(key, value)
+      contexts.push(context)
       return Promise.resolve()
     },
   }
@@ -28,7 +32,7 @@ function setup(options: { ready?: boolean; settings?: boolean } = {}) {
     remoteAddress: () => '10.0.0.7',
     origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
   })
-  return { app, values }
+  return { app, values, contexts }
 }
 
 const put = (app: Hono, body: unknown, headers: Record<string, string> = UI) =>
@@ -52,6 +56,12 @@ describe('the headless-browser setting', () => {
 
     expect(await (await put(app, { enabled: false })).json()).toEqual({ enabled: false })
     expect(values.get(SETTING_HEADLESS_BROWSER)).toBe(false)
+  })
+
+  it('audits the write as the browser user over HTTP, not as ScadBuddy (#831)', async () => {
+    const { app, contexts } = setup()
+    expect((await put(app, { enabled: true })).status).toBe(200)
+    expect(contexts).toEqual([{ actor: UI_ACTOR, surface: 'http', clientIp: '10.0.0.7' }])
   })
 
   it('treats anything stored but `true` as off', async () => {
