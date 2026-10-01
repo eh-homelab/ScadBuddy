@@ -8,6 +8,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet } from 'react-router'
+import { attentionLabel, titleWithAttention, useAttention } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -75,6 +76,14 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       setMounted(false)
     }
   }, [shown])
+  // #815 — approvals waiting on the user, shown on the toggle so a closed panel (or a
+  // background session's approval, which never reaches this tab's socket) still says so.
+  const attention = useAttention(shown)
+  const refreshAttention = attention.refresh
+  const waitingLabel = attentionLabel(attention.waiting)
+  useEffect(() => {
+    document.title = titleWithAttention(document.title, attention.waiting)
+  }, [attention.waiting])
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
 
@@ -91,6 +100,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // means "show me the assistant": it leaves full screen and opens the panel, rather
   // than opening (or closing) it out of sight.
   const toggle = useCallback(() => {
+    // A decision may just have landed in the panel or elsewhere.
+    refreshAttention()
     if (leaveFullscreen()) {
       openPanel()
       // The browser's own full screen ends a moment later, and until it has, nothing
@@ -103,7 +114,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     } else {
       openPanel()
     }
-  }, [open, closePanel, openPanel])
+  }, [open, closePanel, openPanel, refreshAttention])
 
   useEffect(() => {
     if (!shown) return
@@ -169,12 +180,22 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               aria-expanded={open}
               aria-controls={mounted ? PANEL_ID : undefined}
               aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
-              title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})`}
-              className={`rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+              aria-label={waitingLabel ? `Assistant, ${waitingLabel}` : undefined}
+              title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${waitingLabel ? `: ${waitingLabel}` : ''}`}
+              className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                 open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
               }`}
             >
               Assistant
+              {attention.waiting > 0 && (
+                <span
+                  data-testid="assistant-attention"
+                  aria-hidden="true"
+                  className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-warn px-1 text-[10.5px] leading-none font-semibold text-bg"
+                >
+                  {attention.waiting}
+                </span>
+              )}
             </button>
           )}
         </div>

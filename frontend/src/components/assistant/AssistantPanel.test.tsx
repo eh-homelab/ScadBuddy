@@ -5,6 +5,7 @@ import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
+import { setPendingApprovals } from '../../mocks/features/approvals'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
 
@@ -242,6 +243,24 @@ describe('assistant panel', () => {
     expect(sentOf('approval.decision')).toMatchObject([{ approve: false }])
     await screen.findByText('Denied: nothing was sent.')
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
+  })
+
+  it('shows waiting approvals on the header button with the panel closed, and in the tab title (#815)', async () => {
+    setPendingApprovals(2)
+    document.title = 'ScadBuddy'
+    const { user } = renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, 2 actions waiting for your approval' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): 2 actions waiting for your approval')
+    expect(within(button).getByTestId('assistant-attention')).toHaveTextContent('2')
+    await waitFor(() => expect(document.title).toBe('(2) ScadBuddy'))
+
+    // Decided elsewhere: toggling the panel reads again, and the badge goes.
+    setPendingApprovals(0)
+    await user.click(button)
+    const plain = await screen.findByRole('button', { name: 'Assistant' })
+    expect(within(plain).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
+    await waitFor(() => expect(document.title).toBe('ScadBuddy'))
   })
 
   it('Stop interrupts the turn', async () => {
