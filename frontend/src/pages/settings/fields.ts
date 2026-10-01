@@ -15,6 +15,7 @@ export const SECTIONS = [
   { id: 'remembered', title: 'Remembered choices' },
   { id: 'assistant', title: 'Assistant' },
   { id: 'diagnostics', title: 'Diagnostics' },
+  { id: 'administration', title: 'Administration' },
   { id: 'about', title: 'About' },
 ] as const
 
@@ -56,6 +57,13 @@ export type FieldSpec = {
  * the unit) are not listed here; they are laid out by hand.
  */
 export const RUNTIME_FIELDS: readonly FieldSpec[] = [
+  {
+    name: 'temporal_ui_url',
+    section: 'administration',
+    label: 'Temporal UI URL',
+    kind: 'url',
+    help: 'The Temporal web UI, where render workflows can be inspected. Empty shows no link.',
+  },
   {
     name: 'media_upload_max_bytes',
     section: 'uploads',
