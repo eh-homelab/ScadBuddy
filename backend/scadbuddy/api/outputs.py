@@ -5,12 +5,12 @@ import logging
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.api.deps import (
     CatalogueDep,
@@ -27,10 +27,18 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
-from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
+from scadbuddy.api.jobs import (
+    PNG_MEDIA_TYPE,
+    JobStatus,
+    ViewSize,
+    _job_status,
+    preview_view,
+    require_job,
+)
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
@@ -54,6 +62,9 @@ from scadbuddy.render.job_models import BomEntry, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.store.cache import materialize_result
+from scadbuddy.workflows.arrange import GOALS, part_of
+from scadbuddy.workflows.models import ArrangeInputs, PackItem, SlotPlan
+from scadbuddy.workflows.pipeline_activities import plate_size
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +232,9 @@ async def create_output(
     # inside the `try`, so a hold that fails part way is released too.
     output_id = uuid.uuid4().hex
     manifest = chosen.manifest if chosen is not None else []
+    # An arranged output has no template inputs to reopen; it records its sources (§7).
+    arranged = job.kind == "arrange"
+    sources = ArrangeInputs.model_validate(job.inputs).sources if arranged else []
     try:
         await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
         meta = await asyncio.to_thread(
@@ -228,9 +242,10 @@ async def create_output(
             job,
             name=body.name,
             public_url=public_url,
-            inputs=inputs,
+            inputs={} if arranged else inputs,
             index=body.index,
             files_dir=files_dir,
+            arranged_from=sources,
             output_id=output_id,
         )
     except Exception:
@@ -244,6 +259,138 @@ async def create_output(
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])
+
+
+Goal = Literal["fewest_plates", "fewest_swaps", "by_colour", "keep_together"]
+assert get_args(Goal) == GOALS
+#: The most copies one arrange places, summed over its objects.
+MAX_ARRANGE_COPIES = 2000
+
+
+class ArrangeObject(BaseModel):
+    output_id: str
+    #: A `manifest` entry's `part`.
+    part: str
+    #: Copies to place; 0 leaves the object out.
+    count: int = Field(ge=0, le=500)
+    #: With `goal = keep_together`: objects sharing a group share a plate.
+    group: str | None = Field(default=None, max_length=100)
+
+
+class ArrangeRequest(BaseModel):
+    objects: list[ArrangeObject] = Field(min_length=1, max_length=200)
+    goal: Goal = "fewest_plates"
+    #: The printer whose plate to pack for; omitted means the configured one, and with
+    #: none configured the default plate.
+    printer_id: int | None = None
+    filament_plan: FilamentPlan | None = None
+    #: The filament order the plan's slots refer to; omitted means the first object's
+    #: output's colours, then any colour the others add.
+    colours: list[str] | None = None
+    name: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def _copies_within_the_cap(self) -> ArrangeRequest:
+        # The packer checks every candidate spot against the plate; this keeps a request
+        # well inside the pack activity's SHORT timeout.
+        total = sum(o.count for o in self.objects)
+        if total > MAX_ARRANGE_COPIES:
+            raise ValueError(
+                f"{total} copies is more than one arrange places ({MAX_ARRANGE_COPIES})"
+            )
+        return self
+
+
+def arrange_inputs(
+    outputs: OutputStore, body: ArrangeRequest, *, plate_model: str | None
+) -> tuple[str, ArrangeInputs]:
+    """Resolve the objects against the outputs' manifests, so every refusal happens here
+    rather than on a worker (spec §10)."""
+    manifests: dict[str, dict[str, ManifestObject]] = {}
+    items: list[PackItem] = []
+    provenance: dict[str, ManifestObject] = {}
+    # A colour list is slot order (slot N = colours[N-1]), and an arranged output's can
+    # name a slot no part uses, so it is never paired with `parts` by index.
+    colours: list[str] = list(body.colours or [])
+    slug: str | None = None
+    for obj in body.objects:
+        meta = require_output(outputs, obj.output_id)
+        slug = slug or meta.slug
+        if obj.output_id not in manifests:
+            manifest = outputs.manifest(obj.output_id)
+            if not manifest:
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"output {obj.output_id} was saved before outputs recorded their objects;"
+                    " generate it again to arrange it",
+                )
+            manifests[obj.output_id] = {m.part: m for m in manifest}
+            if body.colours is None:
+                colours += [c for c in meta.colors if c not in colours]
+        entry = manifests[obj.output_id].get(obj.part)
+        if entry is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"output {obj.output_id} has no object {obj.part}",
+            )
+        if obj.count == 0:
+            continue
+        if entry.plates > 1:
+            # The packer places objects on shared plates; one that lays out its own
+            # plates cannot be one of them, even alone.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"object {obj.part} ({entry.file}) of output {obj.output_id} lays out its"
+                f" own {entry.plates} plates, so it cannot be arranged; print that output"
+                " as it is",
+            )
+        items.append(PackItem(part=part_of(entry), count=obj.count, group=obj.group))
+        provenance.setdefault(
+            entry.part,
+            entry.model_copy(update={"source_output": entry.source_output or obj.output_id}),
+        )
+        if body.colours is None:
+            colours += [c for c in entry.colours if c not in colours]
+    if not items or slug is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "nothing to arrange: every count is 0"
+        )
+    return slug, ArrangeInputs(
+        items=items,
+        goal=body.goal,
+        plate=plate_size(plate_model),
+        plate_model=plate_model,
+        filament_plan=SlotPlan.of(body.filament_plan),
+        colours=colours,
+        name=body.name,
+        provenance=provenance,
+        sources=list(dict.fromkeys(o.output_id for o in body.objects)),
+    )
+
+
+@router.post(
+    "/outputs/arrange",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Arrange objects onto plates",
+    description="Lay out objects from saved outputs again for a goal, printer and spool plan"
+    " (spec §7). No re-render. Poll the job with GET /jobs/{id}, then save it as an output.",
+)
+async def arrange_outputs(
+    body: ArrangeRequest, outputs: OutputsDep, render: RenderDep, store: SettingsStoreDep
+) -> JobStatus:
+    stored = await asyncio.to_thread(store.load)
+    printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
+    # No printer: the plate the preview falls back to (Settings), else the default plate.
+    plate_model = stored.default_plate
+    if printer_id is not None:
+        # `printer()` declares Scope.READ_STATUS, and the client's `_send` maps a refusal
+        # through bambuddy/errors.py, so a key without it gets a 403 naming the scope.
+        async with client_for(stored) as client:
+            plate_model = (await client.printer(printer_id)).model
+    slug, inputs = await asyncio.to_thread(arrange_inputs, outputs, body, plate_model=plate_model)
+    job = await render.arrange(slug, inputs)
+    return _job_status(job, None)
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")

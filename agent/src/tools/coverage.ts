@@ -42,6 +42,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
   {
+    operation: 'POST /api/v1/outputs/arrange',
+    reason:
+      "Arrange needs objects, a printer and spools chosen in the History or Print dialog; the agent's print " +
+      'tools do not pick spools yet.',
+  },
+  {
     operation: 'POST /api/v1/models/{slug}/inputs/migrate',
     reason:
       'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',

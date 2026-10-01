@@ -19,6 +19,8 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
 from scadbuddy.library.outputs import OUTPUT_HOLDER, OutputStore
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows.arrange import part_of
+from scadbuddy.workflows.models import ArrangeInputs, PackItem, PlateSize
 from tests.support.arrange import finished_job
 from tests.support.store import store_pool
 
@@ -181,3 +183,21 @@ def test_a_save_cancelled_mid_write_keeps_its_holds(
     with TestClient(app, raise_server_exceptions=False) as client:
         client.post("/api/v1/models/demo/outputs", json={"job_id": job_id})
     assert {part for part, _ in held(pool)} == set(parts)
+
+
+def test_saving_an_arrange_job_records_its_sources_and_holds_its_parts(
+    client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path
+) -> None:
+    _, job, written = asyncio.run(finished_job(tmp_path, job_id="arr-1"))
+    sources = ["a" * 32, "c" * 32]
+    inputs = ArrangeInputs(
+        items=[PackItem(part=part_of(written.manifest[0]), count=2)],
+        plate=PlateSize(key="default", width=256.0, depth=256.0),
+        sources=sources,
+    )
+    arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
+    app.dependency_overrides[get_render] = lambda: OneJob(arranged)
+    output_id = save(client, "arr-1")
+    detail = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert detail["arranged_from"] == sources
+    assert held(pool) == {(m.part, output_id) for m in written.manifest}

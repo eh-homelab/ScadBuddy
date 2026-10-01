@@ -197,6 +197,15 @@ class RenderService:
         the same insert, start, reconcile path as a render (spec §3.3, §3.4)."""
         payload = inputs.model_dump(mode="json")
         job = Job(id=uuid.uuid4().hex, slug=slug, kind="arrange", inputs=payload, created_at=now())
+        # Before the row, as a render's submit: Temporal refuses an input this large
+        # outright, so the row could never start.
+        size = len(pydantic_data_converter.payload_converter.to_payload(job).data)
+        if size > MAX_WORKFLOW_INPUT_BYTES:
+            raise ApiError(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"these objects make an arrange request of {size} bytes; the most a job can"
+                f" carry is {MAX_WORKFLOW_INPUT_BYTES}",
+            )
         try:
             submitted = await asyncio.to_thread(
                 self.store.submit,
