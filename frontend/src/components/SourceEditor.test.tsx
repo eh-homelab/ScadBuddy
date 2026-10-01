@@ -1,16 +1,23 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as Monaco from 'monaco-editor/editor/editor.api'
 
 interface Opener {
-  openCodeEditor(source: unknown, resource: { toString(): string }, selection?: object): boolean
+  openCodeEditor(source: unknown, resource: Monaco.Uri, selection?: object): boolean
 }
+
+// Monaco's own URI class (the editor needs a DOM; this does not). The opener gets one of
+// these, whose `toString()` percent-encodes: `BOSL2@<commit>` is `BOSL2%40<commit>` (#185).
+const { URI } = await vi.hoisted(() =>
+  vi.importActual<{ URI: typeof Monaco.Uri }>('monaco-editor/base/common/uri.js'),
+)
 
 const dispose = vi.fn()
 /** URIs Monaco has no text model for. */
 const absent = new Set<string>()
-const getModel = vi.fn((uri: string | { toString(): string }) =>
-  absent.has(String(uri)) ? null : { dispose, getValue: () => 'cube(1);' },
+const getModel = vi.fn((uri: string | Monaco.Uri) =>
+  absent.has(URI.parse(String(uri)).toString()) ? null : { dispose, getValue: () => 'cube(1);' },
 )
 const setModelMarkers = vi.fn()
 const openers: Opener[] = []
@@ -26,7 +33,7 @@ vi.mock('../lib/monaco', () => ({
   setupMonaco: vi.fn(),
   monaco: {
     editor: { getModel, setModelMarkers, registerEditorOpener },
-    Uri: { parse: (value: string) => value },
+    Uri: URI,
   },
 }))
 
@@ -106,7 +113,7 @@ function jump(resource: string, selection: object | undefined = RANGE, source: u
   if (!opener) throw new Error('no editor opener registered')
   let handled = false
   act(() => {
-    handled = opener.openCodeEditor(source, { toString: () => resource }, selection)
+    handled = opener.openCodeEditor(source, URI.parse(resource), selection)
   })
   return handled
 }
@@ -128,7 +135,7 @@ describe('SourceEditor', () => {
     expect(dispose).not.toHaveBeenCalled()
 
     unmount()
-    expect(getModel).toHaveBeenCalledWith(MODEL)
+    expect(getModel.mock.calls.map(([uri]) => String(uri))).toContain(MODEL)
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
@@ -136,7 +143,7 @@ describe('SourceEditor', () => {
     const { rerender } = render(<SourceEditor {...props} uri={MODEL} />)
     rerender(<SourceEditor {...props} uri="file:///models/b/model.scad" />)
 
-    expect(getModel).toHaveBeenCalledWith(MODEL)
+    expect(getModel.mock.calls.map(([uri]) => String(uri))).toContain(MODEL)
     expect(dispose).toHaveBeenCalledTimes(1)
   })
 
@@ -166,7 +173,7 @@ describe('SourceEditor', () => {
 
       expect(jump(LIBRARY)).toBe(true)
       const editor = screen.getByTestId('monaco')
-      expect(editor.dataset.path).toBe(LIBRARY)
+      expect(editor.dataset.path).toBe(URI.parse(LIBRARY).toString())
       expect(editor.dataset.readonly).toBe('true')
       // The wrapper would write `value` into the library's model.
       expect(editor.dataset.value).toBe('(held)')
@@ -198,9 +205,19 @@ describe('SourceEditor', () => {
       expect(instance.setPosition).toHaveBeenCalledWith({ lineNumber: 2, column: 1 })
     })
 
+    it("opens a pinned library's file read-only, though Monaco encodes the @ in its URI", () => {
+      render(<SourceEditor {...props} uri={MODEL} />)
+      const resource = URI.parse(LIBRARY)
+      expect(resource.toString()).toContain('BOSL2%40')
+
+      expect(jump(LIBRARY)).toBe(true)
+      expect(screen.getByTestId('definition-bar')).toHaveTextContent('BOSL2/shapes3d.scad — read-only')
+      expect(screen.getByTestId('monaco').dataset.readonly).toBe('true')
+    })
+
     it('leaves jumps it cannot show to Monaco', () => {
       render(<SourceEditor {...props} uri={MODEL} />)
-      absent.add('file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/unfetched.scad')
+      absent.add(URI.parse('file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/unfetched.scad').toString())
 
       expect(jump('file:///libraries/BOSL2@0123456789abcdef0123456789abcdef01234567/unfetched.scad')).toBe(false)
       expect(jump('file:///usr/share/openscad/libraries/MCAD/units.scad')).toBe(false)
