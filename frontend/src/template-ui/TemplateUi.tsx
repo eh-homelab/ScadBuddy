@@ -41,23 +41,17 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
       fail(`written for host API ${ui.api}; this ScadBuddy supports ${UI_API_SUPPORTED.join(', ')}`)
       return
     }
-    const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
+    // One element and shadow root per mount: a slow `mount` of the template this
+    // replaces writes into its own detached root, never into the next one's.
+    const holder = document.createElement('div')
+    holder.dataset['testid'] = 'template-ui'
+    holder.className = 'h-full min-h-0'
+    el.append(holder)
+    const root = holder.attachShadow({ mode: 'open' })
     adoptAppStyles(root)
-    const created = createHost({
-      slug,
-      version,
-      getSchema: () => latest.current.deps.getSchema(),
-      getInputs: () => latest.current.deps.getInputs(),
-      setInputs: (next) => latest.current.deps.setInputs(next),
-      generate: () => latest.current.deps.generate(),
-      openPrint: (id) => latest.current.deps.openPrint(id),
-      presets: {
-        list: () => latest.current.deps.presets.list(),
-        save: (name) => latest.current.deps.presets.save(name),
-        load: (id) => latest.current.deps.presets.load(id),
-      },
-      onDescribe: (fn) => latest.current.deps.onDescribe(fn),
-    })
+    // This mount's own deps: a host the template kept after its unmount never reaches
+    // the next template's.
+    const created = createHost(latest.current.deps)
     handle.current = created
     let active = true
     let cleanup: (() => void) | void
@@ -84,6 +78,7 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
         console.error(`${ui.module}: its cleanup threw`, cause)
       }
       root.replaceChildren()
+      holder.remove()
     }
   }, [slug, version, ui.module, ui.api, slot, latest])
 
@@ -91,5 +86,5 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure }: Props
     handle.current?.notify(inputs)
   }, [inputs])
 
-  return <div ref={element} data-testid="template-ui" className="h-full min-h-0 overflow-auto" />
+  return <div ref={element} className="h-full min-h-0 overflow-auto" />
 }
