@@ -17,3 +17,23 @@ export function safeHttpUrl(value: string | null | undefined): string | null {
   // `URL` lower-cases the scheme, so `JAVASCRIPT:` is caught here too.
   return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : null
 }
+
+/**
+ * A `src` for an image in untrusted Markdown (#820): a same-origin path under
+ * `/api/v1/`, normalised, else null. Only ScadBuddy's own API serves what such an
+ * image may show (a render view, a thumbnail), so text from the model, a README or a
+ * tool result can never make the browser fetch another host. A backslash is refused
+ * because the URL parser reads it as `/`, and `..` is resolved before the prefix is
+ * checked so it cannot climb out of the API.
+ */
+export function safeImageSrc(value: string | null | undefined): string | null {
+  if (!value || !value.startsWith('/api/v1/') || value.includes('\\')) return null
+  let parsed: URL
+  try {
+    parsed = new URL(value, 'http://scadbuddy.invalid')
+  } catch {
+    return null
+  }
+  if (parsed.origin !== 'http://scadbuddy.invalid' || !parsed.pathname.startsWith('/api/v1/')) return null
+  return parsed.pathname + parsed.search
+}

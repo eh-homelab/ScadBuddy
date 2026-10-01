@@ -86,18 +86,18 @@ export function recognitionErrorMessage(error: string, embedded: boolean): strin
 /** Replies are spoken up to about this many characters; the rest stays on screen. */
 export const SPOKEN_LIMIT = 400
 
-/** Plain text for the voice: no code blocks, no markdown marks, cut at a sentence end. */
+/** Plain text for the voice: no code blocks or tables, no markdown marks, cut at a sentence end. */
 export function spokenText(markdown: string): string {
   const parts: string[] = []
   for (const block of parseBlocks(markdown)) {
-    if (block.kind === 'code') continue
+    if (block.kind === 'code' || block.kind === 'table') continue
     if (block.kind === 'list') parts.push(...block.items)
     else parts.push(block.text)
   }
   const plain = parts
     .map((p) =>
       p
-        .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
         .replace(/`([^`]*)`/g, '$1')
         .replace(/[*_~#>]+/g, '')
         .trim(),

@@ -1,15 +1,18 @@
 import type { ReactNode } from 'react'
-import { safeHttpUrl } from '../../lib/safeUrl'
+import { safeHttpUrl, safeImageSrc } from '../../lib/safeUrl'
 import { parseBlocks } from './markdownBlocks'
 
 /**
  * A deliberately small Markdown renderer for assistant replies: paragraphs, `#`–`###`
- * headings, `-`/`*`/`1.` lists, fenced code, and inline `code`, **bold**, *italic*
- * and [links](https://…). The repo has no Markdown renderer to reuse and a full one
- * is a lot of bundle for chat text.
+ * headings, `-`/`*`/`1.` lists, fenced code, GFM tables (#820), and inline `code`,
+ * **bold**, *italic*, [links](https://…) and ![images](/api/v1/…). The repo has no
+ * Markdown renderer to reuse and a full one is a lot of bundle for chat text.
  *
  * It builds React elements — never HTML strings — so model output cannot inject
- * markup, and links render only for http(s) URLs (`safeHttpUrl`). It tolerates the
+ * markup, links render only for http(s) URLs (`safeHttpUrl`), and images only for
+ * ScadBuddy's own API paths (`safeImageSrc`), so a render view the agent checked can
+ * be shown while untrusted text never makes the browser fetch another host; any other
+ * image is its alt text. It tolerates the
  * half-finished text of a stream: an unclosed fence is code to the end, and an
  * unclosed `**` is plain text until its partner arrives.
  */
@@ -49,12 +52,45 @@ function blocks(text: string): ReactNode[] {
       }
       case 'para':
         return <p key={i}>{inline(block.text)}</p>
+      case 'table':
+        return (
+          <div key={i} className="overflow-x-auto">
+            <table className="border-collapse text-[12px]">
+              <thead>
+                <tr>
+                  {block.header.map((cell, c) => (
+                    <th
+                      key={c}
+                      style={{ textAlign: block.align[c] ?? undefined }}
+                      className="border border-line bg-surface-3 px-2 py-1 font-semibold"
+                    >
+                      {inline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {block.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((cell, c) => (
+                      <td key={c} style={{ textAlign: block.align[c] ?? undefined }} className="border border-line px-2 py-1">
+                        {inline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
     }
   })
 }
 
-// One alternation, leftmost match wins: code first so `**` inside backticks stays literal.
-const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[([^\]]+)\]\(([^)\s]+)\)/g
+// One alternation, leftmost match wins: code first so `**` inside backticks stays literal,
+// and an image's `!` starts one character before the `[` a link would match.
+const INLINE =
+  /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|_([^_\s][^_]*)_|\[([^\]]+)\]\(([^)\s]+)\)|!\[([^\]]*)\]\(([^)\s]+)\)/g
 
 function inline(text: string): ReactNode[] {
   const out: ReactNode[] = []
@@ -73,6 +109,21 @@ function inline(text: string): ReactNode[] {
       out.push(<strong key={key}>{inline(m[2])}</strong>)
     } else if (m[3] !== undefined || m[4] !== undefined) {
       out.push(<em key={key}>{inline(m[3] ?? m[4] ?? '')}</em>)
+    } else if (m[8] !== undefined) {
+      const src = safeImageSrc(m[8])
+      out.push(
+        src ? (
+          <img
+            key={key}
+            src={src}
+            alt={m[7] ?? ''}
+            loading="lazy"
+            className="inline-block max-h-80 max-w-full rounded-[6px] border border-line bg-bg align-middle"
+          />
+        ) : (
+          <span key={key}>{m[7]}</span>
+        ),
+      )
     } else {
       const href = safeHttpUrl(m[6])
       out.push(

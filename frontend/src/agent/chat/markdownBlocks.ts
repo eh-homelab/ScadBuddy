@@ -4,6 +4,33 @@ export type Block =
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
   | { kind: 'para'; text: string }
+  | { kind: 'table'; align: Align[]; header: string[]; rows: string[][] }
+
+export type Align = 'left' | 'center' | 'right' | null
+
+const DELIMITER_CELL = /^\s*(:?)-+(:?)\s*$/
+
+/** A GFM table row's cells: edge pipes dropped, split on unescaped `|`, `\|` unescaped. */
+function cells(line: string): string[] {
+  let row = line.trim()
+  if (row.startsWith('|')) row = row.slice(1)
+  if (row.endsWith('|') && !row.endsWith('\\|')) row = row.slice(0, -1)
+  return row.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'))
+}
+
+/** The delimiter row's alignments, or null when `line` is not one for `width` columns. */
+function delimiter(line: string | undefined, width: number): Align[] | null {
+  if (line === undefined || !line.includes('|')) return null
+  const parts = cells(line)
+  if (parts.length !== width) return null
+  const align: Align[] = []
+  for (const part of parts) {
+    const m = DELIMITER_CELL.exec(part)
+    if (!m) return null
+    align.push(m[1] && m[2] ? 'center' : m[2] ? 'right' : m[1] ? 'left' : null)
+  }
+  return align
+}
 
 export function parseBlocks(text: string): Block[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n')
@@ -25,6 +52,22 @@ export function parseBlocks(text: string): Block[] {
       while (i < lines.length && !/^```\s*$/.test(lines[i] ?? '')) body.push(lines[i++] ?? '')
       out.push({ kind: 'code', lang: fence[1] ?? '', body: body.join('\n') })
       continue
+    }
+    if (line.includes('|')) {
+      const header = cells(line)
+      const align = delimiter(lines[i + 1], header.length)
+      if (align) {
+        flush()
+        const rows: string[][] = []
+        i += 2
+        while (i < lines.length && (lines[i] ?? '').includes('|') && (lines[i] ?? '').trim() !== '') {
+          const row = cells(lines[i++] ?? '')
+          rows.push(header.map((_, c) => row[c] ?? ''))
+        }
+        i--
+        out.push({ kind: 'table', align, header, rows })
+        continue
+      }
     }
     const heading = /^(#{1,3})\s+(.*)$/.exec(line)
     if (heading) {

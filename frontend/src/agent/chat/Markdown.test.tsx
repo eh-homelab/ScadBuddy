@@ -26,6 +26,70 @@ describe('Markdown', () => {
     expect(screen.getByText('click')).toBeInTheDocument()
   })
 
+  it('renders a GFM table with column alignment in a horizontal scroller (#820)', () => {
+    const { container } = render(
+      <Markdown
+        text={'Plan:\n\n| Part | Spool | Loaded |\n|:--|:-:|--:|\n| body | **PLA** red | yes |\n| text | `#fff` | no |'}
+      />,
+    )
+    const table = screen.getByRole('table')
+    expect(table.parentElement).toHaveClass('overflow-x-auto')
+    expect(screen.getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Part', 'Spool', 'Loaded'])
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(3)
+    const cells = screen.getAllByRole('cell')
+    expect(cells.map((td) => td.textContent)).toEqual(['body', 'PLA red', 'yes', 'text', '#fff', 'no'])
+    expect(cells.map((td) => td.style.textAlign)).toEqual(['left', 'center', 'right', 'left', 'center', 'right'])
+    expect(screen.getByText('PLA').tagName).toBe('STRONG')
+    expect(container.textContent).not.toContain('|')
+  })
+
+  it('parses table rows with and without edge pipes, escaped pipes and short rows', () => {
+    expect(parseBlocks('a | b\n--- | ---\n1 \\| 2 | 3\n| 4 |')).toEqual([
+      {
+        kind: 'table',
+        align: [null, null],
+        header: ['a', 'b'],
+        rows: [
+          ['1 | 2', '3'],
+          ['4', ''],
+        ],
+      },
+    ])
+  })
+
+  it('leaves pipes without a delimiter row as a paragraph', () => {
+    expect(parseBlocks('| a | b |\n| c | d |')).toEqual([{ kind: 'para', text: '| a | b | | c | d |' }])
+  })
+
+  it('shows a same-origin API image inline, such as a render view (#820)', () => {
+    render(<Markdown text={'Top: ![top view](/api/v1/jobs/j1/views/top.png?size=256)'} />)
+    const img = screen.getByRole('img', { name: 'top view' })
+    expect(img).toHaveAttribute('src', '/api/v1/jobs/j1/views/top.png?size=256')
+  })
+
+  it('never fetches a remote, protocol-relative or non-API image', () => {
+    const { container } = render(
+      <Markdown
+        text={
+          '![remote](https://evil.example/x.png) ![proto](//evil.example/x.png) ' +
+          '![data](data:image/png;base64,AAAA) ![js](javascript:alert(1)) ![other](/assets/x.png) ' +
+          '![dots](/api/v1/../../x.png) ![slash](/api/v1\\evil)'
+        }
+      />,
+    )
+    expect(container.querySelector('img')).toBeNull()
+    for (const alt of ['remote', 'proto', 'data', 'js', 'other', 'dots', 'slash']) {
+      expect(screen.getByText(alt)).toBeInTheDocument()
+    }
+  })
+
+  it('renders an image and a link side by side', () => {
+    render(<Markdown text={'see ![a](/api/v1/models/m/thumbnail) and [b](https://example.org)'} />)
+    expect(screen.getByRole('img', { name: 'a' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'b' })).toHaveAttribute('href', 'https://example.org')
+  })
+
   it('treats an unclosed fence mid-stream as code to the end', () => {
     expect(parseBlocks('text\n```\ncube(')).toEqual([
       { kind: 'para', text: 'text' },
