@@ -156,16 +156,17 @@ describe('host custom elements', () => {
     expect(shadowOf(container).textContent).toContain('style.padding')
   })
 
-  it('numbers extruders from the bound values, not params alone', async () => {
+  it('numbers extruders from the rendered values (inputs.params), not from a value bound elsewhere', async () => {
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
         root.innerHTML = '<sb-param name="text_color" bind="style.text"></sb-param>'
       },
     }))
+    // `style.text` is UI state: the render has text_color #222222, a second extruder.
     const inputs = { params: { body_color: '#111111', text_color: '#222222' }, style: { text: '#111111' } }
     const { container } = render(page(inputs, vi.fn()))
     await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder'))
-    expect(shadowOf(container).textContent).toContain('extruder 1')
+    expect(shadowOf(container).textContent).toContain('extruder 2')
   })
 
   it('numbers a parameter by its default-bound element, not one rebound elsewhere', async () => {

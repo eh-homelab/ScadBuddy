@@ -315,6 +315,9 @@ class ModelMeta(BaseModel):
     #: Why a ``ui`` on disk could not be read. The template still lists and
     #: customizes with the generated form (§4.2); never written back to model.json.
     ui_error: str | None = Field(default=None, exclude=True)
+    #: The ``ui`` as written when it could not be read, so a create writes the
+    #: author's declaration back as it came rather than dropping it.
+    unread_ui: Any = Field(default=None, exclude=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -328,7 +331,12 @@ class ModelMeta(BaseModel):
                 f"ui.{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
                 for detail in error.errors()
             )
-            return {**data, "ui": None, "ui_error": f"model.json's ui is not valid: {problems}"}
+            return {
+                **data,
+                "ui": None,
+                "ui_error": f"model.json's ui is not valid: {problems}",
+                "unread_ui": data["ui"],
+            }
         return data
 
     #: The template's default slicer settings (#770): process overrides on the print
@@ -933,7 +941,10 @@ class Catalogue:
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
-            self.write_raw_meta(slug, meta.model_dump(exclude=excluded), presets=True)
+            raw = meta.model_dump(exclude=excluded)
+            if meta.unread_ui is not None:
+                raw["ui"] = meta.unread_ui
+            self.write_raw_meta(slug, raw, presets=True)
             self._clear_media_rows(slug)
             if thumbnail is not None:
                 self.thumbnail_path(slug).write_bytes(thumbnail)

@@ -140,10 +140,19 @@ export const customizerTools: Tool[] = [
       'Render a model with the given parameters and wait for it to finish, reporting progress. Returns the ' +
       "job's outcome (bounding box, colours, parts, warnings, errors). Parameters are validated first; " +
       'set `save_output` to keep the result as an output (needed before plates, 3MF download or printing). ' +
-      'If the render outlasts the wait, the still-running job id is returned: poll it with get_render_job.',
+      'If the render outlasts the wait, the still-running job id is returned: poll it with get_render_job. ' +
+      'For a template with its own UI (`ui` in get_model), pass `inputs` to keep its state; the output records them.',
     input: z.object({
       slug,
       params: params.default({}),
+      // `catchall`, not `z.record`: see `params` in common.ts.
+      inputs: z
+        .object({})
+        .catchall(z.unknown())
+        .optional()
+        .describe(
+          'Template inputs (a template with its own UI keeps state beside `params`); when given, leave `params` out: inputs.params is what renders',
+        ),
       version: z.string().regex(/^[0-9a-f]{7,40}$/).optional().describe('Render an earlier revision'),
       save_output: z.boolean().default(false),
       output_name: z.string().optional(),
@@ -152,8 +161,17 @@ export const customizerTools: Tool[] = [
     source:
       "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
-    handler: async ({ slug, params, version, save_output, output_name }, ctx) => {
-      const report = validateParams(await fetchSchema(ctx, slug, version), params)
+    handler: async ({ slug, params, inputs, version, save_output, output_name }, ctx) => {
+      // With inputs, inputs.params is what renders (missing: the defaults). A `params`
+      // beside them would be dropped, so it is refused rather than validated in vain.
+      if (inputs && Object.keys(params).length > 0) {
+        throw new ToolError('not rendered: put the parameters in inputs.params, not beside inputs')
+      }
+      const given = inputs ? (inputs['params'] ?? {}) : params
+      if (typeof given !== 'object' || given === null || Array.isArray(given)) {
+        throw new ToolError('not rendered: inputs.params must be an object')
+      }
+      const report = validateParams(await fetchSchema(ctx, slug, version), given as typeof params)
       if (!report.valid) {
         throw new ToolError(
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
@@ -169,7 +187,7 @@ export const customizerTools: Tool[] = [
         const accepted = await ok(
           ctx.backend.POST('/api/v1/models/{slug}/render', {
             params: { path: { slug } },
-            body: { params, version: version ?? null },
+            body: inputs ? { inputs, version: version ?? null } : { params, version: version ?? null },
             signal: ctx.signal,
           }),
           `render ${slug}`,
@@ -195,7 +213,7 @@ export const customizerTools: Tool[] = [
       const output = await ok(
         ctx.backend.POST('/api/v1/models/{slug}/outputs', {
           params: { path: { slug } },
-          body: { job_id: job.id, name: output_name ?? null },
+          body: { job_id: job.id, name: output_name ?? null, ...(inputs ? { inputs } : {}) },
         }),
         `save output of ${job.id}`,
       )

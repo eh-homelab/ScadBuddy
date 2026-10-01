@@ -44,6 +44,21 @@ describe('createHost', () => {
     expect(d.state.inputs).toEqual({ params: { name: 'Hi' }, tab: 'a' })
   })
 
+  it('refuses what the backend would refuse to save: a bad v, NaN, over 64 KB', () => {
+    const d = deps()
+    const { host } = createHost(d)
+    expect(() => host.inputs.set({ v: 'x' })).toThrow(HostInputError)
+    expect(() => host.inputs.set({ v: -1 })).toThrow(/inputs\.v/)
+    expect(() => host.inputs.set({ v: 1.5 })).toThrow(/inputs\.v/)
+    expect(() => host.inputs.set({ v: true })).toThrow(/inputs\.v/)
+    expect(() => host.inputs.set({ picked: Number.NaN })).toThrow(HostInputError)
+    expect(() => host.inputs.set({ nested: { far: Number.POSITIVE_INFINITY } })).toThrow(/NaN or Infinity/)
+    expect(() => host.inputs.set({ big: 'é'.repeat(40_000) })).toThrow(/bytes/)
+    expect(d.state.inputs).toEqual({ params: { name: 'Hi' }, tab: 'a' })
+    host.inputs.set({ v: 2 })
+    expect(d.state.inputs).toEqual({ params: { name: 'Hi' }, tab: 'a', v: 2 })
+  })
+
   it('refuses removing params or a non-scalar parameter value', () => {
     const d = deps()
     const { host } = createHost(d)

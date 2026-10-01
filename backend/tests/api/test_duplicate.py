@@ -688,3 +688,16 @@ def test_the_claim_sweep_leaves_a_model_whose_source_is_only_missing_from_disk(
 
     assert catalogue.sweep_stranded_claims() == []
     assert paths.model_dir("kept").is_dir()
+
+
+def test_a_duplicate_of_the_maze_puzzle_serves_its_ui(
+    app: FastAPI, seed_dir: Path, bundled: Path
+) -> None:
+    shipped = Path(__file__).resolve().parents[3] / "models" / "maze-puzzle"
+    shutil.copytree(shipped, seed_dir / "maze-puzzle", ignore=shutil.ignore_patterns(".renders"))
+    with TestClient(app) as client:
+        copy = _duplicate(client, "builtin:maze-puzzle", "My maze")
+        assert copy["ui"] is not None
+        module = client.get(f"/api/v1/models/{copy['slug']}/ui/index.js")
+        assert module.status_code == 200, module.text
+        assert module.content == (shipped / "ui" / "index.js").read_bytes()

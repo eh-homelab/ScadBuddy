@@ -68,6 +68,12 @@ function importedFrom(originUrl: string): string {
   }
 }
 
+/** ``current`` with ``changed`` over its parameters. */
+function withParams(current: JsonObject, changed: ParamValues): JsonObject {
+  const { params, extra } = splitInputs(current)
+  return joinInputs({ ...params, ...changed }, extra)
+}
+
 export function CustomizePage() {
   const { slug = '' } = useParams()
   const [search, setSearch] = useSearchParams()
@@ -161,9 +167,12 @@ export function CustomizePage() {
   const extra = edits.extra ?? reopenedInputs?.extra ?? NO_EXTRA
 
   // #425 — a template's own interface (spec 2026-09-27 §4). Whether there is one is the
-  // record's `ui` declaration, never `extra` being non-empty.
+  // `ui` declaration, never `extra` being non-empty: the record's for the live template,
+  // the revision's own (on its schema) for an old one, which may declare another or none.
   const record = modelState.data
-  const declared = (record?.ui ?? null) as UiDeclaration | null
+  const pinned = version !== undefined && schema && 'ui' in schema ? schema : undefined
+  const declaration = version === undefined ? record : pinned
+  const declared = (declaration?.ui ?? null) as UiDeclaration | null
   // Keyed by the revision as well: another revision's interface may work.
   const [uiFailure, setUiFailure] = useState<{
     slug: string
@@ -173,8 +182,8 @@ export function CustomizePage() {
   const failure =
     uiFailure?.slug === slug && uiFailure.version === version
       ? uiFailure.failure
-      : record?.ui_error
-        ? { file: 'model.json', message: record.ui_error }
+      : declaration?.ui_error
+        ? { file: 'model.json', message: declaration.ui_error }
         : null
   const customUi = declared && !failure ? declared : null
   // A failure is not for good: a reload of the record or the schema, or the banner's own
@@ -202,6 +211,8 @@ export function CustomizePage() {
   useLayoutEffect(() => {
     latestInputs.current = inputs
   }, [inputs])
+  // Every writer advances it at once, before its `setEdits` renders: a template UI that
+  // awaits a preset load (or anything else) and then writes starts from what it loaded.
   const actions = useRef<ActionBarHandle>(null)
   const describeRef = useRef<(() => string) | null>(null)
   const uiVersion = version ?? record?.version ?? undefined
@@ -275,6 +286,7 @@ export function CustomizePage() {
   const misfit = platesFitMessages(fits, targets, unit)
 
   const onChange = useCallback((name: string, value: ParamValue) => {
+    latestInputs.current = withParams(latestInputs.current, { [name]: value })
     setEdits((current) => ({
       of: current.of,
       values: { ...(current.values ?? current.of ?? NOTHING), [name]: value },
@@ -284,11 +296,13 @@ export function CustomizePage() {
 
   const onReset = useCallback(() => {
     if (schema) {
+      latestInputs.current = joinInputs(defaultValues(schema), NO_EXTRA)
       setEdits((current) => ({ of: current.of, values: defaultValues(schema), extra: NO_EXTRA }))
     }
   }, [schema])
 
   const onApplyPreset = useCallback((next: ParamValues, nextExtra: InputsExtra) => {
+    latestInputs.current = joinInputs(next, nextExtra)
     setEdits((current) => ({ of: current.of, values: next, extra: nextExtra }))
   }, [])
 
@@ -499,6 +513,7 @@ export function CustomizePage() {
         }
         // All or nothing: one bad value leaves every field as it was.
         if (problems.length > 0) throw new AgentToolError('invalid_args', problems.join(' '))
+        latestInputs.current = withParams(latestInputs.current, next)
         setEdits((current) => ({
           of: current.of,
           values: { ...(current.values ?? current.of ?? NOTHING), ...next },

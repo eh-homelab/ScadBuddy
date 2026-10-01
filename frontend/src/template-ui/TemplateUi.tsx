@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../api/client'
-import type { JsonObject } from '../lib/inputs'
+import { splitInputs, type JsonObject } from '../lib/inputs'
 import { extrudersOf } from '../lib/params'
 import { useLatest } from '../lib/useLatest'
 import { defineHostElements, provideRegistry, type HostElement } from './elements'
 import { checkedUiPath, createHost, type HostDeps, type HostHandle } from './host'
-import { effectiveValues } from './bindings'
 import { HostElementContent, type ElementContext } from './HostElementContent'
 import { loadUiModule } from './loadModule'
 import { adoptAppStyles } from './styles'
@@ -60,10 +59,10 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
   const firstPreview = elements
     .filter((el) => el.localName === 'sb-preview')
     .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))[0]
-  // Once per render, for every widget: an attribute change on any element re-renders all.
-  const extruders = elementContext
-    ? extrudersOf(elementContext.schema, effectiveValues(elements, elementContext))
-    : NO_EXTRUDERS
+  // Extruder numbers follow what renders, `inputs.params`: a value an `<sb-param bind>`
+  // keeps elsewhere is the UI's own state, and no render or slot sees it (phase 2).
+  // Once per render, for every widget.
+  const extruders = elementContext ? extrudersOf(elementContext.schema, splitInputs(inputs).params) : NO_EXTRUDERS
 
   useEffect(() => {
     const el = element.current

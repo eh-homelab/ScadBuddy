@@ -150,6 +150,25 @@ describe('CustomizePage with a template UI', () => {
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
   })
 
+  it('a write right after a preset load starts from the preset', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined())
+    const initial = (host?.inputs.get()['params'] as Record<string, unknown>)['name']
+    const saved = await host!.presets.save('at defaults')
+    host?.inputs.set({ params: { name: 'Changed' } })
+    await host!.presets.load(saved.id)
+    // No render between the load and the write: the write must start from the preset.
+    host?.inputs.set({ picked: 'x' })
+    await waitFor(() => expect(host?.inputs.get()['picked']).toBe('x'))
+    expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe(initial)
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({
@@ -170,6 +189,41 @@ describe('CustomizePage with a template UI', () => {
     await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
     expect(renders).toBe(1)
     expect(host?.inputs.get()['demo']).toEqual({ touched: true })
+  })
+
+  it('a colour bound outside params starts no render and leaves the extruder numbers to params', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const param = document.createElement('sb-param')
+        param.setAttribute('name', 'text_color')
+        param.setAttribute('bind', 'style.c')
+        root.append(param)
+      },
+    }))
+    let renders = 0
+    server.use(
+      http.post('/api/v1/models/:slug/render', () => {
+        renders += 1
+      }),
+    )
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(renders).toBe(1))
+    const before = structuredClone(host?.inputs.get()['params'])
+    const text = await waitFor(() => {
+      const found = shadow().querySelector<HTMLInputElement>('input[type="text"]')
+      if (!found) throw new Error('no colour field yet')
+      return found
+    })
+    const extruder = () => shadow().textContent?.match(/extruder (\d+)/)?.[1]
+    const numbered = extruder()
+    fireEvent.change(text, { target: { value: '#123456' } })
+    await waitFor(() => expect(host?.inputs.get()['style']).toEqual({ c: '#123456' }))
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders).toBe(1)
+    expect(host?.inputs.get()['params']).toEqual(before)
+    expect(extruder()).toBe(numbered)
   })
 
   it('keeps a template without ui exactly on the generated form', async () => {
@@ -213,6 +267,26 @@ describe('CustomizePage with a template UI', () => {
     expect(await screen.findByTestId('ui-origin', {}, { timeout: 5000 })).toHaveTextContent(
       'Custom interface · imported',
     )
+  })
+
+  it("opens a revision with that revision's ui declaration, not the current one", async () => {
+    const imports: string[] = []
+    setUiModuleLoader(async (url) => {
+      imports.push(url)
+      return { mount: demo }
+    })
+    const old = 'b'.repeat(40)
+    // The current record declares a UI; the revision from before it declares none.
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+        HttpResponse.json({ ...keychainSchema, ui: null, ui_error: null }),
+      ),
+    )
+    renderPage(<CustomizePage />, { route: `/m/${UI_DEMO_SLUG}?version=${old}`, path: '/m/:slug' })
+    await waitFor(() => expect(document.querySelector('[data-param]')).not.toBeNull())
+    expect(document.querySelector('[data-testid="template-ui"]')).toBeNull()
+    expect(screen.queryByRole('alert', { name: /template interface/i })).toBeNull()
+    expect(imports).toEqual([])
   })
 
   it('tries the interface again from the banner after a transient failure', async () => {

@@ -11,6 +11,7 @@ import type {
   ChoicesView,
   ConnectionTest,
   CustomizerSchema,
+  RevisionSchema,
   DuplicateRequest,
   EditTarget,
   FilamentOptions,
@@ -649,13 +650,11 @@ export const api = {
     return requestText(`${base}/libraries/${seg(file.library)}/files/${path}${commit}`)
   },
 
-  /** A `version` reads that revision's schema instead of the model's current one. */
-  getSchema: (slug: string, version?: string) =>
-    request<CustomizerSchema>(
-      version
-        ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
-        : `/models/${seg(slug)}/schema`,
-    ),
+  /** A `version` reads that revision's schema, and its `ui`, instead of the model's current one. */
+  getSchema: (slug: string, version?: string): Promise<CustomizerSchema | RevisionSchema> =>
+    version
+      ? request<RevisionSchema>(`/models/${seg(slug)}/versions/${seg(version)}/schema`)
+      : request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
 
   listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 

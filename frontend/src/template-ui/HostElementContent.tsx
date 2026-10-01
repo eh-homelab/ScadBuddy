@@ -54,7 +54,7 @@ export function HostElementContent({
 }: {
   element: HostElement
   context: ElementContext
-  /** Each colour parameter's extruder, from `effectiveValues` over every element: once per render. */
+  /** Each colour parameter's extruder, from the rendered values (`inputs.params`): once per render. */
   extruders: ReadonlyMap<string, number>
   /** The one `<sb-preview>` the preview mounts into: one canvas, one capture ref. */
   firstPreview: HostElement | undefined

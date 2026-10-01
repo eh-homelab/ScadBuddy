@@ -7,6 +7,7 @@ import {
   BUILTIN_PREVIEW_ID,
   BUILTIN_SLUG,
   GALLERY_SLUG,
+  MAZE_SLUG,
   MEDIA_MP4_BASE64,
   keychainSource,
   outputs,
@@ -24,6 +25,7 @@ import {
   setMockPresets,
   setMockUploadLimit,
 } from './handlers'
+import { UI_MODULES } from './templateUi'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -1258,5 +1260,49 @@ describe('mock inputs, as the backend keeps them (spec 2026-09-27 §4.3)', () =>
       v: 2,
     })
     expect(given.inputs).toEqual({ params: { name: 'Kai' }, tab: 'b', v: 2 })
+  })
+})
+
+describe('mock template UI files and outputs, as the backend holds them (#425)', () => {
+  beforeEach(() => resetMockState())
+  afterEach(() => {
+    delete UI_MODULES['ui-demo']?.['notes.txt']
+    delete UI_MODULES['ui-demo']?.['.hidden.js']
+    delete UI_MODULES['ui-demo']?.['theme.css']
+  })
+
+  it('gives the maze puzzle a version, as every record with history has', async () => {
+    expect((await api.getModel(MAZE_SLUG)).version).toMatch(/^[0-9a-f]{40}$/)
+  })
+
+  it('serves only UI_MEDIA_TYPES extensions, each with its type, and 404s dot segments', async () => {
+    const demo = UI_MODULES['ui-demo']!
+    demo['notes.txt'] = 'not servable'
+    demo['.hidden.js'] = 'export {}'
+    demo['theme.css'] = ':host { color: red }'
+    const get = (path: string) => fetch(`/api/v1/models/ui-demo/ui/${path}`)
+    expect((await get('notes.txt')).status).toBe(404)
+    expect((await get('.hidden.js')).status).toBe(404)
+    // Encoded, so the URL parser leaves the `..` for the route to see.
+    expect((await get('..%2Fui%2Findex.js')).status).toBe(404)
+    const css = await get('theme.css')
+    expect(css.status).toBe(200)
+    expect(css.headers.get('Content-Type')).toBe('text/css; charset=utf-8')
+    expect((await get('index.js')).headers.get('Content-Type')).toBe('text/javascript; charset=utf-8')
+  })
+
+  it('refuses an output whose inputs.params are not what the job rendered', async () => {
+    const accepted = await api.render('name-keychain', { params: { name: 'Kai' }, v: 0 })
+    const job = await vi.waitFor(
+      async () => {
+        const current = await api.getJob(accepted.job_id)
+        if (current.status !== 'done') throw new Error(current.status)
+        return current
+      },
+      { timeout: 5000 },
+    )
+    await expect(
+      api.createOutput('name-keychain', job.id, undefined, { params: { name: 'Ada' }, v: 0 }),
+    ).rejects.toMatchObject({ status: 422 })
   })
 })
