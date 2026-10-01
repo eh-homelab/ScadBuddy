@@ -15,9 +15,11 @@ was measured not to follow on 2026-09-28 (#745). What the slicer does follow is 
 extruders have the nozzle, and the run now states that (:func:`slicer_nozzle_stats`,
 #834).
 
-One advisory stays, by the owner's ruling on #723 (queue item 149 paused on it): a
-mounted High Flow nozzle of the sliced size is warned about (:func:`high_flow_warnings`),
-never refused, since a print may be set up before its nozzle is fitted.
+One advisory stays, by the owner's ruling on #723 (queue item 149 paused on it) and #797:
+a mounted High Flow nozzle of the chosen size is warned about (:func:`high_flow_warnings`),
+whatever flow is chosen, since the slice is always Standard flow until Bambuddy supports
+High Flow presets (#484), never refused, since a print may be set up before its nozzle is
+fitted.
 
 What is left besides is a label: the side each loaded spool feeds, so the picker can show it as
 the printer and Bambuddy do. With the Filament Track Switch (``fila_switch.installed``)
@@ -38,10 +40,11 @@ Anything else is ``None``, "unknown" — never quietly the right-hand side.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentWarning
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 
 RIGHT = 0
 LEFT = 1
@@ -115,22 +118,30 @@ def fitted_high_flow(status: PrinterStatus | None, extruder: int) -> bool:
     return status.nozzles[extruder].high_flow
 
 
-def high_flow_warnings(status: PrinterStatus | None, size: str) -> list[FilamentWarning]:
-    """A warning for each mounted High Flow nozzle of ``size`` (#723), never a refusal.
+def high_flow_warnings(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> list[FilamentWarning]:
+    """A warning for each mounted High Flow nozzle of the chosen size, whatever flow is
+    chosen (#723, #797), never a refusal. Only ``nozzles[0].size`` is read here: the
+    slice is always Standard flow (#484), so it pauses on a mounted High Flow nozzle
+    regardless of the flow the choices ask for.
 
-    ScadBuddy slices for standard nozzles until High Flow slicing works (#484), and the
-    printer paused a print at the first layer on a side whose nozzle type the slice
+    The printer paused a print at the first layer on a side whose nozzle type the slice
     didn't match (queue item 149). A print may be set up before its nozzle is fitted, so
-    the owner chose a warning; the dialog shows it in Advanced mode only (#772)."""
+    the owner chose a warning, and the dialog shows it in Simple and Advanced mode alike.
+    An unreadable status knows no nozzle, so it warns nothing."""
+    if not nozzles:
+        return []
+    size = nozzles[0].size
     return [
         FilamentWarning(
-            kind="hf-unsupported",
+            kind="hf-mounted",
             message=(
-                f"The {_side_word(extruder)} nozzle is High Flow. ScadBuddy slices for "
-                "standard nozzles until High Flow slicing is supported (#484), so if the "
-                f"print uses the {_side_word(extruder)}, the printer pauses at the first "
+                f"The {_side_word(extruder)} nozzle is High Flow and this print is sliced "
+                "for Standard flow (High Flow slicing isn't supported yet, #484), so if it "
+                f"prints on the {_side_word(extruder)}, the printer pauses at the first "
                 f'layer ("the {_side_word(extruder)} nozzle is not matched with slicing '
-                f'file"). Fit a standard nozzle there before it starts.'
+                'file"). Fit a standard nozzle there before it starts.'
             ),
         )
         for extruder in (RIGHT, LEFT)
@@ -191,7 +202,7 @@ def slicer_nozzle_stats(status: PrinterStatus | None, size: str) -> list[str] | 
     filament in one group on the right with ``volume_type="Standard"``, and all come
     back rewritten to ["Standard#0", "Standard#1"]; the G-code differs only in its time
     estimates. The mirrored left case is the same. The flow mismatch is left to the
-    ``hf-unsupported`` warning from ``high_flow_warnings`` (#723).
+    ``hf-mounted`` warning from ``high_flow_warnings`` (#723, #797).
 
     When both sides or neither side has the size, or the status cannot be read, this
     is ``None`` and the file is left as it was: the slicer keeps its own choice, and
