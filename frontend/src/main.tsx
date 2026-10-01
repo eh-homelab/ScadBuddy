@@ -1,9 +1,15 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
+import { z } from 'zod'
 import { installAgentBridge } from './agent'
 import { App } from './App'
 import './index.css'
+
+// The page CSP has no 'unsafe-eval'. zod's JIT probes `new Function` on its first parse
+// and swallows the refusal, but the browser still reports a violation; jitless skips the
+// probe (and the JIT it would enable).
+z.config({ jitless: true })
 
 async function start() {
   if (import.meta.env.VITE_MOCK_API === '1') {

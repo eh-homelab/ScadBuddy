@@ -1,4 +1,5 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
+import { bambuddyFrame } from './bambuddyFrame'
 
 // Settings → MCP access tokens (#251), against the msw stand-in for the agent
 // service's /api/v1/ai/mcp-tokens (src/mocks/features/mcpTokens.ts).
@@ -54,25 +55,9 @@ test.describe('MCP access tokens', () => {
     await expect(section.getByRole('button', { name: 'Revoke Claude Code' })).toHaveCount(0)
   })
 
-  test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, context, baseURL, browserName }) => {
-    // Bambuddy's External Link frame: another origin, its sandbox flags and no
-    // allow="clipboard-write", so the async Clipboard API is not granted to it.
-    const host = new URL('/mockServiceWorker.js', baseURL)
-    host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
-    // Bambuddy's page, not ours: served without ScadBuddy's page CSP, which would refuse
-    // to frame another origin.
-    await page.route(host.href, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
-    // A routed page is not on the loopback address space, so Chrome's Local Network
-    // Access checks refuse its loopback frame. Bambuddy on the LAN is local; grant it.
-    // Chromium's permission: another browser's context throws on the unknown name.
-    if (browserName === 'chromium') await context.grantPermissions(['local-network-access'])
-    await page.goto(host.href)
-    await page.setContent(
-      `<iframe src="${new URL('/settings', baseURL).href}" title="ScadBuddy"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
-        style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
-    )
-    const frame = page.frameLocator('iframe')
+  test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, baseURL }) => {
+    // No allow="clipboard-write" on Bambuddy's frame: the async Clipboard API is not granted to it.
+    const frame = await bambuddyFrame(page, baseURL, '/settings')
     const { panel, token } = await createToken(frame, 'In the frame')
 
     await panel.getByRole('button', { name: 'Copy token' }).click()

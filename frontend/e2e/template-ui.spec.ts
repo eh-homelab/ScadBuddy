@@ -1,5 +1,9 @@
 import { expect, test, type Page } from '@playwright/test'
 
+// The ui-demo and ui-broken templates are msw fixtures (src/mocks/templateUi.ts); the real
+// stack has neither.
+test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack has no ui-demo template')
+
 /** The browser globals these checks touch; the e2e tsconfig has no DOM lib. */
 interface CspWindow {
   __csp: string[]
