@@ -138,16 +138,22 @@ the wrong color beats a hardened one holding the right color.
    normalise (empty, unparsable) never matches, not even another unknown one:
    `None == None` is not "already holds this color". This saves a purge. It is
    Bambuddy's own preference, kept.
-3. **The algorithm key** (§4).
+3. **The algorithm key** (§4): for Least used, `print_seconds` and then
+   `prints`, both ascending.
 4. **Lowest position**, as the final tiebreak, matching Bambuddy.
 
 ## 4. Algorithms
 
 | Algorithm | Key | Default |
 |---|---|---|
-| Least used | Fewest print seconds recorded on that hotend's serial | Yes |
+| Least used | Fewest `print_seconds` on that hotend's serial, then fewest `prints` | Yes |
 | Oldest first | Earliest `first_seen_at` for the serial | |
 | Newest first | Latest `first_seen_at` | |
+
+All three read one `Usage` per serial from `RackUsageStore.usage(serials)`:
+`prints`, `print_seconds`, `grams` and `first_seen_at` (`None` for a serial the
+print flow has not seen yet, which sorts last for Oldest first and first for
+Newest first). That is the only path `first_seen_at` takes into `rank_rack`.
 | Let Bambuddy pick | Send no choice; Bambuddy's color-then-lowest rule applies | |
 
 The algorithm is remembered per printer as `printer_rack_algorithms:
@@ -433,7 +439,10 @@ so the trade is accepted.
   `nozzle_rack_choice`" design decision): amend both to point at this spec, so
   neither contradicts it.
 - `bambuddy/dispatch.py` module docstring: name `nozzle_rack_choice` beside
-  `filament_overrides` as a queue-only field.
+  `filament_overrides` as a queue-only field. Its existing `PrintQueueItemCreate`
+  is correct and stays: that is Bambuddy's schema name
+  (`backend/app/schemas/print_queue.py`), of which ScadBuddy's `QueueItemCreate`
+  is the client-side model.
 - `api/printing.py` / `/check`: rack options and picks per side.
 - Settings: `printer_rack_algorithms` on `StoredSettings` (jsonb, no
   migration), shown and cleared in remembered choices.
@@ -450,7 +459,7 @@ fixtures (which use invented serials), or in commits.
 
 | # | Question | Test | If it fails |
 |---|---|---|---|
-| 1 | What do the `nozzle_type` codes say about material? | Compare each rack position's code with the hotend's own label or Bambu's hotend list. Record the table here | Material step treats every nozzle as unknown (not hardened), and the abrasive warning is always shown for CF/GF/Glow |
+| 1 | What do the `nozzle_type` codes say about material? | The owner reads each rack position's hotend label and records code → material here. Bambuddy does not decode it: it reads only the two-letter flow prefix (`slot_nozzle.py`), and its one remark, that `HH01` is "hardened steel high-flow" (`bambu_mqtt.py`), is not enough to call `HS00` or `HS01` hardened | **Gate, not a blocker.** `rack.py` ships with the table **empty**, so every code counts as not hardened: abrasive groups always get `rack-unsafe-material`, never a silent brass pick. The implementation plan's first task asks the owner for the labels; filling the table is a one-line data change once they are known |
 | 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color. On an unsliced upload (files 240, 251) `group_id`, `group` and `type` are all empty, which is why the pick is made after the slice (§5) |
 | 3 | Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
 
@@ -464,7 +473,11 @@ fixtures (which use invented serials), or in commits.
   - no eligible position;
   - two groups never sharing a position, with the more constrained group first;
   - `"0.2"` on the rack matching a `"0.20"` group;
-  - an unknown code counted as not hardened;
+  - an unknown code counted as not hardened, and with the empty table every
+    code is unknown;
+  - Least used breaking a `print_seconds` tie on `prints`;
+  - Oldest and Newest first ordering on `first_seen_at`, with an unseen serial
+    last and first respectively;
   - `PLA-CF`, `PA6-CF` and `ABS-GF` abrasive, `PLA` and `PLA-AERO` not;
   - a `PLA` group whose spool's subtype is `Glow` abrasive;
   - a manual pick reserved before the ranking, so no ranked group takes its
