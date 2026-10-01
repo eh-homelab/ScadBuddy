@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from pydantic_core import PydanticUndefined
 
 from scadbuddy.core.settings import APPLIES, BOOTSTRAP_FIELDS, Settings
@@ -32,16 +33,25 @@ def _default(value: Any) -> str:
     return f"`{value}`" if isinstance(value, str | Path | bool) else f"`{value!r}`"
 
 
+def _rejects_default(name: str) -> bool:
+    """Whether the field's own validators refuse its default: a required setting
+    (#401, #546) keeps a default only so its validator can say what to set."""
+    try:
+        Settings.__pydantic_validator__.validate_assignment(
+            Settings.model_construct(), name, Settings.model_fields[name].default
+        )
+    except ValidationError:
+        return True
+    return False
+
+
 def reference() -> str:
     prefix = Settings.model_config.get("env_prefix", "")
     # "In Settings": whether the UI can change it, and when a change takes effect
     # (`APPLIES`, #322); a bootstrap field is read from the environment only.
     lines = ["| Variable | Type | Default | In Settings |", "|---|---|---|---|"]
     for name, field in Settings.model_fields.items():
-        # A required field defaults to "" only so its validator can say what to set
-        # (#401, #546).
-        required = field.validate_default and field.default == ""
-        default = PydanticUndefined if required else field.default
+        default = PydanticUndefined if _rejects_default(name) else field.default
         env = f"{prefix}{name}".upper()
         ui = "no" if name in BOOTSTRAP_FIELDS else APPLIES[name]
         lines.append(f"| `{env}` | `{_type_name(field.annotation)}` | {_default(default)} | {ui} |")
