@@ -40,7 +40,8 @@ class NotTextError(ValueError):
     """Not UTF-8 text: a binary file."""
 
 
-def _segments(relative: str) -> list[str]:
+def plain_segments(relative: str) -> list[str]:
+    """``relative``'s segments, or :class:`FilePathError` when it is not plain."""
     if not relative or len(relative) > MAX_PATH_LENGTH:
         raise FilePathError("the path is empty or too long")
     if "\\" in relative or "\0" in relative:
@@ -56,12 +57,26 @@ def _segments(relative: str) -> list[str]:
 def read_text_file(root: Path, relative: str, *, limit: int) -> str:
     """The text of ``relative`` under ``root``, at most ``limit`` bytes.
 
+    Raises what :func:`read_file` does, and :class:`NotTextError`.
+    """
+    data = read_file(root, relative, limit=limit)
+    if b"\0" in data:
+        raise NotTextError(relative)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise NotTextError(relative) from None
+
+
+def read_file(root: Path, relative: str, *, limit: int) -> bytes:
+    """The bytes of ``relative`` under ``root``, at most ``limit`` of them.
+
     Raises :class:`FilePathError` for a path that is not plain, ``FileNotFoundError``
     for one that is missing, not a regular file, or resolves outside ``root`` (a
     symlink out of it reads as missing, so it says nothing about what is outside),
-    :class:`FileTooLargeError` and :class:`NotTextError`.
+    and :class:`FileTooLargeError`.
     """
-    segments = _segments(relative)
+    segments = plain_segments(relative)
     base = root.resolve(strict=True)
     target = base.joinpath(*segments).resolve()
     if not target.is_relative_to(base) or not target.is_file():
@@ -84,12 +99,7 @@ def read_text_file(root: Path, relative: str, *, limit: int) -> str:
         data = file.read(limit + 1)
     if len(data) > limit:
         raise FileTooLargeError(relative)
-    if b"\0" in data:
-        raise NotTextError(relative)
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        raise NotTextError(relative) from None
+    return data
 
 
 def opened_path(fd: int) -> Path | None:

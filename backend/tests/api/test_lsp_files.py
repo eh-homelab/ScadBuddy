@@ -363,10 +363,10 @@ def test_the_reader_refuses_a_path_over_the_length_cap_itself(tmp_path: Path) ->
     """The route's own cap answers first, so the reader's is exercised directly."""
     assert len(AT_PATH_CAP) == editor_files.MAX_PATH_LENGTH
     with pytest.raises(editor_files.FilePathError, match="too long"):
-        editor_files._segments(OVER_PATH_CAP)
+        editor_files.plain_segments(OVER_PATH_CAP)
     with pytest.raises(editor_files.FilePathError, match="too long"):
         editor_files.read_text_file(tmp_path, OVER_PATH_CAP, limit=MAX_SOURCE_CHARS)
-    assert len(editor_files._segments(AT_PATH_CAP)) == 11
+    assert len(editor_files.plain_segments(AT_PATH_CAP)) == 11
 
 
 def test_a_symlink_out_of_a_library_reads_as_missing(
