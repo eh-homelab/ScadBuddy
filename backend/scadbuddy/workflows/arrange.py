@@ -91,20 +91,21 @@ class _Sheet:
     colours: set[str] = field(default_factory=set)
     height: float = 0.0
     extent: tuple[float, float] = (0.0, 0.0)
+    #: footprints (size, colours, height) this sheet refused; a sheet only fills up, so a
+    #: refusal stands, and a full plate need not re-check every later copy.
+    refused: set[tuple[tuple[float, float], frozenset[str], float]] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         # The gap trails every part, so the sheet is one gap larger than the plate.
         self.free = [_Free(0.0, 0.0, self.width + GAP_MM, self.depth + GAP_MM)]
 
-    def spot(self, w: float, d: float) -> _Free | None:
-        """Best-short-side-fit: the free rectangle leaving the least on its tighter side."""
-        best: tuple[float, float, float, _Free] | None = None
-        for free in self.free:
-            if w + GAP_MM <= free.w + _EPS and d + GAP_MM <= free.d + _EPS:
-                score = (min(free.w - w, free.d - d), free.y, free.x)
-                if best is None or score < best[:3]:
-                    best = (*score, free)
-        return best[3] if best else None
+    def spots(self, w: float, d: float) -> list[_Free]:
+        """Every free rectangle a ``w`` x ``d`` footprint (and its trailing gap) fits in."""
+        return [
+            free
+            for free in self.free
+            if w + GAP_MM <= free.w + _EPS and d + GAP_MM <= free.d + _EPS
+        ]
 
     def occupy(self, used: _Free) -> None:
         pieces: list[_Free] = []
@@ -137,14 +138,22 @@ class _Sheet:
 def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
     """Place ``copy`` on ``sheet`` if a turn of it fits and the plate stays writable."""
     w, d = copy.size
+    key = ((w, d), frozenset(c.upper() for c in copy.part.colours), copy.part.bbox.size[2])
+    if key in sheet.refused:
+        return False
     turns = [(w, d, 0.0)] + ([(d, w, 90.0)] if abs(w - d) > _EPS else [])
-    options = [
-        (spot, tw, td, rot) for tw, td, rot in turns if (spot := sheet.spot(tw, td)) is not None
-    ]
+    # Every spot, not one per turn: the plate check (a prime tower's corner, the X1C's
+    # cutter) can refuse the first while another keeps the block writable. Least extent
+    # first grows the block as a rectangle rather than an "L" across the whole plate,
+    # then best-short-side-fit, then the lower-left spot, so the result is deterministic.
+    options = [(spot, tw, td, rot) for tw, td, rot in turns for spot in sheet.spots(tw, td)]
     options.sort(
         key=lambda o: (
             max(sheet.extent[0], o[0].x + o[1]) * max(sheet.extent[1], o[0].y + o[2]),
+            min(o[0].w - o[1], o[0].d - o[2]),
             o[3],
+            o[0].y,
+            o[0].x,
         )
     )
     colours = sheet.colours | {c.upper() for c in copy.part.colours}
@@ -157,6 +166,7 @@ def _try(sheet: _Sheet, copy: _Copy, geometry: PlateGeometry) -> bool:
         sheet.placed.append((copy, spot.x, spot.y, rot))
         sheet.colours, sheet.height, sheet.extent = colours, height, extent
         return True
+    sheet.refused.add(key)
     return False
 
 

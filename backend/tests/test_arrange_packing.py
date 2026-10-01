@@ -208,3 +208,21 @@ def test_an_explicit_plate_takes_quarter_turns() -> None:
     assert placed.items[0].rot == 90.0
     with pytest.raises(PackError, match="quarter turns"):
         explicit_plate([part("a", 10, 20)], [(0.0, 0.0, 45.0)], plate=DEFAULT)
+
+
+@pytest.mark.parametrize("colours", [("#FF0000",), ("#FF0000", "#00FF00")])
+@pytest.mark.parametrize("model", ["Bambu Lab X1 Carbon", None])
+def test_a_plate_the_check_refuses_a_corner_of_still_fills_up(
+    model: str | None, colours: tuple[str, ...]
+) -> None:
+    # A prime tower or the X1C cutter corner refuses the first spot the packer tries;
+    # the next free rectangle must be tried, not a new plate opened (final review I1).
+    size = plate(model) if model else DEFAULT
+    p = part("a", 10, 10, *colours)
+    layout = arrange([PackItem(part=p, count=100)], size)
+    assert len(layout.plates) == 1
+    geometry = geometry_of(size)
+    for rects in footprints(layout, {"a": p}):
+        assert_no_overlap(rects)
+        extent = (max(r[2] for r in rects), max(r[3] for r in rects), 5.0)
+        assert fit_problem(extent, geometry, tower=len(colours) > 1) is None
