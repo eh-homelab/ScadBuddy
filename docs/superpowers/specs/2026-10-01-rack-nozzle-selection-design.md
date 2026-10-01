@@ -74,7 +74,7 @@ pick** is one the user chose in Advanced mode.
 For each `on_rack` group, the eligible positions are those holding a nozzle of
 the group's diameter and flow type. This is the same test as Bambuddy's
 `_rack_slot_is_eligible` (Bambuddy `backend/app/services/bambu_mqtt.py`, read
-on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
+on the deployed image 2026-10-01), and `rack/rank.py` mirrors it exactly:
 
 - **Diameter** is compared as `round(float(x), 2)`, never as a string: the rack
   reports `"0.2"` and `filament-requirements` reports `"0.20"` for the same
@@ -88,7 +88,7 @@ on the deployed image 2026-10-01), and `rack.py` mirrors it exactly:
   `volume_type.strip().lower()` starts with `"high flow"`; the slot is High Flow
   when `NozzleInfo.high_flow` (`models.py`, which `NozzleRackSlot` inherits)
   says so. That property reads the code's second letter, which for every
-  measured code agrees with Bambuddy's `HH` prefix test; `rack.py` reuses it
+  measured code agrees with Bambuddy's `HH` prefix test; `rack/rank.py` reuses it
   rather than restating the rule. They must agree, and are compared only when
   both are present, so a missing code or name does not rule a position out.
 
@@ -314,7 +314,7 @@ before the queue item exists) writes the picks it got back on `QueueOutcome` to
 A raise or `None` from the callback means no choice: the item is queued without
 `nozzle_rack_choice`, and Bambuddy picks, as today.
 
-The pure ranking lives in `bambuddy/rack.py`, with no I/O:
+The pure ranking lives in `rack/rank.py`, with no I/O:
 
 ```python
 rank_rack(groups: list[RackGroup], rack: list[NozzleRackSlot],
@@ -435,19 +435,22 @@ so the trade is accepted.
   (`warningsFor` in `frontend/src/lib/filaments.ts`). That is deliberate: a rack
   pick is a choice for the whole plate's rack side, and the message names the
   group or side it is about.
-- `bambuddy/rack.py` (new): the material table, the abrasive test and `rank_rack`.
+- `rack/rank.py` (new): the material table, the abrasive test and `rank_rack`.
 - `bambuddy/print_run.py`: the `choose_rack` callback, and writing the picks to
   `rack_nozzle_picks` after the enqueue.
 - `bambuddy/watcher.py`: on the first settled read, write the print's
   `rack_nozzle_prints` rows from its linked archives.
 - Migration: `rack_nozzle_seen`, `rack_nozzle_picks` and `rack_nozzle_prints`.
-- `bambuddy/rack_usage.py` (new): `RackUsageStore`, the one store that owns all
-  three tables: `seen()`, `record_picks()`, `record_prints()` and
-  `usage(serials)`. It is a `Component` (`core/components.py`), registered in
-  `bambuddy/component.py` beside `ARCHIVE_CACHE`, never a new `AppState` field;
-  routes read it through `api/components.py` `component_dep`. `PrintLinkStore`
-  is on the older `AppState` wiring and is not the pattern to copy.
-  `print_run.py`, `choices.py` and `watcher.py` call it; none of them holds SQL.
+- `rack/usage.py` (new): `RackUsageStore`, the one store that owns all three
+  tables: `seen()`, `record_picks()`, `record_prints()` and `usage(serials)`.
+- `rack/component.py` (new): `RACK_USAGE` and its `COMPONENT`. Discovery
+  (`core/components.py` `discover_components`) takes one `COMPONENT` per
+  feature package, and `bambuddy/component.py` already holds `ARCHIVE_CACHE`,
+  so the rack code is its own feature package, `scadbuddy/rack/` (`rank.py`,
+  `usage.py`, `component.py`), never a new `AppState` field. Routes read it
+  through `api/components.py` `component_dep`; `print_run.py`, `choices.py` and
+  `watcher.py` call it, and none of them holds SQL. `PrintLinkStore` is on the
+  older `AppState` wiring and is not the pattern to copy.
 - `docs/superpowers/specs/2026-09-27-spool-first-print-design.md` §6 and
   `docs/superpowers/plans/2026-09-27-spool-first-print.md` (its "no
   `nozzle_rack_choice`" design decision): amend both to point at this spec, so
@@ -473,9 +476,9 @@ fixtures (which use invented serials), or in commits.
 
 | # | Question | Test | If it fails |
 |---|---|---|---|
-| 1 | What do the `nozzle_type` codes say about material? | The owner reads each rack position's hotend label and records code → material here. Bambuddy does not decode it: it reads only the two-letter flow prefix (`slot_nozzle.py`), and its one remark, that `HH01` is "hardened steel high-flow" (`bambu_mqtt.py`), is not enough to call `HS00` or `HS01` hardened | **Gate, not a blocker.** `rack.py` ships with the table **empty**, so every code counts as not hardened: abrasive groups always get `rack-unsafe-material`, never a silent brass pick. The implementation plan's first task asks the owner for the labels; filling the table is a one-line data change once they are known |
+| 1 | What do the `nozzle_type` codes say about material? | The owner reads each rack position's hotend label and records code → material here. Bambuddy does not decode it: it reads only the two-letter flow prefix (`slot_nozzle.py`), and its one remark, that `HH01` is "hardened steel high-flow" (`bambu_mqtt.py`), is not enough to call `HS00` or `HS01` hardened | **Gate, not a blocker.** `rack/rank.py` ships with the table **empty**, so every code counts as not hardened: abrasive groups always get `rack-unsafe-material`, never a silent brass pick. The implementation plan's first task asks the owner for the labels; filling the table is a one-line data change once they are known |
 | 2 | Does `filament-requirements` on a ScadBuddy-sliced file return `group_id` and `on_rack`? | Called on queue item 160's sliced file (library file 228) | **Pass, 2026-10-01.** Both filaments came back as `group_id: 0`, `group: {on_rack: true, nozzle_diameter: "0.20", volume_type: "Standard", filament_color: "#00B1B7"}`. Two colors on one hotend are one group, and the group's color is its first filament's, so step 2 of §3 matches on the group color. On an unsliced upload (files 240, 251) `group_id`, `group` and `type` are all empty, which is why the pick is made after the slice (§5) |
-| 3 | **Gate: settle before building `rack.py`, `rack_usage.py` or the migrations.** Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
+| 3 | **Gate: settle before building `rack/rank.py`, `rack/usage.py` or the migrations.** Does a sent pick change which hotend the printer mounts? | Queue a one-color print with a pick that differs from Bambuddy's default, with manual start. **Needs the owner's OK; it is a physical print** | Send no pick and keep only the warning |
 
 **Build order.** Unknown 3 is what the whole feature rests on, so the
 implementation plan settles it first: its first task is the live pick test
