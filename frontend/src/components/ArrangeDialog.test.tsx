@@ -1,6 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Output } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { lastArrangeRequest } from '../mocks/handlers'
@@ -99,5 +100,34 @@ describe('ArrangeDialog', () => {
     const progress = await screen.findByText('Arranging…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  it('stops waiting when it is closed, so the job is never saved behind its back', async () => {
+    // Final review M3: a closed dialog kept polling; reopened and clicked again, both
+    // loops saved the same coalesced job as two outputs.
+    const created_at = '2026-09-28T12:00:00Z'
+    let status = 'pending'
+    server.use(
+      http.post('/api/v1/outputs/arrange', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status: 'pending', created_at }, { status: 202 }),
+      ),
+      http.get('/api/v1/jobs/arrange-wait', () =>
+        HttpResponse.json({ id: 'arrange-wait', slug: 'name-keychain', status, created_at }),
+      ),
+    )
+    const save = vi.spyOn(api, 'createOutput')
+    const onArranged = vi.fn()
+    // `rerender` swaps the whole tree, router included; the dialog needs none.
+    const dialog = (open: boolean) => (
+      <ArrangeDialog open={open} slug="name-keychain" outputs={[first]} onClose={vi.fn()} onArranged={onArranged} />
+    )
+    const { user, rerender } = renderPage(dialog(true))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByText('Waiting for a worker…')
+    rerender(dialog(false))
+    status = 'done'
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    expect(save).not.toHaveBeenCalled()
+    expect(onArranged).not.toHaveBeenCalled()
   })
 })

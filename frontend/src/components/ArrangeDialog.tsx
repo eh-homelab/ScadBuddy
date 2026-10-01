@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import type { ArrangeRequest, Output } from '../api/types'
 import { GOAL_LABELS, runArrange, type ArrangeGoal, type Arranged } from '../lib/arrange'
@@ -32,6 +32,15 @@ export function ArrangeDialog({ open, slug, outputs, onClose, onArranged }: Prop
 
   const countOf = (key: string, fallback: number) => counts[key] ?? fallback
 
+  /** The arrange in flight: closing the dialog (or leaving the page) stops its wait. */
+  const running = useRef<AbortController | null>(null)
+  useEffect(() => {
+    if (open) return
+    running.current?.abort()
+    running.current = null
+  }, [open])
+  useEffect(() => () => running.current?.abort(), [])
+
   async function submit() {
     setBusy(true)
     setError(null)
@@ -44,11 +53,15 @@ export function ArrangeDialog({ open, slug, outputs, onClose, onArranged }: Prop
       goal,
       name: name.trim() || null,
     }
+    const controller = new AbortController()
+    running.current = controller
     try {
-      onArranged(await runArrange(slug, body, { onProgress: setProgress }))
+      onArranged(await runArrange(slug, body, { onProgress: setProgress, signal: controller.signal }))
     } catch (cause) {
+      if (controller.signal.aborted) return
       setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
     } finally {
+      if (running.current === controller) running.current = null
       setBusy(false)
       setProgress(null)
     }
