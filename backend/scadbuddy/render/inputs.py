@@ -39,7 +39,7 @@ def legacy_inputs(params: Mapping[str, ParamValue]) -> dict[str, Any]:
     return {"params": dict(params), "v": 0}
 
 
-def _typed(params: Mapping[str, ParamValue]) -> dict[str, tuple[type, ParamValue]]:
+def _typed(params: Mapping[str, ParamValue]) -> dict[str, tuple[type[object], ParamValue]]:
     return {name: (type(value), value) for name, value in params.items()}
 
 
