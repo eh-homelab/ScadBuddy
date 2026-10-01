@@ -119,6 +119,8 @@ _TOPIC = re.compile(
             f"job:{_strip_anchors(JOB_ID_PATTERN)}",
             f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
             f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
+            # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
+            r"print:library:[1-9][0-9]{0,17}",
             *sorted(COLLECTION_TOPICS),
         ]
     )
