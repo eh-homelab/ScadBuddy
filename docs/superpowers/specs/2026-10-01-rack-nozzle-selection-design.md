@@ -281,7 +281,7 @@ made per rack side, not per group:
 - After the slice, `manual` is built from it: when the slice has one `on_rack`
   group, that group gets the manual position. When it has several, the lowest
   `group_id` gets it and the others are ranked, and the run result carries a
-  `rack-left-to-bambuddy`-style note saying which groups were ranked instead.
+  `rack-left-to-bambuddy` warning saying which groups were ranked instead.
 - `manual` is `{group_id: position}`. Its positions are placed first and
   excluded for every other group, so a manual pick and a ranked one can never
   name the same position.
@@ -354,13 +354,15 @@ so the trade is accepted.
   both carried on `PrintRunResult.warnings` and on `/check`'s warnings like the
   existing kinds:
   - `rack-unsafe-material`: the pick is not hardened for an abrasive group;
+  - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
+    unreadable", "requirements unreadable", "no eligible position for group N").
+    This is the message §5's failure table promises. It also carries the note
+    when a manual pick went to one of several groups and the rest were ranked.
+
   Both carry `slot_id: null`, which the frontend reads as plate-wide
   (`warningsFor` in `frontend/src/lib/filaments.ts`). That is deliberate: a rack
   pick is a choice for the whole plate's rack side, and the message names the
   group or side it is about.
-  - `rack-left-to-bambuddy`: no choice was sent, with the reason ("status
-    unreadable", "requirements unreadable", "no eligible position for group N").
-    This is the message §5's failure table promises.
 - `bambuddy/rack.py` (new): the material table, the abrasive test and `rank_rack`.
 - `bambuddy/print_run.py`: the `choose_rack` callback, and writing the picks to
   `rack_nozzle_picks` after the enqueue.
@@ -405,7 +407,10 @@ fixtures (which use invented serials), or in commits.
   - `PLA-CF`, `PA6-CF` and `ABS-GF` abrasive, `PLA` and `PLA-AERO` not;
   - a `PLA` group whose spool's subtype is `Glow` abrasive;
   - a manual pick reserved before the ranking, so no ranked group takes its
-    position; an ineligible or duplicated manual pick refused with 422;
+    position; a manual pick that does not fit the side refused with 422 before
+    slicing; with two `on_rack` groups the manual pick goes to the lower id;
+  - `"#00B1B7"` on a group matching `"00B1B7FF"` on a slot;
+  - a `used_in_plate: false` CF filament not making its group abrasive;
   - a group of PLA and PLA-CF counted as abrasive;
   - `"High Flow"` matching only `HH` codes, `"Standard"` only non-`HH`, and a
     missing code or name matching either.
