@@ -2816,6 +2816,7 @@ export const handlers = [
       description: body.description ?? null,
       colour: body.colour ?? null,
       status: 'active',
+      parent_id: body.parent_id ?? null,
       archive_count: 0,
       queue_count: 0,
       folder_id: null,

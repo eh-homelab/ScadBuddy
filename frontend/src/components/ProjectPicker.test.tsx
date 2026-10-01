@@ -109,6 +109,62 @@ describe('ProjectPicker', () => {
     expect(posted).toEqual([{ name: 'Workshop Bins', description: null, colour: '#ef4444' }])
   })
 
+  it('nests a new project under a chosen parent, with None the default (#930)', async () => {
+    const posted: ProjectRequest[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/print/projects')) {
+        posted.push((await request.clone().json()) as ProjectRequest)
+      }
+    })
+    const { user } = mount()
+    await listed()
+
+    await user.selectOptions(select(), 'new')
+    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
+    expect(parent).toHaveValue('')
+    expect(within(parent).getByRole('option', { name: 'None' })).toBeInTheDocument()
+    await user.type(screen.getByTestId('new-project-name'), 'Tags')
+    await user.selectOptions(parent, '1')
+    await user.click(screen.getByTestId('create-project'))
+
+    await waitFor(() =>
+      expect(select().selectedOptions[0]).toHaveTextContent(/^Reagan Keychain › Tags · /),
+    )
+    expect(posted).toEqual([{ name: 'Tags', description: null, colour: null, parent_id: 1 }])
+  })
+
+  it('offers the project in view as the parent without choosing it (#930)', async () => {
+    withLastProject(1)
+    const { user } = mount()
+    await listed()
+    await waitFor(() => expect(select()).toHaveValue('1'))
+
+    await user.selectOptions(select(), 'new')
+    const parent = screen.getByTestId<HTMLSelectElement>('new-project-parent')
+    expect(parent).toHaveValue('')
+    await user.click(screen.getByTestId('suggested-parent'))
+    expect(parent).toHaveValue('1')
+  })
+
+  it('shows a child project under its parent as a breadcrumb (#930)', async () => {
+    server.use(
+      http.get('/api/v1/print/projects', () =>
+        HttpResponse.json({
+          projects: [
+            ...fixtures.projectViews,
+            { ...fixtures.projectViews[1]!, id: 3, name: 'Tags', parent_id: 1 },
+          ],
+          last_project_id: null,
+        }),
+      ),
+    )
+    mount()
+    await listed()
+    expect(within(select()).getByRole('option', { name: /Tags/ })).toHaveTextContent(
+      /^Reagan Keychain › Tags · /,
+    )
+  })
+
   it('opens on the project the last send went to', async () => {
     withLastProject(1)
     mount()

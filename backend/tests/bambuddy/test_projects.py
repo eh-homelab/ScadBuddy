@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.projects import (
     folder_for,
 )
 from scadbuddy.core.problems import ApiError
-from tests.bambuddy.conftest import BASE_URL, recording
+from tests.bambuddy.conftest import BASE_URL, recorded_schema, recording
 
 API = f"{BASE_URL}/api/v1"
 
@@ -114,6 +114,79 @@ async def test_only_the_fields_scadbuddy_has_an_opinion_about_are_sent(
 
     await ensure_project(bambuddy, ProjectRequest(name="x"))
     assert set(json.loads(created.calls.last.request.content)) == {"name", "priority"}
+
+
+@respx.mock
+async def test_a_new_project_can_be_put_under_a_parent(bambuddy: BambuddyClient) -> None:
+    """``parent_id`` is the field Bambuddy's recorded ``ProjectCreate`` takes for the
+    nesting (#930), and the listing reports it back so the picker can indent."""
+    assert "parent_id" in recorded_schema("ProjectCreate")["properties"]
+    created = respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 1}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/1").mock(
+        return_value=httpx.Response(200, json=recording("folders-by-project.json"))
+    )
+    respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Tags", "project_id": 7})
+    )
+
+    view = await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1))
+    assert json.loads(created.calls.last.request.content)["parent_id"] == 1
+    assert view.parent_id == 1
+
+
+@respx.mock
+async def test_a_child_projects_folder_is_made_inside_its_parents_folder(
+    bambuddy: BambuddyClient,
+) -> None:
+    """The library mirrors the nesting: the new folder's ``parent_id`` is the parent
+    project's own folder (``FolderCreate.parent_id``), not the library's top level."""
+    assert "parent_id" in recorded_schema("FolderCreate")["properties"]
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 1}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/1").mock(
+        return_value=httpx.Response(200, json=recording("folders-by-project.json"))
+    )
+    folder = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "name": "Tags", "project_id": 7, "parent_id": 2}
+        )
+    )
+
+    await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=1))
+    assert json.loads(folder.calls.last.request.content) == {
+        "name": "Tags",
+        "project_id": 7,
+        "parent_id": 2,
+    }
+
+
+@respx.mock
+async def test_a_parent_without_a_folder_is_not_given_one(bambuddy: BambuddyClient) -> None:
+    """Creating a child must not write to a project nobody touched: when the parent
+    has no folder of its own, the child's folder goes at the top level."""
+    respx.post(f"{API}/projects/").mock(
+        return_value=httpx.Response(
+            200, json={"id": 7, "name": "Tags", "status": "active", "parent_id": 4}
+        )
+    )
+    respx.get(f"{API}/library/folders/by-project/7").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/library/folders/by-project/4").mock(return_value=httpx.Response(200, json=[]))
+    folder = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 9, "name": "Tags", "project_id": 7})
+    )
+
+    await ensure_project(bambuddy, ProjectRequest(name="Tags", parent_id=4))
+    assert folder.call_count == 1
+    assert json.loads(folder.calls.last.request.content) == {"name": "Tags", "project_id": 7}
 
 
 @respx.mock
