@@ -174,8 +174,8 @@ on shutdown.
     blob store's pieces and snapshots (see "Blob store and render workers").
   - `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 86400 s): how often that sweep runs
     after the one at startup; 0 turns it off. The same interval drives the blob
-    store's sweep and every process's piece-cache eviction, so 0 turns those off
-    too.
+    store's sweep, which 0 also turns off, and a render worker's piece-cache
+    eviction, which 0 does not: a worker then evicts every 300 s.
   - The same periodic sweep also clears old duplicate staging
     (`SCADBUDDY_DUPLICATE_STAGING_MAX_AGE`), so 0 leaves that to startup and the
     next duplicate.
@@ -407,8 +407,8 @@ workers restart.
     `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
     revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
-    hour; it fetches one again when a render names it). `0` turns all of that off,
-    and the volume then grows until it is full.
+    hour; it fetches one again when a render names it). `0` (or unset) does not
+    stop that pass: the worker falls back to a fixed 300 s.
   - Size the `emptyDir`'s `sizeLimit` for what bounds each part, plus one interval's
     writes. Past it, the kubelet evicts the pod mid-render, with no drain.
 
@@ -453,7 +453,7 @@ workers restart.
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
-| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL`, not on write. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and the Settings page's **Store** section show the
