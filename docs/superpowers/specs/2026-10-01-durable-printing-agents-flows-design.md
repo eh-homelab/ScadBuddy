@@ -139,12 +139,13 @@ Non-goals
     - **Built-in tools run inside the model segment.** Claude Code's own tools (Bash,
       Edit and the rest) are not activities, so a segment that runs again can run them
       again.
-      - This does not reach ScadBuddy. The plugin enables built-in tools only when
-        `builtin_tools` is passed, and ScadBuddy passes none, as every classic query
-        already passes `tools: []` (`agent/src/harness/options.ts:59`).
-      - Every tool a durable session has is a durable tool (§6.3).
+      - In ScadBuddy this reaches only `Skill`. The plugin enables built-in tools only
+        when `builtin_tools` is passed, and a durable session passes exactly
+        `["Skill"]` (§6.3b). Running `Skill` again reads the same instructions again,
+        which is harmless.
+      - Every tool with an effect is a durable tool (§6.3).
       - Phase 5 asserts in a test that a durable session's engine is started with no
-        built-in tools.
+        built-in tool but `Skill`.
     - **One durable tool call at a time.** The engine keeps one paused call per run. When
       Claude asks for several in one message, the first pauses, and each of the others
       is told to call again after its result.
@@ -450,7 +451,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
   after the 168h retention. The bucket, prefix and credentials item are a clusters
   change, made with phase 1's manifests.
 
-`PrintRuns`, `PrintRunStore`'s claim/find/heartbeat/expire, `HEARTBEAT_INTERVAL`,
+`PrintRuns`, `PrintRunStore`'s `claim`, `find`, `heartbeat` and `_expire_lost`, `HEARTBEAT_INTERVAL`,
 `LOST_AFTER` and the `LOST`/`LOST_UNQUEUED` texts are deleted.
 
 ### 5.5 The `scadbuddy-print` worker
@@ -595,7 +596,7 @@ It holds the Anthropic credential and runs a git-pinned, pre-release package, so
 the most constrained runtime in the system.
 
 - **Image.** The Dockerfile stage `agent-durable` runs as `USER 10001:10001`, like the
-  `agent` stage (`Dockerfile:509`, `:523`). There are no build tools in the final
+  `agent` stage (`Dockerfile:271`). There are no build tools in the final
   stage, and its only writable path is `/srv/agent`, an `emptyDir`. The pod sets
   `readOnlyRootFilesystem`, `runAsNonRoot`, drops all capabilities and uses
   `seccompProfile: RuntimeDefault`.
@@ -616,6 +617,35 @@ the most constrained runtime in the system.
   at build.
 - **The credential** is decrypted per segment, passed to the runner's `env`, and never
   logged, written to disk or put in history (§6.2).
+
+### 6.3b Plugins, skills and settings in a durable session
+
+A classic query loads ScadBuddy's own plugin (`agent/src/harness/ownPlugin.ts`: the
+`skills` and `agents` of `plugins/scadbuddy/`, with the `Skill` and `Agent` built-ins and
+`settingSources: []`, `agent/src/harness/options.ts:60`). It also loads whatever
+`ai_plugins` and `ai_plugin_packages` are approved, vetted by `harness/plugins.ts`, which
+refuses anything that starts a process because it would inherit the credential env.
+
+A durable session in phase 5 gets:
+
+- **No filesystem settings.** The runner's `extra_options` carries
+  `setting_sources=[]`, as `options.ts` does. Nothing in `/srv/agent` or the image is
+  read as Claude Code configuration.
+- **ScadBuddy's own skills only.** The image copies `plugins/scadbuddy/skills` into the
+  `agent-durable` stage, as the `agent-build` stage does for the classic harness. They
+  are loaded through the runner, with `builtin_tools=["Skill"]`.
+  - Skills are instructions: no hooks, no MCP servers, no LSP, no processes.
+  - The plugin's `.mcp.json` is for installs outside ScadBuddy and is not copied, as
+    in the classic harness.
+- **No subagents.** The plugin cannot pause a durable tool call made from a subagent and
+  fails closed (§3.2). So `Agent` is not enabled, and `plugins/scadbuddy/agents` is not
+  loaded. A durable session that needs a subagent's role asks for a new session with
+  `agent(...)` in a flow (§7).
+- **No `ai_plugins` and no `ai_plugin_packages`.** Giving them to durable sessions needs
+  a Python equivalent of `harness/plugins.ts` and `plugins/packages/vet.ts`, with the
+  same process-spawning refusal and the forwarder for remote MCP. That is its own later
+  issue. Until then the durable mode's description in the mode picker says that
+  plugins are not available in it.
 
 ### 6.4 Human-in-the-loop
 
@@ -840,5 +870,6 @@ Each phase is its own implementation plan and ships alone.
 6. **Flows** (§7): the harness verification, `ProjectWorkflow`, host functions, records,
    routes, Reset, and the Workflows page.
 
-Follow-up outside this spec: moving the plugin pin to PyPI once the package is
-published.
+Follow-ups outside this spec: moving the plugin pin to PyPI once the package is
+published; and `ai_plugins` / `ai_plugin_packages` for durable sessions, behind a Python
+port of the plugin vetting (§6.3b).
