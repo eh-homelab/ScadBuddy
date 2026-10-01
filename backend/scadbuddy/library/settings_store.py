@@ -256,6 +256,7 @@ class SettingsPatch(BaseModel):
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     log_level: str | None = None
+    temporal_ui_url: str | None = None
 
     #: Where blobs live (spec 2026-09-27 §6.2) and the store's caps: read at start, so a
     #: change applies at the next one; a reset puts one back on the deployment's value.
@@ -435,6 +436,15 @@ class SettingsStore:
         for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
             if changes.get(secret) == "":
                 changes[secret] = None
+        if changes.get("store_backend") == "bambuddy":
+            current = self.load()
+            url = changes.get("bambuddy_url", current.bambuddy_url)
+            inbox = changes.get("library_folder_id", current.library_folder_id)
+            if not url or inbox is None:
+                raise StoreNotReadyError(
+                    "the Bambuddy store needs a Bambuddy URL and a library folder (its inbox)"
+                    " saved first"
+                )
         with self._pool.connection() as conn, conn.transaction():
             if (changes.keys() | set(reset)) & STORE_READINESS:
                 self._check_store_ready(conn, changes, reset)

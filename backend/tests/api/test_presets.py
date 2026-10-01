@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 import scadbuddy.api.params as params_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
@@ -996,3 +997,56 @@ def test_an_inputs_version_survives_model_json(
     assert written["inputs"] == {"params": {"width": 3}, "v": 2}
     [listed] = [p for p in client.get(_url(model)).json() if p["origin"] == "template"]
     assert listed["inputs"] == {"params": {"width": 3}, "v": 2}
+
+
+# ── fix round 3: inputs-only patches, duplicate's 422, model.json left alone ──
+
+
+def test_an_inputs_only_update_without_params_keeps_the_params(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    lid = _lid(client, model)
+    updated = client.patch(_url(model, lid["id"]), json={"inputs": {"ui": {"tab": "base"}}})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["params"] == {"width": 12}
+    assert updated.json()["inputs"] == {"params": {"width": 12}, "ui": {"tab": "base"}, "v": 0}
+    assert _stored(pg_conninfo, lid["id"]) == (
+        {"width": 12},
+        {"params": {"width": 12}, "ui": {"tab": "base"}, "v": 0},
+    )
+
+
+def test_duplicating_a_preset_whose_stored_inputs_are_oversized_is_a_422(
+    client: TestClient, model: str, pg_conninfo: str
+) -> None:
+    saved = _save(client, model, "Big", {"width": 1})
+    oversized = {"params": {"width": 1}, "ui": {"blob": "x" * 70000}, "v": 0}
+    _sql(
+        pg_conninfo,
+        "UPDATE saved_presets SET inputs = %s WHERE id = %s",
+        (Jsonb(oversized), saved["id"]),
+    )
+    refused = _duplicate(client, model, saved["id"], "Big copy")
+    assert refused.status_code == 422, refused.text
+    assert "at most 65536" in refused.json()["detail"]
+
+
+def test_an_unrelated_metadata_patch_leaves_model_json_presets_as_written(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = {
+        "id": "plain",
+        "name": "Plain",
+        "params": {"width": 5},
+        "inputs": {"params": {"width": 5}, "v": 0},
+    }
+    _define(paths, model, [legacy])
+    tagged = client.patch(f"/api/v1/models/{model}", json={"tags": ["box"]})
+    assert tagged.status_code == 200, tagged.text
+    [written] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert written == legacy
+    # A patch that writes the presets still writes them in canonical form.
+    assert _patch_presets(client, model, [legacy]).status_code == 200
+    [rewritten] = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))["presets"]
+    assert "inputs" not in rewritten
+    assert rewritten["params"] == {"width": 5}
