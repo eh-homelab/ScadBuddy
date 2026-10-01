@@ -740,7 +740,7 @@ async def test_an_upload_whose_local_copy_vanished_is_not_called_absent_from_the
             remote_assets=RemoteAssets(local_content(tmp_path / "remote", pool)),
         )
         acts = RenderActivities(deps)
-        params = {"label": meta.id}
+        params: dict[str, str | int | float | bool] = {"label": meta.id}
         req = PieceRequest(
             slug="demo",
             revision=REVISION,
