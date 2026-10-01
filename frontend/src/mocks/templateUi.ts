@@ -1,3 +1,5 @@
+import mazeUi from './ui/maze-puzzle.js?raw'
+
 /** Template UI modules the msw API serves (spec 2026-09-27 §4). */
 export const UI_MODULES: Record<string, Record<string, string>> = {
   'ui-demo': {
@@ -22,4 +24,7 @@ export function mount(root, host) {
   'ui-broken': {
     'index.js': `export function mount() { throw new Error('the template UI is broken on purpose') }\n`,
   },
+  // A copy of models/maze-puzzle/ui/index.js (ui/copies.test.ts keeps it byte-identical):
+  // the bundle, and so the mocks, may not import from models/.
+  'builtin:maze-puzzle': { 'index.js': mazeUi },
 }

@@ -36,4 +36,9 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Copies of bundled template UIs (models/*/ui/*.js): plain browser modules.
+    files: ['src/mocks/ui/**/*.js'],
+    languageOptions: { ecmaVersion: 2022, sourceType: 'module', globals: globals.browser },
+  },
 )

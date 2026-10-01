@@ -73,3 +73,15 @@ test('the page CSP breaks nothing the app does', async ({ page }) => {
   await page.waitForLoadState('networkidle')
   expect(await violations(page)).toEqual([])
 })
+
+test('maze-puzzle shows the lid colour only with a lid', async ({ page }) => {
+  await trackCsp(page)
+  await page.goto('/m/builtin%3Amaze-puzzle')
+  const ui = page.getByTestId('template-ui')
+  await expect(ui.locator('sb-param[name="wall_color"]')).toBeVisible()
+  await expect(ui.locator('sb-param[name="lid_color"]')).toBeHidden()
+  await ui.locator('sb-param[name="mode"]').getByRole('combobox').selectOption('ball_lid')
+  await expect(ui.locator('sb-param[name="lid_color"]')).toBeVisible()
+  await expect(page.getByTestId('ui-origin')).toHaveText('Custom interface · built-in')
+  expect(await violations(page)).toEqual([])
+})
