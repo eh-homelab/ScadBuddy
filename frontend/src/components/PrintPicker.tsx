@@ -118,9 +118,10 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   const [arrangeError, setArrangeError] = useState<string | null>(null)
   /** #902 — the output in view, read back after a re-render gave it its objects. */
   const [backfilled, setBackfilled] = useState<Output | null>(null)
-  /** Asking whether to re-render it first; Arrange said so, though it showed objects. */
-  const [askBackfill, setAskBackfill] = useState(false)
-  const [flagged, setFlagged] = useState(false)
+  /** The output being asked about (re-render it first?), by id, so it never names another. */
+  const [askFor, setAskFor] = useState<string | null>(null)
+  /** The output Arrange said needs a re-render, though it showed objects; by id, likewise. */
+  const [flaggedId, setFlaggedId] = useState<string | null>(null)
   const [backfillProgress, setBackfillProgress] = useState<Record<string, string>>({})
   /**
    * What a re-arrange was made for, carried across the switch to its output: the new
@@ -135,6 +136,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     if (open) return
     arrangeRun.current?.abort()
     arrangeRun.current = null
+    setAskFor(null)
+    setFlaggedId(null)
   }, [open])
   useEffect(() => () => arrangeRun.current?.abort(), [])
   const givenKey = sourceKey(given)
@@ -145,6 +148,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     arrangeRun.current = null
     carry.set(null)
     setArranged(null)
+    setAskFor(null)
+    setFlaggedId(null)
   }, [givenKey, carry])
   const source: PrintSource | undefined = arranged ? { kind: 'output', output: arranged } : given
   /** The output in view, with what Re-arrange needs of it (a library file has none). */
@@ -152,7 +157,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   const target = inView && backfilled?.id === inView.id ? backfilled : inView
   /** Its objects, when the caller knows them; an unknown list offers no Re-arrange. */
   const known = target?.manifest !== undefined
-  const stale = known && (flagged || needsBackfill(target))
+  const stale = known && (flaggedId === target.id || needsBackfill(target))
+  const askBackfill = target !== undefined && askFor === target.id
 
   /**
    * The model, for its print-options scope — the same slug its choices are remembered
@@ -249,7 +255,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
   async function rearrange(backfill: boolean) {
     if (!target?.slug) return
-    setAskBackfill(false)
+    setAskFor(null)
     setArranging(true)
     setArrangeNote(null)
     setArrangeError(null)
@@ -269,7 +275,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
         }
         from = read
         setBackfilled(read)
-        setFlagged(false)
+        setFlaggedId(null)
       }
       const next = await runArrange(
         from.slug,
@@ -296,8 +302,8 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
     } catch (cause) {
       if (controller.signal.aborted) return
       if (backfillIds(cause)) {
-        setFlagged(true)
-        setAskBackfill(true)
+        setFlaggedId(target.id)
+        setAskFor(target.id)
         return
       }
       setArrangeError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
@@ -563,7 +569,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                     size="sm"
                     className="mt-1.5"
                     disabled={arranging || askBackfill}
-                    onClick={() => (stale ? setAskBackfill(true) : void rearrange(false))}
+                    onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
                   >
                     Re-arrange for these spools
                   </Button>
@@ -572,7 +578,7 @@ export function PrintPicker({ open, source: given, onClose, onRan, onPrinterMode
                       <BackfillPrompt
                         outputs={[target]}
                         onConfirm={() => void rearrange(true)}
-                        onCancel={() => setAskBackfill(false)}
+                        onCancel={() => setAskFor(null)}
                       />
                     </div>
                   )}

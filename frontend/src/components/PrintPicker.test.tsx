@@ -642,6 +642,45 @@ describe('PrintPicker', () => {
       expect(lastArrangeRequest()).toBeNull()
     })
 
+    it('asks when Arrange itself says the output needs a re-render', async () => {
+      // The caller's copy shows objects the server no longer records.
+      const stale: Output = { ...nova, manifest: output.manifest }
+      const { user } = renderPage(
+        <PrintPicker open source={{ kind: 'output', output: stale }} onClose={vi.fn()} onRan={vi.fn()} />,
+      )
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByRole('group', { name: 'Re-render first' })).toHaveTextContent(
+        'Re-render Nova, then arrange?',
+      )
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('keeps a refusal and its prompt to the output they were for', async () => {
+      const stale: Output = { ...nova, manifest: output.manifest }
+      // ActionBar keeps one picker mounted and changes its source.
+      function Switching() {
+        const [source, setSource] = useState<Output>(stale)
+        return (
+          <>
+            <button onClick={() => setSource(output)}>Show Reagan</button>
+            <PrintPicker open source={{ kind: 'output', output: source }} onClose={vi.fn()} onRan={vi.fn()} />
+          </>
+        )
+      }
+      const { user } = renderPage(<Switching />)
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      await screen.findByRole('group', { name: 'Re-render first' })
+      await user.click(screen.getByRole('button', { name: 'Show Reagan', hidden: true }))
+      await waitFor(() => expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument())
+      expect(screen.queryByText(/saved before Arrange existed/)).not.toBeInTheDocument()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
