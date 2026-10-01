@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
 import psycopg
-from fastapi import APIRouter, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.api.deps import (
+    AssetsDep,
     CatalogueDep,
     ConfigDep,
     EventsDep,
+    FetcherDep,
+    FontsDep,
+    HistoryDep,
     OutputIdPath,
     OutputsDep,
+    PathsDep,
     PrintLinksDep,
     RenderDep,
     SettingsStoreDep,
@@ -29,9 +35,11 @@ from scadbuddy.api.jobs import (
     GLB_MEDIA_TYPE,
     PNG_MEDIA_TYPE,
     JobStatus,
+    RenderRequest,
     ViewSize,
     _job_status,
     preview_view,
+    render_model,
     require_job,
 )
 from scadbuddy.api.models import PNG_MAGIC, require_model
@@ -52,12 +60,14 @@ from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
+    BackfillState,
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
@@ -109,6 +119,9 @@ class OutputDetail(OutputSummary):
     manifest: list[ManifestObject] = Field(default_factory=list)
     #: For an arranged output, the outputs its objects came from (Task 5).
     arranged_from: list[str] = Field(default_factory=list)
+    #: The re-render queued to give it a manifest (#902): pending while ``error`` is
+    #: None, failed with why otherwise; None when none was asked for or it attached.
+    backfill: BackfillState | None = None
 
 
 class OutputPlate(BaseModel):
@@ -160,6 +173,7 @@ def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCop
         files=store.files(meta.id),
         manifest=store.manifest(meta.id),
         arranged_from=store.arranged_from(meta.id),
+        backfill=store.backfill(meta.id),
         library_files=library_files,
     )
 
@@ -296,6 +310,9 @@ async def create_output(
 
 Goal = Literal["fewest_plates", "fewest_swaps", "by_colour", "keep_together"]
 assert get_args(Goal) == GOALS
+#: Arrange's refusal of outputs saved before manifests (#902): the UI offers to
+#: re-render them (`output_ids`) and arranges once they have one.
+NEEDS_BACKFILL_PROBLEM = "https://scadbuddy.dev/problems/needs-backfill"
 #: The most copies one arrange places, summed over its objects.
 MAX_ARRANGE_COPIES = 2000
 
@@ -348,18 +365,26 @@ def arrange_inputs(
     # name a slot no part uses, so it is never paired with `parts` by index.
     colours: list[str] = list(body.colours or [])
     slug: str | None = None
+    # Every output first, so one refusal names all that need a re-render (#902).
+    chosen = list(dict.fromkeys(o.output_id for o in body.objects))
+    for output_id in chosen:
+        require_output(outputs, output_id)
+    unrecorded = [i for i in chosen if not outputs.manifest(i)]
+    if unrecorded:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{len(unrecorded)} output(s) were saved before Arrange existed, so nothing"
+            " records their objects; re-render them (POST /outputs/{id}/backfill) to"
+            " arrange them",
+            type_=NEEDS_BACKFILL_PROBLEM,
+            code="needs_backfill",
+            output_ids=unrecorded,
+        )
     for obj in body.objects:
         meta = require_output(outputs, obj.output_id)
         slug = slug or meta.slug
         if obj.output_id not in manifests:
-            manifest = outputs.manifest(obj.output_id)
-            if not manifest:
-                raise ApiError(
-                    status.HTTP_409_CONFLICT,
-                    f"output {obj.output_id} was saved before outputs recorded their objects;"
-                    " generate it again to arrange it",
-                )
-            manifests[obj.output_id] = {m.part: m for m in manifest}
+            manifests[obj.output_id] = {m.part: m for m in outputs.manifest(obj.output_id)}
             if body.colours is None:
                 colours += [c for c in meta.colors if c not in colours]
         entry = manifests[obj.output_id].get(obj.part)
@@ -425,6 +450,73 @@ async def arrange_outputs(
             plate_model = (await client.printer(printer_id)).model
     slug, inputs = await asyncio.to_thread(arrange_inputs, outputs, body, plate_model=plate_model)
     job = await render.arrange(slug, inputs)
+    return _job_status(job, None)
+
+
+@router.post(
+    "/outputs/{output_id}/backfill",
+    response_model=JobStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-render an output saved before Arrange, to record its objects",
+    description="Queues an ordinary render of the output's recorded inputs at its recorded"
+    " revision (#902). When it finishes the output gains its manifest and holds its Parts;"
+    " it keeps its id, name and files. Poll the job with GET /jobs/{id}, then the output's"
+    " `backfill` and `manifest`.",
+)
+async def backfill_output(
+    output_id: OutputIdPath,
+    request: Request,
+    outputs: OutputsDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    render: RenderDep,
+    assets: AssetsDep,
+    fetcher: FetcherDep,
+    fonts: FontsDep,
+) -> JobStatus:
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    if await asyncio.to_thread(outputs.manifest, output_id):
+        raise ApiError(status.HTTP_409_CONFLICT, f"output {output_id} already records its objects")
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} was arranged, not rendered: there is nothing to render again",
+        )
+    version = meta.model_version
+    if not version or not re.fullmatch(COMMIT_ID_PATTERN, version):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} records no revision of {meta.slug} to render again",
+        )
+    params = await asyncio.to_thread(outputs.params, output_id)
+    inputs = await asyncio.to_thread(outputs.inputs, output_id, params)
+    try:
+        accepted = await render_model(
+            meta.slug,
+            RenderRequest(inputs=inputs, version=version),
+            request,
+            catalogue,
+            history,
+            paths,
+            config,
+            render,
+            assets,
+            fetcher,
+            fonts,
+        )
+    except ApiError as error:
+        if error.status != status.HTTP_404_NOT_FOUND:
+            raise
+        # The template, or that revision of it, is gone: this output cannot be made again.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"output {output_id} cannot be rendered again: revision {version} of"
+            f" {meta.slug} is no longer in the template's history ({error.detail})",
+        ) from None
+    await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
+    job = await asyncio.to_thread(require_job, render, accepted.job_id)
     return _job_status(job, None)
 
 

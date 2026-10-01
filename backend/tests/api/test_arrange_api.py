@@ -11,7 +11,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
-from scadbuddy.api.outputs import ArrangeObject, ArrangeRequest, arrange_inputs
+from scadbuddy.api.outputs import (
+    NEEDS_BACKFILL_PROBLEM,
+    ArrangeObject,
+    ArrangeRequest,
+    arrange_inputs,
+)
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import SlotChoice
 from scadbuddy.core.paths import DataPaths
@@ -66,7 +71,8 @@ async def test_an_output_without_a_manifest_is_refused_up_front(tmp_path: Path) 
     body = ArrangeRequest(objects=[ArrangeObject(output_id=meta.id, part="x", count=1)])
     with pytest.raises(ApiError) as raised:
         arrange_inputs(OutputStore(paths), body, plate_model=None)
-    assert raised.value.status == 409 and "generate it again" in raised.value.detail
+    assert raised.value.status == 409 and raised.value.type == NEEDS_BACKFILL_PROBLEM
+    assert raised.value.extensions == {"code": "needs_backfill", "output_ids": [meta.id]}
 
 
 async def test_nothing_to_place_is_refused(tmp_path: Path) -> None:

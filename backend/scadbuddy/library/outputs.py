@@ -23,7 +23,13 @@ from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyze_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.inputs import legacy_inputs, normalize_inputs
-from scadbuddy.render.job_models import FILE_NAME_PATTERN, BomEntry, ManifestObject, OutputRecord
+from scadbuddy.render.job_models import (
+    FILE_NAME_PATTERN,
+    BomEntry,
+    ManifestObject,
+    OutputRecord,
+    PipelineOutput,
+)
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
@@ -47,6 +53,9 @@ BOM_NAME = "bom.json"
 RECORD_NAME = "record.json"
 MANIFEST_NAME = "manifest.json"
 ARRANGED_NAME = "arranged_from.json"
+#: #902: the re-render that will give an output saved before manifests its own. Removed
+#: once attached; kept with an ``error`` when the re-render did not finish.
+BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
 #: `blob_refs.holder_kind` for a saved output: its Parts live as long as it does.
 OUTPUT_HOLDER = "output"
@@ -75,6 +84,20 @@ class PlateSend(BaseModel):
     plate_id: int
     queue_item_id: int
     slice_job_id: int
+
+
+class BackfillState(BaseModel):
+    """`backfill.json` (#902)."""
+
+    job_id: str
+    error: str | None = None
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write ``path`` whole or not at all: a reader never sees half a file."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
 
 
 class OutputMeta(BaseModel):
@@ -373,6 +396,51 @@ class OutputStore:
         if not path.is_file():
             return []
         return _ID_LIST.validate_json(path.read_text(encoding="utf-8"))
+
+    def backfill(self, output_id: str) -> BackfillState | None:
+        """The re-render queued to give this output a manifest (#902), if any."""
+        try:
+            path = self.directory(output_id) / BACKFILL_NAME
+        except OutputNotFoundError:
+            return None
+        if not path.is_file():
+            return None
+        return BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def start_backfill(self, output_id: str, job_id: str) -> None:
+        _replace(
+            self.directory(output_id) / BACKFILL_NAME,
+            BackfillState(job_id=job_id).model_dump_json(),
+        )
+
+    def fail_backfill(self, output_id: str, job_id: str, error: str) -> None:
+        state = BackfillState(job_id=job_id, error=error)
+        _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
+
+    def pending_backfills(self) -> list[tuple[str, BackfillState]]:
+        """Every output waiting on a re-render that has not failed."""
+        pending: list[tuple[str, BackfillState]] = []
+        for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
+            try:
+                state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
+            except (OSError, ValidationError):
+                continue  # deleted under us, or half written: the next pass reads it
+            if state.error is None:
+                pending.append((path.parent.name, state))
+        return pending
+
+    def attach_backfill(self, output_id: str, chosen: PipelineOutput) -> None:
+        """Give the output what a new one records (§7, §8.4) from its re-render, keeping
+        its id, name and files. Run again, it writes the same files."""
+        directory = self.directory(output_id)
+        if not (directory / RECORD_NAME).is_file():
+            _replace(directory / RECORD_NAME, chosen.record.model_dump_json())
+        _replace(
+            directory / MANIFEST_NAME,
+            json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
+        )
+        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
         path = self.directory(output_id) / RECORD_NAME
