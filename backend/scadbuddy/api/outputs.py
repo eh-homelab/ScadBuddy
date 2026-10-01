@@ -46,6 +46,7 @@ from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
+    OUTPUT_ID_PATTERN,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
     OutputMeta,
@@ -268,7 +269,9 @@ MAX_ARRANGE_COPIES = 2000
 
 
 class ArrangeObject(BaseModel):
-    output_id: str
+    #: An output id, as `OutputIdPath` takes it: the store looks it up by directory
+    #: glob, so "*" must never reach it.
+    output_id: str = Field(pattern=OUTPUT_ID_PATTERN)
     #: A `manifest` entry's `part`.
     part: str
     #: Copies to place; 0 leaves the object out.

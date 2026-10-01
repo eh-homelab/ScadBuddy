@@ -21,6 +21,9 @@ from scadbuddy.render.job_models import Job, now
 from scadbuddy.workflows.models import ArrangeInputs
 from tests.support.arrange import saved_output
 
+#: A well-formed output id no output has: each test fails for its own reason, not the id's.
+UNKNOWN = "0" * 32
+
 
 def _rewrite_manifest(paths: DataPaths, meta: OutputMeta, **update: object) -> None:
     """Change every manifest entry of a saved output on disk."""
@@ -121,7 +124,7 @@ async def test_a_printer_model_sets_the_plate(tmp_path: Path) -> None:
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:
     response = client.post(
         "/api/v1/outputs/arrange",
-        json={"objects": [{"output_id": "missing", "part": "p", "count": 1}]},
+        json={"objects": [{"output_id": UNKNOWN, "part": "p", "count": 1}]},
     )
     assert response.status_code == 404
 
@@ -129,20 +132,20 @@ def test_an_unknown_output_is_a_404(client: TestClient) -> None:
 def test_an_unknown_goal_is_a_422(client: TestClient) -> None:
     response = client.post(
         "/api/v1/outputs/arrange",
-        json={"objects": [{"output_id": "o", "part": "p", "count": 1}], "goal": "prettiest"},
+        json={"objects": [{"output_id": UNKNOWN, "part": "p", "count": 1}], "goal": "prettiest"},
     )
     assert response.status_code == 422
 
 
 def test_more_than_2000_copies_is_a_422(client: TestClient) -> None:
-    objects = [{"output_id": "o", "part": f"p{i}", "count": 500} for i in range(5)]
+    objects = [{"output_id": UNKNOWN, "part": f"p{i}", "count": 500} for i in range(5)]
     response = client.post("/api/v1/outputs/arrange", json={"objects": objects})
     assert response.status_code == 422
     assert "2500 copies" in response.text and "2000" in response.text
 
 
 def test_2000_copies_is_allowed() -> None:
-    objects = [ArrangeObject(output_id="o", part=f"p{i}", count=500) for i in range(4)]
+    objects = [ArrangeObject(output_id=UNKNOWN, part=f"p{i}", count=500) for i in range(4)]
     assert sum(o.count for o in ArrangeRequest(objects=objects).objects) == 2000
 
 
@@ -197,4 +200,20 @@ def test_an_arrange_too_large_to_start_is_a_413_before_any_job(
     )
     assert response.status_code == 413, response.text
     assert "the most a job can carry is" in response.text
+    assert state.render.store.counts() == before
+
+
+def test_an_output_id_that_is_not_an_id_is_a_422_before_any_job(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """The id names a directory to look up: "*" would glob to whichever output comes
+    first and record it in the arranged output's `arranged_from`."""
+    _, _, written = asyncio.run(saved_output(tmp_path))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    before = state.render.store.counts()
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"output_id": "*", "part": written.manifest[0].part, "count": 1}]},
+    )
+    assert response.status_code == 422, response.text
     assert state.render.store.counts() == before
