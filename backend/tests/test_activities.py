@@ -110,11 +110,15 @@ def _deps(
 
 def _request(revision: str | None = REVISION) -> PieceRequest:
     params = {"width": 12}
+    scope = None if revision is not None else "job:test"
     return PieceRequest(
         slug="demo",
         revision=revision,
+        scope=scope,
         params=dict(params),
-        piece_key=piece_key("demo", revision, "model.scad", params),
+        piece_key=piece_key(
+            "demo", revision if revision is not None else scope, "model.scad", params
+        ),
     )
 
 
