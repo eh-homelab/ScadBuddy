@@ -136,6 +136,9 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
     name pointing at it.
     """
     if request.project_id is not None:
+        if request.parent_id is not None:
+            # Linking never re-parents a project; dropping the field would look like it did.
+            raise ApiError(400, "parent_id applies only to a new project, not a linked one")
         project = await client.project(request.project_id)
     else:
         if not request.name:

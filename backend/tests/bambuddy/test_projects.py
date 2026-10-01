@@ -207,6 +207,17 @@ async def test_linking_a_project_that_already_has_a_folder_does_not_make_another
 
 
 @respx.mock
+async def test_a_parent_on_a_link_is_refused_rather_than_ignored(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Linking never re-parents an existing project, so a ``parent_id`` sent with
+    ``project_id`` is a 400 the caller sees, not a nesting silently dropped (#930)."""
+    with pytest.raises(ApiError) as raised:
+        await ensure_project(bambuddy, ProjectRequest(project_id=1, parent_id=2))
+    assert raised.value.status == 400
+
+
+@respx.mock
 async def test_a_new_project_needs_a_name(bambuddy: BambuddyClient) -> None:
     with pytest.raises(ApiError):
         await ensure_project(bambuddy, ProjectRequest())
