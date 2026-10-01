@@ -175,4 +175,28 @@ describe('TemplateUi', () => {
     await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
     expect(onFailure).toHaveBeenCalledOnce()
   })
+
+  it('gives a host kept after a template switch nothing of the next template', async () => {
+    let kept: Host | undefined
+    withModule((root, host) => {
+      kept ??= host
+      root.append(document.createElement('span'))
+    })
+    const a = deps()
+    const b = { ...deps(), slug: 'other', getInputs: () => ({ params: { name: 'B' } }) }
+    const { container, rerender } = render(
+      <TemplateUi slug="name-keychain" ui={UI} version={undefined} deps={a} inputs={{ params: {} }} onFailure={vi.fn()} />,
+    )
+    await waitFor(() => expect(kept).toBeDefined())
+    rerender(<TemplateUi slug="other" ui={UI} version={undefined} deps={b} inputs={{ params: {} }} onFailure={vi.fn()} />)
+    await waitFor(() => expect(shadow(container).childNodes.length).toBe(1))
+    const old = kept as Host
+    expect(() => old.inputs.get()).toThrow(/unmounted/)
+    await expect(old.schema()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.list()).rejects.toThrow(/unmounted/)
+    await expect(old.presets.save('x')).rejects.toThrow(/unmounted/)
+    await expect(old.presets.load('x')).rejects.toThrow(/unmounted/)
+    expect(b.presets.list).not.toHaveBeenCalled()
+    expect(b.presets.save).not.toHaveBeenCalled()
+  })
 })

@@ -71,21 +71,9 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     })
     const root = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
     adoptAppStyles(root)
-    const created = createHost({
-      slug,
-      version,
-      getSchema: () => latest.current.deps.getSchema(),
-      getInputs: () => latest.current.deps.getInputs(),
-      setInputs: (next) => latest.current.deps.setInputs(next),
-      generate: () => latest.current.deps.generate(),
-      openPrint: (id) => latest.current.deps.openPrint(id),
-      presets: {
-        list: () => latest.current.deps.presets.list(),
-        save: (name) => latest.current.deps.presets.save(name),
-        load: (id) => latest.current.deps.presets.load(id),
-      },
-      onDescribe: (fn) => latest.current.deps.onDescribe(fn),
-    })
+    // This mount's own deps: a host the template kept after its unmount never reaches
+    // the next template's.
+    const created = createHost(latest.current.deps)
     handle.current = created
     let active = true
     let cleanup: (() => void) | void
