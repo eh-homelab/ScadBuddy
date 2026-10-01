@@ -89,6 +89,9 @@ class ContentStore:
             self.metrics.store_ops.labels(op, outcome).inc()
 
     def usage(self) -> StoreUsage:
+        """Synchronous, unlike the rest of the class: a Postgres aggregate over every
+        row of the backend. Call it from a thread (`_require_room` runs in one; the
+        usage route and `/metrics` call `store_usage` in one)."""
         count, total, by_kind = self.index.usage(self.name)
         return StoreUsage(
             backend=self.name,
