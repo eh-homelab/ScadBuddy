@@ -313,6 +313,8 @@ export type SessionManagerDeps = {
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (session: SessionRecord, turn: TurnPrincipal) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
+  /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
+  ownPlugin?: string
   /**
    * The registered, enabled remote MCP plugins for a turn (#297), registered
    * with the loopback forwarder: in production
@@ -934,7 +936,8 @@ export class SessionManager {
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
       const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-      const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
+      const ownPlugin = this.deps.ownPlugin
+      const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
       eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
       // A plugin left out of this turn is said so in the session, not only in the log.
       const unavailable = (message: string) =>
@@ -957,6 +960,9 @@ export class SessionManager {
         // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
         const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
         const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+        if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
+          await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
+        }
         for (const dir of packages?.paths ?? []) {
           if (!loaded.has(path.resolve(dir))) {
             await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
@@ -1073,6 +1079,7 @@ export class SessionManager {
             }
           : {}),
         ...(pluginPaths.length ? { pluginPaths } : {}),
+        ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(memory ? { memoryHooks: memory.hooks } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),

@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage, SDKResultMessage, SDKSystemMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { createBackendClient } from '../src/api/backend.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
@@ -23,9 +24,9 @@ import { browser } from './support/sessions.js'
 
 // The harness as main.ts wires it (#255): the registry's in-process server and
 // tiers (tools/harness.ts), run through the real SDK and its bundled Claude
-// Code against the fake Anthropic endpoint. The backend is msw. ScadBuddy's
-// own plugin is not passed, as in main.ts: with `tools: []` there is no Skill
-// or Agent tool, so its skills and subagents would be listed but unusable.
+// Code against the fake Anthropic endpoint. The backend is msw. A run without
+// ScadBuddy's own plugin has no built-in tool; main.ts passes the plugin
+// (#896), which brings the Skill and Agent tools and nothing else.
 
 const BACKEND = 'http://backend.test'
 const GATEWAY_TOKEN = 'gw-wiring-test-token-777788889999'
@@ -195,4 +196,86 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(deletes).toBe(0)
     expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/needs a human approval in the ScadBuddy UI/)
   }, 60_000)
+
+  describe("ScadBuddy's own plugin (#896)", () => {
+    const registry = ALL_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`)
+
+    it('loads its skills and subagents, and offers Skill and Agent beside the registry tools', async () => {
+      script = (r) =>
+        lastContent(r).includes('tool_result')
+          ? { text: 'done' }
+          : { toolUse: { name: 'Skill', input: { skill: 'scadbuddy:customize' } } }
+      const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+      expect(result.subtype).toBe('success')
+      expect(init.plugins).toContainEqual(expect.objectContaining({ name: 'scadbuddy', path: OWN_PLUGIN_DIR }))
+      expect(init.plugin_errors ?? []).toEqual([])
+      expect(init.skills.filter((s) => s.startsWith('scadbuddy:')).sort()).toEqual(
+        ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
+      )
+      expect(init.agents).toEqual(expect.arrayContaining(['scadbuddy:model-author', 'scadbuddy:print-analyst']))
+      // `Agent` is listed by its older name (measured on Claude Code 2.1.283).
+      expect([...init.tools].sort()).toEqual(['Skill', 'Task', ...registry].sort())
+      // No server of its own: its tools are the in-process `scadbuddy` server.
+      expect(init.mcp_servers.map((s) => s.name)).toEqual(['scadbuddy'])
+      // Claude Code asks no permission for Skill (the PreToolUse hook passes it
+      // at `read`), so canUseTool records nothing.
+      expect(decisions).toEqual([])
+      // The skill's body reached the model.
+      expect(lastContent(fake.messageCalls().at(-1)!)).toContain('get_schema')
+    }, 60_000)
+
+    it("runs a subagent whose calls go through the session's own permission seam", async () => {
+      script = (r) => {
+        const last = lastContent(r)
+        if (last.includes('tool_result')) return { text: 'done' }
+        if (last.includes('SUBAGENT-TASK')) return { toolUse: { name: 'mcp__scadbuddy__delete_model', input: { slug: 'keychain' } } }
+        return {
+          toolUse: {
+            name: 'Agent',
+            input: { subagent_type: 'scadbuddy:model-author', description: 'Delete it', prompt: 'SUBAGENT-TASK delete keychain' },
+          },
+        }
+      }
+      const { result, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR })
+      expect(result.subtype).toBe('success')
+      // The subagent ran (only it calls delete_model), and its outward call is
+      // no more allowed than the session's: no gate, so denied.
+      expect(decisions).toEqual([['mcp__scadbuddy__delete_model', 'needs_approval']])
+      expect(deletes).toBe(0)
+    }, 60_000)
+
+    // With Skill and Agent offered, another loaded plugin's subagents run too
+    // (an approved package's, #297). One that asks for a built-in gets none:
+    // the session offers only Skill and Agent (docs/ai/security.md, "Plugin packages").
+    it("gives another plugin's subagent no built-in beyond the session's", async () => {
+      const other = path.join(stateDir, 'other')
+      await mkdir(path.join(other, '.claude-plugin'), { recursive: true })
+      await mkdir(path.join(other, 'agents'), { recursive: true })
+      await writeFile(path.join(other, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'other' }))
+      await writeFile(
+        path.join(other, 'agents', 'shell.md'),
+        '---\nname: shell\ndescription: Runs commands.\ntools: Bash, mcp__scadbuddy\n---\n\nRun what you are asked.\n',
+      )
+      const asked: RecordedRequest[] = []
+      script = (r) => {
+        const last = lastContent(r)
+        if (last.includes('SHELL-TASK') && !last.includes('tool_result')) {
+          return { toolUse: { name: 'Bash', input: { command: 'echo pwned' } } }
+        }
+        if (last.includes('tool_result')) {
+          asked.push(r)
+          return { text: 'done' }
+        }
+        return { toolUse: { name: 'Agent', input: { subagent_type: 'other:shell', description: 'Run', prompt: 'SHELL-TASK' } } }
+      }
+      const { result, init, decisions } = await collect({ ownPlugin: OWN_PLUGIN_DIR, pluginPaths: [other] })
+      expect(result.subtype).toBe('success')
+      expect(init.agents).toContain('other:shell')
+      expect(init.tools).not.toContain('Bash')
+      expect(decisions.filter(([name]) => name === 'Bash')).toEqual([])
+      // The subagent's Bash call came back as an error, not a command's output.
+      const results = asked.map(lastContent).join('')
+      expect(results).toContain('No such tool available: Bash')
+    }, 60_000)
+  })
 })

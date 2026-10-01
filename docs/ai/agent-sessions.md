@@ -188,9 +188,8 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
-  (`/scadbuddy:…`). Session queries run with `tools: []` and without ScadBuddy's plugin
-  (`agent/src/main.ts`, `test/harnessWiring.test.ts`), so there is no Skill tool to run
-  one.
+  (`/scadbuddy:…`). Session queries load ScadBuddy's plugin and have the Skill tool
+  (#896), so the model can use a skill, but `sessions.start` does not take one yet.
 - **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
   access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).

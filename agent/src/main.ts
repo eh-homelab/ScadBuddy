@@ -13,6 +13,7 @@ import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { probeChromiumSandbox } from './harness/headlessSandbox.js'
+import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
 import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
@@ -216,12 +217,11 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
-        // ScadBuddy's tools and their tiers (tools/harness.ts). ScadBuddy's own
-        // plugin (plugins/scadbuddy) is not loaded: with `tools: []`
-        // (harness/options.ts) a query has no Skill or Agent tool to use its
-        // skills and subagents (test/harnessWiring.test.ts). The plugins
-        // below (remote, packages, the headless browser's vendored one) are.
+        // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
+        // subagents, with the Skill and Agent tools they need.
+        ownPlugin: OWN_PLUGIN_DIR,
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
