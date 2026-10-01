@@ -73,7 +73,7 @@ WarningKind = Literal[
     "not-installed",
     "plate-differs",
     "hf-unsupported",
-    "side-unknown",
+    "hf-mounted",
 ]
 
 
@@ -110,7 +110,7 @@ class SpoolOption(BaseModel):
     loaded: LoadedAt | None = None
     #: The physical extruder this spool feeds on the chosen printer — 0 right, 1 left —
     #: and the letter for it (#469). ``None`` when the spool is not loaded there or the
-    #: printer does not say; the picker compares it with the nozzle mounted on that side.
+    #: printer does not say. A label only: the run checks no spool against a nozzle (#768).
     extruder: int | None = None
     side: Literal["L", "R"] | None = None
 
@@ -170,10 +170,6 @@ class FilamentOptions(BaseModel):
     #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
     #: printer: a class target nobody has narrowed yet has no hardware to read.
     nozzles: list[NozzleInfo] = Field(default_factory=list)
-    #: The spare hotends in the chosen printer's rack, besides the mounted pair (#469):
-    #: the printer swaps one of the sliced size onto a side whose nozzle differs, so a
-    #: size a spare has fits that side too. Empty on a printer without a rack.
-    rack: list[NozzleInfo] = Field(default_factory=list)
     #: The chosen printer has the Filament Track Switch (#469): any AMS reaches either
     #: nozzle, so a spool's ``side`` is only where its inlet rests, not a constraint.
     track_switch: bool = False
@@ -559,7 +555,6 @@ async def gather_plate_options(
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
-    assignments: list[SpoolAssignment] | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -567,13 +562,9 @@ async def gather_plate_options(
     once (#480); only each plate's slots are read per plate, concurrently. The reads
     keep the single-plate order, spools, assignments, the plates, then the printer and
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
-    the printer's, and among plates the first failing one in ``plate_ids`` order wins.
-
-    ``assignments`` already read by the caller (a run reads them for the spools' sides,
-    #469) are used instead of reading them again."""
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
     spools = await client.spools()
-    if assignments is None:
-        assignments = await client.spool_assignments()
+    assignments = await client.spool_assignments()
 
     answers = await asyncio.gather(
         *(

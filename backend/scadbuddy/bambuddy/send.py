@@ -104,6 +104,9 @@ class Target:
     #: One colour per filament, from the spools the run chose (#476). ``None`` — the
     #: send bar, which chooses no spools — keeps the model's own colours.
     colours: tuple[str, ...] | None = None
+    #: Which extruders have the nozzle, in the slicer's order (#834). ``None`` — no run,
+    #: or a printer whose status says nothing either way — lets the slicer choose.
+    nozzle_stats: tuple[str, ...] | None = None
 
     @property
     def key(self) -> str:
@@ -115,6 +118,10 @@ class Target:
         key = self.plate.key
         if self.nozzle_diameter is not None:
             key = f"{key}@{self.nozzle_diameter}"
+        if self.nozzle_stats is not None:
+            # A file that lets the slicer use either side must not be reused for one
+            # that must keep to one side, nor the other way round.
+            key = f"{key}^{','.join(self.nozzle_stats)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -128,7 +135,7 @@ class Target:
         that project reuses it when its spools are the model's own colours; spools in
         other colours get a copy in theirs (#476).
         """
-        return Target(self.plate, self.nozzle_diameter).key
+        return Target(self.plate, self.nozzle_diameter, nozzle_stats=self.nozzle_stats).key
 
 
 async def target_for(
@@ -138,6 +145,7 @@ async def target_for(
     printer_id: int | None = None,
     nozzle_diameter: str | None = None,
     colours: Sequence[str] | None = None,
+    nozzle_stats: Sequence[str] | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -145,16 +153,19 @@ async def target_for(
     plate; a printer Bambuddy reports without a model falls back the same way. The
     nozzle is stated only when the caller chose one: the print run does (spec
     2026-09-27 §4), the send bar does not. ``colours`` are the chosen spools' (#476),
-    and only the print run has any.
+    and only the print run has any. ``nozzle_stats`` (#834) are not the print run's
+    alone: Generate's ``generate_target`` computes them too, so the file Generate lays
+    out is the one the project's next print reuses.
     """
     chosen = tuple(colours) if colours is not None else None
+    stats = tuple(nozzle_stats) if nozzle_stats is not None else None
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen)
+        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen)
+    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -175,7 +186,12 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     prime tower a multi-colour print needs — where every extruder can reach them.
     """
     try:
-        payload = replate_3mf(payload, target.plate, nozzle_diameter=target.nozzle_diameter)
+        payload = replate_3mf(
+            payload,
+            target.plate,
+            nozzle_diameter=target.nozzle_diameter,
+            nozzle_stats=target.nozzle_stats,
+        )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
@@ -587,17 +603,17 @@ def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
 
 
 def resolve_print_options(
-    settings: StoredSettings, slug: str, printer_id: int | None, request_scope: PrintOptions
+    settings: StoredSettings, slug: str | None, printer_id: int | None, request_scope: PrintOptions
 ) -> PrintOptions:
     """global → per-printer → per-model → per-request, least specific first.
 
     The print run's merge (#124). The send bar no longer queues (#312), so it resolves
-    none.
+    none. A library file (#313) has no model, so its per-model layer is empty.
     """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(slug),
+        settings.model_print_options.get(slug) if slug is not None else None,
         request_scope,
     )
 

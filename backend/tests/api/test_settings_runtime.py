@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Iterator
@@ -13,6 +14,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.settings import APPLIES, ENV_SEEDED, Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
@@ -127,8 +129,8 @@ def test_a_live_field_applies_at_once(client: TestClient) -> None:
     assert body["log_level"] == "DEBUG"
     assert body["restart_required"] == []
     assert state.config.render_timeout == 12.5
-    assert state.queue.config.render_timeout == 12.5
-    assert state.queue.config.job_ttl == 3600
+    assert state.render.config.render_timeout == 12.5
+    assert state.render.config.job_ttl == 3600
     assert state.settings.render_timeout == 12.5
     assert state.assets.max_count == 5
     assert state.libraries.max_bytes == 1000
@@ -166,8 +168,7 @@ def test_a_restart_field_is_listed_until_the_process_runs_with_it(settings: Sett
     with TestClient(create_app(settings)) as client:
         state = _state(client)
         assert state.settings.render_concurrency == 3
-        assert state.queue.config.render_concurrency == 3
-        assert state.metrics.workers._value.get() == 3
+        assert state.render.config.render_concurrency == 3
         assert client.get("/api/v1/settings").json()["restart_required"] == []
 
 
@@ -244,8 +245,49 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
         "print_options": {},
         "printer_print_options": {},
         "model_print_options": {},
+        "project_print_targets": {},
     }
     assert client.get("/api/v1/settings").json()["printer_id"] == 4
+
+
+def _remember_project_targets(client: TestClient) -> None:
+    uploads = _state(client).uploads
+
+    async def seed() -> None:
+        await uploads.remember_project_target(3, ProjectTarget(printer_id=1, nozzle_diameter="0.4"))
+        await uploads.remember_project_target(7, ProjectTarget(printer_id=2))
+
+    asyncio.run(seed())
+
+
+def test_the_remembered_project_targets_are_listed(client: TestClient) -> None:
+    assert client.get("/api/v1/settings/remembered").json()["project_print_targets"] == {}
+    _remember_project_targets(client)
+    body = client.get("/api/v1/settings/remembered").json()
+    assert body["project_print_targets"] == {
+        "3": {"printer_id": 1, "nozzle_diameter": "0.4"},
+        "7": {"printer_id": 2},
+    }
+
+
+def test_forgetting_one_project_target_leaves_the_rest(client: TestClient) -> None:
+    _remember_everything(client)
+    _remember_project_targets(client)
+    body = client.delete("/api/v1/settings/remembered/projects/3").json()
+    assert body["project_print_targets"] == {"7": {"printer_id": 2}}
+    assert body["printer_bed_types"] == {"1": "Cool Plate", "2": "Textured PEI Plate"}
+    assert client.get("/api/v1/settings/remembered").json()["project_print_targets"] == {
+        "7": {"printer_id": 2}
+    }
+    # Forgetting what is not remembered is not an error.
+    assert client.delete("/api/v1/settings/remembered/projects/3").status_code == 200
+
+
+def test_forget_all_clears_the_project_targets(client: TestClient) -> None:
+    _remember_project_targets(client)
+    body = client.delete("/api/v1/settings/remembered").json()
+    assert body["project_print_targets"] == {}
+    assert asyncio.run(_state(client).uploads.project_target(3)) is None
 
 
 def test_the_default_project_is_a_setting(client: TestClient) -> None:

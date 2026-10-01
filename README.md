@@ -40,6 +40,10 @@ multi-colour rules, connecting Bambuddy and each feature.
   through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
+- **Library**: print any file already in Bambuddy's library through the same print
+  picker, printed exactly as its author left it — never replated, recolored or
+  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
@@ -63,7 +67,7 @@ docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
 ```
 
 **A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
-the backend refuses to start and says so. Settings and the render queue live
+the backend refuses to start and says so. Settings and the render jobs live
 there; the schema is created and migrated at startup, so an empty database is
 enough.
 
@@ -71,6 +75,30 @@ Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 [Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
 **Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
 for the project picker).
+
+**Renders run on Temporal** (#424, #546). `SCADBUDDY_TEMPORAL_ADDRESS` (the
+Temporal frontend's `host:port`) is required: without it the backend does not start.
+The API submits and a separate render worker (see "Render worker" under Deploying)
+runs them. The API's client connects lazily, so the API boots while Temporal is
+down, and its renders wait. For a one-process dev run, let the API host the worker itself:
+
+```bash
+temporal server start-dev --namespace scadbuddy      # listens on 127.0.0.1:7233
+cd backend
+SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy \
+SCADBUDDY_DATA_DIR=$HOME/.scadbuddy-data \
+SCADBUDDY_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
+  uv run --frozen uvicorn --factory scadbuddy.main:create_app --port 8080
+```
+
+`SCADBUDDY_DATA_DIR` must be writable (its default is `/data`), and a real `openscad`
+must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only once
+`frontend/dist` is built (`pnpm build` in `frontend/`); otherwise it serves only the API.
+`SCADBUDDY_TEMPORAL_NAMESPACE` defaults to `scadbuddy` (hence `--namespace` above)
+and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
+`SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
+on shutdown.
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
@@ -88,26 +116,24 @@ for the project picker).
   `/data/libraries` at start when it is not there, so a fresh install renders
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-- **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
-  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
-  1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
-  from the UI it wins; a field the UI never saved keeps following the variable,
-  and one it cleared stays cleared (the upload limit instead goes back to the
-  variable). `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
-  (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
-  `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
-  `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
-  `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
-  `SCADBUDDY_ALLOWED_ORIGINS` (comma-separated origins the UI is also served
-  under, see "Realtime" below);
+- **Environment** (all optional but `SCADBUDDY_DATABASE_URL` and
+  `SCADBUDDY_TEMPORAL_ADDRESS`): every variable is a field of `Settings` in `backend/scadbuddy/core/settings.py`, as
+  `SCADBUDDY_<FIELD>`, with what it does in the comment beside it. The full list,
+  with each type and default, is generated rather than kept here:
+  `cd backend && uv run python -m scadbuddy.tools.settings_reference`. A new
+  setting adds a field there, not a line here (#508). The notes below are the
+  ones that need more than a comment.
+  A variable whose "In Settings" column is `live` or `restart` only sets the
+  starting value (#322): once a value is saved from the UI it wins, taking effect
+  at once or at the next start; a field the UI never saved keeps following the
+  variable, and one it cleared stays cleared (the upload limit instead goes back
+  to the variable). `no` is read from the environment only.
   `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
   catalogue thumbnail; `false` renders nothing, and such a model shows no image
   until one is set or generated. The previews are kept in the
-  `SCADBUDDY_DATABASE_URL` database's `model_previews` table, so without a
-  database there are none);
+  `SCADBUDDY_DATABASE_URL` database's `model_previews` table);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
@@ -149,68 +175,51 @@ for the project picker).
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
   `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default 1073741824, 1 GiB) is the largest
-  single upload. It is set only here (no Settings override); `GET /api/v1/settings`
-  reports it read-only as `media_upload_max_bytes`.
+  single upload. Settings can change it, and a change applies at once
+  (`media_upload_max_bytes`).
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.
-- **Render queue.** By default every render request is accepted;
-  `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
-  first. A preview replaced before it started is dropped, and identical waiting
-  requests share one job. A finished render is kept under its template
-  (`models/<slug>/.renders/<key>/`, beside the source like its media) and a
-  later request for the same parameters at the same revision is answered from it
-  without running OpenSCAD; an entry with a file missing is rendered again, and
-  entries unused for `SCADBUDDY_JOB_TTL` are removed with the jobs. Installing a
-  font or moving a library pin does not change the key, so a render kept before
-  that is served until it expires or the template is edited.
+- **Render queue.** By default every render request is accepted and runs on
+  Temporal: the API records the job in `render_jobs` and starts its workflow, and
+  the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
+  replaced before it started is cancelled, and identical waiting requests share
+  one job. An identical OpenSCAD run (same template, revision, file and
+  parameters) is rendered once and its piece kept in the blob store
+  (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
+  references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.
-  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the queue is in Postgres, so
-    accepted renders survive a restart. Several replicas can share one queue only
-    if they also share `/data` (a ReadWriteMany volume): a job's files are written
-    there by whichever replica renders it. On a ReadWriteOnce PVC run one replica,
-    as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
-    and the settings each hold one). The schema is created and migrated at
-    startup.
-  - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
-    Postgres too: each change is appended to an `events` table and sent with
+  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
+    (`render_jobs`), so accepted renders survive a restart; a pending row whose
+    workflow never started is started by the API's reconciler.
+    `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
+    hold one). The schema is created and migrated at startup.
+  - The **event bus** (spec §7) is in the same Postgres database (the backend
+    will not start without `SCADBUDDY_DATABASE_URL`, #467): each change is appended to an `events` table and sent with
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
-    hear it once over the same `LISTEN` connection the render queue uses. After
+    hear it once over the process's one `LISTEN` connection. After
     that connection drops and comes back, subscribers get a `bus.resync` event.
     The table keeps events for `Last-Event-ID` replay:
     `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
     `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
-    replica every 5 minutes. Unset, events stay in the process as before.
+    replica every 5 minutes.
     `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
     `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
     `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
     database, so give each deployment its own database, not just its own schema.
-  - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
-    than this for a worker, unrendered.
-  - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
-    jobs it was not woken for. With Postgres, only while the listener below is
-    disconnected.
-  - `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s), Postgres only: each process
-    `LISTEN`s on `scadbuddy_render_queue`, and a submit or requeue on any replica
-    sends `NOTIFY` in the same transaction, so an idle worker starts the job at
-    once. While that connection is up, idle workers still check this often, to
-    catch a notification missed around a reconnect. The listener reconnects with
-    back-off; `scadbuddy_render_queue_listener_connected` and
-    `scadbuddy_render_queue_listener_reconnects_total` show its state.
-  - `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s) and `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2),
-    Postgres only: a running job whose worker stops heartbeating for a lease is
-    requeued, and failed after its last attempt.
   - `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and `SCADBUDDY_RENDER_LATENCY_SLO`
     (60 s): targets, not limits. They are exported with the metrics for alerts.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is
-  writable, and the build revision.
+  writable, the build revision, and a `temporal` object (`address`, `namespace`,
+  `task_queue`, `worker_inprocess`).
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
-  (read from the store, so across replicas with Postgres), wait time and latency
+  (read from the store in Postgres, so across replicas), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
-  the queue's store can be read (`scadbuddy_render_store_up`), the
-  SLO targets, the upload store's files and bytes against its caps
+  the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
+  `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
+  `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
 
@@ -305,6 +314,57 @@ the pinned `revision` — the commit stamped into the image at build time by
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
 
+### Render worker (#424)
+
+Renders run on a separate worker. It is the
+**same image** run as `python -m scadbuddy.worker`, and it serves `/healthz`
+(`{"ok": true, "build_id": …, "task_queue": …}`) and `/metrics` on port **9090**.
+Probe that port: the image's `HEALTHCHECK` is the API's 8080.
+
+- **One replica in phase 1**, sharing `/data` with the API. A rendered piece is
+  written to `/data/blobs/<piece_key>/` and read back by the API, so both pods mount
+  the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
+  same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
+  may mount it. A piece no job references any more is removed by the API's periodic
+  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
+  the jobs.
+- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
+  the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+  `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
+  `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
+  id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
+  `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
+  API's: the worker runs openscad under them, and the API derives the workflows'
+  timeouts from the same values.
+- **Versioning:** workflows are pinned to the build that started them. At start
+  the worker makes its own build the deployment's current version, so a new build
+  receives new workflows once it is polling. It retries that for a minute after it
+  starts polling, because Temporal 1.28 accepts a build only once it has a poller.
+- **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
+  drain. The worker keeps polling until no workflow pinned to its build is
+  running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
+  SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
+  drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
+  workflows still pinned to its build then have no poller, and their jobs stay
+  `running` until that build polls again. Set `terminationGracePeriodSeconds` ≥
+  `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
+  (e.g. 30 s): **690 s** at the default 120 s timeout. While a single replica drains
+  it is still current, so new renders keep landing on it; a rollout that starts
+  the new pod first (surge) lets it drain promptly.
+- **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
+  `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
+  API hosting the worker) is for dev and tests only.
+- **Upgrading from a release that still had the legacy queue** (before #546): its
+  pods render in-process and renew a lease in `render_jobs.heartbeat_at`, which this
+  release's first start drops. Do not let one overlap a new pod: stop the old pods
+  (or use a `Recreate` rollout) before the new API starts, and start the API before
+  the render workers. At start the API fails every render the old queue left
+  `running` (no workflow; nothing would finish it), with an error naming the
+  upgrade; its `pending` renders are started on Temporal as usual. From a release
+  already on Temporal (#600 or later, `SCADBUDDY_TEMPORAL_ADDRESS` set) there is
+  nothing to do. Nothing reads what the legacy queue left on the volume any more:
+  `data/jobs/` (job files and `.work` dirs) and `models/*/.renders/` can be deleted.
+
 ### The agent sidecar (AI, #261)
 
 The AI agent service in `agent/` ships as a **separate image**,
@@ -322,8 +382,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each
-  described below. With no database
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and
+  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
@@ -385,6 +445,14 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     peer, is accepted. This is what stops DNS rebinding: an attacker's page
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
+- **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It always opens the
+  backend (`SCADBUDDY_BACKEND_URL`), and a URL on `SCADBUDDY_PUBLIC_URL` or
+  `SCADBUDDY_ALLOWED_ORIGINS` is rewritten onto it. **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
+  (comma-separated origins, or `*` for any) lets it open other origins too, each only
+  after a human approves it once per session in the ScadBuddy UI. Unset, it opens
+  nothing else. `*` plus that approval is the intended setting for full use; it also
+  lets the model ask to open services on your LAN, so read the risks in that doc first.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -506,6 +574,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
+  | `POST …/{id}/fork` | `{title?}` → `201 {session}`: a new session with the transcript so far and a fresh budget (the panel's "Continue in a new chat", #790); counted like a start (`429`) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to that session's budget, up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`

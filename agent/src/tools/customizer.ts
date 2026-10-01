@@ -4,7 +4,9 @@ import { binary } from './binary.js'
 import { ok } from './call.js'
 import { decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE } from './common.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Customizer (issue #251): the schema (with the `// color` and `// font`
 // overlays), validating a parameter set, rendering and waiting with progress,
@@ -54,9 +56,40 @@ export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatu
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
     await ctx.progress(step, undefined, `render ${job.status}${lastLine ? `: ${lastLine}` : ''}`)
-    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled' || Date.now() >= deadline)
-      return job
+    if (settled(job.status) || Date.now() >= deadline) return job
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+  }
+}
+
+function settled(status: JobStatus['status']): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * Polls a render that render_model handed back unsettled (or whose wait was
+ * aborted) until it settles, fails to answer, or `holdMs` passes, so its
+ * render-limit slot is held while the backend still runs it (PR #752 review).
+ * It outlives the call, so it uses no call signal, and it never rejects.
+ *
+ * This holds on however the wait ended: a job handed back still running, the call
+ * aborted, or `getJob` failing once in `waitForJob`. That errs toward holding, since
+ * the render may still be running and a released slot would let a second one start
+ * beside it. The hold ends when a poll shows the job settled or gone, when the backend
+ * cannot be reached, or after `holdMs` (30 min) at most (#774).
+ */
+async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): Promise<void> {
+  const deadline = Date.now() + holdMs
+  try {
+    while (Date.now() < deadline) {
+      await sleep(ctx.pollIntervalMs)
+      const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
+        params: { path: { job_id: id } },
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      })
+      if (!data || settled(data.status)) return
+    }
+  } catch {
+    // An unreachable backend or the deadline: stop holding.
   }
 }
 
@@ -126,16 +159,31 @@ export const customizerTools: Tool[] = [
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      const accepted = await ok(
-        ctx.backend.POST('/api/v1/models/{slug}/render', {
-          params: { path: { slug } },
-          body: { params, version: version ?? null },
-          signal: ctx.signal,
-        }),
-        `render ${slug}`,
-      )
-      await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
-      const job = await waitForJob(ctx, accepted.job_id)
+      // Per-principal render bounds (renderLimits.ts, #252), held until the
+      // backend job settles, past this call when it hands the job back running.
+      const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
+      const release = limiter.acquire(ctx.principal.id)
+      let submitted: string | undefined
+      let job: JobStatus | undefined
+      try {
+        const accepted = await ok(
+          ctx.backend.POST('/api/v1/models/{slug}/render', {
+            params: { path: { slug } },
+            body: { params, version: version ?? null },
+            signal: ctx.signal,
+          }),
+          `render ${slug}`,
+        )
+        submitted = accepted.job_id
+        await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
+        job = await waitForJob(ctx, accepted.job_id)
+      } finally {
+        if (submitted !== undefined && (job === undefined || !settled(job.status))) {
+          void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
+        } else {
+          release()
+        }
+      }
       const summary = jobSummary(job)
       if (job.status === 'failed' || job.status === 'cancelled') {
         return { ...json(summary), isError: true }
@@ -238,14 +286,21 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'list_presets',
-    description: "A model's saved parameter presets, including read-only ones a template ships.",
-    input: z.object({ slug }),
+    description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
+    input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
       'preset names and values written by model authors or users',
     routes: ['GET /api/v1/models/{slug}/presets'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`)),
+    handler: async ({ slug, ...args }, { backend }) =>
+      json(
+        page(
+          await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`),
+          { slug, ...args },
+          (p) => p.id,
+          'list_presets',
+        ),
+      ),
   }),
 
   defineTool({

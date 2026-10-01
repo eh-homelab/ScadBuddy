@@ -37,6 +37,8 @@ const KIND_LABEL: Record<AuditKind, string> = {
   plugin: 'Plugins',
   settings: 'Settings',
   token: 'MCP tokens',
+  memory: 'Memory',
+  http: 'HTTP requests',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
@@ -66,6 +68,10 @@ function describe(entry: AuditEntry): string {
       return `Approval ${entry.action}`
     case 'resource':
       return `Resource ${entry.action}`
+    case 'memory':
+      return entry.action === 'recall' ? 'Memory recall' : entry.action === 'retain' ? 'Memory save' : `Memory ${entry.action}`
+    case 'http':
+      return `HTTP ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }
@@ -80,8 +86,51 @@ function when(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
+/**
+ * A memory row's summary (#818) in words: the agent stores `{bank, document_id?,
+ * results?, tool?}` as JSON, never the query or a memory.
+ */
+function memoryText(entry: AuditEntry): string | null {
+  let parts: string[] = []
+  try {
+    const s = JSON.parse(entry.input_summary ?? '{}') as Record<string, unknown>
+    if (typeof s.bank === 'string') parts.push(`bank ${s.bank}`)
+    if (typeof s.results === 'number') parts.push(`${s.results} ${s.results === 1 ? 'memory' : 'memories'}`)
+    if (typeof s.document_id === 'string') parts.push(s.document_id)
+    if (typeof s.tool === 'string') parts.push(`result of ${toolName(s.tool)}`)
+  } catch {
+    parts = entry.input_summary ? [entry.input_summary] : []
+  }
+  if (entry.detail) parts.push(entry.detail)
+  return parts.length ? parts.join(' · ') : null
+}
+
+/**
+ * An http row's summary (#827) in words: the agent stores `{method, scheme, host,
+ * status?, size_bytes?, redirect?}` as JSON, never a path, a header or a body.
+ */
+function httpText(entry: AuditEntry): string | null {
+  let parts: string[] = []
+  try {
+    const s = JSON.parse(entry.input_summary ?? '{}') as Record<string, unknown>
+    if (typeof s.host === 'string') parts.push(typeof s.scheme === 'string' ? `${s.scheme}://${s.host}` : s.host)
+    if (typeof s.status === 'number') parts.push(`HTTP ${s.status}`)
+    if (typeof s.size_bytes === 'number') parts.push(`${s.size_bytes} bytes`)
+    if (typeof s.redirect === 'number') parts.push(`redirect ${s.redirect}`)
+  } catch {
+    parts = entry.input_summary ? [entry.input_summary] : []
+  }
+  if (entry.detail) parts.push(entry.detail)
+  return parts.length ? parts.join(' · ') : null
+}
+
 function AuditRow({ entry }: { entry: AuditEntry }) {
-  const text = entry.detail ?? entry.input_summary
+  const text =
+    entry.kind === 'memory'
+      ? memoryText(entry)
+      : entry.kind === 'http'
+        ? httpText(entry)
+        : (entry.detail ?? entry.input_summary)
   return (
     <li className="border-b border-line px-4 py-2 text-[13px] last:border-b-0" data-testid="audit-entry">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">

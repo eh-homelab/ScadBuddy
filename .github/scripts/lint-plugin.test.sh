@@ -192,6 +192,48 @@ check 'every problem is reported, not only the first' \
   "1:plugins/demo/skills/one/SKILL.md: frontmatter has no 'description'|plugins/demo/skills/one/SKILL.md: cites no source (add a URL, or a repository path with its § or section)" \
   "$(run "$r")"
 
+# own <dir>: the good tree plus a plugins/scadbuddy and its agent copy (#896).
+own() {
+  local r="$1"
+  good "$r"
+  cp -r "$r/plugins/demo" "$r/plugins/scadbuddy"
+  printf '{"name": "scadbuddy", "version": "0.2.0", "description": "d"}\n' \
+    >"$r/plugins/scadbuddy/.claude-plugin/plugin.json"
+  mkdir -p "$r/agent/plugins/scadbuddy/.claude-plugin"
+  printf '{"name": "scadbuddy", "version": "0.2.0", "description": "d"}\n' \
+    >"$r/agent/plugins/scadbuddy/.claude-plugin/plugin.json"
+  ln -s ../../../plugins/scadbuddy/skills "$r/agent/plugins/scadbuddy/skills"
+  ln -s ../../../plugins/scadbuddy/agents "$r/agent/plugins/scadbuddy/agents"
+}
+
+own "$r"
+check 'an agent copy in step passes' '0:' "$(run "$r")"
+
+own "$r"
+printf '{"name": "scadbuddy", "version": "0.1.0", "description": "d"}\n' \
+  >"$r/agent/plugins/scadbuddy/.claude-plugin/plugin.json"
+check 'an agent copy at another version fails' \
+  "1:agent/plugins/scadbuddy/.claude-plugin/plugin.json: 'version' must match plugins/scadbuddy/.claude-plugin/plugin.json" \
+  "$(run "$r")"
+
+own "$r"
+printf '{"name": "scadbuddy", "version": "0.2.0", "description": "d", "userConfig": {}}\n' \
+  >"$r/agent/plugins/scadbuddy/.claude-plugin/plugin.json"
+check 'an agent copy with userConfig fails' \
+  "1:agent/plugins/scadbuddy/.claude-plugin/plugin.json: must not have 'userConfig' (the harness refuses it)" \
+  "$(run "$r")"
+
+own "$r"
+printf '{}\n' >"$r/agent/plugins/scadbuddy/.mcp.json"
+check 'an agent copy with an .mcp.json fails' \
+  '1:agent/plugins/scadbuddy/.mcp.json: must not exist (the harness serves the tools in-process)' "$(run "$r")"
+
+own "$r"
+rm "$r/agent/plugins/scadbuddy/skills"
+cp -r "$r/plugins/scadbuddy/skills" "$r/agent/plugins/scadbuddy/skills"
+check 'an agent copy whose skills are copied, not linked, fails' \
+  '1:agent/plugins/scadbuddy/skills: must be a symlink to ../../../plugins/scadbuddy/skills' "$(run "$r")"
+
 check 'a root that is not a directory is a usage error' '2:' "$(run "$tmp/nope")"
 
 check 'the repository plugin passes' '0:' "$(run "$here/../..")"

@@ -17,7 +17,9 @@ import type {
   Param,
   ParamPreset,
   Plate,
+  PrintDetail,
   PrintProgress,
+  PrintSummary,
   Settings,
 } from '../api/types'
 
@@ -193,7 +195,7 @@ export const MEDIA_PNG_BASE64 =
 export const MEDIA_MP4_BASE64 = 'AAAAGGZ0eXBpc29tAAACAGlzb21pc28y'
 
 function image(id: string, caption = ''): MediaView {
-  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, content_type: 'image/png', size: 67 }
+  return { id, file: `${id}.png`, kind: 'image', caption, poster: null, missing: false, readonly: false, content_type: 'image/png', size: 67 }
 }
 
 /** #274 — the template of mine with a gallery: three images and a video. */
@@ -214,6 +216,7 @@ export const media: Record<string, MediaView[]> = {
       caption: '',
       poster: null,
       missing: false,
+      readonly: false,
       content_type: 'image/png',
       size: 67,
     },
@@ -231,6 +234,7 @@ export const media: Record<string, MediaView[]> = {
       caption: 'Printing on an H2C',
       poster: 'd4e5f6a1b2c3-poster.png',
       missing: false,
+      readonly: false,
       content_type: 'video/mp4',
       size: 24,
     },
@@ -628,6 +632,7 @@ export const outputs: Output[] = [
  */
 export const settingsDefaults = {
   bambuddy_url: null,
+  bambuddy_web_urls: null,
   public_url: null,
   default_plate: null,
   media_upload_max_bytes: 1024 * 1024 * 1024,
@@ -635,11 +640,6 @@ export const settingsDefaults = {
   render_concurrency: 2,
   solid_concurrency: 0,
   render_queue_max: 0,
-  render_queue_timeout: 0,
-  render_poll_interval: 1,
-  render_fallback_poll_interval: 30,
-  render_lease_timeout: 60,
-  render_max_attempts: 2,
   render_queue_depth_slo: 16,
   render_latency_slo: 60,
   check_concurrency: 1,
@@ -653,10 +653,14 @@ export const settingsDefaults = {
   asset_sweep_grace: 7 * 86400,
   asset_sweep_interval: 86400,
   duplicate_staging_max_age: 3600,
+  store_max_total_bytes: 53_687_091_200,
+  store_max_count: 200_000,
+  worker_cache_max_bytes: 10_737_418_240,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   event_log_retention_rows: 100_000,
   log_level: 'INFO',
+  temporal_ui_url: null,
 } as const satisfies Partial<Settings>
 
 export const settingsDeployment: Record<string, unknown> = {
@@ -671,20 +675,25 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
   render_concurrency: 'restart',
-  render_fallback_poll_interval: 'restart',
-  render_lease_timeout: 'restart',
-  render_max_attempts: 'restart',
   check_concurrency: 'restart',
   lsp_sessions: 'restart',
   realtime_sockets: 'restart',
   preview_renders: 'restart',
   asset_sweep_interval: 'restart',
+  store_backend: 'restart',
+  bambuddy_render_api_key: 'restart',
+  store_max_total_bytes: 'restart',
+  store_max_count: 'restart',
+  worker_cache_max_bytes: 'restart',
 }
 
 export const settings: Settings = {
   ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
   has_api_key: true,
+  has_render_api_key: false,
+  render_key_fallback: true,
+  store_backend: 'local',
   public_url: 'https://scadbuddy.internal.nullreference.io',
   library_folder_id: 2,
   printer_id: 1,
@@ -1139,4 +1148,200 @@ export const filamentOptions: FilamentOptions = {
     { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
     { nozzle_type: 'HS01', nozzle_diameter: '0.4' },
   ],
+}
+
+/**
+ * #308 — the prints API (`GET /prints`, `GET /prints/{archive_id}`), newest archive
+ * first: a completed print with a finish photo and a timelapse, a failed one without a
+ * timelapse, one still printing, and one whose archive was deleted in Bambuddy. Shaped
+ * from the live archive 35 (`backend/tests/bambuddy/recordings/archive-detail.json`).
+ */
+function printOf(
+  archive_id: number,
+  output: Output,
+  fields: Partial<PrintSummary> & Pick<PrintSummary, 'status'>,
+  { failureReason = null, ...detail }: Partial<Omit<PrintDetail, keyof PrintSummary>> & {
+    failureReason?: string | null
+  } = {},
+): PrintDetail {
+  const prints = `/api/v1/prints/${archive_id}`
+  const download = `name-keychain-${(output.name ?? output.id).toLowerCase()}`
+  const summary: PrintSummary = {
+    archive_id,
+    output_id: output.id,
+    slug: output.slug,
+    output_name: output.name ?? null,
+    printer_id: 1,
+    printer_name: '3DP-31B-598',
+    started_at: '2026-09-27T04:09:36.529201',
+    completed_at: '2026-09-27T05:56:53.660315',
+    actual_time_seconds: 6437,
+    filament_used_grams: 16.36,
+    cover: { kind: 'thumbnail', url: `${prints}/thumbnail` },
+    has_timelapse: false,
+    attachment_count: 0,
+    params_diff: { name: output.params?.['name'] ?? '' },
+    run_count: 1,
+    ...fields,
+  }
+  return {
+    ...summary,
+    provenance: {
+      slug: output.slug,
+      model_version: output.model_version ?? null,
+      params: output.params ?? {},
+      output_id: output.id,
+      edit_url: `/edit/${output.id}`,
+    },
+    files: [
+      { kind: 'output_3mf', name: `${download}.3mf`, size: 48213, url: `/api/v1/outputs/${output.id}/model.3mf` },
+      { kind: 'preview_glb', name: `${download}.glb`, size: 30512, url: `/api/v1/outputs/${output.id}/preview.glb` },
+      { kind: 'sliced', name: `${download}.gcode.3mf`, size: 2091667, url: `${prints}/files/sliced` },
+    ],
+    media: { finish_photo: null, photos: [], timelapse: null, plate_thumbnails: [], attachments: [] },
+    outcome: {
+      status: summary.status,
+      failure_reason: failureReason,
+      estimated_time_seconds: 5647,
+      actual_time_seconds: summary.actual_time_seconds,
+      filament_used_grams: summary.filament_used_grams,
+      filament_type: 'PLA',
+      filament_color: '#00629B,#FF9425',
+      cost: 0.43,
+      printer_id: summary.printer_id,
+      printer_name: summary.printer_name,
+      runs: [],
+    },
+    printer_media: null,
+    links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
+    // The summary's own fields went in above; these are the detail's, a disjoint set.
+    ...detail,
+  }
+}
+
+const [reagan, nova, workshop] = outputs as [Output, Output, Output]
+const FINISH_PHOTO = 'finish_20260927_015703_93372185.jpg'
+
+export const prints: PrintDetail[] = [
+  printOf(38, workshop, {
+    status: 'deleted_in_bambuddy',
+    printer_name: null,
+    started_at: null,
+    completed_at: null,
+    actual_time_seconds: null,
+    filament_used_grams: null,
+    cover: null,
+    run_count: 0,
+  }, {
+    files: [
+      { kind: 'output_3mf', name: 'name-keychain-workshop.3mf', size: 45120, url: `/api/v1/outputs/${workshop.id}/model.3mf` },
+    ],
+    links: { bambuddy_url: null, customize_url: `/m/${workshop.slug}` },
+  }),
+  printOf(37, nova, {
+    status: 'printing',
+    printer_id: 2,
+    printer_name: '3DP-H2C-042',
+    started_at: '2026-09-28T09:12:00',
+    completed_at: null,
+    actual_time_seconds: null,
+  }),
+  printOf(
+    36,
+    reagan,
+    {
+      status: 'failed',
+      started_at: '2026-09-26T20:01:00',
+      completed_at: '2026-09-26T20:44:10',
+      actual_time_seconds: 2590,
+      filament_used_grams: 4.1,
+    },
+    { failureReason: 'Spaghetti detected' },
+  ),
+  printOf(35, reagan, {
+    status: 'completed',
+    cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+    has_timelapse: true,
+  }, {
+    media: {
+      finish_photo: { name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+      photos: [],
+      timelapse: {
+        url: '/api/v1/prints/35/timelapse',
+        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+      },
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      attachments: [],
+    },
+  }),
+]
+
+/**
+ * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
+ * print 36 left a timelapse and a camera recording on the printer; the others nothing.
+ */
+export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
+  36: [
+    {
+      name: 'video_2026-09-26_20-01-00.mp4',
+      path: '/timelapse/video_2026-09-26_20-01-00.mp4',
+      size: 1843200,
+      mtime: '2026-09-26T20:44:00',
+      kind: 'timelapse',
+    },
+    {
+      name: 'ipcam-record.2026-09-26_20-01-10.101.mp4',
+      path: '/ipcam/ipcam-record.2026-09-26_20-01-10.101.mp4',
+      size: 251931635,
+      mtime: '2026-09-26T20:30:00',
+      kind: 'ipcam',
+    },
+  ],
+}
+
+// #311 — print 35 printed twice: the first run was cancelled, the second completed.
+const reprinted = prints.find((print) => print.archive_id === 35)
+if (reprinted) {
+  reprinted.provenance.model_version = versionIds.edited
+  reprinted.outcome.runs = [
+    {
+      id: 71,
+      archive_id: 35,
+      status: 'cancelled',
+      started_at: '2026-09-27T03:40:00',
+      completed_at: '2026-09-27T03:52:00',
+      duration_seconds: 720,
+      filament_used_grams: 1.9,
+      cost: 0.05,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+    {
+      id: 72,
+      archive_id: 35,
+      status: 'completed',
+      started_at: '2026-09-27T04:09:36.529201',
+      completed_at: '2026-09-27T05:56:53.660315',
+      duration_seconds: 6437,
+      filament_used_grams: 16.36,
+      cost: 0.43,
+      failure_reason: null,
+      printer_id: 1,
+      printer_name: '3DP-31B-598',
+    },
+  ]
+}
+
+/**
+ * What the backend's list filters read that a print does not carry (#609 review):
+ * Bambuddy's `print_name`, which `q` also matches, and when ScadBuddy first saw the
+ * link (`first_seen`), which dates a print with no start, such as a deleted archive.
+ */
+export const printArchives: Record<number, { print_name: string | null; first_seen: string }> = {
+  38: { print_name: null, first_seen: '2026-09-25T08:00:00Z' },
+  37: { print_name: 'name-keychain', first_seen: '2026-09-28T09:10:00Z' },
+  36: { print_name: 'gift tag', first_seen: '2026-09-26T19:59:00Z' },
+  35: { print_name: 'name-keychain', first_seen: '2026-09-27T03:45:40Z' },
 }

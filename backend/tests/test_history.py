@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import RENDERS_DIR_NAME, DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import (
     DEFAULT_TIMEOUT,
@@ -28,7 +28,6 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import prune_revision_exports
-from scadbuddy.render.render_cache import RENDERS_DIR_NAME
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 pytestmark = pytest.mark.requires_git
@@ -138,8 +137,8 @@ def test_ensure_repo_ignores_the_render_wrapper(models: Path, history: ModelHist
 
 
 def test_ensure_repo_ignores_the_kept_renders(models: Path, history: ModelHistory) -> None:
-    """A finished render is kept under its template (`render_cache`); it is derived
-    from the source, so it must never move the template's revision."""
+    """What the legacy queue kept under a template (`RENDERS_DIR_NAME`) may still be on
+    a volume; it is derived from the source, so it must never move the revision."""
     write_model(models, "keychain", "cube(10);\n")
     history.ensure_repo()
 

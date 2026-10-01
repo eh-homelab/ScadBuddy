@@ -1,8 +1,11 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import { SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/headless-browser (#349): turns the headless browser on or
 // off for session turns (spec §5.3, "Off unless enabled"). Stored in
@@ -20,7 +23,8 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 export type SettingsRepo = {
   get<T>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown): Promise<void>
+  /** `context` says who wrote it, for the audit row (credentials.ts SettingsStore.set). */
+  set(key: string, value: unknown, context: AuditContext): Promise<void>
 }
 
 export type HeadlessBrowserRouteDeps = {
@@ -75,8 +79,27 @@ export function registerHeadlessBrowserRoutes(app: Hono, deps: HeadlessBrowserRo
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    await settings.set(SETTING_HEADLESS_BROWSER, body.enabled)
+    await settings.set(SETTING_HEADLESS_BROWSER, body.enabled, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
     const view: HeadlessBrowserSettingView = { enabled: body.enabled }
     return c.json(view)
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349), the HTTP request tool's setting (#827, routes/httpRequest.ts) and the session limits (#790, routes/sessionLimits.ts) answer 503 without it. */
+    settings?: SettingsRepo | undefined
+  }
+}
+
+/** The headless-browser setting (#349). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerHeadlessBrowserRoutes(app, {
+      settings: deps.settings,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

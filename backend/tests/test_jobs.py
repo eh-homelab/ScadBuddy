@@ -5,16 +5,14 @@ import json
 import shutil
 import threading
 import zipfile
-from collections.abc import AsyncIterator
 from contextlib import ExitStack
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 import psycopg
 import pytest
-import pytest_asyncio
 import trimesh
 
 from scadbuddy.core.config import Config
@@ -37,11 +35,9 @@ from scadbuddy.render.jobs import (
     UNCOLOURED_WARNING,
     Job,
     JobResult,
-    JobStore,
     PartInfo,
     PlateLayout,
     Prepared,
-    RenderQueue,
     extruder_order,
     finish_piece_stage,
     plate_thumbnails,
@@ -79,130 +75,6 @@ def paths(tmp_path: Path) -> DataPaths:
 
 def _job(job_id: str, **kwargs: object) -> Job:
     return Job(id=job_id, slug="demo", created_at=datetime.now(UTC), **kwargs)  # type: ignore[arg-type]
-
-
-def test_store_round_trip(paths: DataPaths) -> None:
-    store = JobStore(paths)
-    job = _job("a")
-    store.write(job)
-    assert store.read("a") == job
-    assert [j.id for j in store.list_jobs()] == ["a"]
-
-
-def test_fail_unfinished_marks_pending_and_running_jobs(paths: DataPaths) -> None:
-    store = JobStore(paths)
-    store.write(_job("pending"))
-    store.write(_job("running", state="running"))
-    store.write(_job("done", state="done"))
-
-    assert sorted(j.id for j in store.fail_unfinished()) == ["pending", "running"]
-    assert store.read("pending").state == "failed"
-    assert store.read("pending").error == "interrupted by a restart"
-    assert store.read("done").state == "done"
-
-
-def test_prune_removes_expired_jobs_and_their_work_dirs(paths: DataPaths) -> None:
-    store = JobStore(paths)
-    old = _job("old", state="done", finished_at=datetime.now(UTC) - timedelta(hours=3))
-    store.write(old)
-    fresh = _job("fresh", state="done", finished_at=datetime.now(UTC))
-    store.write(fresh)
-    work = paths.job_work_dir("old")
-    work.mkdir()
-    (work / "model.3mf").write_bytes(b"x")
-
-    assert store.prune(3600.0) == ["old"]
-    assert not work.exists()
-    assert [j.id for j in store.list_jobs()] == ["fresh"]
-
-
-@pytest_asyncio.fixture
-async def queue(paths: DataPaths) -> AsyncIterator[RenderQueue]:
-    queue = RenderQueue(CONFIG, paths, render=lambda job: _fake_render(job))
-    await queue.start()
-    yield queue
-    await queue.aclose()
-
-
-async def _fake_render(job: Job) -> tuple[JobResult, list[str]]:
-    if job.params.get("mode") == "boom":
-        raise OpenSCADError("openscad exited with 1", ["ERROR: something"], 1)
-    if job.params.get("mode") == "bug":
-        raise KeyError("unexpected")
-    return _result(), ["Total rendering time: 0:00:00.065"]
-
-
-async def test_a_successful_job_records_its_result(queue: RenderQueue) -> None:
-    job = await queue.submit("demo", {"name": "Reagan"})
-    assert queue.store.read(job.id).state == "pending"
-    await queue.join()
-
-    done = queue.store.read(job.id)
-    assert done.state == "done"
-    assert done.result == _result()
-    assert done.log_tail == ["Total rendering time: 0:00:00.065"]
-    assert done.started_at is not None and done.finished_at is not None
-
-
-async def test_an_openscad_failure_keeps_the_log_tail(queue: RenderQueue) -> None:
-    job = await queue.submit("demo", {"mode": "boom"})
-    await queue.join()
-
-    failed = queue.store.read(job.id)
-    assert failed.state == "failed"
-    assert failed.error == "openscad exited with 1"
-    assert failed.log_tail == ["ERROR: something"]
-    assert failed.result is None
-
-
-async def test_an_unexpected_error_fails_the_job_and_the_worker_lives_on(
-    queue: RenderQueue,
-) -> None:
-    broken = await queue.submit("demo", {"mode": "bug"})
-    good = await queue.submit("demo", {})
-    await queue.join()
-
-    assert queue.store.read(broken.id).state == "failed"
-    assert queue.store.read(broken.id).error == "KeyError: 'unexpected'"
-    assert queue.store.read(good.id).state == "done"
-
-
-async def test_concurrency_is_capped_by_the_config(paths: DataPaths) -> None:
-    in_flight = 0
-    peak = 0
-    release = asyncio.Event()
-
-    async def slow(job: Job) -> tuple[JobResult, list[str]]:
-        nonlocal in_flight, peak
-        in_flight += 1
-        peak = max(peak, in_flight)
-        await release.wait()
-        in_flight -= 1
-        return _result(), []
-
-    queue = RenderQueue(replace(CONFIG, render_concurrency=2), paths, render=slow)
-    await queue.start()
-    try:
-        # Distinct parameters: identical waiting renders would coalesce into one job.
-        for n in range(4):
-            await queue.submit("demo", {"n": n})
-        await asyncio.sleep(0.05)
-        assert peak == 2
-        release.set()
-        await queue.join()
-    finally:
-        await queue.aclose()
-    assert peak == 2
-
-
-async def test_start_fails_jobs_left_behind_by_a_restart(paths: DataPaths) -> None:
-    JobStore(paths).write(_job("stale", state="running"))
-    queue = RenderQueue(CONFIG, paths, render=_fake_render)
-    await queue.start()
-    try:
-        assert queue.store.read("stale").state == "failed"
-    finally:
-        await queue.aclose()
 
 
 async def test_uncoloured_geometry_falls_back_to_the_split_parts() -> None:
@@ -296,41 +168,6 @@ async def test_a_thumbnail_that_raises_costs_the_cover_not_the_job() -> None:
 
     assert rendered is None
     assert warnings == [THUMBNAIL_FAILED_WARNING]
-
-
-async def test_the_queue_gives_the_rasteriser_its_own_threads(paths: DataPaths) -> None:
-    """An abandoned cover thread must not hold a slot the 3MF writer needs (#116)."""
-    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box())]
-    ran_on: list[str] = []
-
-    def record(_: object) -> None:
-        ran_on.append(threading.current_thread().name)
-
-    queue = RenderQueue(CONFIG, paths)
-    try:
-        with mock.patch.object(jobs, "render_plate_thumbnails", record):
-            await plate_thumbnails(parts, config=CONFIG, executor=queue._thumbnails)
-    finally:
-        await queue.aclose()
-
-    assert ran_on and ran_on[0].startswith("thumbnail")
-    with pytest.raises(RuntimeError):
-        queue._thumbnails.submit(lambda: None)
-
-
-def test_a_job_written_before_the_source_hash_existed_still_loads(paths: DataPaths) -> None:
-    """Job files outlive a deploy on the PVC, and the queue reads every one at startup —
-    a field the old writer never wrote must not turn an upgrade into a crash loop."""
-    store = JobStore(paths)
-    job = _job("old", state="done", result=_result())
-    store.write(job)
-    raw = json.loads(paths.job_file("old").read_text(encoding="utf-8"))
-    del raw["result"]["source_version"]
-    paths.job_file("old").write_text(json.dumps(raw), encoding="utf-8")
-
-    loaded = store.read("old")
-    assert loaded.result is not None
-    assert loaded.result.source_version == ""
 
 
 def _colour_schema(*colours: tuple[str, str]) -> CustomizerSchema:
@@ -746,54 +583,6 @@ async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> 
     assert result.diagnostics == [WARNING]
 
 
-async def test_a_job_carries_its_diagnostics_done_or_failed(paths: DataPaths) -> None:
-    async def render(job: Job) -> tuple[JobResult, list[str]]:
-        if job.params.get("mode") == "boom":
-            raise OpenSCADError("openscad exited with 1", [], 1, [ERROR])
-        return _result().model_copy(update={"diagnostics": [WARNING]}), []
-
-    queue = RenderQueue(CONFIG, paths, render=render)
-    await queue.start()
-    try:
-        done = await queue.submit("demo", {})
-        failed = await queue.submit("demo", {"mode": "boom"})
-        await queue.join()
-    finally:
-        await queue.aclose()
-
-    assert queue.store.read(done.id).diagnostics == [WARNING]
-    assert queue.store.read(failed.id).diagnostics == [ERROR]
-
-
-def test_latest_finished_is_the_render_that_settled_last(paths: DataPaths) -> None:
-    store = JobStore(paths)
-    now = datetime.now(UTC)
-    store.write(_job("older", state="done", finished_at=now - timedelta(minutes=2)))
-    store.write(_job("newer", state="failed", finished_at=now - timedelta(minutes=1)))
-    store.write(_job("running", state="running"))
-    store.write(Job(id="other", slug="another", state="done", created_at=now, finished_at=now))
-
-    latest = store.latest_finished("demo")
-
-    assert latest is not None and latest.id == "newer"
-    assert store.latest_finished("nothing") is None
-
-
-def test_a_job_written_before_diagnostics_still_reads(paths: DataPaths) -> None:
-    """Job files outlive a deploy on the PVC; the new field must not fail the old ones."""
-    store = JobStore(paths)
-    job = _job("old", state="done", result=_result())
-    raw = job.model_dump(mode="json")
-    del raw["diagnostics"]
-    del raw["result"]["diagnostics"]
-    paths.job_file("old").write_text(json.dumps(raw), encoding="utf-8")
-
-    read = store.read("old")
-
-    assert read.diagnostics == []
-    assert read.result is not None and read.result.diagnostics == []
-
-
 # ── library leases (#253, review of #324) ────────────────────────────────────
 
 LIBRARY_COMMIT = "c" * 40
@@ -882,66 +671,6 @@ async def test_a_render_that_waited_out_a_removal_fails_cleanly(paths: DataPaths
             await task
 
     assert schema_reads == []
-    assert gate.leased(checkout) == []
-
-
-async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> None:
-    """A lapsed store lease retries the job while the first attempt may still run
-    (#241). The first finishing must not release the retry's hold on the checkout."""
-    checkout = _model_pinning_a_library(paths)
-    gate = CheckoutGate()
-    release: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
-    rendering: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
-
-    async def render(*args: object, **kwargs: object) -> object:
-        out = args[3]
-        assert isinstance(out, Path)
-        attempt = 2 if "attempt-2" in str(out) else 1
-        rendering[attempt].set()
-        await release[attempt].wait()
-        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(
-            log_tail=[],
-            missing_files=(),
-            diagnostics=(),
-            diagnostics_dropped=0,
-            notes=(),
-            plates=None,
-        )
-
-    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
-        return _file_schema()
-
-    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
-        return SolidRender()
-
-    def attempt(number: int) -> asyncio.Task[tuple[JobResult, list[str]]]:
-        return asyncio.create_task(
-            jobs.render_job(
-                _job("r").claimed(number),
-                config=CONFIG,
-                paths=paths,
-                assets=AssetStore(paths.assets),
-                checkouts=gate,
-            )
-        )
-
-    with (
-        mock.patch.object(jobs, "render_3mf", render),
-        mock.patch.object(jobs, "cached_schema", cached_schema),
-        mock.patch.object(jobs, "render_solids", render_solids),
-    ):
-        first, retry = attempt(1), attempt(2)
-        await asyncio.wait_for(rendering[1].wait(), 5)
-        await asyncio.wait_for(rendering[2].wait(), 5)
-        assert gate.leased(checkout) == ["r"]
-
-        release[1].set()
-        await first
-        assert gate.leased(checkout) == ["r"]  # the retry still reads it
-
-        release[2].set()
-        await retry
     assert gate.leased(checkout) == []
 
 
@@ -1457,3 +1186,36 @@ async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths
 
     assert leased == [["s"]]
     assert unreadable_colour_warnings(schema, {"base_color": "not-a-colour"})[0] in result.warnings
+
+
+# ── the pins a render read (#169) ─────────────────────────────────────────────
+
+
+async def test_a_render_records_the_library_pins_it_was_built_from(paths: DataPaths) -> None:
+    """The result names the exact library commits, not only the model revision."""
+    _model_pinning_a_library(paths)
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+
+    assert [(pin.name, pin.ref, pin.commit) for pin in result.libraries] == [
+        ("BOSL2", "v1", LIBRARY_COMMIT)
+    ]
+
+
+async def test_a_render_of_a_model_with_no_libraries_records_none(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        result, _ = await jobs.render_job(
+            _job("n"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+
+    assert result.libraries == []
+
+
+def test_a_result_stored_before_the_pins_were_recorded_still_loads() -> None:
+    stored = _result().model_dump(mode="json")
+    del stored["libraries"]
+    assert JobResult.model_validate(stored).libraries == []

@@ -11,6 +11,8 @@ import type { McpAuthMode } from '../api/mcpTokens'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { HttpRequestSetting } from '../components/HttpRequestSetting'
+import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -19,8 +21,13 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { AiAuditSection } from '../components/assistant/AiAuditSection'
+import { NEW_TAB } from '../lib/embed'
+import { safeHttpUrl } from '../lib/safeUrl'
+import { LibraryUpgrade } from '../components/settings/LibraryUpgrade'
 import { useSubscription } from '../lib/realtime'
+import { formatBytes } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
 import {
@@ -34,20 +41,8 @@ import {
   type SectionId,
 } from './settings/fields'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
+import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from './settings/useLeaveGuard'
-
-/** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */
-function formatBytes(bytes: number): string {
-  if (bytes < 1000) return `${bytes} B`
-  const units = ['kB', 'MB', 'GB', 'TB']
-  let value = bytes / 1000
-  let unit = 0
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000
-    unit += 1
-  }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
-}
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
 function ofLimit(used: string, limit: number, format: (n: number) => string): string {
@@ -65,7 +60,7 @@ const ID_FIELDS: readonly FieldName[] = ['library_folder_id', 'printer_id', 'las
 
 /** The fields each section saves. The runtime ones come from `RUNTIME_FIELDS`. */
 const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
-  connection: ['bambuddy_url', 'bambuddy_api_key', 'public_url'],
+  connection: ['bambuddy_url', 'bambuddy_web_urls', 'bambuddy_api_key', 'public_url'],
   printing: ['printer_id'],
   projects: ['library_folder_id', 'last_project_id'],
   preview: ['display_unit', 'default_plate'],
@@ -111,7 +106,6 @@ function baseline(settings: Settings, name: FieldName): string {
   return serverValue(settings, name)
 }
 
-type Draft = Partial<Record<FieldName, string>>
 type Problem = { problem: string }
 
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
@@ -174,23 +168,33 @@ export function SettingsPage() {
     [connected, settings?.bambuddy_url],
   )
 
-  // Which fields the next settings object seeds the form with: all of them at first
-  // and after a reload, one section's after its save, one field's after a reset.
-  const reseed = useRef<'all' | FieldName[] | null>('all')
+  // What the next settings objects seed the form with: all of it at first and after a
+  // reload, one section's after its save, one field's after a reset. Queued, since
+  // requests overlap. Each seed carries the edit counts from when its request was sent,
+  // and leaves alone any field typed into since (#767): the seed's effect can land after
+  // a keystroke, and a save's answer can arrive after more typing.
+  const edits = useRef(new Map<FieldName, number>())
+  const seeds = useRef<Seed[]>([{ names: 'all', since: new Map() }])
+  // Taken before the request whose answer is seeded.
+  const beginSeed = (): Edits => new Map(edits.current)
+  const requestSeed = (names: 'all' | FieldName[], since: Edits) => {
+    seeds.current.push({ names, since })
+  }
   useEffect(() => {
-    if (!settings || reseed.current === null) return
-    const names =
-      reseed.current === 'all' ? SECTIONS.flatMap((section) => fieldsOf(section.id, settings)) : reseed.current
-    reseed.current = null
-    setDraft((current) => ({
-      ...current,
-      ...Object.fromEntries(names.map((name) => [name, baseline(settings, name)])),
-    }))
+    if (!settings || seeds.current.length === 0) return
+    const since = pendingFields(seeds.current, () => SECTIONS.flatMap((section) => fieldsOf(section.id, settings)))
+    seeds.current = []
+    const edited = editedSince(since, edits.current)
+    const names = [...since.keys()].filter((name) => !edited.has(name))
+    const values = Object.fromEntries(names.map((name) => [name, baseline(settings, name)]))
+    // Checked again in the updater: it runs later, and a keystroke can land between.
+    setDraft((current) => seedDraft(current, values, editedSince(since, edits.current)))
     setClearing((current) => current.filter((name) => !names.includes(name)))
   }, [settings])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {
+    edits.current.set(name, (edits.current.get(name) ?? 0) + 1)
     setDraft((current) => ({ ...current, [name]: next }))
     setErrors((current) => ({ ...current, [name]: undefined }))
     // A key typed after Remove key replaces the stored one rather than clearing it.
@@ -213,7 +217,7 @@ export function SettingsPage() {
   const [changedElsewhere, setChangedElsewhere] = useState(false)
   const loadLatest = () => {
     setChangedElsewhere(false)
-    reseed.current = 'all'
+    requestSeed('all', beginSeed())
     settingsState.refresh()
   }
 
@@ -228,13 +232,15 @@ export function SettingsPage() {
     }
     settingsState.refresh(() => {
       if (!isDirty.current()) {
-        reseed.current = 'all'
+        requestSeed('all', beginSeed())
         return true
       }
       setChangedElsewhere(true)
       return false
     })
   })
+
+  const temporalUi = safeHttpUrl(settings?.temporal_ui_url)
 
   function patchFor(id: SectionId): SettingsUpdate | null {
     if (!settings) return null
@@ -266,10 +272,12 @@ export function SettingsPage() {
     setSaving(id)
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
+      const since = beginSeed()
       const next = await api.putSettings(body)
-      reseed.current = fieldsOf(id, next)
+      requestSeed(fieldsOf(id, next), since)
       settingsState.setData(next)
       if (id === 'preview') setDisplayUnit(next.display_unit)
+      if (id === 'connection') setBambuddyLinks(next)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
       if (id === 'connection') {
         targetsState.reload()
@@ -313,9 +321,11 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
+      const since = beginSeed()
       const next = await api.putSettings({ reset: [name] })
-      reseed.current = [name]
+      requestSeed([name], since)
       settingsState.setData(next)
+      setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
         targetsState.reload()
         projectsState.reload()
@@ -590,6 +600,23 @@ export function SettingsPage() {
                   value={value('bambuddy_url')}
                   onChange={(event) => setField('bambuddy_url', event.target.value)}
                   placeholder="https://bambuddy.internal.example"
+                  className="sb-field sb-num"
+                />
+              </FieldRow>
+
+              <FieldRow
+                id="bambuddy-web-urls"
+                label="Bambuddy web URLs"
+                badge={badge('bambuddy_web_urls')}
+                error={errors.bambuddy_web_urls}
+                help="Where browsers reach Bambuddy, when the URL above is one only ScadBuddy's server can. Comma-separated: links use the first, or whichever of them ScadBuddy is opened inside."
+              >
+                <input
+                  id="bambuddy-web-urls"
+                  type="text"
+                  value={value('bambuddy_web_urls')}
+                  onChange={(event) => setField('bambuddy_web_urls', event.target.value)}
+                  placeholder="https://bambuddy.example, https://bambuddy.lan"
                   className="sb-field sb-num"
                 />
               </FieldRow>
@@ -870,6 +897,14 @@ export function SettingsPage() {
 
           {saved('fonts', runtimeRows('fonts'))}
 
+          <Section
+            id="libraries"
+            title={sectionTitle('libraries')}
+            description="Move a library to another tag or branch across the models that pin it. Check each model against the candidate first; each ticked model is then re-pinned on its own, as one revision of that model."
+          >
+            <LibraryUpgrade />
+          </Section>
+
           {saved(
             'preview',
             <>
@@ -920,7 +955,7 @@ export function SettingsPage() {
             title={sectionTitle('remembered')}
             description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults."
           >
-            <RememberedChoicesPanel targets={targetsState.data} />
+            <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
@@ -944,6 +979,9 @@ export function SettingsPage() {
               </p>
             </div>
             <HeadlessBrowserSetting />
+            <HttpRequestSetting />
+            {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
+            <SessionLimitsSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}
@@ -976,6 +1014,19 @@ export function SettingsPage() {
           </Section>
 
           {saved('diagnostics', runtimeRows('diagnostics'))}
+
+          {saved(
+            'administration',
+            <>
+              {runtimeRows('administration')}
+              {temporalUi && (
+                // Not ScadBuddy's page: a new tab, which also escapes Bambuddy's sandbox.
+                <a href={temporalUi} {...NEW_TAB} className="text-[13px] text-accent underline">
+                  Temporal UI ↗
+                </a>
+              )}
+            </>,
+          )}
 
           <Section id="about" title={sectionTitle('about')}>
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]" data-testid="about">

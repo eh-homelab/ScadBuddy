@@ -1,8 +1,9 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { decodeBase64, fileForm, slug } from './common.js'
+import { commit, decodeBase64, fileForm, slug } from './common.js'
 import { defineTool, image, json, text, type Tool } from './registry.js'
+import { page, PAGED, pageInput } from './pagination.js'
 
 // Catalogue & models (issue #251): list, get, create, import, check, duplicate,
 // delete, and edit details, README, source and thumbnail. Routes:
@@ -12,14 +13,15 @@ export const catalogueTools: Tool[] = [
   defineTool({
     name: 'list_models',
     description:
-      'List every model in the catalogue (bundled templates and user models) with name, slug, tags, ' +
-      'version, origin and upstream state.',
-    input: z.object({}),
+      'List the models in the catalogue (bundled templates and user models) with name, slug, tags, ' +
+      'version, origin and upstream state.' + PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
     routes: ['GET /api/v1/models'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/models'), 'list models')),
+    handler: async (args, { backend }) =>
+      json(page(await ok(backend.GET('/api/v1/models'), 'list models'), args, (m) => m.slug, 'list_models')),
   }),
 
   defineTool({
@@ -156,21 +158,23 @@ export const catalogueTools: Tool[] = [
     name: 'update_source',
     description:
       "Replace a model's OpenSCAD source as one revision in its history (undo with restore_version). " +
-      'Refused when the parse check fails unless `force` is true.',
+      'Refused when the parse check fails unless `force` is true. Pass `base` (the `version` you read ' +
+      'the source at) to have it refused if someone else saved since; for a small change, apply_patch.',
     input: z.object({
       slug,
       source: z.string().max(1_000_000),
       message: z.string().max(200).optional().describe('What the revision is called in the history'),
       force: z.boolean().default(false),
+      base: commit.optional().describe('Refuse (409, naming the current revision) unless the model is still here'),
     }),
     risk: 'write',
     routes: ['PUT /api/v1/models/{slug}/source'],
-    handler: async ({ slug, source, message, force }, { backend }) =>
+    handler: async ({ slug, source, message, force, base }, { backend }) =>
       json(
         await ok(
           backend.PUT('/api/v1/models/{slug}/source', {
             params: { path: { slug } },
-            body: { source, message: message ?? null, force },
+            body: { source, message: message ?? null, force, base: base ?? null },
           }),
           `update source of ${slug}`,
         ),

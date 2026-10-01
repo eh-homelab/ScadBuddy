@@ -18,14 +18,15 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    QueueDep,
+    RenderDep,
     SettingsStoreDep,
     SlugPath,
     UploadsDep,
 )
-from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
+from scadbuddy.api.jobs import GLB_MEDIA_TYPE, PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.download import download_3mf
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -47,7 +48,6 @@ from scadbuddy.library.outputs import (
     OutputMeta,
     OutputNotFoundError,
     OutputStore,
-    download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
@@ -137,12 +137,12 @@ def create_output(
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
     outputs: OutputsDep,
-    queue: QueueDep,
+    render: RenderDep,
     store: SettingsStoreDep,
     events: EventsDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
-    job = require_job(queue, body.job_id)
+    job = require_job(render, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
@@ -268,16 +268,34 @@ async def delete_output(
 
 @router.get(
     "/outputs/{output_id}/model.3mf",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
+) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return FileResponse(path, media_type=THREE_MF_MEDIA_TYPE, filename=download_filename(meta))
+    # For the default printer, on its real presets (#769), with the template's own
+    # print settings (#770).
+    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+
+
+@router.get(
+    "/outputs/{output_id}/preview.glb",
+    response_class=FileResponse,
+    responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
+    summary="The output's preview mesh",
+)
+def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+    require_output(outputs, output_id)
+    path = outputs.directory(output_id) / PREVIEW_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
+    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
 
 
 @router.get(

@@ -26,7 +26,6 @@ from scadbuddy.render.bambu3mf import (
     cover_names,
     laid_out_plates,
     plate_columns,
-    plate_filaments,
     plate_origin,
     plate_settings,
     plates_of,
@@ -209,11 +208,50 @@ class TestReplate:
         # Same one-entry arity as the placeholder it replaces.
         assert settings["nozzle_diameter"] == ["0.2"]
 
+    def test_replating_for_a_nozzle_maps_every_filament_to_one_extruder(
+        self, tmp_path: Path
+    ) -> None:
+        """#768: the shape Bambu Studio saved for the maintainer's two-colour keychain
+        that printed on one 0.2 mm nozzle."""
+        two = tmp_path / "two.3mf"
+        box = trimesh.creation.box(extents=(10, 10, 4))
+        write_bambu_3mf(
+            [ColourPart(1, "Color 1", "#C48CF3", box), ColourPart(2, "Color 2", "#EC008C", box)],
+            two,
+            thumbnails=None,
+            model_name="two",
+        )
+        moved = replate_3mf(two.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["filament_map"] == ["1", "1"]
+        assert settings["filament_map_mode"] == "Auto For Flush"
+
+    def test_replating_states_which_extruders_have_the_nozzle(self, written: Path) -> None:
+        """#834: the key the slicer groups filaments by, and its newer twin, which it
+        reads first; Bambu Studio writes both."""
+        stats = ["Standard#0", "Standard#1"]
+        moved = replate_3mf(
+            written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2", nozzle_stats=stats
+        )
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["extruder_nozzle_stats"] == stats
+        assert settings["extruder_nozzle_stats_new"] == stats
+
+    def test_replating_without_nozzle_stats_states_none(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert "extruder_nozzle_stats" not in settings
+        assert "extruder_nozzle_stats_new" not in settings
+
     def test_replating_without_a_nozzle_keeps_the_placeholder(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
         with zipfile.ZipFile(io.BytesIO(moved)) as archive:
             settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert settings["nozzle_diameter"] == PLACEHOLDER_NOZZLE_DIAMETER
+        assert "filament_map" not in settings
 
     def test_a_model_too_big_for_the_printer_is_refused(self, tmp_path: Path) -> None:
         big = tmp_path / "big.3mf"
@@ -481,64 +519,6 @@ class TestPlatesOf:
                 archive.writestr(name, payload)
         with pytest.raises(ValueError, match="plater_id"):
             plates_of(path)
-
-
-def _set_part_extruder(path: Path, part_id: str, value: str | None) -> Path:
-    """Rewrite one ``<part>``'s ``extruder`` metadata in ``model_settings.config``,
-    to ``value``, or drop the ``<metadata>`` entirely when ``value`` is ``None`` — the
-    two ways a part can fail to name a real extruder."""
-    with zipfile.ZipFile(path) as archive:
-        entries = {name: archive.read(name) for name in archive.namelist()}
-    config = ET.fromstring(entries[MODEL_SETTINGS_NAME])
-    for part in config.iter("part"):
-        if part.get("id") != part_id:
-            continue
-        for metadata in list(part.findall("metadata")):
-            if metadata.get("key") == "extruder":
-                if value is None:
-                    part.remove(metadata)
-                else:
-                    metadata.set("value", value)
-    entries[MODEL_SETTINGS_NAME] = ET.tostring(config, encoding="unicode").encode("utf-8")
-    with zipfile.ZipFile(path, "w") as archive:
-        for name, payload in entries.items():
-            archive.writestr(name, payload)
-    return path
-
-
-class TestPlateFilaments:
-    """#469: the filaments (1-based extruder numbers) each plate's parts are
-    assigned, read straight from ``model_settings.config`` before upload."""
-
-    def test_a_written_3mfs_one_plate_reports_both_its_extruders(self, written: Path) -> None:
-        assert plate_filaments(written) == {1: {1, 2}}
-
-    def test_every_plate_of_a_multi_plate_project_reports_its_own_extruders(
-        self, tmp_path: Path
-    ) -> None:
-        path = _write_plates(tmp_path / "maze.3mf", covers=False)
-        assert plate_filaments(path) == {1: {1, 2}, 2: {3}}
-
-    def test_a_part_with_a_non_digit_extruder_is_ignored_beside_valid_ones(
-        self, written: Path
-    ) -> None:
-        """One part's ``extruder`` can't be read; its plate's other, valid part
-        still counts."""
-        path = _set_part_extruder(written, "1", "not-a-number")
-        assert plate_filaments(path) == {1: {2}}
-
-    def test_a_part_with_no_extruder_metadata_at_all_is_ignored_beside_valid_ones(
-        self, written: Path
-    ) -> None:
-        path = _set_part_extruder(written, "1", None)
-        assert plate_filaments(path) == {1: {2}}
-
-    def test_a_plate_with_no_readable_extruder_on_any_part_is_left_out(self, written: Path) -> None:
-        """Neither part names a real extruder: the caller can't tell what the plate
-        uses, so it is left out entirely rather than reported as an empty set."""
-        path = _set_part_extruder(written, "1", "")
-        path = _set_part_extruder(path, "2", None)
-        assert plate_filaments(path) == {}
 
 
 def add_plate(path: Path, index: int, *, thumbnail: bytes | None = None) -> Path:

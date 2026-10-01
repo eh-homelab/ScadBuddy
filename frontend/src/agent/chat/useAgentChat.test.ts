@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION, type ClientMessage } from './protocol'
 import type { ChatTransport, SendResult, TransportHandlers } from './transport'
 import { useAgentChat } from './useAgentChat'
+import { TAB_ID } from '../tabId'
 
 const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
 
@@ -21,7 +22,13 @@ function scripted(answer: () => SendResult = () => 'sent') {
     },
     close: () => {},
   }
-  return { factory: () => transport, sent, h: () => handlers! }
+  return {
+    factory: () => transport,
+    sent,
+    /** What was sent apart from the `tab.bind` that opens every connection. */
+    chat: () => sent.filter((m) => m.type !== 'tab.bind'),
+    h: () => handlers!,
+  }
 }
 
 const frame = (body: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...body })
@@ -57,10 +64,10 @@ describe('useAgentChat', () => {
       t.h().onFrame(frame({ type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'chat', owner, status: 'idle' }] }))
     })
     act(() => result.current.select('s1'))
-    expect(t.sent).toEqual([{ v: 1, type: 'session.attach', sessionId: 's1' }])
+    expect(t.chat()).toEqual([{ v: 1, type: 'session.attach', sessionId: 's1' }])
     act(() => t.h().onClose?.('Lost the connection to the assistant; reconnecting…'))
     act(() => t.h().onOpen?.())
-    expect(t.sent).toEqual([
+    expect(t.chat()).toEqual([
       { v: 1, type: 'session.attach', sessionId: 's1' },
       { v: 1, type: 'session.attach', sessionId: 's1' },
     ])
@@ -170,9 +177,24 @@ describe('useAgentChat', () => {
       t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
     })
     act(() => result.current.select('s1'))
-    expect(t.sent).toEqual([])
+    expect(t.chat()).toEqual([])
     act(() => t.h().onOpen?.())
-    expect(t.sent).toEqual([{ v: 1, type: 'session.attach', sessionId: 's1' }])
+    expect(t.chat()).toEqual([{ v: 1, type: 'session.attach', sessionId: 's1' }])
+  })
+
+  it('names its tab first on every connection, before it re-attaches (#254)', () => {
+    const t = scripted()
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    const bind = { v: 1, type: 'tab.bind', tabId: TAB_ID }
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onFrame(frame({ type: 'sessions.snapshot', sessions: [{ sessionId: 's1', title: 't', origin: 'chat', owner, status: 'idle' }] }))
+    })
+    expect(t.sent).toEqual([bind])
+    act(() => result.current.select('s1'))
+    act(() => t.h().onClose?.('Lost the connection to the assistant; reconnecting…'))
+    act(() => t.h().onOpen?.())
+    expect(t.sent).toEqual([bind, { v: 1, type: 'session.attach', sessionId: 's1' }, bind, { v: 1, type: 'session.attach', sessionId: 's1' }])
   })
 
   it('keeps waiting for a queued first turn through failed reconnect attempts', () => {

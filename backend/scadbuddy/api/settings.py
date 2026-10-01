@@ -6,13 +6,15 @@ from fastapi import APIRouter, status
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep
+from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import Folder, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
+from scadbuddy.bambuddy.uploads import ProjectTarget
+from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import (
     APPLIES,
@@ -28,6 +30,7 @@ from scadbuddy.library.settings_store import (
     SettingsPatch,
     SettingsSnapshot,
     StoredSettings,
+    StoreNotReadyError,
 )
 
 router = APIRouter(tags=["settings"])
@@ -63,6 +66,13 @@ class SettingsView(BaseModel):
 
     bambuddy_url: str | None = None
     has_api_key: bool = False
+    #: As saved (comma-separated); the first is where Bambuddy links point (#775).
+    bambuddy_web_urls: str | None = None
+    has_render_api_key: bool = False
+    #: True while render workers would hold the full key (spec §9): a key is stored and
+    #: no render key is. The Settings page shows a persistent warning.
+    render_key_fallback: bool = False
+    store_backend: StoreBackend = "local"
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
@@ -77,11 +87,6 @@ class SettingsView(BaseModel):
     render_concurrency: int
     solid_concurrency: int
     render_queue_max: int
-    render_queue_timeout: float
-    render_poll_interval: float
-    render_fallback_poll_interval: float
-    render_lease_timeout: float
-    render_max_attempts: int
     render_queue_depth_slo: int
     render_latency_slo: float
     check_concurrency: int
@@ -95,11 +100,16 @@ class SettingsView(BaseModel):
     asset_sweep_grace: float
     asset_sweep_interval: float
     duplicate_staging_max_age: float
+    store_max_total_bytes: int
+    store_max_count: int
+    worker_cache_max_bytes: int
     has_google_fonts_api_key: bool = False
     fonts_catalogue_ttl: float
     event_log_retention_seconds: float
     event_log_retention_rows: int
     log_level: str
+    #: The Temporal web UI, which Settings → Administration links to (#668).
+    temporal_ui_url: str | None = None
 
     #: Where each env-seeded field's value comes from.
     sources: dict[str, SettingSource] = Field(default_factory=dict)
@@ -188,6 +198,8 @@ class RememberedChoices(BaseModel):
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+    #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
+    project_print_targets: dict[str, ProjectTarget] = Field(default_factory=dict)
 
 
 class BambuddyStatus(BaseModel):
@@ -253,6 +265,10 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
     return SettingsView(
         bambuddy_url=stored.bambuddy_url,
         has_api_key=bool(stored.bambuddy_api_key),
+        has_render_api_key=bool(stored.bambuddy_render_api_key),
+        render_key_fallback=bool(stored.bambuddy_api_key) and not stored.bambuddy_render_api_key,
+        store_backend=stored.store_backend,
+        bambuddy_web_urls=stored.bambuddy_web_urls,
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,
         printer_id=stored.printer_id,
@@ -283,14 +299,20 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
     ``settings.changed``) on every other replica."""
-    store.save(patch)
+    try:
+        store.save(patch)
+    except StoreNotReadyError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = store.snapshot()
     apply_runtime(state, snapshot.runtime)
     return _view(snapshot, state)
 
 
-def _remembered(settings: StoredSettings) -> RememberedChoices:
+def _remembered(
+    settings: StoredSettings, project_targets: dict[int, ProjectTarget]
+) -> RememberedChoices:
     return RememberedChoices(
+        project_print_targets={str(pid): target for pid, target in project_targets.items()},
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
         print_options=settings.print_options,
@@ -305,12 +327,13 @@ def _remembered(settings: StoredSettings) -> RememberedChoices:
     response_model_exclude_none=True,
     summary="What the print dialog remembers",
 )
-def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
+async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
-    whole map back."""
-    return _remembered(store.load())
+    whole map back; a project's printer and nozzle go through
+    ``DELETE /settings/remembered/projects/{project_id}``."""
+    return _remembered(store.load(), await uploads.project_targets())
 
 
 @router.delete(
@@ -319,8 +342,22 @@ def get_remembered(store: SettingsStoreDep) -> RememberedChoices:
     response_model_exclude_none=True,
     summary="Forget every remembered choice",
 )
-def delete_remembered(store: SettingsStoreDep) -> RememberedChoices:
-    return _remembered(store.forget_remembered())
+async def delete_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
+    await uploads.forget_all_project_targets()
+    return _remembered(store.forget_remembered(), {})
+
+
+@router.delete(
+    "/settings/remembered/projects/{project_id}",
+    response_model=RememberedChoices,
+    response_model_exclude_none=True,
+    summary="Forget one project's remembered printer and nozzle",
+)
+async def delete_remembered_project(
+    project_id: int, store: SettingsStoreDep, uploads: UploadsDep
+) -> RememberedChoices:
+    await uploads.forget_project_target(project_id)
+    return _remembered(store.load(), await uploads.project_targets())
 
 
 def _options_view(settings: StoredSettings) -> PrintOptionsView:

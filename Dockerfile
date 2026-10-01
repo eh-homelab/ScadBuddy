@@ -185,7 +185,21 @@ COPY --from=api-spec /src/openapi.json /src/openapi.json
 ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
+# ScadBuddy's own plugin's skills and subagents (#896): agent/plugins/scadbuddy
+# links to them, and `pnpm build` copies the authoring skill into dist/docs for
+# `scadbuddy://docs/authoring` (#252, agent/src/tools/guide.ts).
+COPY plugins/scadbuddy/skills /src/plugins/scadbuddy/skills
+COPY plugins/scadbuddy/agents /src/plugins/scadbuddy/agents
 RUN pnpm build
+# COPY keeps a symlink as a link, which would dangle in the agent stage:
+# replace the links with the files (agent/src/harness/ownPlugin.ts), readable
+# by the agent's non-root user whatever modes the build context had.
+RUN cp -rL plugins/scadbuddy /tmp/own-plugin \
+    && rm -r plugins/scadbuddy \
+    && mv /tmp/own-plugin plugins/scadbuddy \
+    && chmod -R a+rX plugins/scadbuddy \
+    && test -z "$(find plugins -type l)" \
+    && test -f plugins/scadbuddy/skills/customize/SKILL.md
 
 # Production dependencies only, installed from the same lockfile in a stage of
 # their own so the shipped node_modules carries no eslint/vitest/typescript.
@@ -520,7 +534,16 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
 # frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
 # A factory, not a module-level app: building one reads Settings, which refuses to
-# start without SCADBUDDY_DATABASE_URL (#401), and importing the module must not.
+# start without SCADBUDDY_DATABASE_URL (#401) or SCADBUDDY_TEMPORAL_ADDRESS (#546),
+# and importing the module must not.
+# The render worker (#424) is this same image run as `python -m scadbuddy.worker`: it
+# serves /healthz and /metrics on 9090 (probe that, not the HEALTHCHECK below, which
+# is the API's 8080). Phase 1 runs one replica, sharing /data with the API.
+# SIGTERM starts its drain (tini forwards it; no preStop needed): it polls until no
+# workflow pinned to its build is running, for at most 2 x (SCADBUDDY_RENDER_TIMEOUT
+# + 60) + 120 s, then gives its running activities SCADBUDDY_RENDER_TIMEOUT + 60 s.
+# terminationGracePeriodSeconds must cover both: 3 x (RENDER_TIMEOUT + 60) + 120,
+# plus a little slack for teardown (e.g. 30 s): 690 s at the default.
 CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short

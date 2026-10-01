@@ -316,8 +316,8 @@ class AssetStore:
     upload of the content, a re-upload included, and by every render or preset save
     that names it, `use`) and so the store's usage, which is ``count(*)`` and
     ``sum(size)`` over the table -- no scan, no running total to go stale, and every
-    replica reads the same numbers. The pool is the render queue's
-    (`PostgresJobStore.pool`), opened and migrated at startup; this store opens
+    replica reads the same numbers. The pool is the projection's
+    (`JobProjection.pool`), opened and migrated at startup; this store opens
     nothing of its own.
 
     A row never exists without its blob: `put` writes the blob before its insert
@@ -493,6 +493,33 @@ class AssetStore:
             )
         return meta
 
+    def adopt(self, meta: AssetMeta, data: bytes) -> None:
+        """Keep an asset fetched from the blob store exactly as it was stored elsewhere.
+
+        No caps: the upload that created it was checked against them. The bytes must be
+        the id, so a damaged or substituted download never becomes a render's input.
+        """
+        if hashlib.sha256(data).hexdigest() != meta.id or len(data) != meta.size:
+            raise AssetRejectedError(f"the fetched file does not match asset {meta.id}")
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
+            blob = self.blob_path(meta)
+            if not blob.is_file():
+                self.root.mkdir(parents=True, exist_ok=True)
+                _write_atomically(blob, data)
+            now = datetime.now(UTC)
+            conn.execute(
+                "INSERT INTO assets"
+                " (id, name, kind, size, width, height, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
+                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
+            )
+
+    def ids(self) -> list[str]:
+        """Every blob this root holds, by id."""
+        return sorted(self._blobs())
+
     def _remove_legacy_files(self) -> None:
         """What the file-based store left (#591): a ``<id>.json`` metadata sidecar per
         asset, and the running total and the flock beside the store. Nothing reads
@@ -611,6 +638,11 @@ def _ids_in(data: bytes) -> set[str]:
     return {match.decode("ascii") for match in _ID_IN_TEXT.findall(data)}
 
 
+def asset_ids_in(params: Mapping[str, object]) -> set[str]:
+    """Every asset id a render's parameters could name (as loose as the sweep's scan)."""
+    return _ids_in(json.dumps(params, sort_keys=True).encode())
+
+
 def _ids_in_archive(archive: Path) -> set[str]:
     """The ids in a 3MF's root model, where its provenance is stamped.
 
@@ -638,7 +670,7 @@ def referenced_asset_ids(
       output whose ``params.json`` is gone, the root model of its 3MF, where the
       provenance "Edit in ScadBuddy" falls back to is stamped;
     - ``params``: every saved preset's values (they are in Postgres) and every job's
-      in the render queue's store, finished or not;
+      in the ``render_jobs`` projection, finished or not;
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see

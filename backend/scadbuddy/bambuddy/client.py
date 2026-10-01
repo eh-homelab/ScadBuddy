@@ -44,6 +44,8 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     InventoryRemain,
     LibraryFile,
+    LibraryListRow,
+    LibraryPlates,
     LocalPresetCatalogue,
     PresetCatalogue,
     Printer,
@@ -63,6 +65,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import split_urls
 from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
@@ -84,18 +87,25 @@ class BambuddyConfig:
     upload_timeout: float = DEFAULT_UPLOAD_TIMEOUT
     slice_timeout: float = DEFAULT_SLICE_TIMEOUT
     slice_poll_interval: float = DEFAULT_SLICE_POLL
+    #: Where a browser reaches Bambuddy (#775); ``base_url`` when unset.
+    web_base_url: str | None = None
 
     @classmethod
     def from_settings(cls, settings: StoredSettings) -> BambuddyConfig:
         if not settings.bambuddy_url:
             raise not_configured("no Bambuddy URL is configured; set one in Settings")
-        return cls(base_url=settings.bambuddy_url.rstrip("/"), api_key=settings.bambuddy_api_key)
+        web = split_urls(settings.bambuddy_web_urls)
+        return cls(
+            base_url=settings.bambuddy_url.rstrip("/"),
+            api_key=settings.bambuddy_api_key,
+            web_base_url=web[0] if web else None,
+        )
 
     def url(self, path: str) -> str:
         return f"{self.base_url}{API_PREFIX}{path}"
 
     def web_url(self, path: str) -> str:
-        return f"{self.base_url}{path}"
+        return f"{self.web_base_url or self.base_url}{path}"
 
 
 class BambuddyClient:
@@ -487,7 +497,12 @@ class BambuddyClient:
         return Folder.model_validate(response.json())
 
     async def upload_library_file(
-        self, filename: str, content: bytes, *, folder_id: int | None = None
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        folder_id: int | None = None,
+        media_type: str = THREE_MF_MEDIA_TYPE,
     ) -> LibraryFile:
         response = await self._send(
             "POST",
@@ -495,7 +510,7 @@ class BambuddyClient:
             scope=Scope.MANAGE_LIBRARY,
             what=f"upload {filename}",
             params={"folder_id": folder_id} if folder_id is not None else None,
-            files={"file": (filename, content, THREE_MF_MEDIA_TYPE)},
+            files={"file": (filename, content, media_type)},
             timeout=self.config.upload_timeout,
         )
         return LibraryFile.model_validate(response.json())
@@ -521,6 +536,54 @@ class BambuddyClient:
             what=f"read library file {file_id}",
         )
         return LibraryFile.model_validate(response.json())
+
+    async def library_listing(self, *, folder_id: int | None) -> list[LibraryListRow]:
+        """``GET /library/files/`` — one folder's files, or the root's without one
+        (``include_root`` defaults to true). One read, however many files: Bambuddy
+        does not paginate it."""
+        what = (
+            "list the library files"
+            if folder_id is None
+            else f"list the files of library folder {folder_id}"
+        )
+        response = await self._send(
+            "GET",
+            "/library/files/",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+            params={"folder_id": folder_id} if folder_id is not None else None,
+        )
+        return [LibraryListRow.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def library_plates(self, file_id: int) -> LibraryPlates:
+        """``GET /library/files/{id}/plates`` — the plates Bambuddy reads out of the
+        file, with whether each has a cover image."""
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}/plates",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read the plates of library file {file_id}",
+        )
+        return LibraryPlates.model_validate(response.json())
+
+    async def download_library_file(self, file_id: int) -> AsyncIterator[bytes]:
+        """``GET /library/files/{id}/download`` (``openapi/routes.txt``): by id, so the
+        blob store never scans a folder to find a file (spec 2026-09-27 §6.3)."""
+        what = f"download library file {file_id}"
+        try:
+            async with self._http.stream(
+                "GET",
+                self.config.url(f"/library/files/{file_id}/download"),
+                headers=self._headers,
+                timeout=self.config.upload_timeout,
+            ) as response:
+                if not response.is_success:
+                    await response.aread()
+                    raise map_response(response, scope=Scope.MANAGE_LIBRARY, what=what)
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+        except httpx.HTTPError as error:
+            raise map_transport(error, what=what) from error
 
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
@@ -614,7 +677,11 @@ class BambuddyClient:
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
-            what=f"queue library file {item.library_file_id}",
+            what=(
+                f"queue archive {item.archive_id}"
+                if item.library_file_id is None
+                else f"queue library file {item.library_file_id}"
+            ),
             json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())

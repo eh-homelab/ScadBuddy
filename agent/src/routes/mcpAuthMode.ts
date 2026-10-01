@@ -1,5 +1,7 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
+import type { AuditContext } from '../audit/log.js'
+import { UI_ACTOR } from '../audit/writes.js'
 import {
   type McpAuthMode,
   type McpAuthSettings,
@@ -11,6 +13,7 @@ import {
 import { type Tier, TIERS } from '../auth/principal.js'
 import { forwardedClient, type OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
+import { mcpAuthOf, ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/auth (#251, spec §8.3): Settings reads and changes the `/mcp`
 // auth mode and the cap on what an anonymous caller may do. Both are
@@ -51,7 +54,12 @@ import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } fro
 /** What this route writes: credentials.ts `SettingsStore` is one. */
 export type SettingsWriter = {
   /** Writes `values` only when `check`, reading inside the same transaction, returns true. */
-  setMany(values: Record<string, unknown>, check: (current: SettingsReader) => Promise<boolean>): Promise<boolean>
+  /** `context` says who wrote them, for the audit rows (#831). */
+  setMany(
+    values: Record<string, unknown>,
+    check: (current: SettingsReader) => Promise<boolean>,
+    context: AuditContext,
+  ): Promise<boolean>
 }
 
 export type McpAuthModeRouteDeps = {
@@ -175,6 +183,7 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
         before = await mcpAuthSettings(stored, () => {})()
         return configured(before) === body.expected.mode && before.anonymousCap === body.expected.anonymous_cap
       },
+      { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) },
     )
     if (!written) return c.json({ detail: CHANGED }, 409)
     if (before && (configured(before) !== body.mode || before.anonymousCap !== body.anonymous_cap)) {
@@ -190,4 +199,28 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
     if (!after) return c.json({ detail: SAVED_UNREADABLE }, 503)
     return c.json(view(after))
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /**
+     * Where Settings writes the /mcp auth mode and anonymous cap (credentials.ts
+     * `SettingsStore`). The routes read them back through `mcp.authSettings`.
+     * Undefined (or left out) when there is no database: the routes then answer 503.
+     */
+    aiSettings?: SettingsWriter | undefined
+  }
+}
+
+/** The /mcp auth-mode routes (#251). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerMcpAuthModeRoutes(app, {
+      settings: deps.database ? deps.aiSettings : undefined,
+      authSettings: mcpAuthOf(deps),
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

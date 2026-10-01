@@ -251,6 +251,13 @@ class NozzleInfo(BambuddyModel):
     nozzle_type: str = ""
     nozzle_diameter: str = ""
 
+    @property
+    def high_flow(self) -> bool:
+        """Whether this is a High Flow nozzle: the second letter of ``nozzle_type`` is
+        the flow (``HH01`` High Flow, ``HS01`` standard), inferred from the codes present."""
+        nozzle_type = self.nozzle_type or ""
+        return len(nozzle_type) > 1 and nozzle_type[1] == "H"
+
 
 class NozzleRackSlot(NozzleInfo):
     """A slot of an H2-series nozzle rack — what ``nozzle_rack_choice`` picks from."""
@@ -389,9 +396,13 @@ class Folder(BambuddyModel):
 
     def walk(self) -> list[Folder]:
         """This folder and every folder beneath it, depth first."""
-        found = [self]
+        return [folder for _, folder in self.walk_with_depth()]
+
+    def walk_with_depth(self, depth: int = 0) -> list[tuple[int, Folder]]:
+        """:meth:`walk`, each folder with how deep it sits (``depth`` for this one)."""
+        found = [(depth, self)]
         for child in self.children:
-            found.extend(child.walk())
+            found.extend(child.walk_with_depth(depth + 1))
         return found
 
 
@@ -416,12 +427,49 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: The folder the file sits in (``FileResponse``); the blob store deletes only files
+    #: in a `Work/` folder it made (spec 2026-09-27 §6.3).
+    folder_id: int | None = None
     #: SHA-256 of the file (``FileResponse.file_hash``). For a sliced file it equals the
-    #: ``content_hash`` of the archive of each print of it (#306).
+    #: ``content_hash`` of the archive of each print of it (#306). The blob store still
+    #: checks its own digest of what it reads back.
     file_hash: str | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
+
+
+class LibraryListRow(BambuddyModel):
+    """A row of ``GET /api/v1/library/files/`` (Bambuddy's ``FileListResponse``;
+    ``library-files-root.json``). ``file_type`` is ``"3mf"``, ``"gcode.3mf"`` for a
+    sliced file, ``"stl"`` and so on."""
+
+    id: int
+    filename: str
+    file_type: str
+    folder_id: int | None = None
+    file_size: int | None = None
+    thumbnail_path: str | None = None
+    print_count: int = 0
+    sliced_for_model: str | None = None
+
+
+class LibraryPlate(BambuddyModel):
+    """One plate of ``GET /api/v1/library/files/{id}/plates``."""
+
+    index: int
+    name: str | None = None
+    has_thumbnail: bool = False
+
+
+class LibraryPlates(BambuddyModel):
+    """``GET /api/v1/library/files/{id}/plates``. Bambuddy's OpenAPI declares no schema
+    for it (its 200 is ``{}``); this is the recorded shape. An STL, or a 3MF that
+    carries no plate metadata, answers ``plates: []``."""
+
+    file_id: int
+    plates: list[LibraryPlate] = Field(default_factory=list)
+    is_multi_plate: bool = False
 
 
 class SliceRequest(BambuddyModel):
@@ -438,6 +486,9 @@ class SliceRequest(BambuddyModel):
     bed_type: str | None = None
     plate: int = 1
     use_embedded_settings: bool = False
+    #: Process settings written over the process preset for this slice, as Bambuddy's
+    #: ``{option_key: value}`` map; ``None`` leaves the preset as it is.
+    process_overrides: dict[str, str] | None = None
 
     @property
     def preset_key(self) -> str:
@@ -445,15 +496,19 @@ class SliceRequest(BambuddyModel):
 
         The printer, process and filament presets — the preset triple — plus the plate
         and the plate type: a slice of plate 2, or for another plate type, is a
-        different file even with the same presets. Recorded as
+        different file even with the same presets. Process overrides (#770) are
+        appended, so a slice without any keeps the key it always had. Recorded as
         :attr:`~scadbuddy.library.outputs.SlicedCopy.preset_key`.
         """
         filaments = ",".join(f"{ref.source}:{ref.id}" for ref in self.filament_presets)
-        return (
+        key = (
             f"{self.printer_preset.source}:{self.printer_preset.id}"
             f"/{self.process_preset.source}:{self.process_preset.id}"
             f"/{filaments}/plate{self.plate}/{self.bed_type or ''}"
         )
+        if self.process_overrides:
+            key += "/" + ",".join(f"{k}={v}" for k, v in sorted(self.process_overrides.items()))
+        return key
 
 
 class SliceJobAccepted(BambuddyModel):

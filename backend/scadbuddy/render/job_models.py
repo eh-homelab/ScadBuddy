@@ -1,19 +1,24 @@
-"""The render job as the API and every job store see it."""
+"""The render job as the API and the projection see it, and what a submit answers."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.schema import ParamValue
 
 JobState = Literal["pending", "running", "done", "failed", "cancelled"]
 JobTableKind = Literal["render", "arrange"]
-StepState = Literal["pending", "running", "done", "failed"]
+StepState = Literal["pending", "running", "done", "failed", "cancelled"]
 
 
 class StepInfo(BaseModel):
@@ -69,6 +74,10 @@ class JobResult(BaseModel):
     #: Every plate of a template that asks for more than one (spec §6.4). Empty for
     #: the ordinary one-plate render, whose plate is ``bbox_mm`` and ``colors``.
     plates: list[PlateInfo] = Field(default_factory=list)
+    #: The library pins this render read (#169): the name, ref and exact commit of each
+    #: checkout on its OPENSCADPATH. Empty for a model with none, and on a result
+    #: stored before the field existed.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -125,3 +134,52 @@ class Job(BaseModel):
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+SUPERSEDED_ERROR = "superseded by a newer render before it started"
+
+
+class QueueFullError(Exception):
+    """``max_pending`` jobs are already waiting (SCADBUDDY_RENDER_QUEUE_MAX). Raised
+    before anything changes: a refused submit supersedes nothing and queues nothing.
+    `RenderService` fills in ``retry_after``."""
+
+    def __init__(self, depth: int, retry_after: int = 1) -> None:
+        super().__init__(
+            f"the render queue is full ({depth} jobs waiting for a worker); "
+            f"try again in {retry_after} s"
+        )
+        self.depth = depth
+        self.retry_after = retry_after
+
+
+class JobNotFoundError(LookupError):
+    def __init__(self, job_id: str) -> None:
+        super().__init__(f"no job with id {job_id!r}")
+        self.job_id = job_id
+
+
+def render_key(slug: str, params: Mapping[str, ParamValue], model_version: str | None) -> str:
+    """What makes two render requests the same render: the model, the revision the
+    submit resolved (`None` when there is no repository) and the parameters."""
+    raw = json.dumps([slug, model_version, dict(params)], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class Submitted:
+    """How the projection answered a submit."""
+
+    job: Job
+    #: Answered with a job already waiting, rather than a new one.
+    coalesced: bool = False
+    #: The job this submit replaced and dropped, if it did.
+    superseded: Job | None = None
+
+
+@dataclass(frozen=True)
+class QueueCounts:
+    pending: int = 0
+    running: int = 0
+    #: When the longest-waiting pending job was submitted; `None` with none waiting.
+    oldest_pending: datetime | None = None

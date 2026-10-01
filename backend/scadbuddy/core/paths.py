@@ -18,10 +18,11 @@ SCHEMA_CACHE_NAME = "schema.json"
 #: The presets people save are not kept with a template: they are rows in Postgres
 #: (`library.presets.PresetStore`), so a save never moves the template's revision.
 LEGACY_PRESETS_NAME = "presets.json"
-#: Finished renders kept under a template, one directory per render key
-#: (`render/render_cache.py`). Hidden, so a duplicate or upload staging (which skip
-#: ``.*``) never copies them, and ignored by the models repository: they are
-#: derived from the source and must never move a template's revision.
+#: Where the legacy render queue kept finished renders under a template (removed in
+#: #546; the Temporal path's cache is the blob store). Nothing writes it now; a
+#: volume may still hold one. Hidden, so a duplicate or upload staging (which skip
+#: ``.*``) never copies it, and ignored by the models repository, so it never moves
+#: a template's revision.
 RENDERS_DIR_NAME = ".renders"
 #: Where the built-in templates are mirrored from the image, inside the models
 #: repository. Slugs are `[a-z0-9-]`, so it can never be one.
@@ -56,10 +57,6 @@ class DataPaths:
         return self.root / "outputs"
 
     @property
-    def jobs(self) -> Path:
-        return self.root / "jobs"
-
-    @property
     def blobs(self) -> Path:
         """Rendered pieces, keyed by `piece_key` (spec §6.2's `local` backend)."""
         return self.root / "blobs"
@@ -90,6 +87,18 @@ class DataPaths:
     @property
     def builtins(self) -> Path:
         return self.models / BUILTIN_DIR
+
+    @property
+    def builtin_media(self) -> Path:
+        """The images and videos people add to built-in templates (#722), one
+        directory per built-in slug. Not under ``models/``: the ``_builtin`` mirror
+        is the image's and is re-synced from it, and nothing added here may move a
+        built-in's revision. Their order and captions are `template_media` rows."""
+        return self.root / "builtin-media"
+
+    def builtin_media_dir(self, model_id: str) -> Path:
+        """Where the media added to the built-in ``model_id`` is kept."""
+        return self.builtin_media / model_id.removeprefix(BUILTIN_PREFIX)
 
     def model_dir(self, slug: str) -> Path:
         return self.models / model_path(slug)
@@ -138,17 +147,10 @@ class DataPaths:
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id
 
-    def job_file(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.json"
-
-    def job_work_dir(self, job_id: str) -> Path:
-        return self.jobs / f"{job_id}.work"
-
     def ensure(self) -> None:
         for directory in (
             self.models,
             self.outputs,
-            self.jobs,
             self.blobs,
             self.cache,
             self.fonts,

@@ -174,7 +174,7 @@ export class SdkEventMapper {
                 ? (block.input as Record<string, unknown>)
                 : {}
             out.push(
-              event({ type: 'tool.call', sessionId, id: block.id, name, input, risk: this.tierOf(name) ?? 'outward' }),
+              event({ type: 'tool.call', sessionId, id: block.id, name, input, risk: this.tierOf(name, input) ?? 'outward' }),
             )
           }
         })

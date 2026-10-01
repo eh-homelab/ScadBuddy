@@ -10,10 +10,12 @@ export const SECTIONS = [
   { id: 'uploads', title: 'Uploads' },
   { id: 'rendering', title: 'Rendering' },
   { id: 'fonts', title: 'Fonts' },
+  { id: 'libraries', title: 'Libraries' },
   { id: 'preview', title: 'Preview' },
   { id: 'remembered', title: 'Remembered choices' },
   { id: 'assistant', title: 'Assistant' },
   { id: 'diagnostics', title: 'Diagnostics' },
+  { id: 'administration', title: 'Administration' },
   { id: 'about', title: 'About' },
 ] as const
 
@@ -55,6 +57,13 @@ export type FieldSpec = {
  * the unit) are not listed here; they are laid out by hand.
  */
 export const RUNTIME_FIELDS: readonly FieldSpec[] = [
+  {
+    name: 'temporal_ui_url',
+    section: 'administration',
+    label: 'Temporal UI URL',
+    kind: 'url',
+    help: 'The Temporal web UI, where render workflows can be inspected. Empty shows no link.',
+  },
   {
     name: 'media_upload_max_bytes',
     section: 'uploads',
@@ -143,45 +152,10 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: '0 accepts every render.',
   },
   {
-    name: 'render_queue_timeout',
-    section: 'rendering',
-    label: 'Fail a render that waits longer than',
-    kind: 'seconds',
-    help: '0 never expires one.',
-  },
-  {
     name: 'preview_renders',
     section: 'rendering',
     label: 'Render a preview for models with no thumbnail',
     kind: 'bool',
-  },
-  {
-    name: 'render_poll_interval',
-    section: 'rendering',
-    label: 'Idle worker poll',
-    kind: 'seconds',
-    advanced: true,
-  },
-  {
-    name: 'render_fallback_poll_interval',
-    section: 'rendering',
-    label: 'Poll while notifications are up',
-    kind: 'seconds',
-    advanced: true,
-  },
-  {
-    name: 'render_lease_timeout',
-    section: 'rendering',
-    label: 'Requeue a render whose worker is silent for',
-    kind: 'seconds',
-    advanced: true,
-  },
-  {
-    name: 'render_max_attempts',
-    section: 'rendering',
-    label: 'Tries per render',
-    kind: 'count',
-    advanced: true,
   },
   {
     name: 'render_queue_depth_slo',

@@ -26,13 +26,14 @@ from scadbuddy.core.events import (
     ModelEvent,
     OutputEvent,
     PrintEvent,
+    SessionBusEvent,
     SettingsChanged,
     Subscription,
 )
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH
 from scadbuddy.main import create_app
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 WS = "/api/v1/ws"
 JOB_ID = "a" * 32
@@ -319,13 +320,19 @@ def test_origin_allowed_with_extra_origins(
 def test_allowed_origins_env_is_split_on_commas() -> None:
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         allowed_origins=" https://scad.internal.example ,, https://scad.lan:8443 , ",
     )
     assert settings.allowed_origin_list == [
         "https://scad.internal.example",
         "https://scad.lan:8443",
     ]
-    assert Settings(database_url=UNUSED_DATABASE_URL).allowed_origin_list == []
+    assert (
+        Settings(
+            database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ).allowed_origin_list
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -349,6 +356,7 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             ),
             ["analyzers"],
         ),
+        (SessionBusEvent(kind="session.message", session_id="s", seq=3), []),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:

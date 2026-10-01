@@ -36,6 +36,18 @@ export type FeedItem =
       by?: Owner
     }
   | { kind: 'error'; id: string; message: string }
+  /** An automatic memory recall or retain (#818): a quiet line, its query and memories collapsed under it. */
+  | {
+      kind: 'memory'
+      id: string
+      action: 'recall' | 'retain'
+      bank: string
+      outcome: 'ok' | 'timeout' | 'error'
+      count?: number
+      detail?: string
+      input?: string
+      memories?: string[]
+    }
 
 export interface SessionState {
   id: string
@@ -45,6 +57,16 @@ export interface SessionState {
   status: SessionStatus
   items: FeedItem[]
   result?: { costUsd?: number; turns: number }
+  /**
+   * #790 — what the session has spent and may spend in all, for the header's meter.
+   * Absent until an event carries it (sessions started before #790 have none in their log).
+   */
+  budget?: { costUsd: number; budgetUsd: number }
+  /**
+   * The budget ran out: a turn stopped at it, or a send was refused because of it. The
+   * panel shows one message and its actions instead of the agent's two errors.
+   */
+  budgetSpent?: boolean
   /**
    * Approvals decided while offline (`queued`) when the feed was cleared for a replay.
    * Their decision goes out right after the attach, so the replayed card shows `sent`,
@@ -158,13 +180,17 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
 
     case 'session.started': {
       const known = event.sessionId in state.sessions
-      const next = upsertSummary(state, {
+      const summarised = upsertSummary(state, {
         sessionId: event.sessionId,
         title: event.title ?? 'New chat',
         origin: event.origin,
         owner: event.owner,
         status: 'running',
       })
+      const next =
+        event.budgetUsd === undefined
+          ? summarised
+          : patchSession(summarised, event.sessionId, (s) => withBudget(s, 0, event.budgetUsd!))
       // Newest first (a replay on attach keeps its place); the panel's own new chat
       // becomes the active one.
       const order = known
@@ -261,12 +287,38 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       })
 
     case 'session.result':
-      return patchSession(state, event.sessionId, (s) => ({
-        ...s,
-        result: { costUsd: event.costUsd, turns: event.turns },
-      }))
+      return patchSession(state, event.sessionId, (s) => {
+        const next = { ...s, result: { costUsd: event.costUsd, turns: event.turns } }
+        return event.budgetUsd === undefined || event.costUsd === undefined
+          ? next
+          : withBudget(next, event.costUsd, event.budgetUsd)
+      })
+
+    case 'session.budget':
+      return patchSession(state, event.sessionId, (s) => withBudget(s, event.costUsd, event.budgetUsd))
+
+    case 'memory':
+      // Appended where it arrives: a retain that finished after its turn lands after
+      // the turn's replies, in the same place on a replay (the event log's order).
+      return patchSession(state, event.sessionId, (s) =>
+        push(s, {
+          kind: 'memory',
+          id: `memory-${s.items.length}`,
+          action: event.action,
+          bank: event.bank,
+          outcome: event.outcome,
+          ...(event.count === undefined ? {} : { count: event.count }),
+          ...(event.detail === undefined ? {} : { detail: event.detail }),
+          ...(event.input === undefined ? {} : { input: event.input }),
+          ...(event.memories === undefined ? {} : { memories: event.memories }),
+        }),
+      )
 
     case 'error': {
+      if (event.sessionId && BUDGET_CODES.has(event.code ?? '') && state.sessions[event.sessionId]) {
+        // Shown once, in the panel's words (`budgetSpent`), not as the agent's text.
+        return patchSession(state, event.sessionId, (s) => ({ ...s, budgetSpent: true }))
+      }
       const message = errorMessage(event.code, event.message)
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
@@ -276,6 +328,17 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       return { ...state, notice: message, awaitingStart: false }
     }
   }
+}
+
+/**
+ * The two ways the agent says a session's budget ran out: a turn stopped at it (the
+ * SDK's result subtype), or a send was refused because of it (agent `manager.ts`).
+ */
+const BUDGET_CODES = new Set(['error_max_budget_usd', 'budget_exhausted'])
+
+/** New budget numbers; the session is spent exactly when they say so. */
+function withBudget(s: SessionState, costUsd: number, budgetUsd: number): SessionState {
+  return { ...s, budget: { costUsd, budgetUsd }, budgetSpent: costUsd >= budgetUsd }
 }
 
 /**
@@ -319,6 +382,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ? patchSession(next, action.sessionId, (s) => ({
             ...s,
             items: [],
+            // Replayed from the log; the numbers stay for a log that has none.
+            budgetSpent: false,
             queuedDecisions: s.items.flatMap((i) => (i.kind === 'approval' && i.state === 'queued' ? [i.id] : [])),
           }))
         : next
@@ -343,6 +408,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 export function isBusy(session: SessionState | undefined): boolean {
   return session?.status === 'running' || session?.status === 'waiting_approval'
 }
+
+/** How much of its budget the session has spent, 0 to 1 (and past 1 once over); undefined without one. */
+export function budgetUsed(session: SessionState | undefined): number | undefined {
+  const budget = session?.budget
+  return budget ? budget.costUsd / budget.budgetUsd : undefined
+}
+
+/** The share of the budget at which the header warns the chat is close to it. */
+export const BUDGET_WARNING = 0.8
 
 /** The panel's own principal: sessions owned by anyone else show "controlled by …". */
 export function isOwnedByBrowser(session: SessionState): boolean {

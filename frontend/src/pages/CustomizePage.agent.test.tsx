@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -199,6 +199,8 @@ describe('customizer tools', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     expect(await call('open_print_dialog', { kind: 'print' })).toMatchObject({ ok: true })
     const dialog = await screen.findByRole('dialog')
+    // The dialog's project picker is an Advanced step.
+    fireEvent.click(await within(dialog).findByRole('switch', { name: 'Advanced' }))
     const dialogPicker = await within(dialog).findByTestId('project-select')
     expect(dialogPicker).toHaveValue('1')
     expect(dialogPicker).toBeEnabled()
@@ -209,7 +211,10 @@ describe('customizer tools', () => {
     await waitFor(() => expect(dialogPicker).toBeDisabled())
     release()
     expect(await generating).toMatchObject({ ok: true })
-    await waitFor(() => expect(dialogPicker).toBeEnabled())
+    // A new output resets the dialog to Simple, so open Advanced again.
+    const again = await screen.findByRole('dialog')
+    fireEvent.click(await within(again).findByRole('switch', { name: 'Advanced' }))
+    await waitFor(() => expect(within(again).getByTestId('project-select')).toBeEnabled())
   })
 
   it('holds Generate while a project is being created (#665)', async () => {
@@ -229,6 +234,26 @@ describe('customizer tools', () => {
     release()
     await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
     await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+  })
+
+  it('holds Print and open_print_dialog while a project is being created (#710 review)', async () => {
+    const { user } = await open()
+    expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({ ok: true })
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await user.selectOptions(picker, 'new')
+    await user.type(screen.getByTestId('new-project-name'), 'Workshop Bins')
+
+    const release = hold('post', '/api/v1/print/projects')
+    await user.click(screen.getByTestId('create-project'))
+    // The dialog's picker would let a reselection be reverted when the create lands.
+    await waitFor(() => expect(screen.getByTestId('print')).toBeDisabled())
+    const refused = await call('open_print_dialog', { kind: 'print' })
+    expect(!refused.ok && refused.error.message).toMatch(/still being created/)
+
+    release()
+    await waitFor(() => expect(picker.selectedOptions[0]).toHaveTextContent(/Workshop Bins/))
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
   })
 
   it('reports itself in the snapshot and goes unavailable when the page does', async () => {
