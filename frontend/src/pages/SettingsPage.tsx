@@ -41,6 +41,7 @@ import {
   type SectionId,
 } from './settings/fields'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
+import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from './settings/useLeaveGuard'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -105,7 +106,6 @@ function baseline(settings: Settings, name: FieldName): string {
   return serverValue(settings, name)
 }
 
-type Draft = Partial<Record<FieldName, string>>
 type Problem = { problem: string }
 
 /** The form value for `name`, as `PUT /settings` takes it, or a problem to show. */
@@ -168,23 +168,33 @@ export function SettingsPage() {
     [connected, settings?.bambuddy_url],
   )
 
-  // Which fields the next settings object seeds the form with: all of them at first
-  // and after a reload, one section's after its save, one field's after a reset.
-  const reseed = useRef<'all' | FieldName[] | null>('all')
+  // What the next settings objects seed the form with: all of it at first and after a
+  // reload, one section's after its save, one field's after a reset. Queued, since
+  // requests overlap. Each seed carries the edit counts from when its request was sent,
+  // and leaves alone any field typed into since (#767): the seed's effect can land after
+  // a keystroke, and a save's answer can arrive after more typing.
+  const edits = useRef(new Map<FieldName, number>())
+  const seeds = useRef<Seed[]>([{ names: 'all', since: new Map() }])
+  // Taken before the request whose answer is seeded.
+  const beginSeed = (): Edits => new Map(edits.current)
+  const requestSeed = (names: 'all' | FieldName[], since: Edits) => {
+    seeds.current.push({ names, since })
+  }
   useEffect(() => {
-    if (!settings || reseed.current === null) return
-    const names =
-      reseed.current === 'all' ? SECTIONS.flatMap((section) => fieldsOf(section.id, settings)) : reseed.current
-    reseed.current = null
-    setDraft((current) => ({
-      ...current,
-      ...Object.fromEntries(names.map((name) => [name, baseline(settings, name)])),
-    }))
+    if (!settings || seeds.current.length === 0) return
+    const since = pendingFields(seeds.current, () => SECTIONS.flatMap((section) => fieldsOf(section.id, settings)))
+    seeds.current = []
+    const edited = editedSince(since, edits.current)
+    const names = [...since.keys()].filter((name) => !edited.has(name))
+    const values = Object.fromEntries(names.map((name) => [name, baseline(settings, name)]))
+    // Checked again in the updater: it runs later, and a keystroke can land between.
+    setDraft((current) => seedDraft(current, values, editedSince(since, edits.current)))
     setClearing((current) => current.filter((name) => !names.includes(name)))
   }, [settings])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {
+    edits.current.set(name, (edits.current.get(name) ?? 0) + 1)
     setDraft((current) => ({ ...current, [name]: next }))
     setErrors((current) => ({ ...current, [name]: undefined }))
     // A key typed after Remove key replaces the stored one rather than clearing it.
@@ -207,7 +217,7 @@ export function SettingsPage() {
   const [changedElsewhere, setChangedElsewhere] = useState(false)
   const loadLatest = () => {
     setChangedElsewhere(false)
-    reseed.current = 'all'
+    requestSeed('all', beginSeed())
     settingsState.refresh()
   }
 
@@ -222,7 +232,7 @@ export function SettingsPage() {
     }
     settingsState.refresh(() => {
       if (!isDirty.current()) {
-        reseed.current = 'all'
+        requestSeed('all', beginSeed())
         return true
       }
       setChangedElsewhere(true)
@@ -262,8 +272,9 @@ export function SettingsPage() {
     setSaving(id)
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
+      const since = beginSeed()
       const next = await api.putSettings(body)
-      reseed.current = fieldsOf(id, next)
+      requestSeed(fieldsOf(id, next), since)
       settingsState.setData(next)
       if (id === 'preview') setDisplayUnit(next.display_unit)
       if (id === 'connection') setBambuddyLinks(next)
@@ -310,8 +321,9 @@ export function SettingsPage() {
     setResetting(name)
     setError(null)
     try {
+      const since = beginSeed()
       const next = await api.putSettings({ reset: [name] })
-      reseed.current = [name]
+      requestSeed([name], since)
       settingsState.setData(next)
       setBambuddyLinks(next)
       if (name === 'bambuddy_url' || name === 'bambuddy_api_key') {
